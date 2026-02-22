@@ -47,11 +47,24 @@ spec:
               value: "/ldap-config"
             - name: DATA_DIR
               value: "/ldap-data"
+            {{- if .Values.ldap.tls.enabled }}
+            - name: LDAP_TLS_CACERT_PATH
+              value: "/etc/openldap/tls/ca.crt"
+            - name: LDAP_TLS_CERT_PATH
+              value: "/etc/openldap/tls/tls.crt"
+            - name: LDAP_TLS_KEY_PATH
+              value: "/etc/openldap/tls/tls.key"
+            {{- end }}
           volumeMounts:
             - name: ldap-config
               mountPath: /ldap-config
             - name: ldap-data
               mountPath: /ldap-data
+            {{- if .Values.ldap.tls.enabled }}
+            - name: ldap-tls
+              mountPath: /etc/openldap/tls
+              readOnly: true
+            {{- end }}
       containers:
         - name: slapd
           image: "{{ .Values.global.registry }}/{{ .Values.global.project }}/{{ .Values.image.slapd.repository }}:{{ .Values.image.slapd.tag }}"
@@ -68,6 +81,9 @@ spec:
             - name: ldap
               containerPort: 1024
               protocol: TCP
+            - name: ldaps
+              containerPort: 1025
+              protocol: TCP
           volumeMounts:
             - name: ldap-config
               mountPath: /ldap-config
@@ -75,6 +91,11 @@ spec:
               mountPath: /ldap-data
             - name: ldap-run
               mountPath: /run/openldap
+            {{- if .Values.ldap.tls.enabled }}
+            - name: ldap-tls
+              mountPath: /etc/openldap/tls
+              readOnly: true
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -97,3 +118,8 @@ spec:
           {{- end }}
         - name: ldap-run
           emptyDir: {}
+        {{- if .Values.ldap.tls.enabled }}
+        - name: ldap-tls
+          secret:
+            secretName: {{ .Values.ldap.tls.secretName }}
+        {{- end }}

@@ -11,5 +11,9 @@ spec:
       targetPort: ldap
       protocol: TCP
       name: ldap
+    - port: 636
+      targetPort: ldaps
+      protocol: TCP
+      name: ldaps
   selector:
     {{- include "slapd.selectorLabels" . | nindent 4 }}

@@ -13,18 +13,19 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            {{- $secretName := (default (printf "%s-passwords" (include "slapd-test.fullname" .)) .Values.slapd.secretName) }}
+            - name: LDAP_ADMIN_PW
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: admin-password
             - name: LDAP_ROOT_PW
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.slapd.secretName }}
+                  name: {{ $secretName }}
                   key: root-password
-                  optional: true
-            - name: LDAP_ROOT_PW_HASH
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.slapd.secretName }}
-                  key: root-password-hash
-                  optional: true
+            - name: LDAPTLS_CACERT
+              value: /etc/ldap/tls/ca.crt
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -32,31 +33,30 @@ spec:
               apt-get update && apt-get install -y ldap-utils
               pip install pyyaml ldap3
               
-              # Wait for slapd to be ready
-              until ldapsearch -x -H ldap://{{ .Values.slapd.fullname }}:389 -LLL -s base; do
-                echo "Waiting for slapd..."
+              # Wait for slapd to be ready (LDAPS on port 636)
+              until ldapsearch -x -H ldaps://{{ .Values.slapd.fullname }} -LLL -s base; do
+                echo "Waiting for slapd (LDAPS)..."
                 sleep 2
               done
 
-              # Authenticate: we need the password. If it's a hash, we can't easily get the plain text.
-              # In our generated secret, it's either root-password (plain) or root-password-hash.
-              # If it's random, it's in root-password.
-              
-              ROOT_PW="${LDAP_ROOT_PW:-admin}"
-              
-              # Bootstrap Step 1
-              python /config/ldap-bootstrap.py -d -H ldap://{{ .Values.slapd.fullname }}:389/ \
-                -D "cn=admin,cn=config" -w "$ROOT_PW" \
+              # Bootstrap Step 1 (Configuration)
+              python /config/ldap-bootstrap.py -d -H ldaps://{{ .Values.slapd.fullname }}/ \
+                -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" \
                 /config/ox-schema.json /config/slapd-readpw.json
               
-              # Bootstrap Step 2
-              python /config/ldap-bootstrap.py -d -H ldap://{{ .Values.slapd.fullname }}:389/ \
-                --domain {{ .Values.slapd.domain | quote }} -w "$ROOT_PW" \
+              # Bootstrap Step 2 (Data)
+              python /config/ldap-bootstrap.py -d -H ldaps://{{ .Values.slapd.fullname }}/ \
+                --domain {{ .Values.slapd.domain | quote }} -w "$LDAP_ADMIN_PW" \
                 --auto-readpw /config/ldap-readpw-users.secret.yaml /config/slapd-ous.json
           volumeMounts:
             - name: config
               mountPath: /config
+            - name: ca-cert
+              mountPath: /etc/ldap/tls
       volumes:
         - name: config
           configMap:
             name: {{ include "slapd-test.fullname" . }}-config
+        - name: ca-cert
+          configMap:
+            name: kube-root-ca.crt

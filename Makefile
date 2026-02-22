@@ -29,7 +29,12 @@ deploy:
 	    -e "s|registry.internal/slaptain/slapd:latest|$(SLAPD_IMAGE)|g" \
 	    test-ldap.yaml | kubectl apply -n $(NAMESPACE) -f -
 
+gencert:
+	cd tests && ./gencert.sh -n $(NAMESPACE) -t slapd -s slapd slapd-tls
+
 helm-install: push
+	# Ensure cert exists if TLS is enabled (default)
+	$(MAKE) gencert
 	helm upgrade --install slapd ./charts/slapd \
 		--namespace $(NAMESPACE) --create-namespace \
 		--set global.registry=$(REGISTRY) \

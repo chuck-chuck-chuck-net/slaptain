@@ -69,19 +69,19 @@ rootpw $ADMIN_PW_HASH
 directory "$DATA_DIR"
 EOF
 
+    # Add TLS to slapd.conf if enabled
+    if [[ "${LDAP_TLS_ENABLED^^}" == "TRUE" ]]; then
+        cat <<EOF >> "$TMP_CONF"
+TLSCACertificateFile ${LDAP_TLS_CACERT_PATH:-/etc/openldap/tls/ca.crt}
+TLSCertificateFile ${LDAP_TLS_CERT_PATH:-/etc/openldap/tls/tls.crt}
+TLSCertificateKeyFile ${LDAP_TLS_KEY_PATH:-/etc/openldap/tls/tls.key}
+EOF
+    fi
+
     # Convert slapd.conf to slapd.d format
     # Can't use -u to avoid the error; it doesn't do the conversion then
     # we might silence the expected error, but actually I'm no friend of that, it hides other errors as well
     slaptest -f "$TMP_CONF" -F "$CONFIG_DIR" || true
-
-    # Handle TLS if enabled
-    if [[ "${LDAP_TLS_ENABLED^^}" == "TRUE" ]]; then
-        CONFIG_FILE="$CONFIG_DIR/cn=config/olcDatabase={0}config.ldif"
-        echo "olcTLSCACertificateFile: ${LDAP_TLS_CACERT_PATH:-/etc/openldap/tls/ca.crt}" >> "$CONFIG_FILE"
-        echo "olcTLSCertificateFile: ${LDAP_TLS_CERT_PATH:-/etc/openldap/tls/tls.crt}" >> "$CONFIG_FILE"
-        echo "olcTLSCertificateKeyFile: ${LDAP_TLS_KEY_PATH:-/etc/openldap/tls/tls.key}" >> "$CONFIG_FILE"
-        fix_crc "$CONFIG_FILE"
-    fi
 
     # Create initial domain objects
     t1=${LDAP_DOMAIN_DC%%,*}

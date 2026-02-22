@@ -24,8 +24,8 @@ ldap:
   # existingSecret: "my-ldap-secrets"
   
   tls:
-    enabled: false
-    # secretName: "ldap-tls-cert"
+    enabled: true
+    secretName: "slapd-tls"
 
 persistence:
   enabled: true

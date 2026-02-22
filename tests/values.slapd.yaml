@@ -7,3 +7,6 @@ ldap:
 
   # existingSecret: "my-ldap-secrets"
 
+  tls:
+    enabled: true
+    secretName: "slapd-tls"

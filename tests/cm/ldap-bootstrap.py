@@ -8,12 +8,24 @@ import urllib
 import hashlib
 import logging
 import argparse
+import ssl
 
 class LdapClient:
     def __init__(self, url, binddn, passwd):
-
         logger.debug("Creating ldap3 Server and Connection")
-        self.server = ldap3.Server(url, get_info=ldap3.ALL)
+        
+        tls = None
+        if url.startswith("ldaps"):
+            # Try to find CA cert from standard env var or fixed path
+            ca_file = os.environ.get("LDAPTLS_CACERT", "/etc/ldap/tls/ca.crt")
+            if os.path.exists(ca_file):
+                logger.debug(f"Configuring TLS with CA cert: {ca_file}")
+                tls = ldap3.Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=ca_file)
+            else:
+                logger.warning(f"LDAPS requested but CA cert not found at {ca_file}. Continuing with default validation.")
+                tls = ldap3.Tls(validate=ssl.CERT_REQUIRED)
+
+        self.server = ldap3.Server(url, get_info=ldap3.ALL, tls=tls)
         self.conn = ldap3.Connection(self.server, binddn, passwd, auto_bind=True)
 
     # result will be a tuple of boolean success and the entries
