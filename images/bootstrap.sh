@@ -18,6 +18,20 @@ fix_crc() {
     fi
 }
 
+# Helper to ensure we have a hash
+get_hash() {
+    local val="$1"
+    local hash_val="$2"
+    if [[ -n "$hash_val" ]]; then
+        echo "$hash_val"
+    elif [[ -n "$val" ]]; then
+        slappasswd -s "$val" -h {SSHA}
+    else
+        echo "ERROR: Neither password nor hash provided for a required field" >&2
+        exit 1
+    fi
+}
+
 # Check writability
 touch "$CONFIG_DIR/.writable" && rm "$CONFIG_DIR/.writable" || { echo "ERROR: $CONFIG_DIR is not writable"; exit 1; }
 touch "$DATA_DIR/.writable" && rm "$DATA_DIR/.writable" || { echo "ERROR: $DATA_DIR is not writable"; exit 1; }
@@ -31,6 +45,9 @@ fi
 if [[ ! -d "$CONFIG_DIR/cn=config" ]]; then
     echo "Generating base configuration..."
 
+    ADMIN_PW_HASH=$(get_hash "${LDAP_ADMIN_PW:-}" "${LDAP_ADMIN_PW_HASH:-}")
+    ROOT_PW_HASH=$(get_hash "${LDAP_ROOT_PW:-}" "${LDAP_ROOT_PW_HASH:-}")
+
     TMP_CONF="/tmp/slapd.conf"
     cat <<EOF > "$TMP_CONF"
 modulepath /usr/lib/openldap
@@ -43,12 +60,12 @@ include /etc/openldap/schema/nis.schema
 
 database config
 rootdn "cn=admin,cn=config"
-rootpw $LDAP_ROOT_PW_HASH
+rootpw $ROOT_PW_HASH
 
 database mdb
 suffix "$LDAP_DOMAIN_DC"
 rootdn "cn=admin,$LDAP_DOMAIN_DC"
-rootpw $LDAP_ADMIN_PW_HASH
+rootpw $ADMIN_PW_HASH
 directory "$DATA_DIR"
 EOF
 
@@ -83,7 +100,7 @@ objectClass: simpleSecurityObject
 objectClass: organizationalRole
 cn: admin
 description: LDAP administrator
-userPassword: $LDAP_ADMIN_PW_HASH
+userPassword: $ADMIN_PW_HASH
 EOF
 
     slapadd -F "$CONFIG_DIR" -b "$LDAP_DOMAIN_DC" -l "$INIT_LDIF"

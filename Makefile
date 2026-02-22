@@ -12,11 +12,11 @@ SLAPD_IMAGE = $(REGISTRY)/$(PROJECT)/slapd:latest
 all: build-init build-slapd
 
 build-init:
-	$(CONTAINER_ENGINE) build -t slapd-init:latest -f image/Containerfile.init image/
+	$(CONTAINER_ENGINE) build -t slapd-init:latest -f images/Containerfile.init images/
 	$(CONTAINER_ENGINE) tag slapd-init:latest $(INIT_IMAGE)
 
 build-slapd:
-	$(APKO) build image/slapd.yaml slapd:latest slapd.tar --arch x86_64
+	$(APKO) build images/slapd.yaml slapd:latest slapd.tar --arch x86_64
 	$(CONTAINER_ENGINE) load -i slapd.tar
 	$(CONTAINER_ENGINE) tag slapd:latest-amd64 $(SLAPD_IMAGE)
 
@@ -38,6 +38,13 @@ helm-install: push
 
 helm-uninstall:
 	helm uninstall slapd --namespace $(NAMESPACE)
+
+test:
+	helm upgrade --install slapd-test ./charts/slapd-test \
+		--namespace $(NAMESPACE) --create-namespace
+
+test-uninstall:
+	helm uninstall slapd-test --namespace $(NAMESPACE)
 
 clean:
 	rm -f *.tar

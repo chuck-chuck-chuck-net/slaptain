@@ -16,8 +16,8 @@ Prioritize a rootless, distroless image built with Wolfi and apko.
 - **Security:** Rootless execution (UID 1024), minimal attack surface.
 
 ### Current Implementation
-- [x] Wolfi/apko base image configuration (`image/slapd.yaml`).
-- [x] Init-image for bootstrapping (`image/Containerfile.init`).
+- [x] Wolfi/apko base image configuration (`images/slapd.yaml`).
+- [x] Init-image for bootstrapping (`images/Containerfile.init`).
 - [x] Ported bootstrap logic with `slaptest` conversion (`images/bootstrap.sh`).
 - [x] Helm Chart for standalone deployment (`charts/slapd`).
 - [ ] Cross-cluster replication logic (to be added to operator/init).

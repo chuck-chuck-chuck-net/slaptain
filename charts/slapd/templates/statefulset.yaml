@@ -28,18 +28,21 @@ spec:
           env:
             - name: LDAP_DOMAIN_DC
               value: {{ .Values.ldap.domain | quote }}
+            {{- $secretName := (default (printf "%s-passwords" (include "slapd.fullname" .)) .Values.ldap.existingSecret) }}
             - name: LDAP_ADMIN_PW_HASH
               valueFrom:
                 secretKeyRef:
-                  name: {{ if .Values.ldap.existingSecret }}{{ .Values.ldap.existingSecret }}{{ else }}{{ include "slapd.fullname" . }}-passwords{{ end }}
+                  name: {{ $secretName }}
                   key: admin-password-hash
             - name: LDAP_ROOT_PW_HASH
               valueFrom:
                 secretKeyRef:
-                  name: {{ if .Values.ldap.existingSecret }}{{ .Values.ldap.existingSecret }}{{ else }}{{ include "slapd.fullname" . }}-passwords{{ end }}
+                  name: {{ $secretName }}
                   key: root-password-hash
             - name: LDAP_TLS_ENABLED
               value: {{ .Values.ldap.tls.enabled | quote }}
+            - name: FORCE_REBOOTSTRAP
+              value: {{ .Values.ldap.forceRebootstrap | quote }}
             - name: CONFIG_DIR
               value: "/ldap-config"
             - name: DATA_DIR

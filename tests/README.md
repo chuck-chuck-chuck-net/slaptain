@@ -18,9 +18,31 @@ To confirm that the LDAP server is running and that you can authenticate to the 
 kubectl exec -n slaptain slapd-0 -c slapd -- ldapsearch -x -H ldap://localhost:1024 -D "cn=admin,cn=config" -w admin -b "cn=config" -LLL -s base
 ```
 
-## Bootstrapping
+## Automated Testing (Helm Chart)
 
-To simulate a pypod for an as8 bootstrap procedure:
+The `charts/slapd-test` chart automates the bootstrap and verification process. It creates a Job that waits for `slapd` to be ready, then applies the schema and ACLs.
+
+### Run the Test
+
+```bash
+# Make sure slapd is already installed (see Installation section)
+make -C .. test
+```
+
+### Check Test Results
+
+```bash
+# Watch the logs of the test job
+kubectl logs -n slaptain -l app.kubernetes.io/name=slapd-test -f
+```
+
+### Cleanup
+
+```bash
+make -C .. test-uninstall
+```
+
+## Manual Bootstrapping (Simulation)
 ```bash
 kubectl create -n slaptain cm slapd-test --from-file=cm
 kubectl apply -n slaptain -f pod.yaml

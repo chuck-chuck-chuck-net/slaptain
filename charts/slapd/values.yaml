@@ -16,13 +16,13 @@ image:
 
 ldap:
   domain: "dc=example,dc=org"
+  forceRebootstrap: false
   # Provide password hashes (SSHA, bcrypt, etc.)
-  # If existingSecret is provided, these are ignored.
   adminPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+" # "admin"
   rootPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"  # "admin"
-
+  
   # existingSecret: "my-ldap-secrets"
-
+  
   tls:
     enabled: false
     # secretName: "ldap-tls-cert"
