@@ -1,0 +1,49 @@
+# Default values for slapd.
+
+global:
+  registry: registry.internal
+  project: slaptain
+
+image:
+  slapd:
+    repository: slapd
+    tag: latest
+    pullPolicy: Always
+  init:
+    repository: slapd-init
+    tag: latest
+    pullPolicy: Always
+
+ldap:
+  domain: "dc=example,dc=org"
+  # Provide password hashes (SSHA, bcrypt, etc.)
+  # If existingSecret is provided, these are ignored.
+  adminPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+" # "admin"
+  rootPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"  # "admin"
+
+  # existingSecret: "my-ldap-secrets"
+
+  tls:
+    enabled: false
+    # secretName: "ldap-tls-cert"
+
+persistence:
+  enabled: true
+  config:
+    size: 1Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  data:
+    size: 5Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+securityContext:
+  runAsUser: 1024
+  runAsGroup: 1024
+  fsGroup: 1024
+
+service:
+  type: ClusterIP
+  port: 389
+  # nodePort: 31024

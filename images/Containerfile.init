@@ -1,0 +1,22 @@
+FROM cgr.dev/chainguard/wolfi-base
+
+RUN apk update && apk add \
+    bash \
+    openldap \
+    openldap-back-mdb \
+    openldap-clients \
+    python-3 \
+    coreutils \
+    findutils \
+    sed \
+    tzdata
+
+# Create user
+RUN addgroup -g 1024 openldap && \
+    adduser -u 1024 -G openldap -S -D openldap
+
+COPY bootstrap.sh /usr/bin/bootstrap.sh
+RUN chmod +x /usr/bin/bootstrap.sh
+
+USER 1024
+ENTRYPOINT ["/usr/bin/bootstrap.sh"]
