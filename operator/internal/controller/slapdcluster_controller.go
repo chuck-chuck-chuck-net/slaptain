@@ -395,7 +395,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// --- Volumes ---
 	volumes := []corev1.Volume{
 		{
-			Name: "ldap-run",
+			Name:         "ldap-run",
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 	}
@@ -495,11 +495,11 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	initContainer := corev1.Container{
-		Name:         "init",
-		Image:        initImage,
+		Name:            "init",
+		Image:           initImage,
 		ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
-		Env:          initEnv,
-		VolumeMounts: initMounts,
+		Env:             initEnv,
+		VolumeMounts:    initMounts,
 	}
 
 	// --- Main container ---

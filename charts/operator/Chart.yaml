@@ -1,0 +1,6 @@
+apiVersion: v2
+name: slaptain-operator
+description: Helm chart for deploying the Slaptain OpenLDAP operator
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

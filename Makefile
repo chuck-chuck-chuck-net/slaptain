@@ -7,7 +7,7 @@ INIT_IMAGE = $(REGISTRY)/$(PROJECT)/slapd-init:latest
 SLAPD_IMAGE = $(REGISTRY)/$(PROJECT)/slapd:latest
 OPERATOR_IMAGE = $(REGISTRY)/$(PROJECT)/operator:latest
 
-.PHONY: all build-init build-slapd build-operator push deploy gencert helm-install helm-uninstall test test-uninstall operator-generate operator-manifests clean
+.PHONY: all build-init build-slapd build-operator push deploy gencert helm-install helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd clean
 
 all: build-init build-slapd build-operator
 
@@ -25,6 +25,10 @@ operator-generate:
 
 operator-manifests:
 	$(MAKE) -C operator manifests
+	$(MAKE) operator-sync-crd
+
+operator-sync-crd:
+	cp operator/config/crd/bases/*.yaml charts/operator/crds/
 
 push: build-init build-slapd build-operator
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
@@ -50,6 +54,15 @@ helm-install: push
 
 helm-uninstall:
 	helm uninstall slapd --namespace $(NAMESPACE)
+
+operator-helm-install:
+	helm upgrade --install slaptain-operator ./charts/operator \
+		--namespace $(NAMESPACE) --create-namespace \
+		--set image.repository=$(REGISTRY)/$(PROJECT)/operator \
+		$(HELM_VALUES)
+
+operator-helm-uninstall:
+	helm uninstall slaptain-operator --namespace $(NAMESPACE)
 
 test:
 	helm upgrade --install slapd-test ./charts/slapd-test \

@@ -39,7 +39,10 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ├── Makefile                        # Root build targets (see Makefile Targets below)
 ├── LLM_STARTUP.md
 ├── charts/
-│   ├── slapd/                      # Legacy standalone Helm chart
+│   ├── operator/                   # Helm chart for deploying the operator itself
+│   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
+│   │   └── templates/              # deployment, RBAC, serviceaccount, metrics, networkpolicy
+│   ├── slapd/                      # Legacy standalone Helm chart (reference only)
 │   └── slapd-test/                 # Test Helm chart
 ├── images/
 │   ├── slapd/Containerfile         # slapd runtime image
@@ -70,7 +73,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - **Build tooling:** Plain Containerfile + podman (apko dropped — only beneficial in the Wolfi ecosystem).
 - **slapd runtime** (`images/slapd/`): `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell.
 - **slapd-init** (`images/slapd-init/`): `debian:trixie-slim` — ephemeral bootstrap; needs shell + python3 + OpenLDAP tools.
-- **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532.
+- **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532. Builder stage uses `golang:1.25`.
 - **User (slapd):** `openldap` (UID/GID 1024). Debian's slapd package creates this user; we `groupmod`/`usermod` to 1024.
 - **Ports:** 1024 (ldap), 1025 (ldaps) — non-privileged. Service maps 389→1024 and 636→1025.
 - **Mount Points:** `/ldap-config` (slapd.d config dir, PVC), `/ldap-data` (LMDB data, PVC), `/run/openldap` (socket, emptyDir), `/etc/openldap/tls` (TLS secret, optional).
@@ -137,7 +140,10 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `make build-operator` | Build operator image (build context = repo root) |
 | `make push` | Build + push all three images |
 | `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |
-| `make operator-manifests` | Run `make manifests` in `operator/` (regenerates CRD + RBAC) |
+| `make operator-manifests` | Run `make manifests` in `operator/`, then sync CRD to `charts/operator/crds/` |
+| `make operator-sync-crd` | Copy CRD from `operator/config/crd/bases/` to `charts/operator/crds/` |
+| `make operator-helm-install` | `helm upgrade --install slaptain-operator ./charts/operator` |
+| `make operator-helm-uninstall` | Uninstall the operator Helm release |
 | `make gencert` | Generate self-signed TLS cert via `tests/gencert.sh` |
 | `make helm-install` | Build, push, gencert, then helm upgrade/install |
 
@@ -156,26 +162,29 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ### Local Dev Workflow
 
 ```bash
-# 1. (If types changed) Regenerate deepcopy and CRD manifests
-make operator-generate operator-manifests
+# 1. (If types changed) Regenerate deepcopy, CRD manifests, and sync to chart
+make operator-generate operator-manifests   # operator-manifests includes operator-sync-crd
 
-# 2. Install CRD into cluster
-cd operator && make install
-
-# 3. Run operator locally (no image push needed)
+# 2. Deploy operator via Helm (installs CRD + RBAC + Deployment)
+make operator-helm-install
+# Or for development without building/pushing an image, run locally instead:
 cd operator && make run
 
-# 4. Prereqs: namespace + TLS secret
+# 3. Prereqs for a SlapdCluster: namespace + TLS secret
 kubectl create namespace slaptain
 make gencert   # creates slapd-tls secret in slaptain namespace
 
-# 5. Apply sample CR
+# 4. Apply sample CR
 kubectl apply -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
 
-# 6. Verify
+# 5. Verify
 kubectl get sc -n slaptain
 kubectl get statefulset,svc,secret,pvc -n slaptain -l app.kubernetes.io/instance=slapd
 kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
 
-# 7. Phase 1 guard smoke test: apply with replicas:2, verify status.phase=Error
+# 6. Phase 1 guard smoke test: apply with replicas:2, verify status.phase=Error
 ```
+
+### Important Notes
+- **No kustomize.** All deployment is via Helm. The `operator/config/` tree is kubebuilder scaffolding only — used to generate code/CRDs, not applied directly to clusters.
+- **CRD sync:** `charts/operator/crds/` is populated from `operator/config/crd/bases/` by `make operator-manifests`. Always run `make operator-manifests` after changing types and commit both the generated CRD and the chart copy together.
