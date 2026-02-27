@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- ldap_v1alpha1_slapdcluster.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

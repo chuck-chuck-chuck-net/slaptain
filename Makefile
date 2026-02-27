@@ -5,10 +5,11 @@ CONTAINER_ENGINE ?= podman
 
 INIT_IMAGE = $(REGISTRY)/$(PROJECT)/slapd-init:latest
 SLAPD_IMAGE = $(REGISTRY)/$(PROJECT)/slapd:latest
+OPERATOR_IMAGE = $(REGISTRY)/$(PROJECT)/operator:latest
 
-.PHONY: all build-init build-slapd push deploy gencert helm-install helm-uninstall test test-uninstall clean
+.PHONY: all build-init build-slapd build-operator push deploy gencert helm-install helm-uninstall test test-uninstall operator-generate operator-manifests clean
 
-all: build-init build-slapd
+all: build-init build-slapd build-operator
 
 build-init:
 	$(CONTAINER_ENGINE) build -t $(INIT_IMAGE) images/slapd-init/
@@ -16,9 +17,19 @@ build-init:
 build-slapd:
 	$(CONTAINER_ENGINE) build -t $(SLAPD_IMAGE) images/slapd/
 
-push: build-init build-slapd
+build-operator:
+	$(CONTAINER_ENGINE) build -f images/operator/Containerfile -t $(OPERATOR_IMAGE) .
+
+operator-generate:
+	$(MAKE) -C operator generate
+
+operator-manifests:
+	$(MAKE) -C operator manifests
+
+push: build-init build-slapd build-operator
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
+	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
 
 deploy:
 	sed -e "s|registry.internal/slaptain/slapd-init:latest|$(INIT_IMAGE)|g" \

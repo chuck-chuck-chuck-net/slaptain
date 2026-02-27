@@ -1,0 +1,76 @@
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdCluster
+metadata:
+  name: slapd
+  namespace: slaptain
+spec:
+  images:
+    slapd:
+      repository: registry.internal/slaptain/slapd
+      tag: latest
+      pullPolicy: Always
+    init:
+      repository: registry.internal/slaptain/slapd-init
+      tag: latest
+      pullPolicy: Always
+
+  ldap:
+    domain: "dc=example,dc=org"
+    # Inline password hashes (SSHA). Replace with your own hashes.
+    # Generate with: slappasswd -h {SSHA} -s yourpassword
+    adminPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"
+    rootPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"
+    # Alternatively, reference an existing Secret:
+    # passwordSecretName: "my-ldap-secrets"
+    forceRebootstrap: false
+    tls:
+      enabled: true
+      secretName: slapd-tls
+
+  replicas: 1
+  logLevel: 0
+
+  persistence:
+    enabled: true
+    config:
+      size: 1Gi
+      accessMode: ReadWriteOnce
+      # storageClass: ""
+    data:
+      size: 5Gi
+      accessMode: ReadWriteOnce
+      # storageClass: ""
+
+  service:
+    type: ClusterIP
+    ldapPort: 389
+    ldapsPort: 636
+
+  # resources:
+  #   requests:
+  #     cpu: 100m
+  #     memory: 128Mi
+  #   limits:
+  #     memory: 512Mi
+
+  # securityContext overrides pod-level defaults (runAsUser/runAsGroup/fsGroup=1024).
+  # securityContext:
+  #   runAsUser: 1024
+  #   runAsGroup: 1024
+  #   fsGroup: 1024
+
+  # replication is stored in the CRD but ignored in Phase 1.
+  # Uncomment to pre-populate for Phase 2 readiness.
+  # replication:
+  #   enabled: false
+  #   role: provider
+  #   mode: delta-syncrepl
+  #   accessLogEnabled: true
+  #   peers:
+  #     - name: slapd-site-b
+  #   externalPeers:
+  #     - name: remote-site-c
+  #       uri: ldaps://ldap.remote-site.example.com:636
+  #       tlsSecretName: remote-site-c-ca
+  #       bindDN: cn=replicator,dc=example,dc=org
+  #       bindPasswordSecretName: remote-site-c-replicator-pw

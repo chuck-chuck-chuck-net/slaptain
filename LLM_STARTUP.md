@@ -17,22 +17,165 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - **Platform:** Kubernetes (separate clusters per site).
 - **Security:** Rootless execution (UID/GID 1024), no privilege escalation, read-only root FS.
 
-### Current Implementation
+---
+
+### Implementation Status
+
 - [x] slapd runtime image: Debian trixie-slim build → `gcr.io/distroless/base-debian13` (`images/slapd/Containerfile`).
 - [x] slapd-init image: Debian trixie-slim, full shell environment for bootstrap (`images/slapd-init/Containerfile`).
 - [x] Bootstrap logic with `slaptest` conversion (`images/slapd-init/bootstrap.sh`).
-- [x] Helm Chart for standalone deployment (`charts/slapd`).
-- [ ] Cross-cluster replication logic (to be added to operator/init).
-- [ ] Kubernetes Operator (to be implemented).
+- [x] Helm Chart for standalone deployment (`charts/slapd`) — superseded by operator, kept for reference.
+- [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller.
+- [ ] Operator Phase 2: multi-replica intra-cluster delta-syncrepl.
+- [ ] Operator Phase 3: cross-cluster replication via `ExternalPeers`, mTLS peer auth.
+- [ ] Replication logic in slapd-init (init container configures syncrepl per pod ordinal).
+
+---
+
+### Repository Layout
+
+```
+.
+├── Makefile                        # Root build targets (see Makefile Targets below)
+├── LLM_STARTUP.md
+├── charts/
+│   ├── slapd/                      # Legacy standalone Helm chart
+│   └── slapd-test/                 # Test Helm chart
+├── images/
+│   ├── slapd/Containerfile         # slapd runtime image
+│   ├── slapd-init/Containerfile    # Bootstrap init container image
+│   └── operator/Containerfile      # Operator image (multi-stage, distroless/static)
+├── operator/                       # kubebuilder v4 Go operator (own Go module)
+│   ├── api/v1alpha1/
+│   │   ├── slapdcluster_types.go   # Full CRD type definitions (all phases)
+│   │   └── zz_generated.deepcopy.go
+│   ├── internal/controller/
+│   │   └── slapdcluster_controller.go
+│   ├── config/
+│   │   ├── crd/bases/              # Generated CRD YAML
+│   │   ├── rbac/role.yaml          # Generated RBAC ClusterRole
+│   │   └── samples/
+│   │       └── ldap_v1alpha1_slapdcluster.yaml
+│   ├── cmd/main.go
+│   ├── go.mod                      # module: github.com/chuck-chuck-chuck-net/slaptain/operator
+│   └── Makefile                    # kubebuilder-generated (generate, manifests, run, …)
+└── tests/
+    └── gencert.sh                  # TLS cert generation helper
+```
+
+---
 
 ### Image Details
-- **Project Name:** `slaptain`
+
 - **Build tooling:** Plain Containerfile + podman (apko dropped — only beneficial in the Wolfi ecosystem).
-- **slapd runtime:** `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell, no package manager.
-- **slapd-init:** `debian:trixie-slim` — ephemeral init container, needs shell + python3 + OpenLDAP tools.
-- **User:** `openldap` (UID/GID 1024). Debian's slapd package creates this user; we `groupmod`/`usermod` it to 1024.
-- **Mount Points:** `/ldap-config` (slapd.d config, PVC) and `/ldap-data` (LMDB data, PVC).
-- **Ports:** 1024 (ldap), 1025 (ldaps) — non-privileged; service maps 389→1024 and 636→1025.
-- **Module path:** `/usr/lib/ldap` (Debian path). Modules currently loaded dynamically; plan to compile in statically later.
+- **slapd runtime** (`images/slapd/`): `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell.
+- **slapd-init** (`images/slapd-init/`): `debian:trixie-slim` — ephemeral bootstrap; needs shell + python3 + OpenLDAP tools.
+- **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532.
+- **User (slapd):** `openldap` (UID/GID 1024). Debian's slapd package creates this user; we `groupmod`/`usermod` to 1024.
+- **Ports:** 1024 (ldap), 1025 (ldaps) — non-privileged. Service maps 389→1024 and 636→1025.
+- **Mount Points:** `/ldap-config` (slapd.d config dir, PVC), `/ldap-data` (LMDB data, PVC), `/run/openldap` (socket, emptyDir), `/etc/openldap/tls` (TLS secret, optional).
+- **Module path:** `/usr/lib/ldap` (Debian path). Modules loaded dynamically; plan to compile in statically later.
 - **Schema path:** `/etc/ldap/schema/` (Debian path).
-- **Init Container:** Handles `slapd.conf` generation, `slaptest` conversion to `slapd.d` format, and initial LDIF population.
+- **Init Container:** Generates `slapd.conf`, runs `slaptest` to produce `slapd.d` format, populates initial LDIFs.
+
+---
+
+### Operator Details
+
+**Framework:** Go + kubebuilder v4 (`go/v4` plugin), controller-runtime v0.23.1, k8s API v0.35.0.
+
+**API:**
+- Group: `ldap.chuck-chuck-chuck.net`
+- Kind: `SlapdCluster` (shortName: `sc`)
+- Version: `v1alpha1`
+- Scope: Namespaced
+
+**CRD spec fields** (all phases baked in from day 1 — no breaking changes needed later):
+
+| Field | Type | Notes |
+|---|---|---|
+| `spec.images.{slapd,init}.{repository,tag,pullPolicy}` | `SlapdImages` | Image config for both containers |
+| `spec.ldap.domain` | string | LDAP domain in DC notation, e.g. `dc=example,dc=org` |
+| `spec.ldap.passwordSecretName` | string | Reference existing Secret; suppresses Secret creation |
+| `spec.ldap.{adminPasswordHash,rootPasswordHash}` | string | SSHA/bcrypt hashes; used when `passwordSecretName` is unset |
+| `spec.ldap.forceRebootstrap` | bool | Force init container to re-bootstrap (destructive) |
+| `spec.ldap.tls.{enabled,secretName}` | `SlapdTLSConfig` | TLS Secret must contain `tls.crt`, `tls.key`, `ca.crt` |
+| `spec.replicas` | int32 | Default 1; Phase 1 enforces ≤1 (controller sets `Error` if >1) |
+| `spec.logLevel` | int32 | slapd `-d` flag, default 0 |
+| `spec.persistence.{enabled,config,data}` | `SlapdPersistenceConfig` | PVC sizes and storage class; emptyDir when disabled |
+| `spec.service.{type,ldapPort,ldapsPort}` | `SlapdServiceConfig` | ClusterIP service config, defaults 389/636 |
+| `spec.resources` | `corev1.ResourceRequirements` | Container resource requests/limits |
+| `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
+| `spec.replication.{enabled,role,mode,peers,externalPeers,accessLogEnabled}` | `SlapdReplicationConfig` | Phase 2+ fields; stored but ignored in Phase 1 |
+
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `observedGeneration`, `conditions`.
+
+**Reconcile order (Phase 1):**
+1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
+2. Phase 1 guard: `replicas > 1` → set `phase=Error`, condition `Ready=False/UnsupportedReplicas`, return (no requeue)
+3. `reconcileSecret` — create `<name>-passwords` Secret (create-only, never update)
+4. `reconcilePVCs` — create `<name>-config` and `<name>-data` PVCs (create-only, never update)
+5. `reconcileHeadlessService` — `<name>`, `clusterIP: None` (createOrUpdate)
+6. `reconcileClusterIPService` — `<name>-svc` (createOrUpdate)
+7. `reconcileStatefulSet` — mirrors Helm chart exactly (createOrUpdate)
+8. Observe StatefulSet → update `status.phase`, `readyReplicas`, conditions
+9. Not Running → `RequeueAfter: 10s`
+
+**Owned resources:** StatefulSet, Service (×2), Secret, PersistentVolumeClaim — all get `SetControllerReference`.
+
+**Known gotcha:** `kubebuilder init` requires `--skip-go-version-check` on Go 1.26 (version string not recognized). `kubebuilder create api` does not accept this flag and works without it.
+
+---
+
+### Makefile Targets (root)
+
+| Target | Effect |
+|---|---|
+| `make all` | Build all three images |
+| `make build-init` | Build slapd-init image |
+| `make build-slapd` | Build slapd image |
+| `make build-operator` | Build operator image (build context = repo root) |
+| `make push` | Build + push all three images |
+| `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |
+| `make operator-manifests` | Run `make manifests` in `operator/` (regenerates CRD + RBAC) |
+| `make gencert` | Generate self-signed TLS cert via `tests/gencert.sh` |
+| `make helm-install` | Build, push, gencert, then helm upgrade/install |
+
+### Makefile Targets (operator/)
+
+| Target | Effect |
+|---|---|
+| `make generate` | Regenerate `zz_generated.deepcopy.go` |
+| `make manifests` | Regenerate CRD YAML and RBAC `role.yaml` |
+| `make run` | Run operator locally against current kubeconfig |
+| `make install` | `kubectl apply` the CRD |
+| `make build` | Compile the manager binary |
+
+---
+
+### Local Dev Workflow
+
+```bash
+# 1. (If types changed) Regenerate deepcopy and CRD manifests
+make operator-generate operator-manifests
+
+# 2. Install CRD into cluster
+cd operator && make install
+
+# 3. Run operator locally (no image push needed)
+cd operator && make run
+
+# 4. Prereqs: namespace + TLS secret
+kubectl create namespace slaptain
+make gencert   # creates slapd-tls secret in slaptain namespace
+
+# 5. Apply sample CR
+kubectl apply -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
+
+# 6. Verify
+kubectl get sc -n slaptain
+kubectl get statefulset,svc,secret,pvc -n slaptain -l app.kubernetes.io/instance=slapd
+kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
+
+# 7. Phase 1 guard smoke test: apply with replicas:2, verify status.phase=Error
+```

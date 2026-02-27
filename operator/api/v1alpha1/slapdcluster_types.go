@@ -1,0 +1,280 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// SlapdClusterPhase represents the lifecycle phase of the cluster.
+type SlapdClusterPhase string
+
+const (
+	PhaseBootstrapping SlapdClusterPhase = "Bootstrapping"
+	PhaseRunning       SlapdClusterPhase = "Running"
+	PhaseDegraded      SlapdClusterPhase = "Degraded"
+	PhaseError         SlapdClusterPhase = "Error"
+)
+
+// SlapdImageConfig defines the image repository, tag, and pull policy for one image.
+type SlapdImageConfig struct {
+	// repository is the image repository (e.g. "registry.internal/slaptain/slapd").
+	// +required
+	Repository string `json:"repository"`
+	// tag is the image tag.
+	// +kubebuilder:default="latest"
+	Tag string `json:"tag,omitempty"`
+	// pullPolicy is the image pull policy.
+	// +kubebuilder:default=Always
+	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
+}
+
+// SlapdImages defines the images used by the slapd cluster.
+type SlapdImages struct {
+	// slapd is the main slapd runtime image.
+	// +required
+	Slapd SlapdImageConfig `json:"slapd"`
+	// init is the slapd-init bootstrap container image.
+	// +required
+	Init SlapdImageConfig `json:"init"`
+}
+
+// SlapdTLSConfig configures TLS for slapd.
+type SlapdTLSConfig struct {
+	// enabled controls whether TLS/LDAPS is active.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// secretName is the name of the TLS Secret containing tls.crt, tls.key, and ca.crt.
+	SecretName string `json:"secretName,omitempty"`
+}
+
+// SlapdLDAPConfig holds LDAP-specific configuration.
+type SlapdLDAPConfig struct {
+	// domain is the LDAP domain in DC notation, e.g. "dc=example,dc=org".
+	// +required
+	Domain string `json:"domain"`
+	// passwordSecretName references an existing Secret containing admin-password-hash
+	// and root-password-hash keys. When set, the operator will not create or manage
+	// the password Secret.
+	// +optional
+	PasswordSecretName string `json:"passwordSecretName,omitempty"`
+	// adminPasswordHash is an SSHA/bcrypt hash of the admin password, used when
+	// passwordSecretName is not set.
+	// +optional
+	AdminPasswordHash string `json:"adminPasswordHash,omitempty"`
+	// rootPasswordHash is an SSHA/bcrypt hash of the rootDN password, used when
+	// passwordSecretName is not set.
+	// +optional
+	RootPasswordHash string `json:"rootPasswordHash,omitempty"`
+	// forceRebootstrap instructs the init container to re-run bootstrap even if
+	// data already exists. Handle with care — this will overwrite existing data.
+	// +kubebuilder:default=false
+	ForceRebootstrap bool `json:"forceRebootstrap,omitempty"`
+	// tls configures TLS/LDAPS.
+	// +optional
+	TLS SlapdTLSConfig `json:"tls,omitempty"`
+}
+
+// SlapdPVCConfig holds sizing and storage class settings for a single PVC.
+type SlapdPVCConfig struct {
+	// size is the requested storage size.
+	// +kubebuilder:default="1Gi"
+	Size string `json:"size,omitempty"`
+	// storageClass is the storage class name. Defaults to the cluster default if empty.
+	// +optional
+	StorageClass string `json:"storageClass,omitempty"`
+	// accessMode is the PVC access mode.
+	// +kubebuilder:default=ReadWriteOnce
+	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
+}
+
+// SlapdPersistenceConfig configures persistent storage for config and data volumes.
+type SlapdPersistenceConfig struct {
+	// enabled controls whether PVCs are created. When false, emptyDir is used.
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+	// config is the PVC for the slapd configuration directory (/ldap-config).
+	// +optional
+	Config SlapdPVCConfig `json:"config,omitempty"`
+	// data is the PVC for the slapd data directory (/ldap-data).
+	// +optional
+	Data SlapdPVCConfig `json:"data,omitempty"`
+}
+
+// SlapdServiceConfig configures the ClusterIP service exposed by the operator.
+type SlapdServiceConfig struct {
+	// type is the Kubernetes Service type.
+	// +kubebuilder:default=ClusterIP
+	Type corev1.ServiceType `json:"type,omitempty"`
+	// ldapPort is the external service port for LDAP.
+	// +kubebuilder:default=389
+	LDAPPort int32 `json:"ldapPort,omitempty"`
+	// ldapsPort is the external service port for LDAPS.
+	// +kubebuilder:default=636
+	LDAPSPort int32 `json:"ldapsPort,omitempty"`
+}
+
+// SlapdReplicationRole represents the role of this cluster in a replication topology.
+type SlapdReplicationRole string
+
+const (
+	ReplicationRoleProvider SlapdReplicationRole = "provider"
+	ReplicationRoleConsumer SlapdReplicationRole = "consumer"
+	ReplicationRoleMirror   SlapdReplicationRole = "mirror"
+)
+
+// PeerRef references a peer SlapdCluster in the same namespace (Phase 2).
+type PeerRef struct {
+	// name is the name of the peer SlapdCluster resource.
+	// +required
+	Name string `json:"name"`
+}
+
+// ExternalPeer defines a cross-cluster peer for Phase 3 replication.
+type ExternalPeer struct {
+	// name is a human-readable identifier for this peer.
+	// +required
+	Name string `json:"name"`
+	// uri is the LDAP URI of the remote peer, e.g. "ldaps://ldap.remote-site.example.com:636".
+	// +required
+	URI string `json:"uri"`
+	// tlsSecretName is the name of the Secret containing the CA cert for verifying the peer.
+	// +optional
+	TLSSecretName string `json:"tlsSecretName,omitempty"`
+	// bindDN is the DN used to authenticate to the remote peer.
+	// +optional
+	BindDN string `json:"bindDN,omitempty"`
+	// bindPasswordSecretName is the name of the Secret containing the bind password.
+	// +optional
+	BindPasswordSecretName string `json:"bindPasswordSecretName,omitempty"`
+}
+
+// SlapdReplicationConfig holds replication configuration (Phase 2+). In Phase 1
+// this field is stored in the CRD but ignored by the controller.
+type SlapdReplicationConfig struct {
+	// enabled controls whether replication is active.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// role is the replication role of this cluster.
+	// +optional
+	Role SlapdReplicationRole `json:"role,omitempty"`
+	// mode is the replication mode (e.g. "delta-syncrepl").
+	// +optional
+	Mode string `json:"mode,omitempty"`
+	// peers lists in-cluster peer SlapdClusters (Phase 2).
+	// +optional
+	Peers []PeerRef `json:"peers,omitempty"`
+	// externalPeers lists cross-cluster peers (Phase 3).
+	// +optional
+	ExternalPeers []ExternalPeer `json:"externalPeers,omitempty"`
+	// accessLogEnabled enables the access log overlay required for delta-syncrepl.
+	// +kubebuilder:default=false
+	AccessLogEnabled bool `json:"accessLogEnabled,omitempty"`
+}
+
+// SlapdClusterSpec defines the desired state of SlapdCluster.
+type SlapdClusterSpec struct {
+	// images specifies the container images to use.
+	// +required
+	Images SlapdImages `json:"images"`
+	// ldap contains LDAP-specific configuration.
+	// +required
+	LDAP SlapdLDAPConfig `json:"ldap"`
+	// replicas is the number of slapd replicas. Phase 1 only supports replicas=1.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	Replicas int32 `json:"replicas,omitempty"`
+	// logLevel is the slapd -d debug level. 0 disables debug output.
+	// +kubebuilder:default=0
+	LogLevel int32 `json:"logLevel,omitempty"`
+	// persistence configures persistent storage for config and data volumes.
+	// +optional
+	Persistence SlapdPersistenceConfig `json:"persistence,omitempty"`
+	// service configures the ClusterIP service.
+	// +optional
+	Service SlapdServiceConfig `json:"service,omitempty"`
+	// resources sets compute resource requests and limits for the slapd container.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+	// securityContext overrides the pod-level security context.
+	// When nil, defaults of runAsUser/runAsGroup/fsGroup=1024 are applied.
+	// +optional
+	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
+	// replication configures replication (Phase 2+). Stored but ignored in Phase 1.
+	// +optional
+	Replication SlapdReplicationConfig `json:"replication,omitempty"`
+}
+
+// SlapdClusterStatus defines the observed state of SlapdCluster.
+type SlapdClusterStatus struct {
+	// phase summarises the current lifecycle state.
+	// +optional
+	Phase SlapdClusterPhase `json:"phase,omitempty"`
+	// readyReplicas is the number of pods reporting Ready.
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+	// replicas is the total number of pods (ready or not).
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
+	// observedGeneration is the .metadata.generation the controller last reconciled.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// conditions holds standard Kubernetes condition entries.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced,shortName=sc
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// SlapdCluster is the Schema for the slapdclusters API.
+type SlapdCluster struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// metadata is a standard object metadata.
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitzero"`
+
+	// spec defines the desired state of SlapdCluster.
+	// +required
+	Spec SlapdClusterSpec `json:"spec"`
+
+	// status defines the observed state of SlapdCluster.
+	// +optional
+	Status SlapdClusterStatus `json:"status,omitzero"`
+}
+
+// +kubebuilder:object:root=true
+
+// SlapdClusterList contains a list of SlapdCluster.
+type SlapdClusterList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitzero"`
+	Items           []SlapdCluster `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&SlapdCluster{}, &SlapdClusterList{})
+}

@@ -1,0 +1,11 @@
+FROM golang:1.23-bookworm AS build
+WORKDIR /workspace
+COPY operator/go.mod operator/go.sum ./
+RUN go mod download
+COPY operator/ .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -trimpath -o /manager ./cmd/main.go
+
+FROM gcr.io/distroless/static-debian13:nonroot
+COPY --from=build /manager /manager
+USER 65532:65532
+ENTRYPOINT ["/manager"]
