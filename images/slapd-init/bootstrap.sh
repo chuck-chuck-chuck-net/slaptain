@@ -50,13 +50,13 @@ if [[ ! -d "$CONFIG_DIR/cn=config" ]]; then
 
     TMP_CONF="/tmp/slapd.conf"
     cat <<EOF > "$TMP_CONF"
-modulepath /usr/lib/openldap
+modulepath /usr/lib/ldap
 moduleload back_mdb
 
-include /etc/openldap/schema/core.schema
-include /etc/openldap/schema/cosine.schema
-include /etc/openldap/schema/inetorgperson.schema
-include /etc/openldap/schema/nis.schema
+include /etc/ldap/schema/core.schema
+include /etc/ldap/schema/cosine.schema
+include /etc/ldap/schema/inetorgperson.schema
+include /etc/ldap/schema/nis.schema
 
 database config
 rootdn "cn=admin,cn=config"

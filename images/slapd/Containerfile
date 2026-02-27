@@ -1,0 +1,68 @@
+# ── Build / gather stage ────────────────────────────────────────────────────
+FROM debian:trixie-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        slapd \
+        ldap-utils \
+        dpkg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Assemble a staging root for the distroless runtime.
+# NOTE: do NOT pre-create /staging/usr/lib/ldap here — cp -r creates it
+# correctly only when the destination does not yet exist.  If the dir exists
+# beforehand, cp -r would nest the source inside it (ldap/ldap/back_mdb.so).
+RUN install -d \
+      /staging/usr/sbin \
+      /staging/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) \
+      /staging/etc/ldap \
+      /staging/ldap-config \
+      /staging/ldap-data \
+      /staging/tmp
+
+# Binary
+RUN cp /usr/sbin/slapd /staging/usr/sbin/
+
+# Schema files (referenced by bootstrap-generated config)
+RUN cp -r /etc/ldap/schema /staging/etc/ldap/schema
+
+# Dynamic backend/overlay modules
+# (later: compile these in statically and drop this directory entirely)
+RUN cp -r /usr/lib/ldap /staging/usr/lib/ldap
+
+# Shared libs required by slapd and its loadable modules.
+# Using ldd instead of globs: trixie ships libldap.so.2 / liblber.so.2
+# (not libldap-2.5.so.* as on bookworm), so name-based globs are fragile.
+RUN set -e; arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
+    # Collect all .so paths from slapd and every loadable module, then copy
+    # both the real file and any SONAME symlink for each dependency.
+    { ldd /usr/sbin/slapd; \
+      for mod in /usr/lib/ldap/*.so; do ldd "$mod" 2>/dev/null; done; \
+    } | awk '/=>/ { print $3 }' | sort -u | \
+    while read lib; do \
+        real=$(readlink -f "$lib") || continue; \
+        cp "$real" /staging/usr/lib/$arch/ 2>/dev/null || true; \
+        [ "$lib" != "$real" ] && cp -P "$lib" /staging/usr/lib/$arch/ 2>/dev/null || true; \
+    done; \
+    # SASL plugin directory (loaded at runtime, not via ldd)
+    cp -r /usr/lib/$arch/sasl2 /staging/usr/lib/$arch/ 2>/dev/null || true
+
+# Minimal /etc/passwd and /etc/group — distroless/base only ships root+nobody
+RUN printf \
+      'root:x:0:0:root:/root:/sbin/nologin\nopenldap:x:1024:1024:OpenLDAP:/nonexistent:/sbin/nologin\n' \
+      > /staging/etc/passwd && \
+    printf 'root:x:0:\nopenldap:x:1024:\n' > /staging/etc/group
+
+# ── Runtime stage ───────────────────────────────────────────────────────────
+FROM gcr.io/distroless/base-debian13
+
+COPY --from=build /staging/ /
+
+# /ldap-config and /ldap-data are populated by the init container
+VOLUME ["/ldap-config", "/ldap-data"]
+
+USER 1024:1024
+
+EXPOSE 1024 1025
+
+# Chart overrides args; -F points to config written by the init container
+ENTRYPOINT ["/usr/sbin/slapd"]

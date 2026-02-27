@@ -10,3 +10,7 @@ ldap:
   tls:
     enabled: true
     secretName: "slapd-tls"
+
+slapd:
+  # slapd -d log level. 0 = no debug output. See slapd(8) for levels.
+  logLevel: 256

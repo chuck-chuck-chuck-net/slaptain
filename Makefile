@@ -2,23 +2,19 @@ REGISTRY ?= registry.internal
 PROJECT ?= slaptain
 NAMESPACE ?= slaptain
 CONTAINER_ENGINE ?= podman
-APKO ?= apko
 
 INIT_IMAGE = $(REGISTRY)/$(PROJECT)/slapd-init:latest
 SLAPD_IMAGE = $(REGISTRY)/$(PROJECT)/slapd:latest
 
-.PHONY: all build-init build-slapd clean search-perl push deploy helm-install helm-uninstall
+.PHONY: all build-init build-slapd push deploy gencert helm-install helm-uninstall test test-uninstall clean
 
 all: build-init build-slapd
 
 build-init:
-	$(CONTAINER_ENGINE) build -t slapd-init:latest -f images/Containerfile.init images/
-	$(CONTAINER_ENGINE) tag slapd-init:latest $(INIT_IMAGE)
+	$(CONTAINER_ENGINE) build -t $(INIT_IMAGE) images/slapd-init/
 
 build-slapd:
-	$(APKO) build images/slapd.yaml slapd:latest slapd.tar --arch x86_64
-	$(CONTAINER_ENGINE) load -i slapd.tar
-	$(CONTAINER_ENGINE) tag slapd:latest-amd64 $(SLAPD_IMAGE)
+	$(CONTAINER_ENGINE) build -t $(SLAPD_IMAGE) images/slapd/
 
 push: build-init build-slapd
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE)

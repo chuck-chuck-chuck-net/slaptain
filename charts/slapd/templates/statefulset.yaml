@@ -69,12 +69,11 @@ spec:
         - name: slapd
           image: "{{ .Values.global.registry }}/{{ .Values.global.project }}/{{ .Values.image.slapd.repository }}:{{ .Values.image.slapd.tag }}"
           imagePullPolicy: {{ .Values.image.slapd.pullPolicy }}
-          command: ["/usr/sbin/slapd"]
-          args: 
+          args:
             - "-h"
             - "ldap://:1024/ ldaps://:1025/ ldapi://%2frun%2fopenldap%2fslapd.ldapi"
             - "-d"
-            - "256"
+            - {{ .Values.slapd.logLevel | toString | quote }}
             - "-F"
             - "/ldap-config"
           ports:

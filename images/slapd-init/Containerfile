@@ -1,0 +1,15 @@
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        slapd \
+        ldap-utils \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupmod -g 1024 openldap && \
+    usermod -u 1024 -g 1024 openldap
+
+COPY bootstrap.sh /usr/local/bin/bootstrap.sh
+
+USER 1024:1024
+ENTRYPOINT ["/usr/local/bin/bootstrap.sh"]
