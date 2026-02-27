@@ -1,150 +1,127 @@
 # Slaptain Test Suite
 
-This directory contains resources for testing the `slaptain` standalone LDAP server chart `charts/slapd`.
+Resources for deploying and testing the `slapd` standalone LDAP server.
+All commands are run from the **project root**.
 
-## Passwords
+For secret management with SOPS and age, see [SOPS.md](SOPS.md).
 
-The slapd chart expects password hashes in its values.yaml file, or an existing secret.
+---
 
-The slapd-test chart expects plain-text passwords in its values.yaml file, or an existing secret.
+## 1. Generate TLS certificates
 
-Recommended to generate passwords like this:
+The `slapd` chart requires a TLS secret in the target namespace. Generate it with:
 
 ```bash
-pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-hash=$(slappasswd -s "$pass" -h {SSHA})
-echo $pass $hash
+make gencert
 ```
 
-## SOPS and helm-secrets
+This creates the namespace (`slaptain-testing`) if it does not exist and runs `tests/gencert.sh`
+to produce the `slapd-tls` Secret.
 
-Software installation:
+---
+
+## 2. Deploy slapd
+
 ```bash
-apt install sops age
-helm plugin install https://github.com/jkroepke/helm-secrets
+make helm-install
 ```
 
-Initialize the key:
+Pass extra values via `HELM_VALUES_SLAPD`:
+
 ```bash
-age-keygen -o age-key.txt
-export SOPS_AGE_KEY_FILE=$(pwd)/age-key.txt
+make helm-install HELM_VALUES_SLAPD="-f tests/values.slapd.yaml"
 ```
 
-Pick a reasonable key location, put the env var into your shell startup.
+To do a full build-and-deploy from scratch (build images, generate certs, install):
 
-Encrypt secret value files:
 ```bash
-sops --encrypt --age $(age-keygen -y $SOPS_AGE_KEY_FILE) --in-place values.slapd.secret.yaml
-sops --encrypt --age $(age-keygen -y $SOPS_AGE_KEY_FILE) --in-place values.slapd-test.secret.yaml
+make helm-deploy HELM_VALUES_SLAPD="-f tests/values.slapd.yaml"
 ```
 
-Subsequent editing:
-```bash
-sops values.slapd.secret.yaml
-sops values.slapd-test.secret.yaml
-```
-
-Adding to `helm install` goes with the `secrets://` protocol, or with `helm secrets install`.
-
-## Certs
+To remove:
 
 ```bash
-./gencert.sh -n slaptain -t slapd -s slapd slapd-tls
-```
-
-## Installation
-
-The files in this directory assume a `dc=as8,dc=lab,dc=test` LDAP_DOMAIN_DC. Make sure the
-slapd chart has been installed with the matching domain:
-
-```bash
-make -C .. helm-install HELM_VALUES="-f tests/values.slapd.yaml"
-```
-
-When using SOPS:
-```bash
-helm upgrade --install slapd ./charts/slapd --namespace slaptain --create-namespace \
-  --set global.registry=registry.internal --set global.project=slaptain \
-  -f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml
+make helm-uninstall
 ```
 
 ---
 
-## Automated Bootstrap (slapd-test chart)
+## 3. Bootstrap and test with slapd-test
 
-The `charts/slapd-test` chart creates a Job that waits for slapd, then applies schema, ACLs,
-and initial directory data. This is the default mode (`bootstrap.enabled: true`).
+The `slapd-test` chart has two optional components, controlled independently:
 
-### Run
+| Component | Default | What it does |
+|---|---|---|
+| `bootstrap` | enabled | Runs a Job that applies schema, ACLs, and initial directory data |
+| `toolkit` | disabled | Keeps a pod alive for interactive `kubectl exec` sessions |
+
+### Default: bootstrap only
 
 ```bash
-make -C .. test
-# or with SOPS:
-helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace \
-  -f secrets://tests/values.slapd-test.secret.yaml
+make testing-helm-install
 ```
 
-### Watch logs
+Watch the bootstrap job run:
 
 ```bash
-kubectl logs -n slaptain -l app.kubernetes.io/name=slapd-test -f
+kubectl logs -n slaptain-testing -l app.kubernetes.io/name=slapd-test -f
 ```
 
-### Cleanup
+### Toolkit only (no bootstrap)
+
+Useful when you want a clean, unmodified slapd to inspect or test manually:
 
 ```bash
-make -C .. test-uninstall
+make testing-helm-install TOOLKIT_ONLY=true
+```
+
+`TOOLKIT_ONLY=true` sets `bootstrap.enabled=false` and `toolkit.enabled=true`.
+
+### Both together
+
+Bootstrap runs once, toolkit stays available for follow-up inspection:
+
+```bash
+make testing-helm-install HELM_VALUES_SLAPD_TESTING="--set toolkit.enabled=true"
+```
+
+To remove:
+
+```bash
+make testing-helm-uninstall
 ```
 
 ---
 
-## Toolkit — Interactive Testing Pod
+## 4. Using the toolkit
 
-The `toolkit` is a persistent Deployment with `ldap-utils` and `python3` (with `ldap3`,
-`pyyaml`) pre-installed. It stays alive so you can `kubectl exec` into it at any time.
+The toolkit pod has `ldap-utils`, `python3`, `ldap3`, and `pyyaml` pre-installed.
 
-Useful for:
-- Manual bootstrap or re-bootstrap
-- Running ad-hoc `ldapsearch` / `ldapadd` / `ldapmodify` commands
-- Inspecting config or data without needing tools installed locally
-- Debugging connectivity or TLS issues
-
-### Start the toolkit (with bootstrap disabled for a clean slate)
+Wait for it to be ready:
 
 ```bash
-helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace \
-  --set bootstrap.enabled=false \
-  --set toolkit.enabled=true
+kubectl rollout status deployment/slapd-test-toolkit -n slaptain-testing
 ```
 
-Or with SOPS secrets:
-```bash
-helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace \
-  --set bootstrap.enabled=false \
-  --set toolkit.enabled=true \
-  -f secrets://tests/values.slapd-test.secret.yaml
-```
-
-Wait for the toolkit pod to be ready (it installs packages on first start):
-```bash
-kubectl rollout status deployment/slapd-test-toolkit -n slaptain
-```
-
-### Exec in
+Exec in:
 
 ```bash
-kubectl exec -it -n slaptain deploy/slapd-test-toolkit -- bash
+kubectl exec -it -n slaptain-testing deploy/slapd-test-toolkit -- bash
 ```
 
-Inside the pod, environment variables are pre-set:
-- `$LDAP_ADMIN_PW` — admin password
-- `$LDAP_ROOT_PW` — rootDN (cn=config) password
-- `$LDAPTLS_CACERT` — path to the cluster CA cert (`/etc/ldap/tls/ca.crt`)
-- `$SLAPD_HOST` — slapd service name (e.g. `slapd`)
-- `$LDAP_DOMAIN` — configured domain (e.g. `dc=as8,dc=lab,dc=test`)
-- Config files and bootstrap scripts are at `/config/`
+Inside the pod, all required environment variables are pre-set:
 
-### Useful commands inside the toolkit
+| Variable | Example value |
+|---|---|
+| `$SLAPD_HOST` | `slapd` |
+| `$LDAP_DOMAIN` | `dc=as8,dc=lab,dc=test` |
+| `$LDAP_ADMIN_PW` | admin password (from Secret) |
+| `$LDAP_ROOT_PW` | rootDN password (from Secret) |
+| `$LDAPTLS_CACERT` | `/etc/ldap/tls/ca.crt` |
+
+Config files and bootstrap scripts are mounted at `/config/`.
+
+### Useful commands
 
 ```bash
 # Verify connectivity (anonymous, LDAPS)
@@ -154,36 +131,14 @@ ldapsearch -x -H ldaps://$SLAPD_HOST -LLL -s base
 ldapsearch -x -H ldaps://$SLAPD_HOST -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" \
   -b "cn=config" -LLL -s base
 
-# Bootstrap schema and ACLs
-python /config/ldap-bootstrap.py -d -H ldaps://$SLAPD_HOST/ \
-  -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" \
-  /config/ox-schema.json /config/slapd-readpw.json
+# Run the full bootstrap (same as the Job)
+bash /config/bootstrap.sh
 
-# Bootstrap OUs and readpw users
-python /config/ldap-bootstrap.py -d -H ldaps://$SLAPD_HOST/ \
-  --domain "$LDAP_DOMAIN" -w "$LDAP_ADMIN_PW" \
-  --auto-readpw /config/ldap-readpw-users.secret.yaml /config/slapd-ous.json
+# Run with trace output
+bash -x /config/bootstrap.sh
 
-# Verify ACLs work (subtree may be empty but access should succeed)
+# Verify ACLs (subtree may be empty, but access should succeed)
 ldapsearch -x -H ldaps://$SLAPD_HOST \
   -D "uid=appsuite,ou=Readpw,$LDAP_DOMAIN" -w "$LDAP_ADMIN_PW" \
   -b "ou=Mail,$LDAP_DOMAIN" -LLL -s sub
-```
-
-### Run both: bootstrap Job + toolkit
-
-Both can be active simultaneously if you want the Job to bootstrap and the toolkit to stay
-available for subsequent inspection:
-
-```bash
-helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace \
-  --set bootstrap.enabled=true \
-  --set toolkit.enabled=true \
-  -f secrets://tests/values.slapd-test.secret.yaml
-```
-
-### Cleanup
-
-```bash
-make -C .. test-uninstall
 ```
