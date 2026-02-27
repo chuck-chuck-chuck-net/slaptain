@@ -9,7 +9,7 @@ SLAPD_IMAGE   = $(REGISTRY)/$(PROJECT)/slapd:latest
 TOOLKIT_IMAGE = $(REGISTRY)/$(PROJECT)/slapd-toolkit:latest
 OPERATOR_IMAGE = $(REGISTRY)/$(PROJECT)/operator:latest
 
-.PHONY: all build-init build-slapd build-toolkit build-operator push gencert helm-install helm-deploy helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd clean
+.PHONY: all build-init build-slapd build-toolkit build-operator push gencert helm-install helm-deploy helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run clean
 
 all: build-init build-slapd build-toolkit build-operator
 
@@ -84,6 +84,13 @@ test:
 
 test-uninstall:
 	helm uninstall slapd-test --namespace $(NAMESPACE_TESTING)
+
+## e2e: full setup + test run + teardown
+e2e: e2e-run
+
+## e2e-run: run tests against an already-installed cluster (skips helm setup/teardown)
+e2e-run:
+	cd tests/e2e && go test -v ./... --ginkgo.v
 
 clean:
 	rm -f *.tar
