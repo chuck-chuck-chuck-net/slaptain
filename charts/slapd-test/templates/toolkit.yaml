@@ -1,20 +1,29 @@
-{{- if .Values.bootstrap.enabled }}
-apiVersion: batch/v1
-kind: Job
+{{- if .Values.toolkit.enabled }}
+{{- $secretName := (default (printf "%s-passwords" (include "slapd-test.fullname" .)) .Values.slapd.secretName) }}
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: {{ include "slapd-test.fullname" . }}
+  name: {{ include "slapd-test.fullname" . }}-toolkit
   labels:
     {{- include "slapd-test.labels" . | nindent 4 }}
+    app.kubernetes.io/component: toolkit
 spec:
+  replicas: {{ .Values.toolkit.replicas }}
+  selector:
+    matchLabels:
+      {{- include "slapd-test.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: toolkit
   template:
+    metadata:
+      labels:
+        {{- include "slapd-test.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: toolkit
     spec:
-      restartPolicy: OnFailure
       containers:
-        - name: tester
+        - name: toolkit
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            {{- $secretName := (default (printf "%s-passwords" (include "slapd-test.fullname" .)) .Values.slapd.secretName) }}
             - name: LDAP_ADMIN_PW
               valueFrom:
                 secretKeyRef:
@@ -31,7 +40,15 @@ spec:
               value: {{ .Values.slapd.fullname | quote }}
             - name: LDAP_DOMAIN
               value: {{ .Values.slapd.domain | quote }}
-          command: ["bash", "/config/bootstrap.sh"]
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              apt-get update && apt-get install -y ldap-utils
+              pip install pyyaml ldap3
+              echo "Toolkit ready. Tools available: ldapsearch, ldapadd, ldapmodify, python (ldap3, pyyaml)"
+              echo "Config files at /config/, CA cert at \$LDAPTLS_CACERT"
+              exec sleep infinity
           volumeMounts:
             - name: config
               mountPath: /config

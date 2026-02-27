@@ -14,3 +14,16 @@ image:
   repository: python
   tag: 3.14-trixie
   pullPolicy: IfNotPresent
+
+# bootstrap: run the automated schema/ACL/data bootstrap Job after slapd is ready.
+# Set enabled: false to skip bootstrapping — useful when you want an empty,
+# unbootstrapped slapd to inspect or test manually via the toolkit.
+bootstrap:
+  enabled: true
+
+# toolkit: a persistent Deployment with ldap-utils and python ldap3 pre-installed.
+# Stays alive so you can kubectl exec into it for interactive testing and debugging.
+# Example: kubectl exec -n slaptain <toolkit-pod> -- bash
+toolkit:
+  enabled: false
+  replicas: 1

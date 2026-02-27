@@ -6,18 +6,17 @@ This directory contains resources for testing the `slaptain` standalone LDAP ser
 
 The slapd chart expects password hashes in its values.yaml file, or an existing secret.
 
-The slapd-test chart expects passwords in its values.yaml file, or an existing secret.
+The slapd-test chart expects plain-text passwords in its values.yaml file, or an existing secret.
 
-Recommended to create this file by any tooling, like, 
+Recommended to generate passwords like this:
 
 ```bash
 pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
 hash=$(slappasswd -s "$pass" -h {SSHA})
 echo $pass $hash
 ```
-## SOPS and helm-secrets
 
-A side topic for this repo. But we live and learn.
+## SOPS and helm-secrets
 
 Software installation:
 ```bash
@@ -30,24 +29,19 @@ Initialize the key:
 age-keygen -o age-key.txt
 export SOPS_AGE_KEY_FILE=$(pwd)/age-key.txt
 ```
+
 Pick a reasonable key location, put the env var into your shell startup.
 
-The files can be encrypted:
+Encrypt secret value files:
 ```bash
 sops --encrypt --age $(age-keygen -y $SOPS_AGE_KEY_FILE) --in-place values.slapd.secret.yaml
 sops --encrypt --age $(age-keygen -y $SOPS_AGE_KEY_FILE) --in-place values.slapd-test.secret.yaml
 ```
 
-Subsequent editing goes e.g. like this:
+Subsequent editing:
 ```bash
 sops values.slapd.secret.yaml
 sops values.slapd-test.secret.yaml
-```
-
-Decrypting to stdout (for viewing):
-```bash
-sops -d values.slapd.secret.yaml
-sops -d values.slapd-test.secret.yaml
 ```
 
 Adding to `helm install` goes with the `secrets://` protocol, or with `helm secrets install`.
@@ -55,12 +49,13 @@ Adding to `helm install` goes with the `secrets://` protocol, or with `helm secr
 ## Certs
 
 ```bash
-% ./gencert.sh -n slaptain -t slapd -s slapd slapd-tls
+./gencert.sh -n slaptain -t slapd -s slapd slapd-tls
 ```
 
 ## Installation
 
-The files in this directory assume a `dc=as8,dc=lab,dc=test` LDAP_DOMAIN_DC. Therefore make sure the helm chart for the standalone slapd has been installed with
+The files in this directory assume a `dc=as8,dc=lab,dc=test` LDAP_DOMAIN_DC. Make sure the
+slapd chart has been installed with the matching domain:
 
 ```bash
 make -C .. helm-install HELM_VALUES="-f tests/values.slapd.yaml"
@@ -68,40 +63,30 @@ make -C .. helm-install HELM_VALUES="-f tests/values.slapd.yaml"
 
 When using SOPS:
 ```bash
-helm upgrade --install slapd ./charts/slapd --namespace slaptain --create-namespace --set global.registry=registry.internal --set global.project=slaptain -f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml
-helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace -f secrets://tests/values.slapd-test.secret.yaml
+helm upgrade --install slapd ./charts/slapd --namespace slaptain --create-namespace \
+  --set global.registry=registry.internal --set global.project=slaptain \
+  -f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml
 ```
 
-## Verification
+---
 
-To confirm that the LDAP server is running and that you can authenticate to the configuration database, use the following command:
+## Automated Bootstrap (slapd-test chart)
 
-```bash
-kubectl exec -n slaptain slapd-0 -c slapd -- ldapsearch -x -H ldap://localhost:1024 -D "cn=admin,cn=config" -w admin -b "cn=config" -LLL -s base
-```
+The `charts/slapd-test` chart creates a Job that waits for slapd, then applies schema, ACLs,
+and initial directory data. This is the default mode (`bootstrap.enabled: true`).
 
-Tests from the slapd-test pod and via TLS below.
-
-## Automated Testing (Helm Chart)
-
-The `charts/slapd-test` chart automates the bootstrap and verification process. It creates a Job that waits for `slapd` to be ready, then applies the schema and ACLs.
-
-### Run the Test
+### Run
 
 ```bash
-# Make sure slapd is already installed (see Installation section)
 make -C .. test
+# or with SOPS:
+helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace \
+  -f secrets://tests/values.slapd-test.secret.yaml
 ```
 
-When using SOPS:
-```bash
-helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace -f secrets://tests/values.slapd-test.secret.yaml
-```
-
-### Check Test Results
+### Watch logs
 
 ```bash
-# Watch the logs of the test job
 kubectl logs -n slaptain -l app.kubernetes.io/name=slapd-test -f
 ```
 
@@ -111,28 +96,94 @@ kubectl logs -n slaptain -l app.kubernetes.io/name=slapd-test -f
 make -C .. test-uninstall
 ```
 
-## Manual Bootstrapping (Simulation)
+---
+
+## Toolkit — Interactive Testing Pod
+
+The `toolkit` is a persistent Deployment with `ldap-utils` and `python3` (with `ldap3`,
+`pyyaml`) pre-installed. It stays alive so you can `kubectl exec` into it at any time.
+
+Useful for:
+- Manual bootstrap or re-bootstrap
+- Running ad-hoc `ldapsearch` / `ldapadd` / `ldapmodify` commands
+- Inspecting config or data without needing tools installed locally
+- Debugging connectivity or TLS issues
+
+### Start the toolkit (with bootstrap disabled for a clean slate)
+
 ```bash
-kubectl create -n slaptain cm slapd-test --from-file=cm
-kubectl apply -n slaptain -f pod.yaml
-kubectl exec -n slaptain slapd-test -- bash -c 'apt update && apt -y install ldap-utils'
-kubectl exec -n slaptain slapd-test -- bash -c 'pip install pyyaml ldap3'
+helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace \
+  --set bootstrap.enabled=false \
+  --set toolkit.enabled=true
 ```
 
-Verify the service with plain `ldapsearch`:
+Or with SOPS secrets:
 ```bash
-kubectl exec -n slaptain slapd-test -it -- bash
-ldapsearch -x -H ldaps://slapd -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" -b "cn=config" -LLL -s base
-LDAPTLS_CACERT=/etc/ldap/tls/ca.crt ldapsearch -x -H ldaps://slapd -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" -b "cn=config" -LLL -s base 
+helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace \
+  --set bootstrap.enabled=false \
+  --set toolkit.enabled=true \
+  -f secrets://tests/values.slapd-test.secret.yaml
 ```
 
-Bootstrap our custom schemas and ACLs:
+Wait for the toolkit pod to be ready (it installs packages on first start):
 ```bash
-kubectl exec -n slaptain slapd-test -- bash -c 'python /config/ldap-bootstrap.py -d -H ldap://slapd:389/ -D "cn=admin,cn=config" -w admin /config/ox-schema.json /config/slapd-readpw.json'
-kubectl exec -n slaptain slapd-test -- bash -c 'python /config/ldap-bootstrap.py -d -H ldap://slapd:389/ --domain dc=as8,dc=lab,dc=test -w admin --auto-readpw /config/ldap-readpw-users.secret.yaml /config/slapd-ous.json'
+kubectl rollout status deployment/slapd-test-toolkit -n slaptain
 ```
 
-Verify our ACLs work (note, the subtree will be empty at this time, but access should work):
+### Exec in
+
 ```bash
-kubectl exec -n slaptain slapd-test -- ldapsearch -x -H ldap://slapd:389 -D "uid=appsuite,ou=Readpw,dc=as8,dc=lab,dc=test" -w "REDACTED-LAB-PW" -b "ou=Mail,dc=as8,dc=lab,dc=test" -LLL -s sub
+kubectl exec -it -n slaptain deploy/slapd-test-toolkit -- bash
+```
+
+Inside the pod, environment variables are pre-set:
+- `$LDAP_ADMIN_PW` — admin password
+- `$LDAP_ROOT_PW` — rootDN (cn=config) password
+- `$LDAPTLS_CACERT` — path to the cluster CA cert (`/etc/ldap/tls/ca.crt`)
+- `$SLAPD_HOST` — slapd service name (e.g. `slapd`)
+- `$LDAP_DOMAIN` — configured domain (e.g. `dc=as8,dc=lab,dc=test`)
+- Config files and bootstrap scripts are at `/config/`
+
+### Useful commands inside the toolkit
+
+```bash
+# Verify connectivity (anonymous, LDAPS)
+ldapsearch -x -H ldaps://$SLAPD_HOST -LLL -s base
+
+# Verify config DB access
+ldapsearch -x -H ldaps://$SLAPD_HOST -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" \
+  -b "cn=config" -LLL -s base
+
+# Bootstrap schema and ACLs
+python /config/ldap-bootstrap.py -d -H ldaps://$SLAPD_HOST/ \
+  -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" \
+  /config/ox-schema.json /config/slapd-readpw.json
+
+# Bootstrap OUs and readpw users
+python /config/ldap-bootstrap.py -d -H ldaps://$SLAPD_HOST/ \
+  --domain "$LDAP_DOMAIN" -w "$LDAP_ADMIN_PW" \
+  --auto-readpw /config/ldap-readpw-users.secret.yaml /config/slapd-ous.json
+
+# Verify ACLs work (subtree may be empty but access should succeed)
+ldapsearch -x -H ldaps://$SLAPD_HOST \
+  -D "uid=appsuite,ou=Readpw,$LDAP_DOMAIN" -w "$LDAP_ADMIN_PW" \
+  -b "ou=Mail,$LDAP_DOMAIN" -LLL -s sub
+```
+
+### Run both: bootstrap Job + toolkit
+
+Both can be active simultaneously if you want the Job to bootstrap and the toolkit to stay
+available for subsequent inspection:
+
+```bash
+helm upgrade --install slapd-test ./charts/slapd-test --namespace slaptain --create-namespace \
+  --set bootstrap.enabled=true \
+  --set toolkit.enabled=true \
+  -f secrets://tests/values.slapd-test.secret.yaml
+```
+
+### Cleanup
+
+```bash
+make -C .. test-uninstall
 ```
