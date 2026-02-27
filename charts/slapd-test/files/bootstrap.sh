@@ -16,14 +16,6 @@
 #   bash -x /config/bootstrap.sh       # trace every command
 set -euo pipefail
 
-# ── Install tools if not already present ────────────────────────────────────
-if ! command -v ldapsearch &>/dev/null; then
-    apt-get update && apt-get install -y ldap-utils
-fi
-if ! python -c 'import ldap3' &>/dev/null 2>&1; then
-    pip install pyyaml ldap3
-fi
-
 # ── Wait for slapd to accept LDAPS connections ───────────────────────────────
 until ldapsearch -x -H "ldaps://${SLAPD_HOST}" -LLL -s base; do
     echo "Waiting for slapd (LDAPS)..."

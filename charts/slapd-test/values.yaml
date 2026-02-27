@@ -11,8 +11,8 @@ slapd:
   rootPassword: "admin"
 
 image:
-  repository: python
-  tag: 3.14-trixie
+  repository: registry.internal/slaptain/slapd-toolkit
+  tag: latest
   pullPolicy: IfNotPresent
 
 # bootstrap: run the automated schema/ACL/data bootstrap Job after slapd is ready.

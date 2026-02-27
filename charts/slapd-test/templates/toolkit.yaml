@@ -40,15 +40,7 @@ spec:
               value: {{ .Values.slapd.fullname | quote }}
             - name: LDAP_DOMAIN
               value: {{ .Values.slapd.domain | quote }}
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              set -e
-              apt-get update && apt-get install -y ldap-utils
-              pip install pyyaml ldap3
-              echo "Toolkit ready. Tools available: ldapsearch, ldapadd, ldapmodify, python (ldap3, pyyaml)"
-              echo "Config files at /config/, CA cert at \$LDAPTLS_CACERT"
-              exec sleep infinity
+          command: ["sleep", "infinity"]
           volumeMounts:
             - name: config
               mountPath: /config

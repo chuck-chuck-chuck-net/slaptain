@@ -2,7 +2,7 @@ age-key.txt
 age-key.txt.public
 values.slapd-test.secret.yaml
 values.slapd.secret.yaml
-slapd-slaptain-csr.yaml
+slapd-*-csr.yaml
 slapd-tls.yaml
 slapd.csr
 slapd.key
