@@ -9,7 +9,7 @@ SLAPD_IMAGE   = $(REGISTRY)/$(PROJECT)/slapd:latest
 TOOLKIT_IMAGE = $(REGISTRY)/$(PROJECT)/slapd-toolkit:latest
 OPERATOR_IMAGE = $(REGISTRY)/$(PROJECT)/operator:latest
 
-.PHONY: all build-init build-slapd build-toolkit build-operator push gencert helm-install helm-deploy helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run clean
+.PHONY: all build-init build-slapd build-toolkit build-operator push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run clean
 
 all: build-init build-slapd build-toolkit build-operator
 
@@ -48,8 +48,6 @@ gencert:
 helm-install:
 	helm upgrade --install slapd ./charts/slapd \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
-		--set global.registry=$(REGISTRY) \
-		--set global.project=$(PROJECT) \
 		$(HELM_VALUES_SLAPD)
 
 helm-deploy: push gencert helm-install ## Full pipeline: build images, generate certs, deploy
@@ -68,6 +66,14 @@ testing-helm-install:
 
 testing-helm-uninstall:
 	helm uninstall slapd-test --namespace $(NAMESPACE_TESTING)
+
+cluster-helm-install:
+	helm upgrade --install slapd ./charts/slapd-cluster \
+		--namespace $(NAMESPACE_TESTING) --create-namespace \
+		$(HELM_VALUES_SLAPD_CLUSTER)
+
+cluster-helm-uninstall:
+	helm uninstall slapd --namespace $(NAMESPACE_TESTING)
 
 operator-helm-install:
 	helm upgrade --install slaptain-operator ./charts/operator \

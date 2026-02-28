@@ -1,0 +1,69 @@
+# Default values for slapd-cluster.
+# Deploys a SlapdCluster CR; the slaptain operator must be installed first.
+
+# -- Override the resource name prefix.
+# With the default "slapd" and release name "slapd", fullname resolves to "slapd"
+# (since "slapd" contains "slapd").  This ensures SLAPD_HOST=slapd works the same
+# way whether slapd is deployed via the standalone chart or via the operator.
+nameOverride: slapd
+
+# -- LDAP configuration.
+ldap:
+  domain: "dc=example,dc=org"
+  forceRebootstrap: false
+  tls:
+    enabled: true
+    secretName: "slapd-tls"
+
+# -- Password secret.
+# The chart creates a Secret named <fullname>-passwords with the hashes below,
+# unless existingSecret is set — in which case no Secret is created and the named
+# Secret is referenced directly.  It must contain admin-password-hash and
+# root-password-hash keys.
+passwords:
+  existingSecret: ""
+  adminPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"  # "admin"
+  rootPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"   # "admin"
+
+# -- Container images.
+images:
+  slapd:
+    repository: registry.internal/slaptain/slapd
+    tag: latest
+    pullPolicy: Always
+  init:
+    repository: registry.internal/slaptain/slapd-init
+    tag: latest
+    pullPolicy: Always
+
+# -- Number of replicas. Phase 1 only supports 1.
+replicas: 1
+
+# -- slapd -d log level. 0 disables debug output.
+logLevel: 0
+
+# -- Persistent storage.
+persistence:
+  enabled: true
+  config:
+    size: 1Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  data:
+    size: 5Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+# -- Service configuration.
+service:
+  type: ClusterIP
+  ldapPort: 389
+  ldapsPort: 636
+
+# -- Compute resources for the slapd container.
+resources: {}
+#  requests:
+#    cpu: 100m
+#    memory: 128Mi
+#  limits:
+#    memory: 512Mi

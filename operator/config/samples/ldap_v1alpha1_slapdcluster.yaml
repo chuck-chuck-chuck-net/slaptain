@@ -2,7 +2,6 @@ apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
 kind: SlapdCluster
 metadata:
   name: slapd
-  namespace: slaptain
 spec:
   images:
     slapd:

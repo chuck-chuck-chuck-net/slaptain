@@ -1,0 +1,56 @@
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdCluster
+metadata:
+  name: {{ include "slapd-cluster.fullname" . }}
+  labels:
+    {{- include "slapd-cluster.labels" . | nindent 4 }}
+spec:
+  images:
+    slapd:
+      repository: {{ .Values.images.slapd.repository | quote }}
+      tag: {{ .Values.images.slapd.tag | quote }}
+      pullPolicy: {{ .Values.images.slapd.pullPolicy }}
+    init:
+      repository: {{ .Values.images.init.repository | quote }}
+      tag: {{ .Values.images.init.tag | quote }}
+      pullPolicy: {{ .Values.images.init.pullPolicy }}
+
+  ldap:
+    domain: {{ .Values.ldap.domain | quote }}
+    passwordSecretName: {{ include "slapd-cluster.passwordSecretName" . | quote }}
+    forceRebootstrap: {{ .Values.ldap.forceRebootstrap }}
+    tls:
+      enabled: {{ .Values.ldap.tls.enabled }}
+      {{- if .Values.ldap.tls.enabled }}
+      secretName: {{ .Values.ldap.tls.secretName | quote }}
+      {{- end }}
+
+  replicas: {{ .Values.replicas }}
+  logLevel: {{ .Values.logLevel }}
+
+  persistence:
+    enabled: {{ .Values.persistence.enabled }}
+    {{- if .Values.persistence.enabled }}
+    config:
+      size: {{ .Values.persistence.config.size | quote }}
+      accessMode: {{ .Values.persistence.config.accessMode }}
+      {{- if .Values.persistence.config.storageClass }}
+      storageClass: {{ .Values.persistence.config.storageClass | quote }}
+      {{- end }}
+    data:
+      size: {{ .Values.persistence.data.size | quote }}
+      accessMode: {{ .Values.persistence.data.accessMode }}
+      {{- if .Values.persistence.data.storageClass }}
+      storageClass: {{ .Values.persistence.data.storageClass | quote }}
+      {{- end }}
+    {{- end }}
+
+  service:
+    type: {{ .Values.service.type }}
+    ldapPort: {{ .Values.service.ldapPort }}
+    ldapsPort: {{ .Values.service.ldapsPort }}
+
+  {{- with .Values.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

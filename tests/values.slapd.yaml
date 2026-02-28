@@ -1,16 +1,13 @@
 ldap:
   domain: "dc=as8,dc=lab,dc=test"
-  # Provide password hashes (SSHA, bcrypt, etc.)
-  # If existingSecret is provided, these are ignored.
-  # adminPasswordHash: "{SSHA}vSshP+XN/R0XmC0O7Gv9/L1X2mE=" # "admin"
-  # # rootPasswordHash: "{SSHA}vSshP+XN/R0XmC0O7Gv9/L1X2mE="  # "admin"
-
   # existingSecret: "my-ldap-secrets"
-
   tls:
     enabled: true
     secretName: "slapd-tls"
 
-slapd:
-  # slapd -d log level. 0 = no debug output. See slapd(8) for levels.
-  logLevel: 256
+# passwords:
+#   adminPasswordHash: "{SSHA}..."  # generate with: slappasswd -h {SSHA} -s yourpassword
+#   rootPasswordHash: "{SSHA}..."
+
+# slapd -d log level. 0 = no debug output. See slapd(8) for levels.
+logLevel: 256

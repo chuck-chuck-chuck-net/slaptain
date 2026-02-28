@@ -42,11 +42,13 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
 │   │   └── templates/              # deployment, RBAC, serviceaccount, metrics, networkpolicy
-│   ├── slapd/                      # Legacy standalone Helm chart (reference only)
-│   └── slapd-test/                 # Test Helm chart
+│   ├── slapd/                      # Standalone Helm chart (baseline / comparison / testing vehicle)
+│   ├── slapd-cluster/              # Helm chart deploying a SlapdCluster CR (operator required)
+│   └── slapd-test/                 # Test chart: bootstrap job + toolkit pod
 ├── images/
 │   ├── slapd/Containerfile         # slapd runtime image
 │   ├── slapd-init/Containerfile    # Bootstrap init container image
+│   ├── slapd-toolkit/Containerfile # Toolkit image (ldap-utils, python3, pyyaml, ldap3)
 │   └── operator/Containerfile      # Operator image (multi-stage, distroless/static)
 ├── operator/                       # kubebuilder v4 Go operator (own Go module)
 │   ├── api/v1alpha1/
@@ -63,7 +65,11 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── go.mod                      # module: github.com/chuck-chuck-chuck-net/slaptain/operator
 │   └── Makefile                    # kubebuilder-generated (generate, manifests, run, …)
 └── tests/
-    └── gencert.sh                  # TLS cert generation helper
+    ├── gencert.sh                  # TLS cert generation helper
+    ├── values.slapd.yaml           # Shared test values for slapd and slapd-cluster charts
+    ├── README.md                   # Test suite documentation
+    ├── SOPS.md                     # SOPS/age secret management guide
+    └── e2e/                        # Ginkgo e2e tests (go-ldap, client-go)
 ```
 
 ---
@@ -118,11 +124,17 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 2. Phase 1 guard: `replicas > 1` → set `phase=Error`, condition `Ready=False/UnsupportedReplicas`, return (no requeue)
 3. `reconcileSecret` — create `<name>-passwords` Secret (create-only, never update)
 4. `reconcilePVCs` — create `<name>-config` and `<name>-data` PVCs (create-only, never update)
-5. `reconcileHeadlessService` — `<name>`, `clusterIP: None` (createOrUpdate)
-6. `reconcileClusterIPService` — `<name>-svc` (createOrUpdate)
-7. `reconcileStatefulSet` — mirrors Helm chart exactly (createOrUpdate)
+5. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (createOrUpdate)
+6. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (createOrUpdate)
+7. `reconcileStatefulSet` — mirrors Helm chart; `serviceName: <name>-headless` (createOrUpdate)
 8. Observe StatefulSet → update `status.phase`, `readyReplicas`, conditions
 9. Not Running → `RequeueAfter: 10s`
+
+**Service naming (Bitnami convention):**
+- Headless: `<name>-headless` — used by StatefulSet for pod DNS (`<name>-0.<name>-headless.ns.svc`)
+- ClusterIP: `<name>` — client-facing, maps standard ports 389→1024 and 636→1025
+- This ensures `SLAPD_HOST=slapd` works identically for standalone chart and operator deployments
+- `charts/slapd-cluster` has `nameOverride: slapd` so `helm install slapd ./charts/slapd-cluster` → fullname `slapd`
 
 **Owned resources:** StatefulSet, Service (×2), Secret, PersistentVolumeClaim — all get `SetControllerReference`.
 
@@ -145,7 +157,14 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `make operator-helm-install` | `helm upgrade --install slaptain-operator ./charts/operator` |
 | `make operator-helm-uninstall` | Uninstall the operator Helm release |
 | `make gencert` | Generate self-signed TLS cert via `tests/gencert.sh` |
-| `make helm-install` | Build, push, gencert, then helm upgrade/install |
+| `make helm-install` | Bare `helm upgrade --install slapd ./charts/slapd` |
+| `make helm-deploy` | Full pipeline: `push` + `gencert` + `helm-install` |
+| `make helm-uninstall` | Uninstall the slapd Helm release |
+| `make cluster-helm-install` | `helm upgrade --install slapd ./charts/slapd-cluster` |
+| `make cluster-helm-uninstall` | Uninstall the slapd-cluster Helm release |
+| `make testing-helm-install` | `helm upgrade --install slapd-test ./charts/slapd-test` |
+| `make testing-helm-uninstall` | Uninstall the slapd-test Helm release |
+| `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` |
 
 ### Makefile Targets (operator/)
 
@@ -188,3 +207,58 @@ kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
 ### Important Notes
 - **No kustomize.** All deployment is via Helm. The `operator/config/` tree is kubebuilder scaffolding only — used to generate code/CRDs, not applied directly to clusters.
 - **CRD sync:** `charts/operator/crds/` is populated from `operator/config/crd/bases/` by `make operator-manifests`. Always run `make operator-manifests` after changing types and commit both the generated CRD and the chart copy together.
+
+---
+
+### Credential & Password Architecture
+
+**Design principle:** The operator manages Kubernetes objects. When it needs to interact with
+slapd directly (monitoring, topology changes), it connects over the network using go-ldap with
+credentials from a Secret — the same pattern as every database operator (Percona, CloudNativePG,
+Strimzi). No kubectl-exec, no sidecar indirection.
+
+**Why not SASL EXTERNAL over ldapi socket?** The ldapi socket lives inside the slapd pod's
+filesystem namespace. The operator is a separate pod and cannot access it. A sidecar sharing the
+socket was considered but rejected: it trades a narrow RBAC permission (read one Secret) for a
+broader one (pod exec or an unauthenticated network endpoint), which is strictly worse from a
+security perspective.
+
+**OpenLDAP credential types:**
+
+| Credential | What it controls | Stored as |
+|---|---|---|
+| Config admin (`cn=admin,cn=config`) | `cn=config` database: schemas, ACLs, replication topology, TLS settings | SSHA hash in `cn=config` |
+| Data admin (`cn=admin,<suffix>`) | Data tree: full bypass of ACLs on the data database | SSHA hash in data DB config |
+
+These are independent. Config admin access does not inherently grant data access (though it can
+change ACLs to open it up).
+
+**Credential requirements per phase:**
+
+| Consumer | What it needs | Format | Phase |
+|---|---|---|---|
+| slapd-init (init container) | Config admin hash, data admin hash | SSHA hash | 1 |
+| Operator: topology reconfiguration | Config admin password | Plaintext | 2 |
+| Operator: CSN lag monitoring | Read-only access to `contextCSN` / `cn=monitor` | Plaintext (monitoring DN) or anonymous | 2 |
+| Consumer init: syncrepl bind | Replication bind password | Plaintext | 2 |
+| Bootstrap job (slapd-test) | Data admin password | Plaintext | Testing only |
+
+**Secrets layout:**
+
+| Secret | Contents | Created by | Scope |
+|---|---|---|---|
+| `<name>-passwords` | `admin-password-hash`, `root-password-hash` | Operator or slapd-cluster chart | Deployment (init container) |
+| `<name>-credentials` | `config-admin-password` (plaintext) | Operator or user | Operator SA only (RBAC) |
+| `<name>-replication` | Replication bind password (plaintext) | Operator or user | Consumer init containers |
+| `slapd-test-passwords` | `admin-password`, `root-password` (plaintext) | slapd-test chart | Testing only, not for production |
+
+**Production scope:** The operator provides a correctly configured, healthy LDAP endpoint.
+Directory content (schemas, OUs, users) is the user's responsibility. The slapd-test bootstrap
+job is a testing tool, not part of production deployment.
+
+**OpenLDAP replication vs Redis — why the operator is simpler:**
+- Delta-syncrepl is pull-based: consumers connect to the provider, provider has no consumer registry.
+- No built-in leader election or failover protocol (unlike Redis Sentinel).
+- Topology is static configuration in `cn=config`, not a dynamic protocol.
+- Adding a consumer = configure it on the consumer side; provider needs no changes.
+- The operator's role is configuration management and monitoring, not real-time failover coordination.

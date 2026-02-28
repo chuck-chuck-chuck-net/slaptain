@@ -18,30 +18,66 @@ make gencert
 This creates the namespace (`slaptain-testing`) if it does not exist and runs `tests/gencert.sh`
 to produce the `slapd-tls` Secret.
 
+## 2. Prepare your environment
+
+The make targets read environment variables for helm values arguments. You'll want to set something like
+
+```
+export HELM_VALUES_SLAPD="-f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml"
+export HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml"
+export HELM_VALUES_SLAPD_TESTING="-f secrets://tests/values.slapd-test.secret.yaml"
+```
+
+The samples below assume the variables are provided by the environment. You could also pass
+them on each make invocation command line explicitly, of course.
+
 ---
 
 ## 2. Deploy slapd
+
+Two deployment paths are supported. They are mutually exclusive — pick one per test environment.
+
+### Option A — Standalone Helm chart (`charts/slapd`)
+
+No operator required. The chart deploys the StatefulSet directly.
 
 ```bash
 make helm-install
 ```
 
-Pass extra values via `HELM_VALUES_SLAPD`:
+Full build-and-deploy from scratch (build images, generate certs, install):
 
 ```bash
-make helm-install HELM_VALUES_SLAPD="-f tests/values.slapd.yaml"
-```
-
-To do a full build-and-deploy from scratch (build images, generate certs, install):
-
-```bash
-make helm-deploy HELM_VALUES_SLAPD="-f tests/values.slapd.yaml"
+make helm-deploy
 ```
 
 To remove:
 
 ```bash
 make helm-uninstall
+```
+
+### Option B — Operator-managed SlapdCluster (`charts/slapd-cluster`)
+
+Requires the operator to be running first:
+
+```bash
+make operator-helm-install
+```
+
+Then deploy a SlapdCluster instance:
+
+```bash
+make cluster-helm-install
+```
+
+`charts/slapd-cluster` creates a password Secret and a `SlapdCluster` CR; the operator
+reconciles all other resources (StatefulSet, Services, PVCs).
+
+To remove:
+
+```bash
+make cluster-helm-uninstall
 ```
 
 ---
@@ -93,7 +129,46 @@ make testing-helm-uninstall
 
 ---
 
-## 4. Using the toolkit
+## 4. End-to-end tests
+
+The e2e suite in `tests/e2e/` works against both deployment options.
+
+### Against the standalone chart (default)
+
+```bash
+SKIP_SETUP=true SKIP_TEARDOWN=true make e2e-run
+```
+
+### Against the operator-managed SlapdCluster
+
+The operator exposes the same `slapd` ClusterIP service as the standalone chart.
+The only difference is that it stores password hashes (not plain text) in the cluster's
+own Secret. Point the suite at that secret:
+
+```bash
+SKIP_SETUP=true SKIP_TEARDOWN=true \
+  LDAP_PASSWORD_SECRET=slapd-passwords \
+  LDAP_PASSWORD_SECRET_KEY=admin-password-hash \
+  make e2e-run
+```
+
+> **Note:** `LDAP_PASSWORD_SECRET_KEY=admin-password-hash` means the suite reads the SSHA hash
+> as the password string. This only works when the slapd chart's default password is `admin`
+> (i.e. the hash decodes to `admin`). For any other password, create the cluster with a
+> `passwords.existingSecret` that also stores the plain-text password under a separate key,
+> or point `slapd-test` at the same secret and read `admin-password` from it.
+
+| Env var | Default | Description |
+|---|---|---|
+| `LDAP_SVC` | `svc/slapd` | Service to port-forward for plain LDAP |
+| `LDAP_PASSWORD_SECRET` | `slapd-test-passwords` | Secret to read the admin password from |
+| `LDAP_PASSWORD_SECRET_KEY` | `admin-password` | Key within the secret |
+| `SKIP_SETUP` | unset | Skip `make helm-install` / `make testing-helm-install` |
+| `SKIP_TEARDOWN` | unset | Leave charts installed after the run |
+
+---
+
+## 5. Using the toolkit
 
 The toolkit pod has `ldap-utils`, `python3`, `ldap3`, and `pyyaml` pre-installed.
 

@@ -23,12 +23,12 @@ spec:
         {{- toYaml .Values.securityContext | nindent 8 }}
       initContainers:
         - name: init
-          image: "{{ .Values.global.registry }}/{{ .Values.global.project }}/{{ .Values.image.init.repository }}:{{ .Values.image.init.tag }}"
-          imagePullPolicy: {{ .Values.image.init.pullPolicy }}
+          image: "{{ .Values.images.init.repository }}:{{ .Values.images.init.tag }}"
+          imagePullPolicy: {{ .Values.images.init.pullPolicy }}
           env:
             - name: LDAP_DOMAIN_DC
               value: {{ .Values.ldap.domain | quote }}
-            {{- $secretName := (default (printf "%s-passwords" (include "slapd.fullname" .)) .Values.ldap.existingSecret) }}
+            {{- $secretName := (default (printf "%s-passwords" (include "slapd.fullname" .)) .Values.passwords.existingSecret) }}
             - name: LDAP_ADMIN_PW_HASH
               valueFrom:
                 secretKeyRef:
@@ -67,13 +67,13 @@ spec:
             {{- end }}
       containers:
         - name: slapd
-          image: "{{ .Values.global.registry }}/{{ .Values.global.project }}/{{ .Values.image.slapd.repository }}:{{ .Values.image.slapd.tag }}"
-          imagePullPolicy: {{ .Values.image.slapd.pullPolicy }}
+          image: "{{ .Values.images.slapd.repository }}:{{ .Values.images.slapd.tag }}"
+          imagePullPolicy: {{ .Values.images.slapd.pullPolicy }}
           args:
             - "-h"
             - "ldap://:1024/ ldaps://:1025/ ldapi://%2frun%2fopenldap%2fslapd.ldapi"
             - "-d"
-            - {{ .Values.slapd.logLevel | toString | quote }}
+            - {{ .Values.logLevel | toString | quote }}
             - "-F"
             - "/ldap-config"
           ports:

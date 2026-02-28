@@ -278,10 +278,11 @@ func (r *SlapdClusterReconciler) reconcilePVCs(ctx context.Context, sc *ldapv1al
 }
 
 // reconcileHeadlessService creates or updates the headless Service (clusterIP: None).
+// Named <name>-headless so the bare <name> can be used for the ClusterIP service.
 func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name,
+			Name:      sc.Name + "-headless",
 			Namespace: sc.Namespace,
 		},
 	}
@@ -324,7 +325,7 @@ func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, 
 
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name + "-svc",
+			Name:      sc.Name,
 			Namespace: sc.Namespace,
 		},
 	}
@@ -547,7 +548,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	return appsv1.StatefulSetSpec{
-		ServiceName: sc.Name, // must match the headless service
+		ServiceName: sc.Name + "-headless", // must match the headless service
 		Replicas:    &replicas,
 		Selector: &metav1.LabelSelector{
 			MatchLabels: labels,

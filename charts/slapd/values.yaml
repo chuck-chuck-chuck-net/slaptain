@@ -1,31 +1,31 @@
 # Default values for slapd.
 
-global:
-  registry: registry.internal
-  project: slaptain
-
-image:
+images:
   slapd:
-    repository: slapd
+    repository: registry.internal/slaptain/slapd
     tag: latest
     pullPolicy: Always
   init:
-    repository: slapd-init
+    repository: registry.internal/slaptain/slapd-init
     tag: latest
     pullPolicy: Always
 
 ldap:
   domain: "dc=example,dc=org"
   forceRebootstrap: false
-  # Provide password hashes (SSHA, bcrypt, etc.)
-  adminPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+" # "admin"
-  rootPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"  # "admin"
-  
-  # existingSecret: "my-ldap-secrets"
-  
   tls:
     enabled: true
     secretName: "slapd-tls"
+
+# Password secret.
+# The chart creates a Secret named <fullname>-passwords with the hashes below,
+# unless existingSecret is set — in which case no Secret is created and the named
+# Secret is referenced directly.  It must contain admin-password-hash and
+# root-password-hash keys.
+passwords:
+  existingSecret: ""
+  adminPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"  # "admin"
+  rootPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"   # "admin"
 
 persistence:
   enabled: true
@@ -43,11 +43,13 @@ securityContext:
   runAsGroup: 1024
   fsGroup: 1024
 
-slapd:
-  # slapd -d log level. 0 = no debug output. See slapd(8) for levels.
-  logLevel: 0
+# slapd -d log level. 0 = no debug output. See slapd(8) for levels.
+logLevel: 0
 
 service:
   type: ClusterIP
-  port: 389
+  ldapPort: 389
+  ldapsPort: 636
   # nodePort: 31024
+
+resources: {}
