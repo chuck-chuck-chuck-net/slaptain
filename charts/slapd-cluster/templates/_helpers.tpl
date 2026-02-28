@@ -39,8 +39,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Resolve the password Secret name: use existingSecret if set, otherwise <fullname>-passwords.
+Resolve the credentials Secret name.
+Returns the existingSecret if set; otherwise empty (operator auto-generates).
 */}}
-{{- define "slapd-cluster.passwordSecretName" -}}
-{{- default (printf "%s-passwords" (include "slapd-cluster.fullname" .)) .Values.passwords.existingSecret }}
+{{- define "slapd-cluster.credentialsSecretName" -}}
+{{- .Values.credentials.existingSecret }}
 {{- end }}

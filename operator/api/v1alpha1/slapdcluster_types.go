@@ -68,19 +68,12 @@ type SlapdLDAPConfig struct {
 	// domain is the LDAP domain in DC notation, e.g. "dc=example,dc=org".
 	// +required
 	Domain string `json:"domain"`
-	// passwordSecretName references an existing Secret containing admin-password-hash
-	// and root-password-hash keys. When set, the operator will not create or manage
-	// the password Secret.
+	// credentialsSecretName references an existing Secret containing admin-password
+	// and root-password keys (plaintext). When set, the operator reads these passwords
+	// and derives SSHA hashes for slapd configuration. When not set, the operator
+	// auto-generates random passwords and stores them in <name>-credentials.
 	// +optional
-	PasswordSecretName string `json:"passwordSecretName,omitempty"`
-	// adminPasswordHash is an SSHA/bcrypt hash of the admin password, used when
-	// passwordSecretName is not set.
-	// +optional
-	AdminPasswordHash string `json:"adminPasswordHash,omitempty"`
-	// rootPasswordHash is an SSHA/bcrypt hash of the rootDN password, used when
-	// passwordSecretName is not set.
-	// +optional
-	RootPasswordHash string `json:"rootPasswordHash,omitempty"`
+	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
 	// forceRebootstrap instructs the init container to re-run bootstrap even if
 	// data already exists. Handle with care — this will overwrite existing data.
 	// +kubebuilder:default=false
@@ -237,6 +230,10 @@ type SlapdClusterStatus struct {
 	// observedGeneration is the .metadata.generation the controller last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// bootstrapComplete indicates that the operator has successfully seeded the
+	// initial LDAP directory entries (root entry, admin, replication user).
+	// +optional
+	BootstrapComplete bool `json:"bootstrapComplete,omitempty"`
 	// conditions holds standard Kubernetes condition entries.
 	// +listType=map
 	// +listMapKey=type

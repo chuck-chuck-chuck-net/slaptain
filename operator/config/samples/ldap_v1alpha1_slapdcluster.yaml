@@ -15,12 +15,11 @@ spec:
 
   ldap:
     domain: "dc=example,dc=org"
-    # Reference a Secret containing admin-password-hash and root-password-hash keys.
-    # Generate hashes with: slappasswd -h {SSHA} -s yourpassword
-    # Create the secret: kubectl create secret generic slapd-passwords \
-    #   --from-literal=admin-password-hash='{SSHA}...' \
-    #   --from-literal=root-password-hash='{SSHA}...'
-    passwordSecretName: "slapd-passwords"
+    # credentialsSecretName: "my-ldap-credentials"  # optional; omit to auto-generate
+    # When set, the Secret must contain admin-password and root-password keys:
+    #   kubectl create secret generic my-ldap-credentials \
+    #     --from-literal=admin-password=changeme \
+    #     --from-literal=root-password=changeme
     forceRebootstrap: false
     tls:
       enabled: true

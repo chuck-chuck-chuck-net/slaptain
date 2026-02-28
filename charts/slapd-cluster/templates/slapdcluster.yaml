@@ -17,7 +17,10 @@ spec:
 
   ldap:
     domain: {{ .Values.ldap.domain | quote }}
-    passwordSecretName: {{ include "slapd-cluster.passwordSecretName" . | quote }}
+    {{- $credSecret := include "slapd-cluster.credentialsSecretName" . }}
+    {{- if $credSecret }}
+    credentialsSecretName: {{ $credSecret | quote }}
+    {{- end }}
     forceRebootstrap: {{ .Values.ldap.forceRebootstrap }}
     tls:
       enabled: {{ .Values.ldap.tls.enabled }}

@@ -15,7 +15,14 @@ rules:
   - apiGroups:
       - ""
     resources:
-      - persistentvolumeclaims
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
       - secrets
       - services
     verbs:

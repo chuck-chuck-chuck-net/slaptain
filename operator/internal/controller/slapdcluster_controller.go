@@ -19,11 +19,15 @@ package controller
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"strconv"
+	"strings"
 	"time"
 
+	ldap "github.com/go-ldap/ldap/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -55,11 +59,10 @@ type SlapdClusterReconciler struct {
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
 	// 1. Fetch the SlapdCluster resource.
 	sc := &ldapv1alpha1.SlapdCluster{}
 	if err := r.Get(ctx, req.NamespacedName, sc); err != nil {
@@ -69,50 +72,35 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 2. Validate password configuration: either an existing Secret must be referenced,
-	//    or both hash fields must be non-empty.
-	if sc.Spec.LDAP.PasswordSecretName == "" &&
-		(sc.Spec.LDAP.AdminPasswordHash == "" || sc.Spec.LDAP.RootPasswordHash == "") {
-		log.Info("password configuration incomplete; set ldap.passwordSecretName or both ldap.adminPasswordHash and ldap.rootPasswordHash")
-		sc.Status.Phase = ldapv1alpha1.PhaseError
-		sc.Status.ObservedGeneration = sc.Generation
-		setCondition(&sc.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "PasswordsNotConfigured",
-			Message:            "set spec.ldap.passwordSecretName or both spec.ldap.adminPasswordHash and spec.ldap.rootPasswordHash",
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: sc.Generation,
-		})
-		if err := r.Status().Update(ctx, sc); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// 3. Reconcile managed password Secret (create-only).
+	// 2. Reconcile credential secrets (<name>-credentials plaintext + <name>-passwords hashes).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSecret: %w", err)
 	}
 
-	// 4. Reconcile replication Secret (create-only; no-op when replication disabled).
+	// 3. Reconcile replication Secret (create-only; no-op when replication disabled).
 	if err := r.reconcileReplicationSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileReplicationSecret: %w", err)
 	}
 
-	// 5. Reconcile headless Service.
+	// 4. Reconcile headless Service.
 	if err := r.reconcileHeadlessService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileHeadlessService: %w", err)
 	}
 
-	// 6. Reconcile ClusterIP Service.
+	// 5. Reconcile ClusterIP Service.
 	if err := r.reconcileClusterIPService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileClusterIPService: %w", err)
 	}
 
-	// 7. Reconcile StatefulSet.
+	// 6. Reconcile StatefulSet.
 	if err := r.reconcileStatefulSet(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
+	}
+
+	// 7. Bootstrap initial directory entries via LDAP once pod-0 is ready.
+	//    Sets sc.Status.BootstrapComplete = true on success; status persisted below.
+	if err := r.reconcileBootstrap(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileBootstrap: %w", err)
 	}
 
 	// 8. Observe StatefulSet status → update SlapdCluster status.
@@ -132,10 +120,12 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	sc.Status.ObservedGeneration = sc.Generation
 
 	switch {
-	case ready == 0 && sts.Status.Replicas == 0:
+	case ready == 0:
 		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping
 	case ready < desired:
 		sc.Status.Phase = ldapv1alpha1.PhaseDegraded
+	case !sc.Status.BootstrapComplete:
+		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping
 	default:
 		sc.Status.Phase = ldapv1alpha1.PhaseRunning
 	}
@@ -143,7 +133,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	readyStatus := metav1.ConditionFalse
 	readyReason := "NotReady"
 	readyMsg := fmt.Sprintf("%d/%d replicas ready", ready, desired)
-	if ready >= desired {
+	if ready >= desired && sc.Status.BootstrapComplete {
 		readyStatus = metav1.ConditionTrue
 		readyReason = "AllReplicasReady"
 	}
@@ -160,39 +150,101 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 9. Requeue until Running.
+	// 9. Requeue until fully Running.
 	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
 }
 
-// reconcileSecret creates the <name>-passwords Secret if no passwordSecretName is set.
-// It never updates an existing Secret.
+// reconcileSecret creates the credential secrets:
+//   - <name>-credentials  (plaintext admin-password + root-password; operator use)
+//   - <name>-passwords    (SSHA hashes; init container use)
+//
+// Both are create-only. If spec.ldap.credentialsSecretName is set, plaintexts are
+// read from the user-provided secret instead of auto-generated.
 func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
-	if sc.Spec.LDAP.PasswordSecretName != "" {
-		return nil
-	}
+	hashName := sc.Name + "-passwords"
 
-	secret := &corev1.Secret{}
-	name := sc.Name + "-passwords"
-	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, secret)
-	if err == nil {
+	// If <name>-passwords already exists, secrets are already in order.
+	hashSecret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: hashName, Namespace: sc.Namespace}, hashSecret); err == nil {
 		return nil
-	}
-	if !errors.IsNotFound(err) {
+	} else if !errors.IsNotFound(err) {
 		return err
 	}
 
-	secret = &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+	// Obtain plaintext passwords.
+	var adminPW, rootPW string
+
+	if sc.Spec.LDAP.CredentialsSecretName != "" {
+		// Read from the user-provided secret.
+		creds := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{
+			Name:      sc.Spec.LDAP.CredentialsSecretName,
 			Namespace: sc.Namespace,
-		},
-		Type: corev1.SecretTypeOpaque,
+		}, creds); err != nil {
+			return fmt.Errorf("read credentialsSecret %s: %w", sc.Spec.LDAP.CredentialsSecretName, err)
+		}
+		adminPW = string(creds.Data["admin-password"])
+		rootPW = string(creds.Data["root-password"])
+		if adminPW == "" || rootPW == "" {
+			return fmt.Errorf("secret %s must contain admin-password and root-password keys",
+				sc.Spec.LDAP.CredentialsSecretName)
+		}
+	} else {
+		// Auto-generate and store in <name>-credentials (create-only).
+		credName := sc.Name + "-credentials"
+		credSecret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{Name: credName, Namespace: sc.Namespace}, credSecret); err == nil {
+			// Already exists — read back the stored passwords.
+			adminPW = string(credSecret.Data["admin-password"])
+			rootPW = string(credSecret.Data["root-password"])
+		} else if errors.IsNotFound(err) {
+			var genErr error
+			adminPW, genErr = generatePassword(24)
+			if genErr != nil {
+				return fmt.Errorf("generate admin password: %w", genErr)
+			}
+			rootPW, genErr = generatePassword(24)
+			if genErr != nil {
+				return fmt.Errorf("generate root password: %w", genErr)
+			}
+			cred := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: credName, Namespace: sc.Namespace},
+				Type:       corev1.SecretTypeOpaque,
+				StringData: map[string]string{
+					"admin-password": adminPW,
+					"root-password":  rootPW,
+				},
+			}
+			if err := controllerutil.SetControllerReference(sc, cred, r.Scheme); err != nil {
+				return err
+			}
+			if err := r.Create(ctx, cred); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+
+	// Hash the passwords and create <name>-passwords.
+	adminHash, err := generateSSHAHash(adminPW)
+	if err != nil {
+		return fmt.Errorf("hash admin password: %w", err)
+	}
+	rootHash, err := generateSSHAHash(rootPW)
+	if err != nil {
+		return fmt.Errorf("hash root password: %w", err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: hashName, Namespace: sc.Namespace},
+		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"admin-password-hash": sc.Spec.LDAP.AdminPasswordHash,
-			"root-password-hash":  sc.Spec.LDAP.RootPasswordHash,
+			"admin-password-hash": adminHash,
+			"root-password-hash":  rootHash,
 		},
 	}
 	if err := controllerutil.SetControllerReference(sc, secret, r.Scheme); err != nil {
@@ -328,6 +380,131 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 	return err
 }
 
+// reconcileBootstrap seeds the initial LDAP directory entries via a live LDAP connection
+// to pod-0 once it is ready.  It is idempotent: if the root entry already exists the
+// function returns immediately after marking BootstrapComplete.
+//
+// Using a live connection (instead of slapadd) ensures that the accesslog overlay
+// records all initial writes, which is required for delta-syncrepl to work correctly.
+func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if sc.Status.BootstrapComplete {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+
+	// Wait until pod-0 is ready before attempting to connect.
+	pod0 := &corev1.Pod{}
+	if err := r.Get(ctx, client.ObjectKey{Name: sc.Name + "-0", Namespace: sc.Namespace}, pod0); err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("pod-0 not yet created; deferring bootstrap")
+			return nil
+		}
+		return err
+	}
+	if !isPodReady(pod0) {
+		log.Info("pod-0 not yet ready; deferring bootstrap")
+		return nil
+	}
+	if pod0.Status.PodIP == "" {
+		log.Info("pod-0 has no IP yet; deferring bootstrap")
+		return nil
+	}
+
+	// Connect directly to pod-0's IP on the container LDAP port.
+	// Using the pod IP avoids the cluster-domain-discovery problem and is
+	// more direct than routing through the ClusterIP service.
+	addr := pod0.Status.PodIP + ":" + strconv.Itoa(int(ldapContainerPort))
+	conn, err := ldap.DialURL("ldap://"+addr,
+		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+	)
+	if err != nil {
+		log.Info("LDAP dial to pod-0 failed; deferring bootstrap", "addr", addr, "err", err)
+		return nil
+	}
+	defer conn.Close()
+
+	// Bind as the rootdn.  In OpenLDAP the rootdn+rootpw defined in slapd.conf
+	// allow authentication even before the LDAP entry for that DN exists.
+	adminDN := "cn=admin," + sc.Spec.LDAP.Domain
+	adminPW, err := r.getAdminPassword(ctx, sc)
+	if err != nil {
+		return err
+	}
+	if err := conn.Bind(adminDN, adminPW); err != nil {
+		log.Info("LDAP bind failed; deferring bootstrap", "dn", adminDN, "err", err)
+		return nil
+	}
+
+	// Idempotency: if the root entry already exists we're done.
+	exists, err := ldapEntryExists(conn, sc.Spec.LDAP.Domain)
+	if err != nil {
+		return fmt.Errorf("check root entry: %w", err)
+	}
+	if exists {
+		log.Info("root entry already exists; marking bootstrap complete")
+		sc.Status.BootstrapComplete = true
+		return nil
+	}
+
+	// Extract the first DC label from the domain (e.g. "dc=example,dc=org" → "example").
+	parts := strings.SplitN(sc.Spec.LDAP.Domain, ",", 2)
+	dc := strings.TrimPrefix(parts[0], "dc=")
+
+	// Add root entry.
+	addRoot := ldap.NewAddRequest(sc.Spec.LDAP.Domain, nil)
+	addRoot.Attribute("objectClass", []string{"top", "dcObject", "organization"})
+	addRoot.Attribute("o", []string{dc})
+	addRoot.Attribute("dc", []string{dc})
+	if err := conn.Add(addRoot); err != nil {
+		return fmt.Errorf("add root entry %s: %w", sc.Spec.LDAP.Domain, err)
+	}
+
+	// Add admin entry.  The password hash is already in <name>-passwords (created by
+	// reconcileSecret) so we reuse it here rather than hashing again.
+	adminHash, err := r.getAdminHash(ctx, sc)
+	if err != nil {
+		return err
+	}
+	addAdmin := ldap.NewAddRequest(adminDN, nil)
+	addAdmin.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
+	addAdmin.Attribute("cn", []string{"admin"})
+	addAdmin.Attribute("description", []string{"LDAP administrator"})
+	addAdmin.Attribute("userPassword", []string{adminHash})
+	if err := conn.Add(addAdmin); err != nil {
+		return fmt.Errorf("add admin entry: %w", err)
+	}
+
+	// Add replication user when replication is enabled.
+	if sc.Spec.Replication.Enabled {
+		replSecret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{
+			Name:      sc.Name + "-replication",
+			Namespace: sc.Namespace,
+		}, replSecret); err != nil {
+			return fmt.Errorf("read replication secret: %w", err)
+		}
+		replPW := string(replSecret.Data["password"])
+		replHash, err := generateSSHAHash(replPW)
+		if err != nil {
+			return fmt.Errorf("hash replication password: %w", err)
+		}
+		replDN := "cn=replication," + sc.Spec.LDAP.Domain
+		addRepl := ldap.NewAddRequest(replDN, nil)
+		addRepl.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
+		addRepl.Attribute("cn", []string{"replication"})
+		addRepl.Attribute("description", []string{"Syncrepl bind account"})
+		addRepl.Attribute("userPassword", []string{replHash})
+		if err := conn.Add(addRepl); err != nil {
+			return fmt.Errorf("add replication entry: %w", err)
+		}
+	}
+
+	log.Info("bootstrap complete", "baseDN", sc.Spec.LDAP.Domain)
+	sc.Status.BootstrapComplete = true
+	return nil
+}
+
 // buildStatefulSetSpec constructs the StatefulSet spec.
 func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster) appsv1.StatefulSetSpec {
 	labels := selectorLabels(sc.Name)
@@ -338,11 +515,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
 	replicationEnabled := sc.Spec.Replication.Enabled && replicas > 1
 
-	// Determine the Secret name to pull password hashes from.
-	secretName := sc.Spec.LDAP.PasswordSecretName
-	if secretName == "" {
-		secretName = sc.Name + "-passwords"
-	}
+	// The hashed-password secret is always <name>-passwords (created by reconcileSecret).
+	secretName := sc.Name + "-passwords"
 
 	// Pod security context.
 	podSecCtx := sc.Spec.SecurityContext
@@ -357,7 +531,6 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	// ── Volumes (non-PVC) ─────────────────────────────────────────────────────
-	// PVCs come from volumeClaimTemplates (when persistence.enabled) or emptyDir.
 	volumes := []corev1.Volume{
 		{
 			Name:         "ldap-run",
@@ -368,7 +541,6 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	var volumeClaimTemplates []corev1.PersistentVolumeClaim
 
 	if sc.Spec.Persistence.Enabled {
-		// Persistence: use StatefulSet volumeClaimTemplates (per-pod PVCs).
 		cfgSize := sc.Spec.Persistence.Config.Size
 		if cfgSize == "" {
 			cfgSize = "1Gi"
@@ -404,7 +576,6 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			)
 		}
 	} else {
-		// No persistence: emptyDir for all data volumes.
 		volumes = append(volumes,
 			corev1.Volume{
 				Name:         "ldap-config",
@@ -645,12 +816,82 @@ func pvcTemplate(name, size, storageClass string, accessMode corev1.PersistentVo
 	return pvc
 }
 
-// generatePassword returns a URL-safe base64-encoded random password of approximately
-// the given number of bytes entropy.
+// generatePassword returns a URL-safe base64-encoded random password.
 func generatePassword(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
 	return base64.URLEncoding.EncodeToString(b), nil
+}
+
+// generateSSHAHash returns an OpenLDAP-compatible {SSHA} password hash.
+func generateSSHAHash(password string) (string, error) {
+	salt := make([]byte, 8)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("generate salt: %w", err)
+	}
+	h := sha1.New()
+	h.Write([]byte(password))
+	h.Write(salt)
+	digest := h.Sum(nil)
+	combined := append(digest, salt...)
+	return "{SSHA}" + base64.StdEncoding.EncodeToString(combined), nil
+}
+
+// getAdminPassword reads the plaintext admin password from <name>-credentials
+// (or spec.ldap.credentialsSecretName when set).
+func (r *SlapdClusterReconciler) getAdminPassword(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
+	secretName := sc.Spec.LDAP.CredentialsSecretName
+	if secretName == "" {
+		secretName = sc.Name + "-credentials"
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sc.Namespace}, secret); err != nil {
+		return "", fmt.Errorf("read credentials secret %s: %w", secretName, err)
+	}
+	pw := string(secret.Data["admin-password"])
+	if pw == "" {
+		return "", fmt.Errorf("secret %s is missing admin-password key", secretName)
+	}
+	return pw, nil
+}
+
+// getAdminHash reads the SSHA admin password hash from <name>-passwords.
+func (r *SlapdClusterReconciler) getAdminHash(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: sc.Name + "-passwords", Namespace: sc.Namespace}, secret); err != nil {
+		return "", fmt.Errorf("read passwords secret: %w", err)
+	}
+	hash := string(secret.Data["admin-password-hash"])
+	if hash == "" {
+		return "", fmt.Errorf("secret %s-passwords is missing admin-password-hash key", sc.Name)
+	}
+	return hash, nil
+}
+
+// isPodReady returns true when all containers in the pod report Ready.
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+// ldapEntryExists returns true when the given DN exists in the directory.
+func ldapEntryExists(conn *ldap.Conn, dn string) (bool, error) {
+	req := ldap.NewSearchRequest(
+		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		1, 0, false, "(objectClass=*)", []string{"dn"}, nil,
+	)
+	result, err := conn.Search(req)
+	if err != nil {
+		if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(result.Entries) > 0, nil
 }

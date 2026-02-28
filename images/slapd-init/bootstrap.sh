@@ -245,16 +245,16 @@ userPassword: $REPL_PW_HASH
 EOF
     fi
 
-    # In a replicated cluster only pod-0 seeds data via slapadd.  Pods 1, 2, …
-    # start with an empty data directory and receive a full content sync from
-    # pod-0 on their first syncrepl connection.  This avoids contextCSN conflicts
-    # that arise when multiple independent slapadd runs each produce a different
-    # CSN — delta-syncrepl then cannot reconcile the provider's (empty) accesslog
-    # with the consumer's stale cookie.
-    if [[ "$REPLICATION_ENABLED" != "true" ]] || [[ "$ORDINAL" == "0" ]]; then
+    # Standalone (no replication): seed data directly via slapadd.
+    # Replicated: skip slapadd entirely — the operator adds the base entries via a
+    # live LDAP connection after pod-0 is ready, so the accesslog overlay captures
+    # every write.  slapadd bypasses overlays; an unseeded accesslog causes
+    # "consumer has state info but provider doesn't!" on the first delta-sync
+    # reconnect.  Starting from an empty database on all pods avoids this entirely.
+    if [[ "$REPLICATION_ENABLED" != "true" ]]; then
         slapadd -F "$CONFIG_DIR" -b "$LDAP_DOMAIN_DC" -l "$INIT_LDIF"
     else
-        echo "Replica pod $ORDINAL: skipping slapadd; will sync from pod-0 via syncrepl."
+        echo "Replication enabled: skipping slapadd; operator will bootstrap via LDAP."
     fi
     rm -f "$TMP_CONF" "$INIT_LDIF"
 fi

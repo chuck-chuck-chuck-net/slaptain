@@ -98,10 +98,12 @@ spec:
               ldap:
                 description: ldap contains LDAP-specific configuration.
                 properties:
-                  adminPasswordHash:
+                  credentialsSecretName:
                     description: |-
-                      adminPasswordHash is an SSHA/bcrypt hash of the admin password, used when
-                      passwordSecretName is not set.
+                      credentialsSecretName references an existing Secret containing admin-password
+                      and root-password keys (plaintext). When set, the operator reads these passwords
+                      and derives SSHA hashes for slapd configuration. When not set, the operator
+                      auto-generates random passwords and stores them in <name>-credentials.
                     type: string
                   domain:
                     description: domain is the LDAP domain in DC notation, e.g. "dc=example,dc=org".
@@ -112,17 +114,6 @@ spec:
                       forceRebootstrap instructs the init container to re-run bootstrap even if
                       data already exists. Handle with care — this will overwrite existing data.
                     type: boolean
-                  passwordSecretName:
-                    description: |-
-                      passwordSecretName references an existing Secret containing admin-password-hash
-                      and root-password-hash keys. When set, the operator will not create or manage
-                      the password Secret.
-                    type: string
-                  rootPasswordHash:
-                    description: |-
-                      rootPasswordHash is an SSHA/bcrypt hash of the rootDN password, used when
-                      passwordSecretName is not set.
-                    type: string
                   tls:
                     description: tls configures TLS/LDAPS.
                     properties:
@@ -596,6 +587,11 @@ spec:
           status:
             description: status defines the observed state of SlapdCluster.
             properties:
+              bootstrapComplete:
+                description: |-
+                  bootstrapComplete indicates that the operator has successfully seeded the
+                  initial LDAP directory entries (root entry, admin, replication user).
+                type: boolean
               conditions:
                 description: conditions holds standard Kubernetes condition entries.
                 items:

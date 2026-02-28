@@ -15,15 +15,18 @@ ldap:
     enabled: true
     secretName: "slapd-tls"
 
-# -- Password secret.
-# The chart creates a Secret named <fullname>-passwords with the hashes below,
-# unless existingSecret is set — in which case no Secret is created and the named
-# Secret is referenced directly.  It must contain admin-password-hash and
-# root-password-hash keys.
-passwords:
+# -- Credentials.
+# The operator auto-generates admin and root passwords when credentialsSecretName
+# is not set, storing them in <name>-credentials (plaintext, for operator use) and
+# <name>-passwords (SSHA hashes, for slapd configuration).
+#
+# To supply your own passwords, create a Secret with admin-password and root-password
+# keys and reference it here:
+#   kubectl create secret generic my-ldap-credentials \
+#     --from-literal=admin-password=changeme \
+#     --from-literal=root-password=changeme
+credentials:
   existingSecret: ""
-  adminPasswordHash: ""  # required; generate with: slappasswd -h {SSHA} -s yourpassword
-  rootPasswordHash: ""   # required
 
 # -- Container images.
 images:
