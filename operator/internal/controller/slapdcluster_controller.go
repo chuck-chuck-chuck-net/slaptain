@@ -87,32 +87,54 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Reconcile managed password Secret (create-only).
+	// 3. Validate password configuration: either an existing Secret must be referenced,
+	//    or both hash fields must be non-empty.  Refuse to proceed otherwise so we never
+	//    spin up a slapd with empty/undefined credentials.
+	if sc.Spec.LDAP.PasswordSecretName == "" &&
+		(sc.Spec.LDAP.AdminPasswordHash == "" || sc.Spec.LDAP.RootPasswordHash == "") {
+		log.Info("password configuration incomplete; set ldap.passwordSecretName or both ldap.adminPasswordHash and ldap.rootPasswordHash")
+		sc.Status.Phase = ldapv1alpha1.PhaseError
+		sc.Status.ObservedGeneration = sc.Generation
+		setCondition(&sc.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "PasswordsNotConfigured",
+			Message:            "set spec.ldap.passwordSecretName or both spec.ldap.adminPasswordHash and spec.ldap.rootPasswordHash",
+			LastTransitionTime: metav1.Now(),
+			ObservedGeneration: sc.Generation,
+		})
+		if err := r.Status().Update(ctx, sc); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// 5. Reconcile managed password Secret (create-only).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSecret: %w", err)
 	}
 
-	// 4. Reconcile PVCs (create-only, never update).
+	// 6. Reconcile PVCs (create-only, never update).
 	if err := r.reconcilePVCs(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcilePVCs: %w", err)
 	}
 
-	// 5. Reconcile headless Service.
+	// 7. Reconcile headless Service.
 	if err := r.reconcileHeadlessService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileHeadlessService: %w", err)
 	}
 
-	// 6. Reconcile ClusterIP Service.
+	// 8. Reconcile ClusterIP Service.
 	if err := r.reconcileClusterIPService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileClusterIPService: %w", err)
 	}
 
-	// 7. Reconcile StatefulSet.
+	// 9. Reconcile StatefulSet.
 	if err := r.reconcileStatefulSet(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
 	}
 
-	// 8. Observe StatefulSet status → update SlapdCluster status.
+	// 10. Observe StatefulSet status → update SlapdCluster status.
 	sts := &appsv1.StatefulSet{}
 	if err := r.Get(ctx, req.NamespacedName, sts); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get StatefulSet: %w", err)

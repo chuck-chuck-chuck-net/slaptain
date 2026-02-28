@@ -7,8 +7,8 @@ slapd:
   secretName: ""
 
   # Provide plain text passwords if not using an existing secret
-  adminPassword: "admin"
-  rootPassword: "admin"
+  adminPassword: ""  # required; must match the adminPasswordHash in the slapd/slapd-cluster chart
+  rootPassword: ""   # required
 
 image:
   repository: registry.internal/slaptain/slapd-toolkit

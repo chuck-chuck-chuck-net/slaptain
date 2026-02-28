@@ -24,8 +24,8 @@ ldap:
 # root-password-hash keys.
 passwords:
   existingSecret: ""
-  adminPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"  # "admin"
-  rootPasswordHash: "{SSHA}//+UEwGDVlMJJykjlfQagPr2lFJ5773+"   # "admin"
+  adminPasswordHash: ""  # required; generate with: slappasswd -h {SSHA} -s yourpassword
+  rootPasswordHash: ""   # required
 
 persistence:
   enabled: true
