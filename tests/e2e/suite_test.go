@@ -17,18 +17,16 @@ import (
 // ── Suite-wide variables ──────────────────────────────────────────────────────
 
 var (
-	k8sClient  *kubernetes.Clientset
-	ldapConn   *ldap.Conn
-	pfCancel   context.CancelFunc
-	adminPW    string
-	rootPW     string
-	readpwPWs  map[string]string // username → plaintext; empty when not configured
+	k8sClient *kubernetes.Clientset
+	ldapConn  *ldap.Conn
+	pfCancel  context.CancelFunc
+	adminPW   string
+	rootPW    string
+	readpwPWs map[string]string // username → plaintext; empty when not configured
+	baseDN    string            // discovered from the server's rootDSE at suite start
 
 	// NAMESPACE_TESTING — Kubernetes namespace to test in.
 	namespace = envOrDefault("NAMESPACE_TESTING", "slaptain-testing")
-
-	// LDAP_DOMAIN — base DN of the LDAP tree.
-	baseDN = envOrDefault("LDAP_DOMAIN", "dc=chuck-chuck-chuck,dc=net")
 
 	// LDAP_SVC — service to port-forward for plain LDAP access (port 389).
 	ldapSvc = envOrDefault("LDAP_SVC", "svc/slapd")
@@ -74,6 +72,23 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	By("Starting kubectl port-forward to " + ldapSvc + ":389")
 	pfCancel = startPortForward(namespace, ldapSvc, "13891", "389")
 	time.Sleep(2 * time.Second)
+
+	By("Discovering base DN from LDAP rootDSE")
+	{
+		conn, err := ldap.Dial("tcp", localLDAPAddr)
+		Expect(err).NotTo(HaveOccurred())
+		req := ldap.NewSearchRequest("",
+			ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+			0, 0, false, "(objectClass=*)", []string{"namingContexts"}, nil)
+		result, err := conn.Search(req)
+		conn.Close()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Entries).To(HaveLen(1))
+		contexts := result.Entries[0].GetAttributeValues("namingContexts")
+		Expect(contexts).NotTo(BeEmpty(), "rootDSE must advertise at least one namingContext")
+		baseDN = contexts[0]
+		GinkgoLogr.Info("discovered base DN", "baseDN", baseDN)
+	}
 
 	By("Connecting to LDAP as admin")
 	ldapConn = connectLDAP(localLDAPAddr, baseDN, adminPW)

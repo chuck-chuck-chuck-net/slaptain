@@ -136,7 +136,6 @@ make e2e-run
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Namespace to test in |
-| `LDAP_DOMAIN` | `dc=chuck-chuck-chuck,dc=net` | Base DN of the LDAP tree |
 | `LDAP_SVC` | `svc/slapd` | Service to port-forward for LDAP access |
 
 ---

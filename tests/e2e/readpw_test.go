@@ -83,6 +83,7 @@ var _ = Describe("config access", func() {
 
 var _ = Describe("readpw ACL enforcement", Ordered, func() {
 
+	// Variables shared across It specs; set in BeforeAll, used by subsequent specs.
 	var (
 		mailUserDN string
 		mailUserPW string
@@ -93,16 +94,32 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 			Skip("no readpw passwords configured — set bootstrap.readpwPasswords in values")
 		}
 
-		// Ensure a People user exists for the "cannot read" ACL check.
+		// Ensure a People user exists for the "cannot read" ACL check later.
 		// ldapAdd is idempotent so this is safe even if ldap_test.go already added alice.
 		addUser("alice", "Alice", "Smith", 10001, 10000, testUserPassword)
 
-		// Create a randomised user in ou=Mail.
-		// ACL rule {0} grants readpw users read access to userPassword under ou=Mail,
-		// so this is the correct OU for testing that permission.
+		// Build the identity for the mail user that subsequent It specs will create and use.
+		// The actual ldapAdd happens in the first It so it appears as a visible test step.
 		uid := fmt.Sprintf("testmail-%06d", rand.Intn(1000000))
 		mailUserPW = fmt.Sprintf("mailpass-%06d", rand.Intn(1000000))
 		mailUserDN = fmt.Sprintf("uid=%s,ou=Mail,%s", uid, baseDN)
+	})
+
+	AfterAll(func() {
+		if mailUserDN == "" {
+			return
+		}
+		err := ldapConn.Del(ldap.NewDelRequest(mailUserDN, nil))
+		if err != nil && !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
+			Expect(err).NotTo(HaveOccurred(), "cleanup: failed to delete %s", mailUserDN)
+		}
+	})
+
+	// ── User provisioning ─────────────────────────────────────────────────────
+
+	It("creates a mail user in ou=Mail", func() {
+		uid := strings.SplitN(mailUserDN, ",", 2)[0] // "uid=testmail-XXXXXX"
+		uid = strings.TrimPrefix(uid, "uid=")
 
 		req := ldap.NewAddRequest(mailUserDN, nil)
 		req.Attribute("objectClass", []string{"posixAccount", "shadowAccount", "inetOrgPerson"})
@@ -117,15 +134,21 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 		ldapAdd(ldapConn, req)
 	})
 
-	AfterAll(func() {
-		if mailUserDN == "" {
-			return
-		}
-		err := ldapConn.Del(ldap.NewDelRequest(mailUserDN, nil))
-		if err != nil && !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
-			Expect(err).NotTo(HaveOccurred(), "cleanup: failed to delete %s", mailUserDN)
-		}
+	It("the mail user can bind with their own password", func() {
+		// ACL rule {0}: to dn.subtree="ou=Mail,..." attrs=userPassword
+		//   … by anonymous auth …
+		// The "by anonymous auth" permission is what allows any client to verify
+		// a user's password via ldap bind, even without being able to read the
+		// userPassword attribute value directly.
+		conn, err := ldap.Dial("tcp", localLDAPAddr)
+		Expect(err).NotTo(HaveOccurred())
+		defer conn.Close()
+
+		Expect(conn.Bind(mailUserDN, mailUserPW)).To(Succeed(),
+			"mail user should be able to bind with their own password")
 	})
+
+	// ── Readpw access ─────────────────────────────────────────────────────────
 
 	It("each readpw user can bind", func() {
 		for user, pw := range readpwPWs {
@@ -142,7 +165,8 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 	})
 
 	It("a readpw user can read userPassword from ou=Mail", func() {
-		// Pick any readpw user — map iteration order is intentionally arbitrary.
+		// ACL rule {0}: to dn.subtree="ou=Mail,..." attrs=userPassword
+		//   … by dn.children="ou=Readpw,..." read …
 		var user, pw string
 		for u, p := range readpwPWs {
 			user, pw = u, p
@@ -166,7 +190,9 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 	})
 
 	It("a readpw user cannot read userPassword from ou=People", func() {
-		// ACL rule {1}: attrs=userPassword … by * none — no read access outside ou=Mail.
+		// ACL rule {1}: to attrs=userPassword … by * none
+		// For entries outside ou=Mail, the wildcard "by * none" denies read access
+		// to everyone except self and the rootDN.
 		var user, pw string
 		for u, p := range readpwPWs {
 			user, pw = u, p
