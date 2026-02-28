@@ -3,6 +3,7 @@ package e2e_test
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,10 +17,12 @@ import (
 // ── Suite-wide variables ──────────────────────────────────────────────────────
 
 var (
-	k8sClient *kubernetes.Clientset
-	ldapConn  *ldap.Conn
-	pfCancel  context.CancelFunc
-	adminPW   string
+	k8sClient  *kubernetes.Clientset
+	ldapConn   *ldap.Conn
+	pfCancel   context.CancelFunc
+	adminPW    string
+	rootPW     string
+	readpwPWs  map[string]string // username → plaintext; empty when not configured
 
 	// NAMESPACE_TESTING — Kubernetes namespace to test in.
 	namespace = envOrDefault("NAMESPACE_TESTING", "slaptain-testing")
@@ -54,11 +57,19 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		return jobSucceeded(k8sClient, namespace, "slapd-test")
 	}).WithTimeout(5 * time.Minute).WithPolling(10 * time.Second).Should(BeTrue())
 
-	By("Reading admin password from slapd-test-passwords secret")
+	By("Reading passwords from slapd-test-passwords secret")
 	secret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-test-passwords", metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred())
 	adminPW = string(secret.Data["admin-password"])
 	Expect(adminPW).NotTo(BeEmpty(), "admin password must not be empty in slapd-test-passwords")
+	rootPW = string(secret.Data["root-password"])
+	Expect(rootPW).NotTo(BeEmpty(), "root password must not be empty in slapd-test-passwords")
+	readpwPWs = make(map[string]string)
+	for k, v := range secret.Data {
+		if user, ok := strings.CutPrefix(k, "readpw-"); ok {
+			readpwPWs[user] = string(v)
+		}
+	}
 
 	By("Starting kubectl port-forward to " + ldapSvc + ":389")
 	pfCancel = startPortForward(namespace, ldapSvc, "13891", "389")

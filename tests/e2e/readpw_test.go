@@ -1,0 +1,192 @@
+package e2e_test
+
+import (
+	"fmt"
+	"math/rand"
+	"strings"
+
+	ldap "github.com/go-ldap/ldap/v3"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+// emailDomainFromDN converts a DC-notation base DN to a dotted domain name.
+// "dc=chuck-chuck-chuck,dc=net" → "chuck-chuck-chuck.net"
+func emailDomainFromDN(dn string) string {
+	var parts []string
+	for _, rdn := range strings.Split(dn, ",") {
+		if after, ok := strings.CutPrefix(strings.TrimSpace(rdn), "dc="); ok {
+			parts = append(parts, after)
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+// ── Config access ─────────────────────────────────────────────────────────────
+
+var _ = Describe("config access", func() {
+
+	It("root DN binds to cn=config and reports correct suffix and rootDN", func() {
+		conn, err := ldap.Dial("tcp", localLDAPAddr)
+		Expect(err).NotTo(HaveOccurred())
+		defer conn.Close()
+
+		Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed(),
+			"bind as cn=admin,cn=config should succeed")
+
+		// olcSuffix and olcRootDN live on the database entry, not on cn=config itself.
+		req := ldap.NewSearchRequest("cn=config",
+			ldap.ScopeWholeSubtree, ldap.NeverDerefAliases,
+			0, 0, false, "(olcSuffix=*)", []string{"olcSuffix", "olcRootDN"}, nil)
+		result, err := conn.Search(req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Entries).NotTo(BeEmpty(),
+			"cn=config subtree should contain at least one database entry with olcSuffix")
+
+		var found bool
+		for _, e := range result.Entries {
+			if e.GetAttributeValue("olcSuffix") == baseDN {
+				found = true
+				Expect(e.GetAttributeValue("olcRootDN")).To(
+					Equal(fmt.Sprintf("cn=admin,%s", baseDN)),
+					"olcRootDN should be cn=admin,<baseDN>")
+			}
+		}
+		Expect(found).To(BeTrue(),
+			"expected a database entry with olcSuffix=%s in cn=config", baseDN)
+	})
+
+	It("admin can list readpw users with their stored password hashes", func() {
+		if len(readpwPWs) == 0 {
+			Skip("no readpw passwords configured — set bootstrap.readpwPasswords in values")
+		}
+
+		// ldapConn is bound as cn=admin,<baseDN> which is the data rootDN and
+		// therefore bypasses ACLs — it can read userPassword from any entry.
+		readpwBase := fmt.Sprintf("ou=Readpw,%s", baseDN)
+		entries := ldapSearch(ldapConn, readpwBase, "(objectClass=posixAccount)", "uid", "userPassword")
+
+		byUID := make(map[string]*ldap.Entry, len(entries))
+		for _, e := range entries {
+			byUID[e.GetAttributeValue("uid")] = e
+		}
+		for user := range readpwPWs {
+			e, ok := byUID[user]
+			Expect(ok).To(BeTrue(), "readpw user %q should be present in %s", user, readpwBase)
+			Expect(e.GetAttributeValue("userPassword")).NotTo(BeEmpty(),
+				"readpw user %q should have userPassword set", user)
+		}
+	})
+})
+
+// ── Readpw ACL enforcement ────────────────────────────────────────────────────
+
+var _ = Describe("readpw ACL enforcement", Ordered, func() {
+
+	var (
+		mailUserDN string
+		mailUserPW string
+	)
+
+	BeforeAll(func() {
+		if len(readpwPWs) == 0 {
+			Skip("no readpw passwords configured — set bootstrap.readpwPasswords in values")
+		}
+
+		// Ensure a People user exists for the "cannot read" ACL check.
+		// ldapAdd is idempotent so this is safe even if ldap_test.go already added alice.
+		addUser("alice", "Alice", "Smith", 10001, 10000, testUserPassword)
+
+		// Create a randomised user in ou=Mail.
+		// ACL rule {0} grants readpw users read access to userPassword under ou=Mail,
+		// so this is the correct OU for testing that permission.
+		uid := fmt.Sprintf("testmail-%06d", rand.Intn(1000000))
+		mailUserPW = fmt.Sprintf("mailpass-%06d", rand.Intn(1000000))
+		mailUserDN = fmt.Sprintf("uid=%s,ou=Mail,%s", uid, baseDN)
+
+		req := ldap.NewAddRequest(mailUserDN, nil)
+		req.Attribute("objectClass", []string{"posixAccount", "shadowAccount", "inetOrgPerson"})
+		req.Attribute("cn", []string{"Test Mail"})
+		req.Attribute("sn", []string{"Mail"})
+		req.Attribute("uid", []string{uid})
+		req.Attribute("uidNumber", []string{"65534"})
+		req.Attribute("gidNumber", []string{"65534"})
+		req.Attribute("homeDirectory", []string{"/dev/null"})
+		req.Attribute("mail", []string{uid + "@" + emailDomainFromDN(baseDN)})
+		req.Attribute("userPassword", []string{mailUserPW})
+		ldapAdd(ldapConn, req)
+	})
+
+	AfterAll(func() {
+		if mailUserDN == "" {
+			return
+		}
+		err := ldapConn.Del(ldap.NewDelRequest(mailUserDN, nil))
+		if err != nil && !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
+			Expect(err).NotTo(HaveOccurred(), "cleanup: failed to delete %s", mailUserDN)
+		}
+	})
+
+	It("each readpw user can bind", func() {
+		for user, pw := range readpwPWs {
+			func() {
+				conn, err := ldap.Dial("tcp", localLDAPAddr)
+				Expect(err).NotTo(HaveOccurred())
+				defer conn.Close()
+
+				dn := fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN)
+				Expect(conn.Bind(dn, pw)).To(Succeed(),
+					"readpw user %q should be able to bind", user)
+			}()
+		}
+	})
+
+	It("a readpw user can read userPassword from ou=Mail", func() {
+		// Pick any readpw user — map iteration order is intentionally arbitrary.
+		var user, pw string
+		for u, p := range readpwPWs {
+			user, pw = u, p
+			break
+		}
+
+		conn, err := ldap.Dial("tcp", localLDAPAddr)
+		Expect(err).NotTo(HaveOccurred())
+		defer conn.Close()
+
+		Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN), pw)).To(Succeed())
+
+		req := ldap.NewSearchRequest(mailUserDN,
+			ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+			0, 0, false, "(objectClass=*)", []string{"userPassword"}, nil)
+		result, err := conn.Search(req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Entries).To(HaveLen(1))
+		Expect(result.Entries[0].GetAttributeValue("userPassword")).NotTo(BeEmpty(),
+			"readpw user %q should be able to read userPassword from ou=Mail", user)
+	})
+
+	It("a readpw user cannot read userPassword from ou=People", func() {
+		// ACL rule {1}: attrs=userPassword … by * none — no read access outside ou=Mail.
+		var user, pw string
+		for u, p := range readpwPWs {
+			user, pw = u, p
+			break
+		}
+
+		conn, err := ldap.Dial("tcp", localLDAPAddr)
+		Expect(err).NotTo(HaveOccurred())
+		defer conn.Close()
+
+		Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN), pw)).To(Succeed())
+
+		req := ldap.NewSearchRequest(fmt.Sprintf("uid=alice,ou=People,%s", baseDN),
+			ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+			0, 0, false, "(objectClass=*)", []string{"userPassword"}, nil)
+		result, err := conn.Search(req)
+		Expect(err).NotTo(HaveOccurred())
+		if len(result.Entries) > 0 {
+			Expect(result.Entries[0].GetAttributeValue("userPassword")).To(BeEmpty(),
+				"readpw user %q must not be able to read userPassword from ou=People", user)
+		}
+	})
+})

@@ -65,6 +65,15 @@ bootstrap:
   #   myapp: "{SSHA}..."
   #   monitoring: "{SSHA}..."
 
+  # readpwPasswords: map of username to plaintext password for read-only service accounts.
+  # Keys must match entries in readpwUsers.  These plaintext passwords are stored in the
+  # slapd-test-passwords Secret (alongside the admin/root passwords) so that e2e tests
+  # can bind as readpw users to verify ACL enforcement.  Store encrypted with SOPS.
+  readpwPasswords: {}
+  # Example:
+  #   myapp: "somepassword"
+  #   monitoring: "anotherpassword"
+
 # toolkit: a persistent Deployment with ldap-utils and python ldap3 pre-installed.
 # Stays alive so you can kubectl exec into it for interactive testing and debugging.
 # Example: kubectl exec -n slaptain <toolkit-pod> -- bash

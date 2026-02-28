@@ -1,4 +1,5 @@
 ldap:
+  # domain: "dc=as8,dc=lab,dc=test"
   domain: "dc=chuck-chuck-chuck,dc=net"
   # existingSecret: "my-ldap-secrets"
   tls:

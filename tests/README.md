@@ -136,7 +136,7 @@ make e2e-run
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Namespace to test in |
-| `LDAP_DOMAIN` | `dc=as8,dc=lab,dc=test` | Base DN of the LDAP tree |
+| `LDAP_DOMAIN` | `dc=chuck-chuck-chuck,dc=net` | Base DN of the LDAP tree |
 | `LDAP_SVC` | `svc/slapd` | Service to port-forward for LDAP access |
 
 ---
@@ -162,7 +162,7 @@ Inside the pod, all required environment variables are pre-set:
 | Variable | Example value |
 |---|---|
 | `$SLAPD_HOST` | `slapd` |
-| `$LDAP_DOMAIN` | `dc=as8,dc=lab,dc=test` |
+| `$LDAP_DOMAIN` | `dc=chuck-chuck-chuck,dc=net` |
 | `$LDAP_ADMIN_PW` | admin password (from Secret) |
 | `$LDAP_ROOT_PW` | rootDN password (from Secret) |
 | `$LDAPTLS_CACERT` | `/etc/ldap/tls/ca.crt` |
