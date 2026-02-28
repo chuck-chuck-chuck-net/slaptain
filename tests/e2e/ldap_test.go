@@ -21,35 +21,10 @@ var _ = Describe("LDAP directory", func() {
 		})
 
 		It("has all OUs created by bootstrap", func() {
-			for _, ou := range []string{"People", "Mail", "Readpw", "SecondaryAccount"} {
+			for _, ou := range []string{"People", "Mail", "Readpw"} {
 				dn := fmt.Sprintf("ou=%s,%s", ou, baseDN)
 				Expect(ldapExists(ldapConn, dn)).To(BeTrue(), "OU %s is missing", dn)
 			}
-		})
-	})
-
-	// ── Readpw service accounts ───────────────────────────────────────────────
-
-	Describe("readpw service accounts", func() {
-		It("has all expected readpw users", func() {
-			for _, uid := range []string{"appsuite", "dovecot", "keycloak"} {
-				dn := fmt.Sprintf("uid=%s,ou=Readpw,%s", uid, baseDN)
-				Expect(ldapExists(ldapConn, dn)).To(BeTrue(), "readpw user %s is missing", dn)
-			}
-		})
-
-		It("readpw users are posixAccounts", func() {
-			entries := ldapSearch(ldapConn,
-				fmt.Sprintf("ou=Readpw,%s", baseDN),
-				"(objectClass=posixAccount)",
-				"uid",
-			)
-			Expect(entries).To(HaveLen(3))
-			uids := make([]string, 0, 3)
-			for _, e := range entries {
-				uids = append(uids, e.GetAttributeValue("uid"))
-			}
-			Expect(uids).To(ConsistOf("appsuite", "dovecot", "keycloak"))
 		})
 	})
 

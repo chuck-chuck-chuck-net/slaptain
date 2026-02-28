@@ -27,8 +27,6 @@ class LdapClient:
 
         # print(entry.entry_to_ldif())
         # print(entry.entry_to_json())
-        # print(entry.oxContextName)
-        # print(entry['oxContextName'])
         # print(entry.entry_dn)
 
         return self.conn.entries
@@ -47,7 +45,7 @@ class LdapClient:
     #     "replace": "olcAccess",
     #     "attributes": {
     #         "olcAccess": [
-    #             "{0}to dn.subtree=\"ou=Mail,dc=as8,dc=test\" attrs=userPassword by self write by dn.children=\"ou=Readpw,dc=as8,dc=test\" read by anonymous auth by * none",
+    #             "{0}to dn.subtree=\"ou=Mail,dc=example,dc=org\" attrs=userPassword by self write by dn.children=\"ou=Readpw,dc=example,dc=org\" read by anonymous auth by * none",
     #             "{1}to attrs=userPassword by self write by anonymous auth by * none",
     #             "{2}to attrs=shadowLastChange by self write by * read",
     #             "{3}to * by * read"
@@ -110,9 +108,9 @@ the samples and / or the source of this script for reference.
 
 Convenience feature: Supplying a domain is not required for basic
 operation, but for some of the other "convenience" features below. The
-domain can be supplied either as DNS-style domain (e.g. as8.test) or in
-"dc=...,dc=..." syntax (e.g. "dc=as8,dc=test") and is converted
-automatically if required.
+domain can be supplied either as DNS-style domain (e.g. chuck-chuck-chuck.net)
+or in "dc=...,dc=..." syntax (e.g. "dc=chuck-chuck-chuck,dc=net") and is
+converted automatically if required.
 
 Convenience feature: If -D is omitted, defaults to "cn=admin,<domain-dc>"
 if a domain was provided.
@@ -129,10 +127,6 @@ argument gets required as well.
 Bugs: I consider it a design bug that this script is mixing generic
 ldapclient functionality with project-specific "smartness". Should be
 separated.
-
-vars.yml keys:
-    .ldap_endpoint
-    .as_hostname (for auto-readpw domain)
 
 auto-readpw.yml:
     <user1>: <password1>
@@ -162,6 +156,7 @@ environment variables:
     #parser.add_argument("-r", "--root-pw", help="Root password", type=str)
     #parser.add_argument("-a", "--admin-pw", help="Admin password", type=str)
     parser.add_argument("--auto-readpw", help="Automatically add readpw users from a yaml file", type=str)
+    parser.add_argument("--readpw-ou", help="OU name for read-only service accounts", type=str, default="Readpw")
     parser.add_argument("--domain", help="LDAP domain", type=str)
     parser.add_argument("jsons", help="Pseudo-LDIF JSON files", type=str, nargs=argparse.REMAINDER)
 
@@ -188,7 +183,7 @@ environment variables:
     if args.auto_readpw:
         try:
             with open(args.auto_readpw, 'r') as stream:
-                auto_readpw = yaml.safe_load(stream)
+                auto_readpw = yaml.safe_load(stream) or {}
         except Exception as e:
             logger.error(e)
             logger.error("Error reading auto-readpw file!")
@@ -211,7 +206,7 @@ environment variables:
     # 3) environment?
 
     ldapuri = args.ldapuri or node.get('ldap_endpoint', None) or os.environ.get("LDAP_URI", None)
-    domain = args.domain or node.get('as_hostname', None) or os.environ.get("DOMAIN_DC", None)
+    domain = args.domain or os.environ.get("DOMAIN_DC", None)
     if domain:
         if not domain.startswith("dc="):
             domain = ",".join([ f"dc={dc}" for dc in domain.split(".") ])
@@ -252,7 +247,7 @@ environment variables:
     if args.auto_readpw:
         additional_jsons += [
             {
-                'dn': f"uid={u},ou=Readpw,{domain}",
+                'dn': f"uid={u},ou={args.readpw_ou},{domain}",
                 'changetype': 'add',
                 'objectClass': ['account', 'posixAccount'],
                 'attributes': {

@@ -3,4 +3,17 @@ kind: ConfigMap
 metadata:
   name: {{ include "slapd-test.fullname" . }}-config
 data:
-{{ (.Files.Glob "files/*").AsConfig | indent 2 }}
+  bootstrap.sh: |
+{{ .Files.Get "files/bootstrap.sh" | indent 4 }}
+  ldap-bootstrap.py: |
+{{ .Files.Get "files/ldap-bootstrap.py" | indent 4 }}
+  slapd-ous.json: |
+{{ tpl .Values.bootstrap.ousJson . | indent 4 }}
+  slapd-readpw.json: |
+{{ tpl .Values.bootstrap.readpwAclJson . | indent 4 }}
+  ldap-readpw-users.secret.yaml: |
+{{ toYaml .Values.bootstrap.readpwUsers | indent 4 }}
+{{- if .Values.bootstrap.customSchemaJson }}
+  custom-schema.json: |
+{{ .Values.bootstrap.customSchemaJson | indent 4 }}
+{{- end }}

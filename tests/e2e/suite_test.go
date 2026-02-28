@@ -25,7 +25,7 @@ var (
 	namespace = envOrDefault("NAMESPACE_TESTING", "slaptain-testing")
 
 	// LDAP_DOMAIN — base DN of the LDAP tree.
-	baseDN = envOrDefault("LDAP_DOMAIN", "dc=as8,dc=lab,dc=test")
+	baseDN = envOrDefault("LDAP_DOMAIN", "dc=chuck-chuck-chuck,dc=net")
 
 	// LDAP_SVC — service to port-forward for plain LDAP access (port 389).
 	ldapSvc = envOrDefault("LDAP_SVC", "svc/slapd")

@@ -31,6 +31,8 @@ spec:
               value: {{ .Values.slapd.fullname | quote }}
             - name: LDAP_DOMAIN
               value: {{ .Values.slapd.domain | quote }}
+            - name: READPW_OU
+              value: {{ .Values.bootstrap.readpwOU | quote }}
           command: ["bash", "/config/bootstrap.sh"]
           volumeMounts:
             - name: config
