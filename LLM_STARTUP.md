@@ -26,9 +26,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] Bootstrap logic with `slaptest` conversion (`images/slapd-init/bootstrap.sh`).
 - [x] Helm Chart for standalone deployment (`charts/slapd`) — superseded by operator, kept for reference.
 - [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller. e2e: 33/33 green.
-- [ ] **Operator Phase 2**: multi-replica intra-cluster delta-syncrepl with proper leader election (see Phase 2 Design below).
+- [x] **Operator Phase 2**: N-way multi-master delta-syncrepl; operator-orchestrated bootstrap; per-pod `volumeClaimTemplates`; replication credential management. e2e: pending.
 - [ ] Operator Phase 3: cross-cluster replication via `ExternalPeers`, mTLS peer auth.
-- [ ] Replication logic in slapd-init (init container configures syncrepl per pod ordinal).
 
 ---
 
@@ -38,6 +37,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 .
 ├── Makefile                        # Root build targets (see Makefile Targets below)
 ├── LLM_STARTUP.md
+├── docs/
+│   └── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -113,29 +114,28 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 |---|---|---|
 | `spec.images.{slapd,init}.{repository,tag,pullPolicy}` | `SlapdImages` | Image config for both containers |
 | `spec.ldap.domain` | string | LDAP domain in DC notation, e.g. `dc=example,dc=org` |
-| `spec.ldap.passwordSecretName` | string | Reference existing Secret; suppresses Secret creation |
-| `spec.ldap.{adminPasswordHash,rootPasswordHash}` | string | SSHA/bcrypt hashes; used when `passwordSecretName` is unset |
+| `spec.ldap.credentialsSecretName` | string | Optional: reference an existing plaintext credentials Secret (`admin-password` + `root-password` keys); suppresses auto-generation of `<name>-credentials` |
 | `spec.ldap.forceRebootstrap` | bool | Force init container to re-bootstrap (destructive) |
 | `spec.ldap.tls.{enabled,secretName}` | `SlapdTLSConfig` | TLS Secret must contain `tls.crt`, `tls.key`, `ca.crt` |
-| `spec.replicas` | int32 | Default 1; Phase 1 enforces ≤1 (controller sets `Error` if >1) |
+| `spec.replicas` | int32 | Default 1; replication is only active when `replicas > 1` AND `replication.enabled=true` |
 | `spec.logLevel` | int32 | slapd `-d` flag, default 0 |
 | `spec.persistence.{enabled,config,data}` | `SlapdPersistenceConfig` | PVC sizes and storage class; emptyDir when disabled |
 | `spec.service.{type,ldapPort,ldapsPort}` | `SlapdServiceConfig` | ClusterIP service config, defaults 389/636 |
 | `spec.resources` | `corev1.ResourceRequirements` | Container resource requests/limits |
 | `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
-| `spec.replication.{enabled,role,mode,peers,externalPeers,accessLogEnabled}` | `SlapdReplicationConfig` | Phase 2+ fields; stored but ignored in Phase 1 |
+| `spec.replication.{enabled,role,mode,peers,externalPeers,accessLogEnabled}` | `SlapdReplicationConfig` | N-way multi-master delta-syncrepl; active when `enabled=true` and `replicas > 1` |
 
-**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `observedGeneration`, `conditions`.
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `observedGeneration`, `bootstrapComplete`, `conditions`.
 
-**Reconcile order (Phase 1):**
+**Reconcile order:**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
-2. Phase 1 guard: `replicas > 1` → set `phase=Error`, condition `Ready=False/UnsupportedReplicas`, return (no requeue)
-3. `reconcileSecret` — create `<name>-passwords` Secret (create-only, never update)
-4. `reconcilePVCs` — create `<name>-config` and `<name>-data` PVCs (create-only, never update)
-5. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (createOrUpdate)
-6. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (createOrUpdate)
-7. `reconcileStatefulSet` — mirrors Helm chart; `serviceName: <name>-headless` (createOrUpdate)
-8. Observe StatefulSet → update `status.phase`, `readyReplicas`, conditions
+2. `reconcileSecret` — create `<name>-credentials` (plaintext, create-only) + `<name>-passwords` (SSHA hashes, create-only); or read from `spec.ldap.credentialsSecretName`
+3. `reconcileReplicationSecret` — create `<name>-replication` (random password, create-only); no-op when `replication.enabled=false`
+4. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (createOrUpdate)
+5. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (createOrUpdate)
+6. `reconcileStatefulSet` — `serviceName: <name>-headless`; uses `volumeClaimTemplates` when persistence enabled (createOrUpdate)
+7. `reconcileBootstrap` — connect to pod-0 via pod IP on port 1024, bind as data rootdn, add root + admin + (optionally) replication entries; sets `status.bootstrapComplete=true`; no-op when already complete (see `docs/BOOTSTRAP.md`)
+8. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, conditions
 9. Not Running → `RequeueAfter: 10s`
 
 **Service naming (Bitnami convention):**
@@ -294,19 +294,20 @@ change ACLs to open it up).
 
 | Consumer | What it needs | Format | Phase |
 |---|---|---|---|
-| slapd-init (init container) | Config admin hash, data admin hash | SSHA hash | 1 |
-| Operator: topology reconfiguration | Config admin password | Plaintext | 2 |
-| Operator: CSN lag monitoring | Read-only access to `contextCSN` / `cn=monitor` | Plaintext (monitoring DN) or anonymous | 2 |
-| Consumer init: syncrepl bind | Replication bind password | Plaintext | 2 |
+| slapd-init (init container) | Config admin hash, data admin hash | SSHA hash | 1+ |
+| Operator: bootstrap | Data admin password | Plaintext | 2 (implemented) |
+| Operator: topology reconfiguration | Config admin password | Plaintext | 3 |
+| Operator: CSN lag monitoring | Read-only access to `contextCSN` / `cn=monitor` | Plaintext (monitoring DN) or anonymous | 3 |
+| Consumer init: syncrepl bind | Replication bind password | Plaintext | 2 (implemented) |
 | Bootstrap job (slapd-test) | Data admin password | Plaintext | Testing only |
 
 **Secrets layout:**
 
 | Secret | Contents | Created by | Scope |
 |---|---|---|---|
-| `<name>-passwords` | `admin-password-hash`, `root-password-hash` | Operator or slapd-cluster chart | Deployment (init container) |
-| `<name>-credentials` | `config-admin-password` (plaintext) | Operator or user | Operator SA only (RBAC) |
-| `<name>-replication` | Replication bind password (plaintext) | Operator or user | Consumer init containers |
+| `<name>-credentials` | `admin-password`, `root-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA only (RBAC); LDAP bind during bootstrap |
+| `<name>-passwords` | `admin-password-hash`, `root-password-hash` (SSHA) | Operator (derived from `<name>-credentials`) | Init container (`rootpw` directives in slapd.conf) |
+| `<name>-replication` | `password` (plaintext, random) | Operator (create-only) | Init container (`credentials=` in syncrepl); operator (adds `cn=replication` LDAP entry) |
 | `slapd-test-passwords` | `admin-password`, `root-password` (plaintext); `readpw-<user>` (plaintext, one key per readpw account) | slapd-test chart | Testing only, not for production |
 
 **Production scope:** The operator provides a correctly configured, healthy LDAP endpoint.
@@ -322,7 +323,7 @@ job is a testing tool, not part of production deployment.
 
 ---
 
-### Phase 2 Design: Multi-Replica N-way Multi-Master Delta-Syncrepl
+### Phase 2: Multi-Replica N-way Multi-Master Delta-Syncrepl (implemented)
 
 #### Architecture Decision
 
