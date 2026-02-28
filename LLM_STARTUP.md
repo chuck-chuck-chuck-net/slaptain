@@ -25,8 +25,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] slapd-init image: Debian trixie-slim, full shell environment for bootstrap (`images/slapd-init/Containerfile`).
 - [x] Bootstrap logic with `slaptest` conversion (`images/slapd-init/bootstrap.sh`).
 - [x] Helm Chart for standalone deployment (`charts/slapd`) — superseded by operator, kept for reference.
-- [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller.
-- [ ] Operator Phase 2: multi-replica intra-cluster delta-syncrepl.
+- [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller. e2e: 33/33 green.
+- [ ] **Operator Phase 2**: multi-replica intra-cluster delta-syncrepl with proper leader election (see Phase 2 Design below).
 - [ ] Operator Phase 3: cross-cluster replication via `ExternalPeers`, mTLS peer auth.
 - [ ] Replication logic in slapd-init (init container configures syncrepl per pod ordinal).
 
@@ -319,3 +319,115 @@ job is a testing tool, not part of production deployment.
 - Topology is static configuration in `cn=config`, not a dynamic protocol.
 - Adding a consumer = configure it on the consumer side; provider needs no changes.
 - The operator's role is configuration management and monitoring, not real-time failover coordination.
+
+---
+
+### Phase 2 Design: Multi-Replica N-way Multi-Master Delta-Syncrepl
+
+#### Architecture Decision
+
+**N-way multi-master (mirrormode), not single-provider + dynamic leader election.**
+
+All replicas are symmetric peers: every pod is simultaneously a syncrepl provider AND consumer.
+There is no permanent "primary." This design was chosen over "elect pod-0 as provider" because:
+
+1. Pod-0 failure is handled gracefully — no pod is special at runtime.
+2. No runtime topology reconfiguration when a pod fails or recovers.
+3. StatefulSet's built-in ordered rollout provides bootstrap sequencing for free — no custom
+   leader election mechanism needed.
+4. OpenLDAP mirrormode is the standard production HA configuration; it handles concurrent writes
+   via CSN-based conflict resolution.
+
+"Proper leader election" in the original decision means: *do not hardcode pod-0 as the permanent
+provider*. N-way multi-master achieves this without a Kubernetes Lease or sidecar agent.
+
+#### Per-Replica Components (when replication enabled)
+
+Each pod has three databases and two overlays:
+
+| Component | Path | Purpose |
+|---|---|---|
+| Data DB (`olcDatabase={1}mdb`) | `/ldap-data` (existing) | LDAP data; unchanged from Phase 1 |
+| Accesslog DB (`olcDatabase={2}mdb`) | `/ldap-accesslog` (**new PVC**) | Delta-syncrepl change journal |
+| `overlay accesslog` on data DB | — | Writes every change to accesslog DB |
+| `overlay syncprov` on accesslog DB | — | Exposes change journal to peers |
+| `overlay syncprov` on data DB | — | Required for initial full sync |
+| `olcMirrorMode: TRUE` on data DB | — | Enables N-way multi-master writes |
+| `olcSyncrepl` (N-1 entries) | — | One syncrepl entry per peer pod |
+
+#### Bootstrap Sequencing
+
+StatefulSet ordered rollout (`podManagementPolicy: OrderedReady`, the default) provides the
+necessary ordering at no extra cost:
+
+- Pod-0 starts first; init container bootstraps standalone config, then adds accesslog, syncprov,
+  and syncrepl entries pointing to all peers (pods 1..N-1). Those connections fail until peers
+  exist — delta-syncrepl retries silently.
+- Pod-1 starts after pod-0 is Ready; connects to pod-0, performs initial full sync, then becomes
+  a fully equal replica.
+- Pod-N-1 starts after pod-N-2 is Ready; same pattern.
+
+After all pods are up, every pod replicates from every other pod. No pod retains special status.
+
+#### PVC Changes (breaking change from Phase 1)
+
+Phase 1 used **shared named PVCs** (`<name>-config`, `<name>-data`) — only works for 1 replica.
+Phase 2 switches to **StatefulSet `volumeClaimTemplates`** for per-pod PVCs:
+
+| Template name | Resulting PVC for pod N | Path |
+|---|---|---|
+| `ldap-config` | `ldap-config-<name>-<N>` | `/ldap-config` |
+| `ldap-data` | `ldap-data-<name>-<N>` | `/ldap-data` |
+| `ldap-accesslog` | `ldap-accesslog-<name>-<N>` | `/ldap-accesslog` (**new**) |
+
+The `reconcilePVCs` controller step is **removed**; PVC lifecycle is managed entirely by the
+StatefulSet. Breaking change for Phase 1 deployments (PVC names change). Acceptable at v1alpha1.
+
+#### Replication Credentials
+
+A new `<name>-replication` Secret holds the plaintext replication bind password:
+
+| Secret | Key | Used by |
+|---|---|---|
+| `<name>-replication` | `password` | Init container: syncrepl bind password |
+
+The operator creates this Secret with a generated random password if it does not exist. Users
+may pre-create it. Never updated after creation.
+
+Replication bind DN: `cn=replication,cn=config`. The init container provisions this entry in the
+config database during bootstrap and grants it read access to the accesslog and data databases.
+
+#### Operator Changes for Phase 2
+
+1. **Remove `replicas > 1` guard** (controller step 2).
+2. **Add `reconcileReplicationSecret`**: creates `<name>-replication` (create-only, random password).
+3. **Remove `reconcilePVCs`**: replaced by StatefulSet `volumeClaimTemplates`.
+4. **Update `buildStatefulSetSpec`**:
+   - Add `ldap-accesslog` volume mount to init and main containers.
+   - Move config/data/accesslog to `volumeClaimTemplates`.
+   - Pass to init container: `LDAP_REPLICATION_ENABLED`, `LDAP_REPLICAS`,
+     `LDAP_CLUSTER_HEADLESS_SVC` (`<name>-headless`), and `LDAP_REPLICATION_PASSWORD`
+     (from `<name>-replication` Secret).
+
+#### slapd-init Changes for Phase 2
+
+The init script gains a conditional replication path, gated on `LDAP_REPLICATION_ENABLED=true`:
+
+- Extend `slapd.conf` with: accesslog DB config, `overlay accesslog`, `overlay syncprov` on
+  both databases, `mirrormode on`, and N-1 `syncrepl` blocks (one per peer ordinal, skipping self).
+- Peer URL template: `ldaps://<name>-<ordinal>.<headless-svc>.<ns>.svc.cluster.local:1025`
+- On first bootstrap: add `cn=replication` entry to config DB and its ACL grants.
+- On pod restart (config exists): patch existing `cn=config` via `ldapmodify` on the ldapi
+  socket to add/update syncrepl entries. This is what enables future scale-out without full
+  re-bootstrap.
+
+Pod ordinal is read from the hostname: `${HOSTNAME##*-}` (last segment of StatefulSet pod name).
+
+#### Phase 2 Scope and Non-Goals
+
+| In scope | Out of scope (Phase 3+) |
+|---|---|
+| Replicas > 1 with N-way multi-master | Changing replicas after cluster creation (scale-out) |
+| Graceful pod failure and restart | Cross-cluster replication (ExternalPeers) |
+| Replication credentials Secret | CSN lag monitoring and alerting |
+| Per-pod accesslog PVC | Per-peer TLS client certificate auth |
