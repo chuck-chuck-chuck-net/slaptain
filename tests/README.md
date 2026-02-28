@@ -1,169 +1,172 @@
 # Slaptain Test Suite
 
-Resources for deploying and testing the `slapd` standalone LDAP server.
-All commands are run from the **project root**.
-
-For secret management with SOPS and age, see [SOPS.md](SOPS.md).
+Resources for deploying and testing the `slapd` LDAP server.
+All commands run from the **project root**.
+For SOPS secret management, see [SOPS.md](SOPS.md).
 
 ---
 
-## 1. Generate TLS certificates
+## Quick start
 
-The `slapd` chart requires a TLS secret in the target namespace. Generate it with:
+Assuming the operator is installed and a TLS certificate exists in the namespace (see
+[One-time prerequisites](#one-time-prerequisites)):
+
+```bash
+# Deploy
+make cluster-helm-install testing-helm-install
+
+# Test
+make e2e-run
+
+# Tear down
+make testing-helm-uninstall cluster-helm-uninstall
+```
+
+The standalone path (no operator) is equivalent: replace `cluster-helm-install` /
+`cluster-helm-uninstall` with `helm-install` / `helm-uninstall`.
+
+---
+
+## One-time prerequisites
+
+### TLS certificate
+
+`slapd` requires a TLS secret in the target namespace. Run once per namespace (idempotent —
+skips silently if the secret already exists):
 
 ```bash
 make gencert
 ```
 
-This creates the namespace (`slaptain-testing`) if it does not exist and runs `tests/gencert.sh`
-to produce the `slapd-tls` Secret.
+Creates the `slaptain-testing` namespace if needed and generates the `slapd-tls` Secret.
 
-## 2. Prepare your environment
+### Operator (operator path only)
 
-The make targets read environment variables for helm values arguments. You'll want to set something like
-
-```
-export HELM_VALUES_SLAPD="-f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml"
-export HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml"
-export HELM_VALUES_SLAPD_TESTING="-f secrets://tests/values.slapd-test.secret.yaml"
-```
-
-The samples below assume the variables are provided by the environment. You could also pass
-them on each make invocation command line explicitly, of course.
-
----
-
-## 2. Deploy slapd
-
-Two deployment paths are supported. They are mutually exclusive — pick one per test environment.
-
-### Option A — Standalone Helm chart (`charts/slapd`)
-
-No operator required. The chart deploys the StatefulSet directly.
-
-```bash
-make helm-install
-```
-
-Full build-and-deploy from scratch (build images, generate certs, install):
-
-```bash
-make helm-deploy
-```
-
-To remove:
-
-```bash
-make helm-uninstall
-```
-
-### Option B — Operator-managed SlapdCluster (`charts/slapd-cluster`)
-
-Requires the operator to be running first:
+Only needed if you want to test against an operator-managed `SlapdCluster`:
 
 ```bash
 make operator-helm-install
 ```
 
-Then deploy a SlapdCluster instance:
+### Environment variables
+
+The Helm install targets read values from environment variables. Set them in your shell or
+`.envrc`:
 
 ```bash
-make cluster-helm-install
+# Values for the slapd / slapd-cluster chart
+export HELM_VALUES_SLAPD="-f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml"
+export HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml"
+
+# Values for the slapd-test chart.
+# The non-secret file holds deployment-specific overrides (custom schema, extra OUs, …).
+# The secret file holds plaintext passwords — copy from *.sample and fill in.
+export HELM_VALUES_SLAPD_TESTING="-f tests/values.slapd-test.yaml -f secrets://tests/values.slapd-test.secret.yaml"
 ```
 
-`charts/slapd-cluster` creates a password Secret and a `SlapdCluster` CR; the operator
-reconciles all other resources (StatefulSet, Services, PVCs).
+Secret templates to fill in (copy, rename, populate, encrypt with SOPS):
 
-To remove:
-
-```bash
-make cluster-helm-uninstall
-```
+| Template | Contents |
+|---|---|
+| `tests/values.slapd.secret.yaml.sample` | Admin/root SSHA password hashes for slapd |
+| `tests/values.slapd-test.secret.yaml.sample` | Admin/root plaintext passwords + readpw user hashes and plaintext passwords |
 
 ---
 
-## 3. Bootstrap and test with slapd-test
+## Deploy slapd
 
-The `slapd-test` chart has two components, controlled independently:
+Two deployment paths are available — pick one per environment. Both produce identical service
+names (`slapd`) so the test suite and slapd-test chart work identically with either.
 
-| Component | Default | What it does |
-|---|---|---|
-| `bootstrap` | enabled | Runs a Job that applies schema, ACLs, and initial directory data |
-| `toolkit` | enabled | Keeps a pod alive for interactive `kubectl exec` sessions |
+### Option A — Standalone Helm chart (`charts/slapd`)
 
-### Default: bootstrap + toolkit
+```bash
+make helm-install    # deploy
+make helm-uninstall  # tear down
+```
+
+### Option B — Operator-managed `SlapdCluster` (`charts/slapd-cluster`)
+
+```bash
+make cluster-helm-install    # deploy (operator must be running)
+make cluster-helm-uninstall  # tear down
+```
+
+`charts/slapd-cluster` creates a `SlapdCluster` CR; the operator reconciles the StatefulSet,
+Services, and PVCs.
+
+---
+
+## Deploy slapd-test
+
+`slapd-test` bootstraps the LDAP directory and provides a persistent toolkit pod. Install
+after slapd is ready:
 
 ```bash
 make testing-helm-install
+make testing-helm-uninstall  # tear down
 ```
 
-Watch the bootstrap job run:
+| Component | Default | What it does |
+|---|---|---|
+| `bootstrap` | enabled | One-shot Job: loads custom schema, sets ACLs, creates OUs and readpw service accounts |
+| `toolkit` | enabled | Long-running pod for interactive `kubectl exec` sessions |
+
+Watch the bootstrap Job complete:
 
 ```bash
 kubectl logs -n slaptain-testing -l app.kubernetes.io/name=slapd-test -f
 ```
 
-### Toolkit only (no bootstrap)
-
-Useful when you want a clean, unmodified slapd to inspect or test manually:
+To install the toolkit only (skip bootstrap — useful for a clean, unmodified slapd):
 
 ```bash
 make testing-helm-install TOOLKIT_ONLY=true
 ```
 
-`TOOLKIT_ONLY=true` sets `bootstrap.enabled=false` and `toolkit.enabled=true`.
-
-To remove:
-
-```bash
-make testing-helm-uninstall
-```
-
 ---
 
-## 4. End-to-end tests
-
-The e2e suite in `tests/e2e/` works against both deployment options.
-
-The suite assumes the cluster is already set up (slapd + slapd-test both installed).
-Run the same command regardless of whether slapd was deployed via the standalone chart or
-the operator — the service name and password secret are identical either way:
+## Run the e2e tests
 
 ```bash
 make e2e-run
 ```
+
+The suite auto-discovers the LDAP base DN from the server's rootDSE — no domain env var
+needed. It assumes slapd and slapd-test are already installed.
 
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Namespace to test in |
 | `LDAP_SVC` | `svc/slapd` | Service to port-forward for LDAP access |
 
+**Readpw ACL tests** require plaintext passwords for the readpw service accounts. Set
+`bootstrap.readpwPasswords` in your `tests/values.slapd-test.secret.yaml` (see `.sample`).
+These tests skip gracefully when not configured.
+
 ---
 
-## 5. Using the toolkit
+## Using the toolkit
 
 The toolkit pod has `ldap-utils`, `python3`, `ldap3`, and `pyyaml` pre-installed.
 
-Wait for it to be ready:
-
 ```bash
+# Wait for it to be ready
 kubectl rollout status deployment/slapd-test-toolkit -n slaptain-testing
-```
 
-Exec in:
-
-```bash
+# Exec in
 kubectl exec -it -n slaptain-testing deploy/slapd-test-toolkit -- bash
 ```
 
-Inside the pod, all required environment variables are pre-set:
+Inside the pod, all required environment variables are pre-set by the chart:
 
 | Variable | Example value |
 |---|---|
 | `$SLAPD_HOST` | `slapd` |
-| `$LDAP_DOMAIN` | `dc=chuck-chuck-chuck,dc=net` |
-| `$LDAP_ADMIN_PW` | admin password (from Secret) |
-| `$LDAP_ROOT_PW` | rootDN password (from Secret) |
+| `$LDAP_DOMAIN` | `dc=as8,dc=lab,dc=test` |
+| `$READPW_OU` | `Readpw` |
+| `$LDAP_ADMIN_PW` | data admin password (plaintext, from Secret) |
+| `$LDAP_ROOT_PW` | config admin password (plaintext, from Secret) |
 | `$LDAPTLS_CACERT` | `/etc/ldap/tls/ca.crt` |
 
 Config files and bootstrap scripts are mounted at `/config/`.
@@ -174,18 +177,16 @@ Config files and bootstrap scripts are mounted at `/config/`.
 # Verify connectivity (anonymous, LDAPS)
 ldapsearch -x -H ldaps://$SLAPD_HOST -LLL -s base
 
-# Verify config DB access
+# Inspect config DB: find database entries with their suffix and rootDN
 ldapsearch -x -H ldaps://$SLAPD_HOST -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" \
-  -b "cn=config" -LLL -s base
+  -b "cn=config" -LLL -s sub "(olcSuffix=*)" olcSuffix olcRootDN
 
 # Run the full bootstrap (same as the Job)
 bash /config/bootstrap.sh
 
-# Run with trace output
-bash -x /config/bootstrap.sh
-
-# Verify ACLs (subtree may be empty, but access should succeed)
+# Verify readpw ACL: a readpw user should be able to read userPassword from ou=Mail
+# (replace <user> and <password> with a configured readpw account)
 ldapsearch -x -H ldaps://$SLAPD_HOST \
-  -D "uid=appsuite,ou=Readpw,$LDAP_DOMAIN" -w "$LDAP_ADMIN_PW" \
-  -b "ou=Mail,$LDAP_DOMAIN" -LLL -s sub
+  -D "uid=<user>,ou=$READPW_OU,$LDAP_DOMAIN" -w "<password>" \
+  -b "ou=Mail,$LDAP_DOMAIN" -LLL -s sub "(objectClass=*)" userPassword
 ```

@@ -66,10 +66,18 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   └── Makefile                    # kubebuilder-generated (generate, manifests, run, …)
 └── tests/
     ├── gencert.sh                  # TLS cert generation helper
-    ├── values.slapd.yaml           # Shared test values for slapd and slapd-cluster charts
-    ├── README.md                   # Test suite documentation
+    ├── values.slapd.yaml           # Non-secret values for slapd / slapd-cluster charts
+    ├── values.slapd-test.yaml      # Non-secret deployment-specific overrides for slapd-test
+    ├── values.slapd-test.secret.yaml.sample   # Template: passwords + readpw hashes/plaintexts
+    ├── README.md                   # Test suite documentation (quick-start cycle at top)
     ├── SOPS.md                     # SOPS/age secret management guide
     └── e2e/                        # Ginkgo e2e tests (go-ldap, client-go)
+        ├── suite_test.go           # BeforeSuite: port-forward, rootDSE baseDN discovery, admin connect
+        ├── helpers_test.go         # k8s/LDAP helpers (ldapSearch, ldapAdd, portForward, …)
+        ├── slapd_test.go           # StatefulSet, Service, PVC, passwords Secret checks
+        ├── bootstrap_test.go       # bootstrap Job and toolkit Deployment checks
+        ├── ldap_test.go            # Directory content: base structure, user/group CRUD, ACL basics
+        └── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
 ```
 
 ---
@@ -141,6 +149,55 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 **Known gotcha:** `kubebuilder init` requires `--skip-go-version-check` on Go 1.26 (version string not recognized). `kubebuilder create api` does not accept this flag and works without it.
 
 ---
+
+### slapd-test Chart (`charts/slapd-test`)
+
+Test harness chart with two components: a bootstrap `Job` and an optional toolkit `Deployment`.
+Configuration lives entirely in values — no files are embedded in the chart image.
+
+Key values structure:
+
+| Value | Purpose |
+|---|---|
+| `slapd.domain` | LDAP base DN (e.g. `dc=chuck-chuck-chuck,dc=net`) |
+| `slapd.adminPassword` / `rootPassword` | Plaintext passwords → stored in `slapd-test-passwords` Secret |
+| `bootstrap.readpwOU` | OU name for read-only service accounts (default `Readpw`) |
+| `bootstrap.customSchemaJson` | Optional JSON schema entry for `cn=config`; empty = no custom schema |
+| `bootstrap.ousJson` | JSON array of OUs to create; supports Helm `tpl` expressions (domain/readpwOU substituted at render) |
+| `bootstrap.readpwAclJson` | JSON ACL modification for the data database; supports Helm `tpl` |
+| `bootstrap.readpwUsers` | `username → {SSHA}hash` — stored in LDAP entries |
+| `bootstrap.readpwPasswords` | `username → plaintext` — stored in `slapd-test-passwords` Secret as `readpw-<user>` keys; used by e2e tests to bind as readpw users |
+
+The `ousJson` / `readpwAclJson` / `customSchemaJson` values may contain `{{ }}` Helm template
+expressions. Values files are plain YAML (no rendering); expressions are only evaluated when the
+configmap template calls `tpl .Values.bootstrap.ousJson .`. This means `-f override.yaml` files
+can contain template expressions and they work identically to chart default values.
+
+Deployment-specific overrides (e.g. OX schema, extra OUs) go in `tests/values.slapd-test.yaml`.
+Secrets (passwords, SSHA hashes) go in `tests/values.slapd-test.secret.yaml` (SOPS-encrypted).
+See `tests/values.slapd-test.secret.yaml.sample` for the expected structure.
+
+### e2e Test Suite (`tests/e2e/`)
+
+**Typical cycle** (operator path; use `helm-install`/`helm-uninstall` for standalone):
+```bash
+make cluster-helm-install testing-helm-install
+make e2e-run
+make testing-helm-uninstall cluster-helm-uninstall
+```
+
+**Suite setup** (`suite_test.go` `BeforeSuite`):
+1. Build k8s client
+2. Wait for `slapd` StatefulSet ready
+3. Wait for `slapd-test` bootstrap Job succeeded
+4. Read `adminPW`, `rootPW`, `readpwPWs` from `slapd-test-passwords` Secret
+   - `readpwPWs` is a `map[string]string` built from all `readpw-*` keys in the Secret
+5. Start `kubectl port-forward svc/slapd 13891:389`
+6. Query LDAP rootDSE (anonymous, `namingContexts`) → set `baseDN` (auto-discovered, no env var)
+7. Connect `ldapConn` as `cn=admin,<baseDN>` (data rootDN, bypasses ACLs)
+
+**Readpw ACL tests** (`readpw_test.go`) skip gracefully when `readpwPWs` is empty, so the suite
+runs without readpw configuration but skips those test cases.
 
 ### Makefile Targets (root)
 
@@ -250,7 +307,7 @@ change ACLs to open it up).
 | `<name>-passwords` | `admin-password-hash`, `root-password-hash` | Operator or slapd-cluster chart | Deployment (init container) |
 | `<name>-credentials` | `config-admin-password` (plaintext) | Operator or user | Operator SA only (RBAC) |
 | `<name>-replication` | Replication bind password (plaintext) | Operator or user | Consumer init containers |
-| `slapd-test-passwords` | `admin-password`, `root-password` (plaintext) | slapd-test chart | Testing only, not for production |
+| `slapd-test-passwords` | `admin-password`, `root-password` (plaintext); `readpw-<user>` (plaintext, one key per readpw account) | slapd-test chart | Testing only, not for production |
 
 **Production scope:** The operator provides a correctly configured, healthy LDAP endpoint.
 Directory content (schemas, OUs, users) is the user's responsibility. The slapd-test bootstrap
