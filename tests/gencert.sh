@@ -54,14 +54,11 @@ then
     namespace=$(</var/run/secrets/kubernetes.io/serviceaccount/namespace)
 fi
 
-# echo "Testing if secret $secret in namespace $namespace already exists:"
-# if kubectl get secret -n $namespace $secret
-# then
-#     echo "... yes -- stopping here, not re-creating."
-#     exit 0
-# else
-#     echo "... nope -- continuing, going creating it."
-# fi
+# If the TLS secret already exists there is nothing to do.
+if kubectl get secret -n "$namespace" "$secret" &>/dev/null; then
+    echo "Secret $secret already exists in namespace $namespace — skipping."
+    exit 0
+fi
 
 # I was unable to find reference docs for how the kubelet-serving approver works
 # but experimentally it is to be observed that some special /O.../CN subj is required
@@ -118,9 +115,7 @@ spec:
   - server auth
 EOF
 
-# experimentally, patching the csr does no good
-# we will end up with updated key, and old csr, and thus
-# a mismatch between private and public key
+# Clean up any stale CSR from a previous failed run before creating a fresh one.
 kubectl delete csr $label-$namespace-csr --ignore-not-found=true
 kubectl apply -f $label-$namespace-csr.yaml
 kubectl certificate approve $label-$namespace-csr

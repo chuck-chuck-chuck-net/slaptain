@@ -2,10 +2,7 @@ package e2e_test
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,11 +16,10 @@ import (
 // ── Suite-wide variables ──────────────────────────────────────────────────────
 
 var (
-	k8sClient    *kubernetes.Clientset
-	ldapConn     *ldap.Conn
-	pfCancel     context.CancelFunc
-	adminPW      string
-	repoRoot     string
+	k8sClient *kubernetes.Clientset
+	ldapConn  *ldap.Conn
+	pfCancel  context.CancelFunc
+	adminPW   string
 
 	// NAMESPACE_TESTING — Kubernetes namespace to test in.
 	namespace = envOrDefault("NAMESPACE_TESTING", "slaptain-testing")
@@ -32,17 +28,7 @@ var (
 	baseDN = envOrDefault("LDAP_DOMAIN", "dc=as8,dc=lab,dc=test")
 
 	// LDAP_SVC — service to port-forward for plain LDAP access (port 389).
-	// Use "svc/slapd" for the standalone Helm chart deployment.
-	// Use "svc/slapd-svc" for the operator-managed SlapdCluster.
 	ldapSvc = envOrDefault("LDAP_SVC", "svc/slapd")
-
-	// LDAP_PASSWORD_SECRET — Secret that holds admin-password (plain text).
-	// The slapd-test chart creates "slapd-test-passwords".
-	// The slapd-cluster chart creates "<release>-passwords" (key: admin-password-hash).
-	// Set this env var when testing against the operator so the suite reads
-	// the correct secret.
-	ldapPasswordSecret    = envOrDefault("LDAP_PASSWORD_SECRET", "slapd-test-passwords")
-	ldapPasswordSecretKey = envOrDefault("LDAP_PASSWORD_SECRET_KEY", "admin-password")
 
 	localLDAPAddr = "localhost:13891"
 )
@@ -55,20 +41,6 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func(ctx SpecContext) {
-	// tests/e2e/ is two levels below the repo root
-	abs, err := filepath.Abs("../..")
-	Expect(err).NotTo(HaveOccurred())
-	repoRoot = abs
-
-	if os.Getenv("SKIP_SETUP") == "" {
-		By("Installing slapd chart")
-		runMake("gencert")
-		runMake("helm-install", "HELM_VALUES_SLAPD=-f tests/values.slapd.yaml")
-
-		By("Installing slapd-test chart (bootstrap + toolkit)")
-		runMake("testing-helm-install")
-	}
-
 	By("Setting up Kubernetes client")
 	k8sClient = newK8sClient()
 
@@ -82,11 +54,11 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		return jobSucceeded(k8sClient, namespace, "slapd-test")
 	}).WithTimeout(5 * time.Minute).WithPolling(10 * time.Second).Should(BeTrue())
 
-	By("Reading admin password from secret " + ldapPasswordSecret)
-	secret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, ldapPasswordSecret, metav1.GetOptions{})
+	By("Reading admin password from slapd-test-passwords secret")
+	secret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-test-passwords", metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred())
-	adminPW = string(secret.Data[ldapPasswordSecretKey])
-	Expect(adminPW).NotTo(BeEmpty(), "admin password must not be empty (check LDAP_PASSWORD_SECRET / LDAP_PASSWORD_SECRET_KEY)")
+	adminPW = string(secret.Data["admin-password"])
+	Expect(adminPW).NotTo(BeEmpty(), "admin password must not be empty in slapd-test-passwords")
 
 	By("Starting kubectl port-forward to " + ldapSvc + ":389")
 	pfCancel = startPortForward(namespace, ldapSvc, "13891", "389")
@@ -103,10 +75,6 @@ var _ = AfterSuite(func() {
 	if pfCancel != nil {
 		pfCancel()
 	}
-	if os.Getenv("SKIP_TEARDOWN") == "" {
-		runMake("testing-helm-uninstall")
-		runMake("helm-uninstall")
-	}
 })
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -116,12 +84,4 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func runMake(args ...string) {
-	cmd := exec.Command("make", args...)
-	cmd.Dir = repoRoot
-	cmd.Stdout = GinkgoWriter
-	cmd.Stderr = GinkgoWriter
-	Expect(cmd.Run()).To(Succeed(), fmt.Sprintf("make %v failed", args))
 }

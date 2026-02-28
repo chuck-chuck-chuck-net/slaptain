@@ -125,25 +125,19 @@ make testing-helm-uninstall
 
 The e2e suite in `tests/e2e/` works against both deployment options.
 
-### Against the standalone chart (default)
+The suite assumes the cluster is already set up (slapd + slapd-test both installed).
+Run the same command regardless of whether slapd was deployed via the standalone chart or
+the operator — the service name and password secret are identical either way:
 
 ```bash
-SKIP_SETUP=true SKIP_TEARDOWN=true make e2e-run
-```
-
-### Against the operator-managed SlapdCluster
-
-Same command — the operator exposes the same `slapd` service and the `slapd-test` chart
-provides the same password secret, so the suite needs no adjustment:
-
-```bash
-SKIP_SETUP=true SKIP_TEARDOWN=true make e2e-run
+make e2e-run
 ```
 
 | Env var | Default | Description |
 |---|---|---|
-| `SKIP_SETUP` | unset | Skip `make helm-install` / `make testing-helm-install` |
-| `SKIP_TEARDOWN` | unset | Leave charts installed after the run |
+| `NAMESPACE_TESTING` | `slaptain-testing` | Namespace to test in |
+| `LDAP_DOMAIN` | `dc=as8,dc=lab,dc=test` | Base DN of the LDAP tree |
+| `LDAP_SVC` | `svc/slapd` | Service to port-forward for LDAP access |
 
 ---
 
