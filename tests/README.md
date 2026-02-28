@@ -133,28 +133,15 @@ SKIP_SETUP=true SKIP_TEARDOWN=true make e2e-run
 
 ### Against the operator-managed SlapdCluster
 
-The operator exposes the same `slapd` ClusterIP service as the standalone chart.
-The only difference is that it stores password hashes (not plain text) in the cluster's
-own Secret. Point the suite at that secret:
+Same command — the operator exposes the same `slapd` service and the `slapd-test` chart
+provides the same password secret, so the suite needs no adjustment:
 
 ```bash
-SKIP_SETUP=true SKIP_TEARDOWN=true \
-  LDAP_PASSWORD_SECRET=slapd-passwords \
-  LDAP_PASSWORD_SECRET_KEY=admin-password-hash \
-  make e2e-run
+SKIP_SETUP=true SKIP_TEARDOWN=true make e2e-run
 ```
-
-> **Note:** `LDAP_PASSWORD_SECRET_KEY=admin-password-hash` means the suite reads the SSHA hash
-> as the password string. This only works when the slapd chart's default password is `admin`
-> (i.e. the hash decodes to `admin`). For any other password, create the cluster with a
-> `passwords.existingSecret` that also stores the plain-text password under a separate key,
-> or point `slapd-test` at the same secret and read `admin-password` from it.
 
 | Env var | Default | Description |
 |---|---|---|
-| `LDAP_SVC` | `svc/slapd` | Service to port-forward for plain LDAP |
-| `LDAP_PASSWORD_SECRET` | `slapd-test-passwords` | Secret to read the admin password from |
-| `LDAP_PASSWORD_SECRET_KEY` | `admin-password` | Key within the secret |
 | `SKIP_SETUP` | unset | Skip `make helm-install` / `make testing-helm-install` |
 | `SKIP_TEARDOWN` | unset | Leave charts installed after the run |
 
