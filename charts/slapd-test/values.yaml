@@ -25,5 +25,5 @@ bootstrap:
 # Stays alive so you can kubectl exec into it for interactive testing and debugging.
 # Example: kubectl exec -n slaptain <toolkit-pod> -- bash
 toolkit:
-  enabled: false
+  enabled: true
   replicas: 1

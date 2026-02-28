@@ -56,7 +56,7 @@ helm-uninstall:
 	helm uninstall slapd --namespace $(NAMESPACE_TESTING)
 
 ifeq ($(TOOLKIT_ONLY),true)
-  HELM_SET_SLAPD_TESTING = --set bootstrap.enabled=false --set toolkit.enabled=true
+  HELM_SET_SLAPD_TESTING = --set bootstrap.enabled=false
 endif
 
 testing-helm-install:

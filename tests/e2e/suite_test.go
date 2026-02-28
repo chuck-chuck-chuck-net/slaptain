@@ -66,7 +66,7 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		runMake("helm-install", "HELM_VALUES_SLAPD=-f tests/values.slapd.yaml")
 
 		By("Installing slapd-test chart (bootstrap + toolkit)")
-		runMake("testing-helm-install", "HELM_VALUES_SLAPD_TESTING=--set toolkit.enabled=true")
+		runMake("testing-helm-install")
 	}
 
 	By("Setting up Kubernetes client")

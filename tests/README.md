@@ -84,14 +84,14 @@ make cluster-helm-uninstall
 
 ## 3. Bootstrap and test with slapd-test
 
-The `slapd-test` chart has two optional components, controlled independently:
+The `slapd-test` chart has two components, controlled independently:
 
 | Component | Default | What it does |
 |---|---|---|
 | `bootstrap` | enabled | Runs a Job that applies schema, ACLs, and initial directory data |
-| `toolkit` | disabled | Keeps a pod alive for interactive `kubectl exec` sessions |
+| `toolkit` | enabled | Keeps a pod alive for interactive `kubectl exec` sessions |
 
-### Default: bootstrap only
+### Default: bootstrap + toolkit
 
 ```bash
 make testing-helm-install
@@ -112,14 +112,6 @@ make testing-helm-install TOOLKIT_ONLY=true
 ```
 
 `TOOLKIT_ONLY=true` sets `bootstrap.enabled=false` and `toolkit.enabled=true`.
-
-### Both together
-
-Bootstrap runs once, toolkit stays available for follow-up inspection:
-
-```bash
-make testing-helm-install HELM_VALUES_SLAPD_TESTING="--set toolkit.enabled=true"
-```
 
 To remove:
 
