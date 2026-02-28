@@ -114,6 +114,10 @@ type SlapdPersistenceConfig struct {
 	// data is the PVC for the slapd data directory (/ldap-data).
 	// +optional
 	Data SlapdPVCConfig `json:"data,omitempty"`
+	// accesslog is the PVC for the delta-syncrepl access log (/ldap-accesslog).
+	// Only provisioned when replication is enabled.
+	// +optional
+	Accesslog SlapdPVCConfig `json:"accesslog,omitempty"`
 }
 
 // SlapdServiceConfig configures the ClusterIP service exposed by the operator.
@@ -164,8 +168,7 @@ type ExternalPeer struct {
 	BindPasswordSecretName string `json:"bindPasswordSecretName,omitempty"`
 }
 
-// SlapdReplicationConfig holds replication configuration (Phase 2+). In Phase 1
-// this field is stored in the CRD but ignored by the controller.
+// SlapdReplicationConfig holds replication configuration (Phase 2+).
 type SlapdReplicationConfig struct {
 	// enabled controls whether replication is active.
 	// +kubebuilder:default=false
@@ -195,7 +198,7 @@ type SlapdClusterSpec struct {
 	// ldap contains LDAP-specific configuration.
 	// +required
 	LDAP SlapdLDAPConfig `json:"ldap"`
-	// replicas is the number of slapd replicas. Phase 1 only supports replicas=1.
+	// replicas is the number of slapd replicas. Set spec.replication.enabled=true for replicas>1.
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	Replicas int32 `json:"replicas,omitempty"`
@@ -215,7 +218,7 @@ type SlapdClusterSpec struct {
 	// When nil, defaults of runAsUser/runAsGroup/fsGroup=1024 are applied.
 	// +optional
 	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
-	// replication configures replication (Phase 2+). Stored but ignored in Phase 1.
+	// replication configures N-way multi-master delta-syncrepl replication (Phase 2+).
 	// +optional
 	Replication SlapdReplicationConfig `json:"replication,omitempty"`
 }

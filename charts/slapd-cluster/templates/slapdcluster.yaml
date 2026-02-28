@@ -43,12 +43,21 @@ spec:
       {{- if .Values.persistence.data.storageClass }}
       storageClass: {{ .Values.persistence.data.storageClass | quote }}
       {{- end }}
+    accesslog:
+      size: {{ .Values.persistence.accesslog.size | quote }}
+      accessMode: {{ .Values.persistence.accesslog.accessMode }}
+      {{- if .Values.persistence.accesslog.storageClass }}
+      storageClass: {{ .Values.persistence.accesslog.storageClass | quote }}
+      {{- end }}
     {{- end }}
 
   service:
     type: {{ .Values.service.type }}
     ldapPort: {{ .Values.service.ldapPort }}
     ldapsPort: {{ .Values.service.ldapsPort }}
+
+  replication:
+    enabled: {{ .Values.replication.enabled }}
 
   {{- with .Values.resources }}
   resources:

@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"time"
@@ -52,7 +54,7 @@ type SlapdClusterReconciler struct {
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=services;persistentvolumeclaims;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -67,29 +69,8 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 2. Phase 1 guard: replicas > 1 is not supported yet.
-	if sc.Spec.Replicas > 1 {
-		log.Info("replicas > 1 is not supported in Phase 1; setting status to Error", "replicas", sc.Spec.Replicas)
-		sc.Status.Phase = ldapv1alpha1.PhaseError
-		sc.Status.ObservedGeneration = sc.Generation
-		meta := metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			Reason:             "UnsupportedReplicas",
-			Message:            fmt.Sprintf("Phase 1 supports only replicas=1; got %d", sc.Spec.Replicas),
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: sc.Generation,
-		}
-		setCondition(&sc.Status.Conditions, meta)
-		if err := r.Status().Update(ctx, sc); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// 3. Validate password configuration: either an existing Secret must be referenced,
-	//    or both hash fields must be non-empty.  Refuse to proceed otherwise so we never
-	//    spin up a slapd with empty/undefined credentials.
+	// 2. Validate password configuration: either an existing Secret must be referenced,
+	//    or both hash fields must be non-empty.
 	if sc.Spec.LDAP.PasswordSecretName == "" &&
 		(sc.Spec.LDAP.AdminPasswordHash == "" || sc.Spec.LDAP.RootPasswordHash == "") {
 		log.Info("password configuration incomplete; set ldap.passwordSecretName or both ldap.adminPasswordHash and ldap.rootPasswordHash")
@@ -109,38 +90,41 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	// 5. Reconcile managed password Secret (create-only).
+	// 3. Reconcile managed password Secret (create-only).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSecret: %w", err)
 	}
 
-	// 6. Reconcile PVCs (create-only, never update).
-	if err := r.reconcilePVCs(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcilePVCs: %w", err)
+	// 4. Reconcile replication Secret (create-only; no-op when replication disabled).
+	if err := r.reconcileReplicationSecret(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileReplicationSecret: %w", err)
 	}
 
-	// 7. Reconcile headless Service.
+	// 5. Reconcile headless Service.
 	if err := r.reconcileHeadlessService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileHeadlessService: %w", err)
 	}
 
-	// 8. Reconcile ClusterIP Service.
+	// 6. Reconcile ClusterIP Service.
 	if err := r.reconcileClusterIPService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileClusterIPService: %w", err)
 	}
 
-	// 9. Reconcile StatefulSet.
+	// 7. Reconcile StatefulSet.
 	if err := r.reconcileStatefulSet(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
 	}
 
-	// 10. Observe StatefulSet status → update SlapdCluster status.
+	// 8. Observe StatefulSet status → update SlapdCluster status.
 	sts := &appsv1.StatefulSet{}
 	if err := r.Get(ctx, req.NamespacedName, sts); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get StatefulSet: %w", err)
 	}
 
 	desired := sc.Spec.Replicas
+	if desired == 0 {
+		desired = 1
+	}
 	ready := sts.Status.ReadyReplicas
 
 	sc.Status.Replicas = sts.Status.Replicas
@@ -194,7 +178,6 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 	name := sc.Name + "-passwords"
 	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, secret)
 	if err == nil {
-		// Secret already exists; never update it.
 		return nil
 	}
 	if !errors.IsNotFound(err) {
@@ -218,85 +201,42 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 	return r.Create(ctx, secret)
 }
 
-// reconcilePVCs creates config and data PVCs when persistence is enabled.
-// It never updates existing PVCs (PVC specs are immutable after creation).
-func (r *SlapdClusterReconciler) reconcilePVCs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
-	if !sc.Spec.Persistence.Enabled {
+// reconcileReplicationSecret creates the <name>-replication Secret with a randomly generated
+// password when replication is enabled. It never updates an existing Secret.
+func (r *SlapdClusterReconciler) reconcileReplicationSecret(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if !sc.Spec.Replication.Enabled {
 		return nil
 	}
 
-	type pvcDef struct {
-		suffix  string
-		pvcConf ldapv1alpha1.SlapdPVCConfig
+	name := sc.Name + "-replication"
+	existing := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, existing)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
 	}
 
-	cfgSize := sc.Spec.Persistence.Config.Size
-	if cfgSize == "" {
-		cfgSize = "1Gi"
-	}
-	dataSize := sc.Spec.Persistence.Data.Size
-	if dataSize == "" {
-		dataSize = "5Gi"
-	}
-	cfgAM := sc.Spec.Persistence.Config.AccessMode
-	if cfgAM == "" {
-		cfgAM = corev1.ReadWriteOnce
-	}
-	dataAM := sc.Spec.Persistence.Data.AccessMode
-	if dataAM == "" {
-		dataAM = corev1.ReadWriteOnce
+	pw, err := generatePassword(32)
+	if err != nil {
+		return fmt.Errorf("generate replication password: %w", err)
 	}
 
-	pvcs := []struct {
-		name   string
-		size   string
-		sc     string
-		access corev1.PersistentVolumeAccessMode
-	}{
-		{sc.Name + "-config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM},
-		{sc.Name + "-data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM},
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: sc.Namespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"password": pw,
+		},
 	}
-
-	for _, p := range pvcs {
-		existing := &corev1.PersistentVolumeClaim{}
-		err := r.Get(ctx, client.ObjectKey{Name: p.name, Namespace: sc.Namespace}, existing)
-		if err == nil {
-			continue
-		}
-		if !errors.IsNotFound(err) {
-			return err
-		}
-
-		qty, qerr := resource.ParseQuantity(p.size)
-		if qerr != nil {
-			return fmt.Errorf("invalid PVC size %q: %w", p.size, qerr)
-		}
-
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      p.name,
-				Namespace: sc.Namespace,
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes: []corev1.PersistentVolumeAccessMode{p.access},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: qty,
-					},
-				},
-			},
-		}
-		if p.sc != "" {
-			pvc.Spec.StorageClassName = &p.sc
-		}
-		if err := controllerutil.SetControllerReference(sc, pvc, r.Scheme); err != nil {
-			return err
-		}
-		if err := r.Create(ctx, pvc); err != nil {
-			return err
-		}
+	if err := controllerutil.SetControllerReference(sc, secret, r.Scheme); err != nil {
+		return err
 	}
-	return nil
+	return r.Create(ctx, secret)
 }
 
 // reconcileHeadlessService creates or updates the headless Service (clusterIP: None).
@@ -388,7 +328,7 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 	return err
 }
 
-// buildStatefulSetSpec constructs the StatefulSet spec mirroring the Helm chart.
+// buildStatefulSetSpec constructs the StatefulSet spec.
 func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster) appsv1.StatefulSetSpec {
 	labels := selectorLabels(sc.Name)
 	replicas := sc.Spec.Replicas
@@ -396,6 +336,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		replicas = 1
 	}
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
+	replicationEnabled := sc.Spec.Replication.Enabled && replicas > 1
 
 	// Determine the Secret name to pull password hashes from.
 	secretName := sc.Spec.LDAP.PasswordSecretName
@@ -415,7 +356,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		}
 	}
 
-	// --- Volumes ---
+	// ── Volumes (non-PVC) ─────────────────────────────────────────────────────
+	// PVCs come from volumeClaimTemplates (when persistence.enabled) or emptyDir.
 	volumes := []corev1.Volume{
 		{
 			Name:         "ldap-run",
@@ -423,26 +365,46 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		},
 	}
 
+	var volumeClaimTemplates []corev1.PersistentVolumeClaim
+
 	if sc.Spec.Persistence.Enabled {
-		volumes = append(volumes,
-			corev1.Volume{
-				Name: "ldap-config",
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: sc.Name + "-config",
-					},
-				},
-			},
-			corev1.Volume{
-				Name: "ldap-data",
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: sc.Name + "-data",
-					},
-				},
-			},
-		)
+		// Persistence: use StatefulSet volumeClaimTemplates (per-pod PVCs).
+		cfgSize := sc.Spec.Persistence.Config.Size
+		if cfgSize == "" {
+			cfgSize = "1Gi"
+		}
+		dataSize := sc.Spec.Persistence.Data.Size
+		if dataSize == "" {
+			dataSize = "5Gi"
+		}
+		accesslogSize := sc.Spec.Persistence.Accesslog.Size
+		if accesslogSize == "" {
+			accesslogSize = "1Gi"
+		}
+		cfgAM := sc.Spec.Persistence.Config.AccessMode
+		if cfgAM == "" {
+			cfgAM = corev1.ReadWriteOnce
+		}
+		dataAM := sc.Spec.Persistence.Data.AccessMode
+		if dataAM == "" {
+			dataAM = corev1.ReadWriteOnce
+		}
+		accesslogAM := sc.Spec.Persistence.Accesslog.AccessMode
+		if accesslogAM == "" {
+			accesslogAM = corev1.ReadWriteOnce
+		}
+
+		volumeClaimTemplates = []corev1.PersistentVolumeClaim{
+			pvcTemplate("ldap-config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
+			pvcTemplate("ldap-data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
+		}
+		if replicationEnabled {
+			volumeClaimTemplates = append(volumeClaimTemplates,
+				pvcTemplate("ldap-accesslog", accesslogSize, sc.Spec.Persistence.Accesslog.StorageClass, accesslogAM),
+			)
+		}
 	} else {
+		// No persistence: emptyDir for all data volumes.
 		volumes = append(volumes,
 			corev1.Volume{
 				Name:         "ldap-config",
@@ -453,6 +415,12 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			},
 		)
+		if replicationEnabled {
+			volumes = append(volumes, corev1.Volume{
+				Name:         "ldap-accesslog",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			})
+		}
 	}
 
 	if sc.Spec.LDAP.TLS.Enabled {
@@ -466,7 +434,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		})
 	}
 
-	// --- Init container ---
+	// ── Init container ────────────────────────────────────────────────────────
 	initEnv := []corev1.EnvVar{
 		{Name: "LDAP_DOMAIN_DC", Value: sc.Spec.LDAP.Domain},
 		{
@@ -491,7 +459,9 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "FORCE_REBOOTSTRAP", Value: strconv.FormatBool(sc.Spec.LDAP.ForceRebootstrap)},
 		{Name: "CONFIG_DIR", Value: "/ldap-config"},
 		{Name: "DATA_DIR", Value: "/ldap-data"},
+		{Name: "ACCESSLOG_DIR", Value: "/ldap-accesslog"},
 	}
+
 	if sc.Spec.LDAP.TLS.Enabled {
 		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "LDAP_TLS_CACERT_PATH", Value: "/etc/openldap/tls/ca.crt"},
@@ -500,9 +470,34 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		)
 	}
 
+	if replicationEnabled {
+		initEnv = append(initEnv,
+			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(replicas))},
+			corev1.EnvVar{Name: "LDAP_CLUSTER_NAME", Value: sc.Name},
+			corev1.EnvVar{Name: "LDAP_CLUSTER_HEADLESS_SVC", Value: sc.Name + "-headless"},
+			corev1.EnvVar{Name: "LDAP_NAMESPACE", Value: sc.Namespace},
+			corev1.EnvVar{
+				Name: "LDAP_REPLICATION_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-replication"},
+						Key:                  "password",
+					},
+				},
+			},
+		)
+	}
+
 	initMounts := []corev1.VolumeMount{
 		{Name: "ldap-config", MountPath: "/ldap-config"},
 		{Name: "ldap-data", MountPath: "/ldap-data"},
+	}
+	if replicationEnabled {
+		initMounts = append(initMounts, corev1.VolumeMount{
+			Name:      "ldap-accesslog",
+			MountPath: "/ldap-accesslog",
+		})
 	}
 	if sc.Spec.LDAP.TLS.Enabled {
 		initMounts = append(initMounts, corev1.VolumeMount{
@@ -525,11 +520,17 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		VolumeMounts:    initMounts,
 	}
 
-	// --- Main container ---
+	// ── Main container ────────────────────────────────────────────────────────
 	mainMounts := []corev1.VolumeMount{
 		{Name: "ldap-config", MountPath: "/ldap-config"},
 		{Name: "ldap-data", MountPath: "/ldap-data"},
 		{Name: "ldap-run", MountPath: "/run/openldap"},
+	}
+	if replicationEnabled {
+		mainMounts = append(mainMounts, corev1.VolumeMount{
+			Name:      "ldap-accesslog",
+			MountPath: "/ldap-accesslog",
+		})
 	}
 	if sc.Spec.LDAP.TLS.Enabled {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
@@ -569,8 +570,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		Resources:       sc.Spec.Resources,
 	}
 
-	return appsv1.StatefulSetSpec{
-		ServiceName: sc.Name + "-headless", // must match the headless service
+	spec := appsv1.StatefulSetSpec{
+		ServiceName: sc.Name + "-headless",
 		Replicas:    &replicas,
 		Selector: &metav1.LabelSelector{
 			MatchLabels: labels,
@@ -586,7 +587,10 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 				Volumes:         volumes,
 			},
 		},
+		VolumeClaimTemplates: volumeClaimTemplates,
 	}
+
+	return spec
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -596,10 +600,11 @@ func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
-		Owns(&corev1.PersistentVolumeClaim{}).
 		Named("slapdcluster").
 		Complete(r)
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 // selectorLabels returns the standard pod selector labels.
 func selectorLabels(name string) map[string]string {
@@ -618,4 +623,34 @@ func setCondition(conditions *[]metav1.Condition, newCond metav1.Condition) {
 		}
 	}
 	*conditions = append(*conditions, newCond)
+}
+
+// pvcTemplate returns a PVC for use in StatefulSet volumeClaimTemplates.
+func pvcTemplate(name, size, storageClass string, accessMode corev1.PersistentVolumeAccessMode) corev1.PersistentVolumeClaim {
+	qty := resource.MustParse(size)
+	pvc := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{accessMode},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: qty,
+				},
+			},
+		},
+	}
+	if storageClass != "" {
+		pvc.Spec.StorageClassName = &storageClass
+	}
+	return pvc
+}
+
+// generatePassword returns a URL-safe base64-encoded random password of approximately
+// the given number of bytes entropy.
+func generatePassword(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
 }

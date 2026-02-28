@@ -86,12 +86,26 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		Expect(result.Entries).To(HaveLen(1))
 		contexts := result.Entries[0].GetAttributeValues("namingContexts")
 		Expect(contexts).NotTo(BeEmpty(), "rootDSE must advertise at least one namingContext")
-		baseDN = contexts[0]
+		// Skip internal cn= suffixes (cn=accesslog, cn=config); pick the user data tree.
+		for _, ctx := range contexts {
+			if strings.HasPrefix(strings.ToLower(ctx), "dc=") {
+				baseDN = ctx
+				break
+			}
+		}
+		Expect(baseDN).NotTo(BeEmpty(), "rootDSE must advertise a dc= naming context")
 		GinkgoLogr.Info("discovered base DN", "baseDN", baseDN)
 	}
 
 	By("Connecting to LDAP as admin")
 	ldapConn = connectLDAP(localLDAPAddr, baseDN, adminPW)
+
+	By("Waiting for bootstrap data to be visible (replication convergence)")
+	ouPeopleDN := "ou=People," + baseDN
+	Eventually(ctx, func() bool {
+		return ldapExists(ldapConn, ouPeopleDN)
+	}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
+		"ou=People not visible — bootstrap may not have run or replication has not converged")
 }, NodeTimeout(12*time.Minute))
 
 var _ = AfterSuite(func() {

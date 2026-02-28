@@ -1,3 +1,5 @@
+replicas: 3
+
 ldap:
   # domain: "dc=as8,dc=lab,dc=test"
   domain: "dc=chuck-chuck-chuck,dc=net"
@@ -12,3 +14,6 @@ ldap:
 
 # slapd -d log level. 0 = no debug output. See slapd(8) for levels.
 logLevel: 256
+
+replication:
+  enabled: true

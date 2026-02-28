@@ -89,14 +89,15 @@ var _ = Describe("slapd chart", func() {
 	})
 
 	Describe("PersistentVolumeClaims", func() {
-		for _, suffix := range []string{"config", "data"} {
-			suffix := suffix
-			It("has a Bound PVC for "+suffix, func() {
+		// PVCs are created by StatefulSet volumeClaimTemplates: ldap-<type>-<name>-<ordinal>.
+		for _, vol := range []string{"config", "data"} {
+			vol := vol
+			It("has a Bound PVC for "+vol+" on pod-0", func() {
 				pvc, err := k8sClient.CoreV1().PersistentVolumeClaims(namespace).Get(
-					context.Background(), "slapd-"+suffix, metav1.GetOptions{})
+					context.Background(), "ldap-"+vol+"-slapd-0", metav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(pvc.Status.Phase).To(Equal(corev1.ClaimBound),
-					"expected PVC slapd-%s to be Bound", suffix)
+					"expected PVC ldap-%s-slapd-0 to be Bound", vol)
 			})
 		}
 	})

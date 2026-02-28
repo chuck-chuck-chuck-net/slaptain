@@ -43,7 +43,7 @@ push: build-init build-slapd build-toolkit build-operator
 
 gencert:
 	kubectl get namespace $(NAMESPACE_TESTING) >/dev/null 2>&1 || kubectl create namespace $(NAMESPACE_TESTING)
-	cd tests && ./gencert.sh -n $(NAMESPACE_TESTING) -t slapd -s slapd slapd-tls
+	cd tests && ./gencert.sh -n $(NAMESPACE_TESTING) -t slapd -s slapd -H slapd-headless slapd-tls
 
 helm-install:
 	helm upgrade --install slapd ./charts/slapd \

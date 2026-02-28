@@ -26,6 +26,7 @@ spec:
       enabled: true
       secretName: slapd-tls
 
+  # Set replicas > 1 together with replication.enabled=true for N-way multi-master.
   replicas: 1
   logLevel: 0
 
@@ -39,11 +40,25 @@ spec:
       size: 5Gi
       accessMode: ReadWriteOnce
       # storageClass: ""
+    # accesslog is only provisioned when replication.enabled=true.
+    accesslog:
+      size: 1Gi
+      accessMode: ReadWriteOnce
+      # storageClass: ""
 
   service:
     type: ClusterIP
     ldapPort: 389
     ldapsPort: 636
+
+  # replication enables N-way multi-master delta-syncrepl (Phase 2).
+  # The operator auto-generates a random bind password in <name>-replication Secret.
+  replication:
+    enabled: false
+  # Example 3-replica multi-master cluster:
+  # replicas: 3
+  # replication:
+  #   enabled: true
 
   # resources:
   #   requests:
@@ -57,19 +72,3 @@ spec:
   #   runAsUser: 1024
   #   runAsGroup: 1024
   #   fsGroup: 1024
-
-  # replication is stored in the CRD but ignored in Phase 1.
-  # Uncomment to pre-populate for Phase 2 readiness.
-  # replication:
-  #   enabled: false
-  #   role: provider
-  #   mode: delta-syncrepl
-  #   accessLogEnabled: true
-  #   peers:
-  #     - name: slapd-site-b
-  #   externalPeers:
-  #     - name: remote-site-c
-  #       uri: ldaps://ldap.remote-site.example.com:636
-  #       tlsSecretName: remote-site-c-ca
-  #       bindDN: cn=replicator,dc=example,dc=org
-  #       bindPasswordSecretName: remote-site-c-replicator-pw

@@ -148,6 +148,24 @@ spec:
                 description: persistence configures persistent storage for config
                   and data volumes.
                 properties:
+                  accesslog:
+                    description: |-
+                      accesslog is the PVC for the delta-syncrepl access log (/ldap-accesslog).
+                      Only provisioned when replication is enabled.
+                    properties:
+                      accessMode:
+                        default: ReadWriteOnce
+                        description: accessMode is the PVC access mode.
+                        type: string
+                      size:
+                        default: 1Gi
+                        description: size is the requested storage size.
+                        type: string
+                      storageClass:
+                        description: storageClass is the storage class name. Defaults
+                          to the cluster default if empty.
+                        type: string
+                    type: object
                   config:
                     description: config is the PVC for the slapd configuration directory
                       (/ldap-config).
@@ -189,14 +207,14 @@ spec:
                 type: object
               replicas:
                 default: 1
-                description: replicas is the number of slapd replicas. Phase 1 only
-                  supports replicas=1.
+                description: replicas is the number of slapd replicas. Set spec.replication.enabled=true
+                  for replicas>1.
                 format: int32
                 minimum: 1
                 type: integer
               replication:
-                description: replication configures replication (Phase 2+). Stored
-                  but ignored in Phase 1.
+                description: replication configures N-way multi-master delta-syncrepl
+                  replication (Phase 2+).
                 properties:
                   accessLogEnabled:
                     default: false

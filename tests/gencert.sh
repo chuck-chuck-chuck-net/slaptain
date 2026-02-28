@@ -10,14 +10,18 @@ join_by() {
 
 sts=""
 service=""
+headless_svc=""
 dns_names=""
 namespace=""
 
 usage() { echo "Usage: $0 <secret>" 1>&2; exit 1; }
-while getopts ":d:n:s:t:" o; do
+while getopts ":d:H:n:s:t:" o; do
     case "${o}" in
         d)
             dns_names="$OPTARG"
+            ;;
+        H)
+            headless_svc="$OPTARG"
             ;;
         n)
             namespace="$OPTARG"
@@ -64,7 +68,27 @@ fi
 # but experimentally it is to be observed that some special /O.../CN subj is required
 # otherwise the cert will not get approved, but failed
 
-domain=$(sed -ne '/^search/s/.* svc.\([^ ]*\).*/\1/pg' /etc/resolv.conf)
+# Stage 1: running inside a pod — /etc/resolv.conf has the cluster search path.
+domain=$(sed -ne '/^search/s/.* svc\.\([^ ]*\).*/\1/pg' /etc/resolv.conf)
+
+# Stage 2: running from a developer laptop with kubectl — query coredns Corefile.
+if [[ -z "$domain" ]]; then
+    domain=$(kubectl get configmap coredns -n kube-system \
+        -o jsonpath='{.data.Corefile}' 2>/dev/null \
+        | awk '/kubernetes/{print $2; exit}')
+fi
+
+# Stage 3: kube-dns clusters store it in a dedicated key.
+if [[ -z "$domain" ]]; then
+    domain=$(kubectl get configmap kube-dns -n kube-system \
+        -o jsonpath='{.data.domain}' 2>/dev/null || true)
+fi
+
+# Final fallback — nearly every cluster uses cluster.local.
+if [[ -z "$domain" ]]; then
+    echo "Warning: could not auto-discover cluster domain; defaulting to cluster.local" >&2
+    domain="cluster.local"
+fi
 
 subj="/O=system:nodes/CN=system:node:$label.$namespace.svc.$domain"
 # no sans just based on the label
@@ -92,7 +116,21 @@ fi
 if [[ -n "$sts" ]]
 then
     subj="/O=system:nodes/CN=system:node:$sts-*.$sts.$namespace.svc.$domain"
-    sans+=("DNS:$sts-*.$sts.$namespace.svc.$domain")
+    # RFC 6125 / OpenSSL 3: * must be the entire leftmost label (no partial wildcards).
+    sans+=("DNS:*.$sts.$namespace.svc.$domain")
+fi
+
+if [[ -n "$headless_svc" ]]
+then
+    sans+=(
+        "DNS:$headless_svc"
+        "DNS:$headless_svc.$namespace"
+        "DNS:$headless_svc.$namespace.svc"
+        "DNS:$headless_svc.$namespace.svc.$domain"
+        # RFC 6125 / OpenSSL 3 compliant wildcard: * is the entire leftmost label.
+        # Covers all per-pod DNS names: slapd-N.<headless>.<ns>.svc.<domain>
+        "DNS:*.$headless_svc.$namespace.svc.$domain"
+    )
 fi
 
 joined_sans=$(join_by ", " "${sans[@]}")

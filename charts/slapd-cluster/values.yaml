@@ -36,7 +36,7 @@ images:
     tag: latest
     pullPolicy: Always
 
-# -- Number of replicas. Phase 1 only supports 1.
+# -- Number of replicas. Set replication.enabled=true when using replicas > 1.
 replicas: 1
 
 # -- slapd -d log level. 0 disables debug output.
@@ -53,6 +53,17 @@ persistence:
     size: 5Gi
     storageClass: ""
     accessMode: ReadWriteOnce
+  # accesslog PVC is only provisioned when replication.enabled=true.
+  accesslog:
+    size: 1Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
+# -- Replication (Phase 2+). N-way multi-master delta-syncrepl.
+# Set enabled=true together with replicas>1 to activate.
+# The operator auto-generates a replication bind password in <name>-replication Secret.
+replication:
+  enabled: false
 
 # -- Service configuration.
 service:
