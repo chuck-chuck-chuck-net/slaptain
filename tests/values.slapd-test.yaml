@@ -24,6 +24,11 @@ slapd:
   passwordsSecretName: slapd-passwords
   configPasswordSecretName: slapd-config-password
 
+persistence:
+  volumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Retain
+
 bootstrap:
   # OX LDAP schema: attribute types and object classes for oxContextId, oxUserId,
   # oxContextName, oxLoginInfo, oxMailQuota, etc., plus the oxSecondaryAccount
