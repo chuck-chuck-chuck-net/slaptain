@@ -20,6 +20,9 @@ slapd:
   fullname: slapd
   # domain: "dc=as8,dc=lab,dc=test"
   domain: "dc=chuck-chuck-chuck,dc=net"
+  # In operator mode passwords live in the operator-managed secrets; don't duplicate them.
+  passwordsSecretName: slapd-passwords
+  configPasswordSecretName: slapd-config-password
 
 bootstrap:
   # OX LDAP schema: attribute types and object classes for oxContextId, oxUserId,

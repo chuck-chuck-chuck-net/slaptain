@@ -69,9 +69,9 @@ type SlapdLDAPConfig struct {
 	// +required
 	Domain string `json:"domain"`
 	// credentialsSecretName references an existing Secret containing admin-password
-	// and root-password keys (plaintext). When set, the operator reads these passwords
-	// and derives SSHA hashes for slapd configuration. When not set, the operator
-	// auto-generates random passwords and stores them in <name>-credentials.
+	// and root-password keys (plaintext); replication-password is optional. When set,
+	// the operator reads these and creates the two typed secrets (<name>-passwords and
+	// <name>-config-password). When not set, passwords are auto-generated.
 	// +optional
 	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
 	// forceRebootstrap instructs the init container to re-run bootstrap even if

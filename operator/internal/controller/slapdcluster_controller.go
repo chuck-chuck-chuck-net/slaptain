@@ -72,38 +72,33 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 2. Reconcile credential secrets (<name>-credentials plaintext + <name>-passwords hashes).
+	// 2. Reconcile credential secrets (<name>-passwords plaintext + <name>-config-password).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSecret: %w", err)
 	}
 
-	// 3. Reconcile replication Secret (create-only; no-op when replication disabled).
-	if err := r.reconcileReplicationSecret(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileReplicationSecret: %w", err)
-	}
-
-	// 4. Reconcile headless Service.
+	// 3. Reconcile headless Service.
 	if err := r.reconcileHeadlessService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileHeadlessService: %w", err)
 	}
 
-	// 5. Reconcile ClusterIP Service.
+	// 4. Reconcile ClusterIP Service.
 	if err := r.reconcileClusterIPService(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileClusterIPService: %w", err)
 	}
 
-	// 6. Reconcile StatefulSet.
+	// 5. Reconcile StatefulSet.
 	if err := r.reconcileStatefulSet(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
 	}
 
-	// 7. Bootstrap initial directory entries via LDAP once pod-0 is ready.
+	// 6. Bootstrap initial directory entries via LDAP once pod-0 is ready.
 	//    Sets sc.Status.BootstrapComplete = true on success; status persisted below.
 	if err := r.reconcileBootstrap(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileBootstrap: %w", err)
 	}
 
-	// 8. Observe StatefulSet status → update SlapdCluster status.
+	// 7. Observe StatefulSet status → update SlapdCluster status.
 	sts := &appsv1.StatefulSet{}
 	if err := r.Get(ctx, req.NamespacedName, sts); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get StatefulSet: %w", err)
@@ -150,35 +145,36 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 9. Requeue until fully Running.
+	// 8. Requeue until fully Running.
 	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
 }
 
-// reconcileSecret creates the credential secrets:
-//   - <name>-credentials  (plaintext admin-password + root-password; operator use)
-//   - <name>-passwords    (SSHA hashes; init container use)
+// reconcileSecret creates two plaintext credential secrets (both create-only):
+//   - <name>-passwords       admin-password + replication-password
+//   - <name>-config-password root-password
 //
-// Both are create-only. If spec.ldap.credentialsSecretName is set, plaintexts are
-// read from the user-provided secret instead of auto-generated.
+// If spec.ldap.credentialsSecretName is set the passwords are read from the
+// user-provided secret (must contain admin-password and root-password; replication-password
+// is optional). Otherwise all passwords are auto-generated.
 func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
-	hashName := sc.Name + "-passwords"
+	pwName := sc.Name + "-passwords"
+	cfgName := sc.Name + "-config-password"
 
-	// If <name>-passwords already exists, secrets are already in order.
-	hashSecret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: hashName, Namespace: sc.Namespace}, hashSecret); err == nil {
+	// If <name>-passwords already exists, both secrets are already in order.
+	existing := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: pwName, Namespace: sc.Namespace}, existing); err == nil {
 		return nil
 	} else if !errors.IsNotFound(err) {
 		return err
 	}
 
 	// Obtain plaintext passwords.
-	var adminPW, rootPW string
+	var adminPW, rootPW, replPW string
 
 	if sc.Spec.LDAP.CredentialsSecretName != "" {
-		// Read from the user-provided secret.
 		creds := &corev1.Secret{}
 		if err := r.Get(ctx, client.ObjectKey{
 			Name:      sc.Spec.LDAP.CredentialsSecretName,
@@ -192,103 +188,56 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 			return fmt.Errorf("secret %s must contain admin-password and root-password keys",
 				sc.Spec.LDAP.CredentialsSecretName)
 		}
+		// replication-password is optional in user-provided secret.
+		replPW = string(creds.Data["replication-password"])
 	} else {
-		// Auto-generate and store in <name>-credentials (create-only).
-		credName := sc.Name + "-credentials"
-		credSecret := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKey{Name: credName, Namespace: sc.Namespace}, credSecret); err == nil {
-			// Already exists — read back the stored passwords.
-			adminPW = string(credSecret.Data["admin-password"])
-			rootPW = string(credSecret.Data["root-password"])
-		} else if errors.IsNotFound(err) {
-			var genErr error
-			adminPW, genErr = generatePassword(24)
-			if genErr != nil {
-				return fmt.Errorf("generate admin password: %w", genErr)
-			}
-			rootPW, genErr = generatePassword(24)
-			if genErr != nil {
-				return fmt.Errorf("generate root password: %w", genErr)
-			}
-			cred := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: credName, Namespace: sc.Namespace},
-				Type:       corev1.SecretTypeOpaque,
-				StringData: map[string]string{
-					"admin-password": adminPW,
-					"root-password":  rootPW,
-				},
-			}
-			if err := controllerutil.SetControllerReference(sc, cred, r.Scheme); err != nil {
-				return err
-			}
-			if err := r.Create(ctx, cred); err != nil {
-				return err
-			}
-		} else {
-			return err
+		var err error
+		adminPW, err = generatePassword(24)
+		if err != nil {
+			return fmt.Errorf("generate admin password: %w", err)
+		}
+		rootPW, err = generatePassword(24)
+		if err != nil {
+			return fmt.Errorf("generate root password: %w", err)
 		}
 	}
 
-	// Hash the passwords and create <name>-passwords.
-	adminHash, err := generateSSHAHash(adminPW)
-	if err != nil {
-		return fmt.Errorf("hash admin password: %w", err)
-	}
-	rootHash, err := generateSSHAHash(rootPW)
-	if err != nil {
-		return fmt.Errorf("hash root password: %w", err)
+	if replPW == "" {
+		var err error
+		replPW, err = generatePassword(32)
+		if err != nil {
+			return fmt.Errorf("generate replication password: %w", err)
+		}
 	}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: hashName, Namespace: sc.Namespace},
+	// Create <name>-passwords (admin-password + replication-password).
+	pwSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: pwName, Namespace: sc.Namespace},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"admin-password-hash": adminHash,
-			"root-password-hash":  rootHash,
+			"admin-password":       adminPW,
+			"replication-password": replPW,
 		},
 	}
-	if err := controllerutil.SetControllerReference(sc, secret, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(sc, pwSecret, r.Scheme); err != nil {
 		return err
 	}
-	return r.Create(ctx, secret)
-}
-
-// reconcileReplicationSecret creates the <name>-replication Secret with a randomly generated
-// password when replication is enabled. It never updates an existing Secret.
-func (r *SlapdClusterReconciler) reconcileReplicationSecret(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
-	if !sc.Spec.Replication.Enabled {
-		return nil
-	}
-
-	name := sc.Name + "-replication"
-	existing := &corev1.Secret{}
-	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, existing)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
+	if err := r.Create(ctx, pwSecret); err != nil {
 		return err
 	}
 
-	pw, err := generatePassword(32)
-	if err != nil {
-		return fmt.Errorf("generate replication password: %w", err)
-	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: sc.Namespace,
-		},
-		Type: corev1.SecretTypeOpaque,
+	// Create <name>-config-password (root-password).
+	cfgSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: cfgName, Namespace: sc.Namespace},
+		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"password": pw,
+			"root-password": rootPW,
 		},
 	}
-	if err := controllerutil.SetControllerReference(sc, secret, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(sc, cfgSecret, r.Scheme); err != nil {
 		return err
 	}
-	return r.Create(ctx, secret)
+	return r.Create(ctx, cfgSecret)
 }
 
 // reconcileHeadlessService creates or updates the headless Service (clusterIP: None).
@@ -460,11 +409,10 @@ func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *lda
 		return fmt.Errorf("add root entry %s: %w", sc.Spec.LDAP.Domain, err)
 	}
 
-	// Add admin entry.  The password hash is already in <name>-passwords (created by
-	// reconcileSecret) so we reuse it here rather than hashing again.
-	adminHash, err := r.getAdminHash(ctx, sc)
+	// Add admin entry.  Hash the plaintext password we already have.
+	adminHash, err := generateSSHAHash(adminPW)
 	if err != nil {
-		return err
+		return fmt.Errorf("hash admin password: %w", err)
 	}
 	addAdmin := ldap.NewAddRequest(adminDN, nil)
 	addAdmin.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
@@ -477,14 +425,14 @@ func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *lda
 
 	// Add replication user when replication is enabled.
 	if sc.Spec.Replication.Enabled {
-		replSecret := &corev1.Secret{}
+		pwSecret := &corev1.Secret{}
 		if err := r.Get(ctx, client.ObjectKey{
-			Name:      sc.Name + "-replication",
+			Name:      sc.Name + "-passwords",
 			Namespace: sc.Namespace,
-		}, replSecret); err != nil {
-			return fmt.Errorf("read replication secret: %w", err)
+		}, pwSecret); err != nil {
+			return fmt.Errorf("read passwords secret: %w", err)
 		}
-		replPW := string(replSecret.Data["password"])
+		replPW := string(pwSecret.Data["replication-password"])
 		replHash, err := generateSSHAHash(replPW)
 		if err != nil {
 			return fmt.Errorf("hash replication password: %w", err)
@@ -514,9 +462,6 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
 	replicationEnabled := sc.Spec.Replication.Enabled && replicas > 1
-
-	// The hashed-password secret is always <name>-passwords (created by reconcileSecret).
-	secretName := sc.Name + "-passwords"
 
 	// Pod security context.
 	podSecCtx := sc.Spec.SecurityContext
@@ -609,20 +554,20 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	initEnv := []corev1.EnvVar{
 		{Name: "LDAP_DOMAIN_DC", Value: sc.Spec.LDAP.Domain},
 		{
-			Name: "LDAP_ADMIN_PW_HASH",
+			Name: "LDAP_ADMIN_PW",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  "admin-password-hash",
+					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-passwords"},
+					Key:                  "admin-password",
 				},
 			},
 		},
 		{
-			Name: "LDAP_ROOT_PW_HASH",
+			Name: "LDAP_ROOT_PW",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  "root-password-hash",
+					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-config-password"},
+					Key:                  "root-password",
 				},
 			},
 		},
@@ -652,8 +597,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 				Name: "LDAP_REPLICATION_PASSWORD",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-replication"},
-						Key:                  "password",
+						LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-passwords"},
+						Key:                  "replication-password",
 					},
 				},
 			},
@@ -839,35 +784,17 @@ func generateSSHAHash(password string) (string, error) {
 	return "{SSHA}" + base64.StdEncoding.EncodeToString(combined), nil
 }
 
-// getAdminPassword reads the plaintext admin password from <name>-credentials
-// (or spec.ldap.credentialsSecretName when set).
+// getAdminPassword reads the plaintext admin password from <name>-passwords.
 func (r *SlapdClusterReconciler) getAdminPassword(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
-	secretName := sc.Spec.LDAP.CredentialsSecretName
-	if secretName == "" {
-		secretName = sc.Name + "-credentials"
-	}
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sc.Namespace}, secret); err != nil {
-		return "", fmt.Errorf("read credentials secret %s: %w", secretName, err)
+	if err := r.Get(ctx, client.ObjectKey{Name: sc.Name + "-passwords", Namespace: sc.Namespace}, secret); err != nil {
+		return "", fmt.Errorf("read passwords secret %s-passwords: %w", sc.Name, err)
 	}
 	pw := string(secret.Data["admin-password"])
 	if pw == "" {
-		return "", fmt.Errorf("secret %s is missing admin-password key", secretName)
+		return "", fmt.Errorf("secret %s-passwords is missing admin-password key", sc.Name)
 	}
 	return pw, nil
-}
-
-// getAdminHash reads the SSHA admin password hash from <name>-passwords.
-func (r *SlapdClusterReconciler) getAdminHash(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: sc.Name + "-passwords", Namespace: sc.Namespace}, secret); err != nil {
-		return "", fmt.Errorf("read passwords secret: %w", err)
-	}
-	hash := string(secret.Data["admin-password-hash"])
-	if hash == "" {
-		return "", fmt.Errorf("secret %s-passwords is missing admin-password-hash key", sc.Name)
-	}
-	return hash, nil
 }
 
 // isPodReady returns true when all containers in the pod report Ready.

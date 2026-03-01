@@ -18,14 +18,14 @@ ldap:
     secretName: "slapd-tls"
 
 # Password secret.
-# The chart creates a Secret named <fullname>-passwords with the hashes below,
+# The chart creates a Secret named <fullname>-passwords with the plaintexts below,
 # unless existingSecret is set — in which case no Secret is created and the named
-# Secret is referenced directly.  It must contain admin-password-hash and
-# root-password-hash keys.
+# Secret is referenced directly.  It must contain admin-password and root-password keys.
+# Hashes are computed at runtime by slappasswd inside the init container.
 passwords:
   existingSecret: ""
-  adminPasswordHash: ""  # required; generate with: slappasswd -h {SSHA} -s yourpassword
-  rootPasswordHash: ""   # required
+  adminPassword: ""  # required plaintext admin password
+  rootPassword: ""   # required plaintext config DB password
 
 persistence:
   enabled: true

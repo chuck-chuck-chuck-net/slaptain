@@ -55,15 +55,23 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		return jobSucceeded(k8sClient, namespace, "slapd-test")
 	}).WithTimeout(5 * time.Minute).WithPolling(10 * time.Second).Should(BeTrue())
 
-	By("Reading passwords from slapd-test-passwords secret")
-	secret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-test-passwords", metav1.GetOptions{})
+	By("Reading admin password from slapd-passwords secret")
+	pwSecret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-passwords", metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred())
-	adminPW = string(secret.Data["admin-password"])
-	Expect(adminPW).NotTo(BeEmpty(), "admin password must not be empty in slapd-test-passwords")
-	rootPW = string(secret.Data["root-password"])
-	Expect(rootPW).NotTo(BeEmpty(), "root password must not be empty in slapd-test-passwords")
+	adminPW = string(pwSecret.Data["admin-password"])
+	Expect(adminPW).NotTo(BeEmpty(), "admin-password must not be empty in slapd-passwords")
+
+	By("Reading root password from slapd-config-password secret")
+	cfgSecret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-config-password", metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred())
+	rootPW = string(cfgSecret.Data["root-password"])
+	Expect(rootPW).NotTo(BeEmpty(), "root-password must not be empty in slapd-config-password")
+
+	By("Reading readpw passwords from slapd-test-passwords secret")
+	testSecret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-test-passwords", metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred())
 	readpwPWs = make(map[string]string)
-	for k, v := range secret.Data {
+	for k, v := range testSecret.Data {
 		if user, ok := strings.CutPrefix(k, "readpw-"); ok {
 			readpwPWs[user] = string(v)
 		}

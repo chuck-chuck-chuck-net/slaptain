@@ -78,13 +78,19 @@ var _ = Describe("slapd chart", func() {
 	})
 
 	Describe("Passwords secret", func() {
-		It("contains admin and root password hashes", func() {
+		It("slapd-passwords contains admin-password and replication-password", func() {
 			secret, err := k8sClient.CoreV1().Secrets(namespace).Get(context.Background(), "slapd-passwords", metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(secret.Data).To(HaveKey("admin-password-hash"))
-			Expect(secret.Data).To(HaveKey("root-password-hash"))
-			Expect(string(secret.Data["admin-password-hash"])).NotTo(BeEmpty())
-			Expect(string(secret.Data["root-password-hash"])).NotTo(BeEmpty())
+			Expect(secret.Data).To(HaveKey("admin-password"))
+			Expect(secret.Data).To(HaveKey("replication-password"))
+			Expect(string(secret.Data["admin-password"])).NotTo(BeEmpty())
+			Expect(string(secret.Data["replication-password"])).NotTo(BeEmpty())
+		})
+		It("slapd-config-password contains root-password", func() {
+			secret, err := k8sClient.CoreV1().Secrets(namespace).Get(context.Background(), "slapd-config-password", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(secret.Data).To(HaveKey("root-password"))
+			Expect(string(secret.Data["root-password"])).NotTo(BeEmpty())
 		})
 	})
 

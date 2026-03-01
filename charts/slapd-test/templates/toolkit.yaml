@@ -1,5 +1,4 @@
 {{- if .Values.toolkit.enabled }}
-{{- $secretName := (default (printf "%s-passwords" (include "slapd-test.fullname" .)) .Values.slapd.secretName) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,12 +26,12 @@ spec:
             - name: LDAP_ADMIN_PW
               valueFrom:
                 secretKeyRef:
-                  name: {{ $secretName }}
+                  name: {{ coalesce .Values.slapd.secretName .Values.slapd.passwordsSecretName (printf "%s-passwords" (include "slapd-test.fullname" .)) }}
                   key: admin-password
             - name: LDAP_ROOT_PW
               valueFrom:
                 secretKeyRef:
-                  name: {{ $secretName }}
+                  name: {{ coalesce .Values.slapd.secretName .Values.slapd.configPasswordSecretName (printf "%s-passwords" (include "slapd-test.fullname" .)) }}
                   key: root-password
             - name: LDAPTLS_CACERT
               value: /etc/ldap/tls/ca.crt

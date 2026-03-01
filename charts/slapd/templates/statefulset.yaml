@@ -29,16 +29,16 @@ spec:
             - name: LDAP_DOMAIN_DC
               value: {{ .Values.ldap.domain | quote }}
             {{- $secretName := (default (printf "%s-passwords" (include "slapd.fullname" .)) .Values.passwords.existingSecret) }}
-            - name: LDAP_ADMIN_PW_HASH
+            - name: LDAP_ADMIN_PW
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretName }}
-                  key: admin-password-hash
-            - name: LDAP_ROOT_PW_HASH
+                  key: admin-password
+            - name: LDAP_ROOT_PW
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretName }}
-                  key: root-password-hash
+                  key: root-password
             - name: LDAP_TLS_ENABLED
               value: {{ .Values.ldap.tls.enabled | quote }}
             - name: FORCE_REBOOTSTRAP
