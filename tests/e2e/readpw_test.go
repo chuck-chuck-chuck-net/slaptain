@@ -172,30 +172,39 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 		}
 	})
 
-	It("a readpw user can read userPassword from ou=Mail", func() {
+	It("a readpw user can read userPassword from ou=Mail", func(ctx SpecContext) {
 		// ACL rule {0}: to dn.subtree="ou=Mail,..." attrs=userPassword
 		//   … by dn.children="ou=Readpw,..." read …
+		//
+		// Use Eventually: the operator applies spec.ldap.acls to each pod
+		// individually via headless service DNS on every reconcile loop.  By the
+		// time the test runs, some pods may still carry the default ACLs (which
+		// deny userPassword reads).  Each retry opens a fresh TCP connection to the
+		// ClusterIP, which may route to a different pod; within 30 s the operator
+		// will have reconciled all pods and every connection attempt will succeed.
 		var user, pw string
 		for u, p := range readpwPWs {
 			user, pw = u, p
 			break
 		}
 
-		conn, err := ldap.Dial("tcp", localLDAPAddr)
-		Expect(err).NotTo(HaveOccurred())
-		defer conn.Close()
+		Eventually(ctx, func(g Gomega) {
+			conn, err := ldap.Dial("tcp", localLDAPAddr)
+			g.Expect(err).NotTo(HaveOccurred())
+			defer conn.Close()
 
-		Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN), pw)).To(Succeed())
+			g.Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN), pw)).To(Succeed())
 
-		req := ldap.NewSearchRequest(mailUserDN,
-			ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-			0, 0, false, "(objectClass=*)", []string{"userPassword"}, nil)
-		result, err := conn.Search(req)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(result.Entries).To(HaveLen(1))
-		Expect(result.Entries[0].GetAttributeValue("userPassword")).NotTo(BeEmpty(),
-			"readpw user %q should be able to read userPassword from ou=Mail", user)
-	})
+			req := ldap.NewSearchRequest(mailUserDN,
+				ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+				0, 0, false, "(objectClass=*)", []string{"userPassword"}, nil)
+			result, err := conn.Search(req)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(result.Entries).To(HaveLen(1))
+			g.Expect(result.Entries[0].GetAttributeValue("userPassword")).NotTo(BeEmpty(),
+				"readpw user %q should be able to read userPassword from ou=Mail", user)
+		}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+	}, SpecTimeout(35*time.Second))
 
 	It("a readpw user cannot read userPassword from ou=People", func() {
 		// ACL rule {1}: to attrs=userPassword … by * none

@@ -73,6 +73,14 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 		}).WithTimeout(3*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
 			"slapd-1 should restart and become ready within 3 min")
 
+		// ldapConn was established via ClusterIP and may have been connected to
+		// slapd-1. After the pod is deleted its TCP connection is severed regardless
+		// of which endpoint it was on. Reconnect to ensure subsequent steps — and
+		// all tests that follow in the suite — can still use ldapConn.
+		By("reconnecting admin LDAP connection (in case it was connected to the restarted pod)")
+		ldapConn.Close()
+		ldapConn = retryConnectLDAP(ctx, localLDAPAddr, baseDN, adminPW)
+
 		By("verifying data is accessible via ClusterIP after restart")
 		Expect(ldapExists(ldapConn, baseDN)).To(BeTrue())
 		Expect(ldapExists(ldapConn, fmt.Sprintf("ou=People,%s", baseDN))).To(BeTrue())
@@ -83,8 +91,22 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 		defer conn1.Close()
 
 		uid := fmt.Sprintf("resil-p1-%d", GinkgoRandomSeed())
-		dn := addReplTestUser(ldapConn, uid, 65520)
-		defer ldapConn.Del(ldap.NewDelRequest(dn, nil)) //nolint:errcheck
+		var dn string
+		if sts.Spec.Replicas != nil && *sts.Spec.Replicas >= 3 {
+			// For ≥3-replica clusters explicitly verify the slapd-2→slapd-1 channel.
+			// Using ldapConn (ClusterIP) here is non-deterministic: the write might
+			// land on slapd-0, leaving the slapd-2→slapd-1 channel unverified. A
+			// subsequent replication test writing to slapd-2 would then race against
+			// that channel still reconnecting.
+			conn2, cancel2 := dialPodLDAP(namespace, "slapd-2", podPort2)
+			defer cancel2()
+			defer conn2.Close()
+			dn = addReplTestUser(conn2, uid, 65520)
+			defer conn2.Del(ldap.NewDelRequest(dn, nil)) //nolint:errcheck
+		} else {
+			dn = addReplTestUser(ldapConn, uid, 65520)
+			defer ldapConn.Del(ldap.NewDelRequest(dn, nil)) //nolint:errcheck
+		}
 
 		Eventually(ctx, func() bool {
 			return ldapExists(conn1, dn)
@@ -230,7 +252,7 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 
 			Eventually(ctx, func() bool {
 				return ldapExists(conn1, dn)
-			}).WithTimeout(30*time.Second).WithPolling(2*time.Second).Should(BeTrue(),
+			}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(BeTrue(),
 				"replication should be healthy after warm restart")
 		}
 	}, NodeTimeout(8*time.Minute))

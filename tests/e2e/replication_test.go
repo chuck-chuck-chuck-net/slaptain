@@ -102,10 +102,13 @@ var _ = Describe("replication", Label("replication"), func() {
 		defer conn2.Del(ldap.NewDelRequest(dn, nil)) //nolint:errcheck
 
 		GinkgoLogr.Info("wrote test entry to slapd-2, waiting for slapd-0 and slapd-1", "dn", dn)
+		// 60 s timeout: if the resilience tests ran first and slapd-1 recently
+		// restarted, the slapd-2→slapd-1 syncrepl channel may need extra time to
+		// re-establish (retry="5 10 60 +" means up to ~50 s for 10 retries at 5 s).
 		Eventually(ctx, func() bool {
 			return ldapExists(conn0, dn) && ldapExists(conn1, dn)
-		}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(BeTrue(),
-			"entry %s should propagate from slapd-2 to both slapd-0 and slapd-1 within 30 s", dn)
+		}).WithTimeout(60 * time.Second).WithPolling(2 * time.Second).Should(BeTrue(),
+			"entry %s should propagate from slapd-2 to both slapd-0 and slapd-1 within 60 s", dn)
 	}, NodeTimeout(2*time.Minute))
 
 	// ── Delete propagation ────────────────────────────────────────────────────
