@@ -46,6 +46,7 @@ import (
 const (
 	ldapContainerPort  = int32(1024)
 	ldapsContainerPort = int32(1025)
+	fieldManager       = "slapdcluster-controller"
 )
 
 // SlapdClusterReconciler reconciles a SlapdCluster object.
@@ -141,7 +142,19 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		ObservedGeneration: sc.Generation,
 	})
 
-	if err := r.Status().Update(ctx, sc); err != nil {
+	// SSA patch on the status subresource: no resourceVersion check, no conflict possible.
+	statusPatch := &ldapv1alpha1.SlapdCluster{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
+			Kind:       "SlapdCluster",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sc.Name,
+			Namespace: sc.Namespace,
+		},
+	}
+	statusPatch.Status = sc.Status
+	if err := r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -240,38 +253,41 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 	return r.Create(ctx, cfgSecret)
 }
 
-// reconcileHeadlessService creates or updates the headless Service (clusterIP: None).
+// reconcileHeadlessService applies the headless Service (clusterIP: None) via SSA.
 // Named <name>-headless so the bare <name> can be used for the ClusterIP service.
 func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	svc := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-headless",
 			Namespace: sc.Namespace,
 		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: corev1.ClusterIPNone,
+			Selector:  selectorLabels(sc.Name),
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "ldap",
+					Port:       ldapContainerPort,
+					TargetPort: intstr.FromString("ldap"),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "ldaps",
+					Port:       ldapsContainerPort,
+					TargetPort: intstr.FromString("ldaps"),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Spec.ClusterIP = corev1.ClusterIPNone
-		svc.Spec.Selector = selectorLabels(sc.Name)
-		svc.Spec.Ports = []corev1.ServicePort{
-			{
-				Name:       "ldap",
-				Port:       ldapContainerPort,
-				TargetPort: intstr.FromString("ldap"),
-				Protocol:   corev1.ProtocolTCP,
-			},
-			{
-				Name:       "ldaps",
-				Port:       ldapsContainerPort,
-				TargetPort: intstr.FromString("ldaps"),
-				Protocol:   corev1.ProtocolTCP,
-			},
-		}
-		return controllerutil.SetControllerReference(sc, svc, r.Scheme)
-	})
-	return err
+	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
+		return err
+	}
+	return r.Patch(ctx, svc, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
-// reconcileClusterIPService creates or updates the ClusterIP Service.
+// reconcileClusterIPService applies the ClusterIP Service via SSA.
 func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	svcType := sc.Spec.Service.Type
 	if svcType == "" {
@@ -287,46 +303,50 @@ func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, 
 	}
 
 	svc := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name,
 			Namespace: sc.Namespace,
 		},
+		Spec: corev1.ServiceSpec{
+			Type:     svcType,
+			Selector: selectorLabels(sc.Name),
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "ldap",
+					Port:       ldapPort,
+					TargetPort: intstr.FromString("ldap"),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "ldaps",
+					Port:       ldapsPort,
+					TargetPort: intstr.FromString("ldaps"),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Spec.Type = svcType
-		svc.Spec.Selector = selectorLabels(sc.Name)
-		svc.Spec.Ports = []corev1.ServicePort{
-			{
-				Name:       "ldap",
-				Port:       ldapPort,
-				TargetPort: intstr.FromString("ldap"),
-				Protocol:   corev1.ProtocolTCP,
-			},
-			{
-				Name:       "ldaps",
-				Port:       ldapsPort,
-				TargetPort: intstr.FromString("ldaps"),
-				Protocol:   corev1.ProtocolTCP,
-			},
-		}
-		return controllerutil.SetControllerReference(sc, svc, r.Scheme)
-	})
-	return err
+	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
+		return err
+	}
+	return r.Patch(ctx, svc, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
-// reconcileStatefulSet creates or updates the StatefulSet.
+// reconcileStatefulSet applies the StatefulSet via SSA.
 func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	sts := &appsv1.StatefulSet{
+		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name,
 			Namespace: sc.Namespace,
 		},
+		Spec: r.buildStatefulSetSpec(sc),
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
-		sts.Spec = r.buildStatefulSetSpec(sc)
-		return controllerutil.SetControllerReference(sc, sts, r.Scheme)
-	})
-	return err
+	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
+		return err
+	}
+	return r.Patch(ctx, sts, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // reconcileBootstrap seeds the initial LDAP directory entries via a live LDAP connection
