@@ -36,18 +36,20 @@ sed "s|olcDatabase={[0-9]*}mdb,cn=config|${DATA_DB_DN}|g" \
     /config/slapd-readpw.json > /tmp/slapd-readpw.json
 
 # custom-schema.json is optional; only present when bootstrap.customSchemaJson is set.
+# Use --bindpw=VALUE (long-form with =) instead of -w VALUE so that passwords
+# starting with '-' are never misinterpreted as flags by Python's argparse.
 if [ -f /config/custom-schema.json ]; then
     python /config/ldap-bootstrap.py -d -H "ldaps://${SLAPD_HOST}/" \
-        -D "cn=admin,cn=config" -w "${LDAP_ROOT_PW}" \
+        -D "cn=admin,cn=config" --bindpw="${LDAP_ROOT_PW}" \
         /config/custom-schema.json /tmp/slapd-readpw.json
 else
     python /config/ldap-bootstrap.py -d -H "ldaps://${SLAPD_HOST}/" \
-        -D "cn=admin,cn=config" -w "${LDAP_ROOT_PW}" \
+        -D "cn=admin,cn=config" --bindpw="${LDAP_ROOT_PW}" \
         /tmp/slapd-readpw.json
 fi
 
 # ── Step 2: Directory data (OUs and read-only service accounts) ───────────────
 python /config/ldap-bootstrap.py -d -H "ldaps://${SLAPD_HOST}/" \
-    --domain "${LDAP_DOMAIN}" -w "${LDAP_ADMIN_PW}" \
+    --domain "${LDAP_DOMAIN}" --bindpw="${LDAP_ADMIN_PW}" \
     --readpw-ou "${READPW_OU}" \
     --auto-readpw /config/ldap-readpw-users.secret.yaml /config/slapd-ous.json
