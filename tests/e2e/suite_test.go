@@ -29,9 +29,17 @@ var (
 	namespace = envOrDefault("NAMESPACE_TESTING", "slaptain-testing")
 
 	// LDAP_SVC — service to port-forward for plain LDAP access (port 389).
+	// Only used in local mode (when LDAP_ADDR is not set).
 	ldapSvc = envOrDefault("LDAP_SVC", "svc/slapd")
 
-	localLDAPAddr = "localhost:13891"
+	// LDAP_ADDR — direct LDAP address used when running in-cluster.
+	// When set, kubectl port-forward is skipped entirely.
+	// Example: slapd.slaptain-testing.svc.cluster.local:389
+	localLDAPAddr = envOrDefault("LDAP_ADDR", "localhost:13891")
+
+	// LDAP_HEADLESS_SVC — headless service name for per-pod DNS in in-cluster mode.
+	// Pods are reachable at <pod>.<headless>.<namespace>.svc.cluster.local:1024.
+	ldapHeadlessSvc = envOrDefault("LDAP_HEADLESS_SVC", "slapd-headless")
 )
 
 // ── Ginkgo bootstrap ──────────────────────────────────────────────────────────
@@ -77,9 +85,16 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		}
 	}
 
-	By("Starting kubectl port-forward to " + ldapSvc + ":389")
-	pfCancel = startPortForward(namespace, ldapSvc, "13891", "389")
-	time.Sleep(2 * time.Second)
+	// In local mode set up a kubectl port-forward so tests can reach slapd.
+	// In in-cluster mode (LDAP_ADDR set) we have direct network access and
+	// the port-forward subprocess is neither needed nor available.
+	if os.Getenv("LDAP_ADDR") == "" {
+		By("Starting kubectl port-forward to " + ldapSvc + ":389")
+		pfCancel = startPortForward(namespace, ldapSvc, "13891", "389")
+		time.Sleep(2 * time.Second)
+	} else {
+		By("Using direct LDAP address (in-cluster mode): " + localLDAPAddr)
+	}
 
 	By("Discovering base DN from LDAP rootDSE")
 	{
