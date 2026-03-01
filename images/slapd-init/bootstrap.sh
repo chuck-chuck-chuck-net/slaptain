@@ -153,10 +153,14 @@ overlay syncprov
 syncprov-checkpoint 100 10
 syncprov-sessionlog 100
 
+access to attrs=userPassword
+  by self write
+  by anonymous auth
+  by * none
+
 access to *
   by dn.exact="cn=replication,$LDAP_DOMAIN_DC" read
-  by users read
-  by anonymous auth
+  by * read
 EOF
 
         # One syncrepl block per peer (skip self); mirrormode must follow syncrepl

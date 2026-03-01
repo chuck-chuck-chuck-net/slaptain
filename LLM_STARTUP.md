@@ -38,7 +38,11 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ├── Makefile                        # Root build targets (see Makefile Targets below)
 ├── LLM_STARTUP.md
 ├── docs/
-│   └── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
+│   ├── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
+│   ├── ONBOARDING.md               # Team onboarding: LDAP concepts, operator model, credential model
+│   └── adrs/
+│       ├── adr-001-double-reconcile-runs.md
+│       └── adr-002-cn-config-node-local-operator-managed.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -115,6 +119,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.images.{slapd,init}.{repository,tag,pullPolicy}` | `SlapdImages` | Image config for both containers |
 | `spec.ldap.domain` | string | LDAP domain in DC notation, e.g. `dc=example,dc=org` |
 | `spec.ldap.credentialsSecretName` | string | Optional: reference an existing plaintext credentials Secret (`admin-password` + `root-password` keys); suppresses auto-generation of `<name>-credentials` |
+| `spec.ldap.acls` | `[]string` | Ordered list of slapd.conf `access to ...` rules applied to every pod's `cn=config` by the operator; empty = preserve init-container defaults |
 | `spec.ldap.forceRebootstrap` | bool | Force init container to re-bootstrap (destructive) |
 | `spec.ldap.tls.{enabled,secretName}` | `SlapdTLSConfig` | TLS Secret must contain `tls.crt`, `tls.key`, `ca.crt` |
 | `spec.replicas` | int32 | Default 1; replication is only active when `replicas > 1` AND `replication.enabled=true` |
@@ -134,8 +139,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 4. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (SSA patch)
 5. `reconcileStatefulSet` — `serviceName: <name>-headless`; uses `volumeClaimTemplates` when persistence enabled (SSA patch)
 6. `reconcileBootstrap` — connect to pod-0 via pod IP on port 1024, bind as data rootdn, add root + admin + (optionally) replication entries; sets `status.bootstrapComplete=true`; no-op when already complete (see `docs/BOOTSTRAP.md`)
-7. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, conditions (SSA patch on status subresource)
-8. Not Running → `RequeueAfter: 10s`
+7. `reconcileACLs` — for each pod ordinal 0..replicas-1: dial `<name>-<N>.<name>-headless.<ns>.svc.cluster.local:1024`, bind as `cn=admin,cn=config` (from `<name>-config-password`), compare current `olcAccess` values against `spec.ldap.acls` (stripping `{N}` prefixes), replace if different; logs warning and skips pods not yet reachable (retries on next reconcile)
+8. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, conditions (SSA patch on status subresource)
+9. Not Running → `RequeueAfter: 10s`
 
 **Service naming (Bitnami convention):**
 - Headless: `<name>-headless` — used by StatefulSet for pod DNS (`<name>-0.<name>-headless.ns.svc`)
@@ -163,14 +169,17 @@ Key values structure:
 | `bootstrap.readpwOU` | OU name for read-only service accounts (default `Readpw`) |
 | `bootstrap.customSchemaJson` | Optional JSON schema entry for `cn=config`; empty = no custom schema |
 | `bootstrap.ousJson` | JSON array of OUs to create; supports Helm `tpl` expressions (domain/readpwOU substituted at render) |
-| `bootstrap.readpwAclJson` | JSON ACL modification for the data database; supports Helm `tpl` |
 | `bootstrap.readpwUsers` | `username → {SSHA}hash` — stored in LDAP entries |
 | `bootstrap.readpwPasswords` | `username → plaintext` — stored in `slapd-test-passwords` Secret as `readpw-<user>` keys; used by e2e tests to bind as readpw users |
 
-The `ousJson` / `readpwAclJson` / `customSchemaJson` values may contain `{{ }}` Helm template
-expressions. Values files are plain YAML (no rendering); expressions are only evaluated when the
-configmap template calls `tpl .Values.bootstrap.ousJson .`. This means `-f override.yaml` files
-can contain template expressions and they work identically to chart default values.
+The `ousJson` / `customSchemaJson` values may contain `{{ }}` Helm template expressions.
+Values files are plain YAML (no rendering); expressions are only evaluated when the configmap
+template calls `tpl .Values.bootstrap.ousJson .`. This means `-f override.yaml` files can
+contain template expressions and they work identically to chart default values.
+
+**Note:** ACL management was removed from the slapd-test chart. ACLs are now declared in
+`spec.ldap.acls` on the `SlapdCluster` CR and applied to every pod by the operator.
+See ADR-002.
 
 Deployment-specific overrides (e.g. OX schema, extra OUs) go in `tests/values.slapd-test.yaml`.
 Secrets (passwords, SSHA hashes) go in `tests/values.slapd-test.secret.yaml` (SOPS-encrypted).
@@ -296,17 +305,18 @@ change ACLs to open it up).
 |---|---|---|---|
 | slapd-init (init container) | Data admin + config admin passwords | Plaintext (hashed at runtime by `slappasswd`) | 1+ |
 | Operator: bootstrap | Data admin password | Plaintext | 2 (implemented) |
+| Operator: ACL management (`reconcileACLs`) | Config admin password | Plaintext | 2 (implemented) |
 | Operator: topology reconfiguration | Config admin password | Plaintext | 3 |
 | Operator: CSN lag monitoring | Read-only access to `contextCSN` / `cn=monitor` | Plaintext (monitoring DN) or anonymous | 3 |
 | Consumer init: syncrepl bind | Replication bind password | Plaintext | 2 (implemented) |
-| Bootstrap job (slapd-test) | Data admin + config admin passwords | Plaintext | Testing only |
+| Bootstrap job (slapd-test) | Data admin + (optionally) config admin passwords | Plaintext | Testing only |
 
 **Secrets layout:**
 
 | Secret | Contents | Created by | Scope |
 |---|---|---|---|
 | `<name>-passwords` | `admin-password` + `replication-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA + init container; LDAP bind during bootstrap and syncrepl |
-| `<name>-config-password` | `root-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA only (Phase 3 topology management via cn=config) |
+| `<name>-config-password` | `root-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA: ACL reconciliation (`reconcileACLs`) and Phase 3 topology management |
 | `slapd-test-passwords` | `readpw-<user>` (plaintext, one key per readpw account) | slapd-test chart | Testing only; e2e tests bind as readpw users to verify ACLs |
 
 **Production scope:** The operator provides a correctly configured, healthy LDAP endpoint.
@@ -431,3 +441,41 @@ Pod ordinal is read from the hostname: `${HOSTNAME##*-}` (last segment of Statef
 | Graceful pod failure and restart | Cross-cluster replication (ExternalPeers) |
 | Replication credentials Secret | CSN lag monitoring and alerting |
 | Per-pod accesslog PVC | Per-peer TLS client certificate auth |
+| Operator-managed cn=config ACLs (`spec.ldap.acls`) | Operator-managed custom schemas (`spec.ldap.schemas`) |
+
+---
+
+### cn=config Architecture Note
+
+`cn=config` is **node-local** — it is never replicated between pods. Each pod has its own
+independent copy stored in the `/ldap-config` PVC. This affects anything that lives in
+`cn=config`: ACLs (`olcAccess`), schemas, overlays, and syncrepl stanzas.
+
+The operator manages cn=config state by connecting to each pod individually via the headless
+service DNS (`<name>-<N>.<name>-headless.<ns>.svc.cluster.local`). The `reconcileACLs` step
+(reconcile step 7) applies `spec.ldap.acls` to every pod on every reconcile loop and is
+idempotent (compares current `olcAccess` values before issuing a modify).
+
+Anything that touches `cn=config` outside the operator (e.g. the slapd-test bootstrap job's
+`customSchemaJson`) only reaches one pod via ClusterIP and is not self-healing. See ADR-002.
+
+---
+
+### Backlog
+
+Items that follow the same pattern as existing work but are deferred to a future phase.
+
+#### Schema extensions (`spec.ldap.schemas`) — Phase 3
+
+Custom LDAP schemas (e.g. the OX schema) currently live in the slapd-test chart's
+`customSchemaJson` and are applied by the bootstrap job to one pod via ClusterIP. This has the
+same cn=config node-locality problem as ACLs had before ADR-002.
+
+The correct fix is a `spec.ldap.schemas` field on `SlapdCluster`, managed by the operator
+using the same per-pod headless-DNS approach as `reconcileACLs`. The operator would compare the
+desired schema OID/attributes with what each pod has in `cn=schema,cn=config` and apply
+missing schemas.
+
+Until this is implemented, schemas must either be baked into the init container's slapd.conf
+(suitable for stable, well-known schemas) or accepted as "apply to one pod only" for
+development environments.

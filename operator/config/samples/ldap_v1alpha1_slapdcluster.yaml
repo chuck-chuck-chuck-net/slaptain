@@ -24,6 +24,19 @@ spec:
     tls:
       enabled: true
       secretName: slapd-tls
+    # acls is an ordered list of slapd.conf "access to ..." rules applied to every pod's
+    # cn=config by the operator (cn=config is not replicated; the operator targets each pod
+    # individually via headless service DNS and self-heals after pod replacement).
+    # Leave empty (or omit) to keep the init-container default ACLs:
+    #   - userPassword: self write + anonymous auth only
+    #   - everything else: read for all
+    #
+    # Example: restrict userPassword in ou=Mail to readpw accounts, hide it elsewhere.
+    # acls:
+    #   - 'to dn.subtree="ou=Mail,dc=example,dc=org" attrs=userPassword by self write by dn.children="ou=Readpw,dc=example,dc=org" read by anonymous auth by * none'
+    #   - 'to attrs=userPassword by self write by anonymous auth by * none'
+    #   - 'to attrs=shadowLastChange by self write by * read'
+    #   - 'to * by * read'
 
   # Set replicas > 1 together with replication.enabled=true for N-way multi-master.
   replicas: 1

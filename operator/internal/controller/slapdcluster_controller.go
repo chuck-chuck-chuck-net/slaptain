@@ -99,7 +99,13 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("reconcileBootstrap: %w", err)
 	}
 
-	// 7. Observe StatefulSet status → update SlapdCluster status.
+	// 7. Apply spec.ldap.acls to each pod's cn=config (idempotent; unreachable pods
+	//    are logged and skipped — the next reconcile will retry them).
+	if err := r.reconcileACLs(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileACLs: %w", err)
+	}
+
+	// 8. Observe StatefulSet status → update SlapdCluster status.
 	sts := &appsv1.StatefulSet{}
 	if err := r.Get(ctx, req.NamespacedName, sts); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get StatefulSet: %w", err)
@@ -727,6 +733,149 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	return spec
+}
+
+// reconcileACLs applies spec.ldap.acls to every pod's data database cn=config entry.
+// Because cn=config is node-local (never replicated), each pod must be updated
+// individually via its headless-service DNS address.
+// Pods that cannot be reached (not yet ready) are logged and skipped; the next
+// reconcile loop will retry.  A non-nil error is returned only for hard failures
+// such as a missing credential secret.
+func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if len(sc.Spec.LDAP.ACLs) == 0 {
+		return nil
+	}
+
+	rootPW, err := r.getConfigPassword(ctx, sc)
+	if err != nil {
+		return err
+	}
+
+	log := logf.FromContext(ctx)
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	headlessSvc := sc.Name + "-headless"
+
+	for i := int32(0); i < replicas; i++ {
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
+			sc.Name, i, headlessSvc, sc.Namespace)
+		if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, sc.Spec.LDAP.ACLs); err != nil {
+			log.Info("ACL reconcile skipped for pod (will retry on next reconcile)",
+				"ordinal", i, "host", host, "err", err)
+		}
+	}
+	return nil
+}
+
+// applyACLsToPod applies the desired ACL rules to one slapd pod's cn=config data DB entry.
+// It is a no-op when the pod's current olcAccess already matches desired.
+func (r *SlapdClusterReconciler) applyACLsToPod(
+	ctx context.Context,
+	host, rootPW, domain string,
+	desired []string,
+) error {
+	log := logf.FromContext(ctx)
+
+	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
+	conn, err := ldap.DialURL("ldap://"+addr,
+		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+	)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
+		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
+	}
+
+	// Locate the data database entry in cn=config.
+	dataDN, err := findDataDBDN(conn, domain)
+	if err != nil {
+		return err
+	}
+
+	// Read current olcAccess values.
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		1, 0, false, "(objectClass=*)", []string{"olcAccess"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("read olcAccess on %s at %s: %w", dataDN, host, err)
+	}
+	if len(sr.Entries) == 0 {
+		return fmt.Errorf("no entry at %s on %s", dataDN, host)
+	}
+
+	current := sr.Entries[0].GetAttributeValues("olcAccess")
+	if aclsMatch(current, desired) {
+		log.V(1).Info("ACLs already up-to-date", "host", host)
+		return nil
+	}
+
+	log.Info("replacing ACL rules", "host", host, "rules", len(desired))
+	modReq := ldap.NewModifyRequest(dataDN, nil)
+	modReq.Replace("olcAccess", desired)
+	if err := conn.Modify(modReq); err != nil {
+		return fmt.Errorf("replace olcAccess on %s at %s: %w", dataDN, host, err)
+	}
+	return nil
+}
+
+// findDataDBDN searches cn=config one level deep for the MDB database entry whose
+// olcSuffix matches the given domain and returns its DN.
+func findDataDBDN(conn *ldap.Conn, domain string) (string, error) {
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false,
+		fmt.Sprintf("(olcSuffix=%s)", domain),
+		[]string{"dn"}, nil,
+	))
+	if err != nil {
+		return "", fmt.Errorf("search cn=config for olcSuffix=%s: %w", domain, err)
+	}
+	if len(sr.Entries) == 0 {
+		return "", fmt.Errorf("no database entry with olcSuffix=%s in cn=config", domain)
+	}
+	return sr.Entries[0].DN, nil
+}
+
+// aclsMatch returns true when the stored olcAccess values (which carry {N} index
+// prefixes, e.g. "{0}to * by * read") match the desired rules (without prefixes).
+func aclsMatch(current, desired []string) bool {
+	if len(current) != len(desired) {
+		return false
+	}
+	for i, c := range current {
+		bare := c
+		if len(c) > 0 && c[0] == '{' {
+			if idx := strings.Index(c, "}"); idx >= 0 {
+				bare = c[idx+1:]
+			}
+		}
+		if bare != desired[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// getConfigPassword reads the plaintext root (cn=config admin) password from
+// <name>-config-password.
+func (r *SlapdClusterReconciler) getConfigPassword(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{
+		Name: sc.Name + "-config-password", Namespace: sc.Namespace,
+	}, secret); err != nil {
+		return "", fmt.Errorf("read %s-config-password: %w", sc.Name, err)
+	}
+	pw := string(secret.Data["root-password"])
+	if pw == "" {
+		return "", fmt.Errorf("secret %s-config-password is missing root-password key", sc.Name)
+	}
+	return pw, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

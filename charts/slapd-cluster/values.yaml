@@ -14,6 +14,11 @@ ldap:
   tls:
     enabled: true
     secretName: "slapd-tls"
+  # -- ACL rules for the data database, applied by the operator to every pod's
+  # cn=config individually. Rules are in slapd.conf "access to ..." format (no {N} prefix).
+  # When empty, the init container's default ACLs are preserved (userPassword hidden,
+  # everything else readable by *).
+  acls: []
 
 # -- Credentials.
 # The operator auto-generates passwords when credentialsSecretName is not set,

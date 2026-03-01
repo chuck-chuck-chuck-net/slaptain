@@ -27,6 +27,10 @@ spec:
       {{- if .Values.ldap.tls.enabled }}
       secretName: {{ .Values.ldap.tls.secretName | quote }}
       {{- end }}
+    {{- if .Values.ldap.acls }}
+    acls:
+      {{- toYaml .Values.ldap.acls | nindent 6 }}
+    {{- end }}
 
   replicas: {{ .Values.replicas }}
   logLevel: {{ .Values.logLevel }}

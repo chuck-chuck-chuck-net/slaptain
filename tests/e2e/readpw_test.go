@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
 	. "github.com/onsi/ginkgo/v2"
@@ -134,19 +135,26 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 		ldapAdd(ldapConn, req)
 	})
 
-	It("the mail user can bind with their own password", func() {
+	It("the mail user can bind with their own password", func(ctx SpecContext) {
 		// ACL rule {0}: to dn.subtree="ou=Mail,..." attrs=userPassword
 		//   … by anonymous auth …
 		// The "by anonymous auth" permission is what allows any client to verify
 		// a user's password via ldap bind, even without being able to read the
 		// userPassword attribute value directly.
-		conn, err := ldap.Dial("tcp", localLDAPAddr)
-		Expect(err).NotTo(HaveOccurred())
-		defer conn.Close()
+		//
+		// Use Eventually: the write went through ldapConn (pinned to one pod);
+		// a fresh connection may route to a different pod and the entry may not
+		// have replicated yet.  err=49 from a non-existent DN is indistinguishable
+		// from a wrong password, so we retry until the entry is visible everywhere.
+		Eventually(ctx, func(g Gomega) {
+			conn, err := ldap.Dial("tcp", localLDAPAddr)
+			g.Expect(err).NotTo(HaveOccurred())
+			defer conn.Close()
 
-		Expect(conn.Bind(mailUserDN, mailUserPW)).To(Succeed(),
-			"mail user should be able to bind with their own password")
-	})
+			g.Expect(conn.Bind(mailUserDN, mailUserPW)).To(Succeed(),
+				"mail user should be able to bind with their own password")
+		}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+	}, SpecTimeout(35*time.Second))
 
 	// ── Readpw access ─────────────────────────────────────────────────────────
 

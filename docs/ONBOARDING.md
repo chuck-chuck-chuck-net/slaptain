@@ -190,7 +190,19 @@ Overlays are slapd plugins that intercept operations and add functionality. We u
 ### ACLs — Access Control Lists
 
 ACLs in slapd control who can read or write what. They are evaluated in order and the first
-matching rule wins. Our key ACLs:
+matching rule wins.
+
+**Important:** ACLs live in `cn=config`, which is **node-local** — it is never replicated
+between pods. Each pod has its own independent `cn=config`. A one-time `ldapmodify` to one
+pod leaves all other pods unchanged, and a pod replacement (node failure, rolling update)
+re-runs the init container, resetting `cn=config` to the generated defaults.
+
+The operator solves this by managing ACLs centrally via `spec.ldap.acls` on the `SlapdCluster`
+CR. On every reconcile loop the operator reads each pod's current `olcAccess` values and
+patches any pod whose ACLs have drifted from the desired state. This means ACL changes are
+applied to all pods simultaneously and are automatically re-applied after pod replacement.
+
+The init-container default ACLs (used when `spec.ldap.acls` is empty):
 
 On the accesslog database — only the replication account can read it:
 ```
@@ -199,18 +211,21 @@ access to *
   by * none
 ```
 
-On the main data database — replication can read everything; authenticated users can read;
-anonymous can authenticate:
+On the main data database — `userPassword` is protected; everything else is readable:
 ```
+access to attrs=userPassword
+  by self write
+  by anonymous auth
+  by * none
+
 access to *
   by dn.exact="cn=replication,<domain>" read
-  by users read
-  by anonymous auth
+  by * read
 ```
 
-ACLs that restrict `userPassword` access more tightly are added by the slapd-test bootstrap
-job (not the operator) for the readpw service accounts. The operator's responsibility is only
-the minimal bootstrapping ACLs.
+Production deployments typically add tighter ACLs — for example, restricting `userPassword`
+reads in specific OUs to named service accounts. These are declared in `spec.ldap.acls`; see
+`operator/config/samples/ldap_v1alpha1_slapdcluster.yaml` for an example.
 
 ---
 
@@ -287,6 +302,8 @@ state matches the desired state defined in the CR. It manages:
 3. **StatefulSet** — the slapd pod deployment, including passing all configuration as env
    vars to the init container
 4. **Bootstrap** — adds the initial LDAP entries to pod-0 via live LDAP once it is ready
+5. **cn=config ACLs** — applies `spec.ldap.acls` to every pod's `cn=config` individually
+   via headless service DNS on every reconcile; self-heals after pod replacement
 
 The operator uses **server-side apply** (SSA) for all Kubernetes resource updates. This means
 the operator sends its desired state and the API server merges it with whatever other
@@ -307,13 +324,14 @@ converge to the correct state.
 
 ### What the operator does not do
 
-- **Schema management** — schemas are loaded by the slapd-test bootstrap job, not the
-  operator. The operator only creates the structural prerequisite entries.
+- **Schema management** — custom schemas are loaded by the slapd-test bootstrap job (which
+  connects to cn=config directly). Because cn=config is node-local, this currently applies
+  to one pod only. Operator-managed schema extensions (`spec.ldap.schemas`) are on the Phase 3
+  backlog; in the interim schemas must be identical in the init-container's generated
+  `slapd.conf` or applied manually to each pod.
 - **User management** — creating, modifying, or deleting user accounts is the application's
   responsibility. The operator creates the framework (OUs, admin account, replication
   account); business data goes in via the application.
-- **ACL management beyond basics** — fine-grained ACLs (per-OU readpw restrictions, etc.)
-  are managed by the slapd-test bootstrap job.
 - **Scale-out after creation** — changing the replica count on a running cluster is Phase 3
   scope. Currently, the replica count is fixed at creation time.
 
@@ -327,7 +345,7 @@ confusion when something fails to authenticate.
 | Password | Where defined | Who uses it | Secret key |
 |---|---|---|---|
 | Data admin | slapd.conf `rootpw` + `cn=admin` entry | Operator bootstrap, day-to-day ldap ops | `<name>-passwords` / `admin-password` |
-| Config admin | slapd.conf `rootpw` for `cn=config` | Phase 3 topology ops only | `<name>-config-password` / `root-password` |
+| Config admin | slapd.conf `rootpw` for `cn=config` | Operator ACL management (and Phase 3 topology ops) | `<name>-config-password` / `root-password` |
 | Replication bind | `cn=replication` entry `userPassword` | Inter-node syncrepl | `<name>-passwords` / `replication-password` |
 | Readpw accounts | Individual `userPassword` in directory | Application service accounts (Dovecot, etc.) | `slapd-test-passwords` / `readpw-<name>` |
 

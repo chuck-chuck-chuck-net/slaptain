@@ -9,8 +9,6 @@ data:
 {{ .Files.Get "files/ldap-bootstrap.py" | indent 4 }}
   slapd-ous.json: |
 {{ tpl .Values.bootstrap.ousJson . | indent 4 }}
-  slapd-readpw.json: |
-{{ tpl .Values.bootstrap.readpwAclJson . | indent 4 }}
   ldap-readpw-users.secret.yaml: |
 {{ toYaml .Values.bootstrap.readpwUsers | indent 4 }}
 {{- if .Values.bootstrap.customSchemaJson }}
