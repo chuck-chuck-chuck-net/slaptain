@@ -129,14 +129,13 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 
 **Reconcile order:**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
-2. `reconcileSecret` — create `<name>-credentials` (plaintext, create-only) + `<name>-passwords` (SSHA hashes, create-only); or read from `spec.ldap.credentialsSecretName`
-3. `reconcileReplicationSecret` — create `<name>-replication` (random password, create-only); no-op when `replication.enabled=false`
-4. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (createOrUpdate)
-5. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (createOrUpdate)
-6. `reconcileStatefulSet` — `serviceName: <name>-headless`; uses `volumeClaimTemplates` when persistence enabled (createOrUpdate)
-7. `reconcileBootstrap` — connect to pod-0 via pod IP on port 1024, bind as data rootdn, add root + admin + (optionally) replication entries; sets `status.bootstrapComplete=true`; no-op when already complete (see `docs/BOOTSTRAP.md`)
-8. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, conditions
-9. Not Running → `RequeueAfter: 10s`
+2. `reconcileSecret` — create `<name>-passwords` (plaintext `admin-password` + `replication-password`, create-only) + `<name>-config-password` (plaintext `root-password`, create-only); or read from `spec.ldap.credentialsSecretName`
+3. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (SSA patch)
+4. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (SSA patch)
+5. `reconcileStatefulSet` — `serviceName: <name>-headless`; uses `volumeClaimTemplates` when persistence enabled (SSA patch)
+6. `reconcileBootstrap` — connect to pod-0 via pod IP on port 1024, bind as data rootdn, add root + admin + (optionally) replication entries; sets `status.bootstrapComplete=true`; no-op when already complete (see `docs/BOOTSTRAP.md`)
+7. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, conditions (SSA patch on status subresource)
+8. Not Running → `RequeueAfter: 10s`
 
 **Service naming (Bitnami convention):**
 - Headless: `<name>-headless` — used by StatefulSet for pod DNS (`<name>-0.<name>-headless.ns.svc`)
@@ -190,11 +189,12 @@ make testing-helm-uninstall cluster-helm-uninstall
 1. Build k8s client
 2. Wait for `slapd` StatefulSet ready
 3. Wait for `slapd-test` bootstrap Job succeeded
-4. Read `adminPW`, `rootPW`, `readpwPWs` from `slapd-test-passwords` Secret
-   - `readpwPWs` is a `map[string]string` built from all `readpw-*` keys in the Secret
-5. Start `kubectl port-forward svc/slapd 13891:389`
-6. Query LDAP rootDSE (anonymous, `namingContexts`) → set `baseDN` (auto-discovered, no env var)
-7. Connect `ldapConn` as `cn=admin,<baseDN>` (data rootDN, bypasses ACLs)
+4. Read `adminPW` from `slapd-passwords` Secret (`admin-password` key)
+5. Read `rootPW` from `slapd-config-password` Secret (`root-password` key)
+6. Read `readpwPWs` from `slapd-test-passwords` Secret — `map[string]string` built from all `readpw-*` keys
+7. Start `kubectl port-forward svc/slapd 13891:389` (local mode only; skipped when `LDAP_ADDR` is set)
+8. Query LDAP rootDSE (anonymous, `namingContexts`) → set `baseDN` (auto-discovered, no env var)
+9. Connect `ldapConn` as `cn=admin,<baseDN>` (data rootDN, bypasses ACLs)
 
 **Readpw ACL tests** (`readpw_test.go`) skip gracefully when `readpwPWs` is empty, so the suite
 runs without readpw configuration but skips those test cases.
@@ -294,21 +294,20 @@ change ACLs to open it up).
 
 | Consumer | What it needs | Format | Phase |
 |---|---|---|---|
-| slapd-init (init container) | Config admin hash, data admin hash | SSHA hash | 1+ |
+| slapd-init (init container) | Data admin + config admin passwords | Plaintext (hashed at runtime by `slappasswd`) | 1+ |
 | Operator: bootstrap | Data admin password | Plaintext | 2 (implemented) |
 | Operator: topology reconfiguration | Config admin password | Plaintext | 3 |
 | Operator: CSN lag monitoring | Read-only access to `contextCSN` / `cn=monitor` | Plaintext (monitoring DN) or anonymous | 3 |
 | Consumer init: syncrepl bind | Replication bind password | Plaintext | 2 (implemented) |
-| Bootstrap job (slapd-test) | Data admin password | Plaintext | Testing only |
+| Bootstrap job (slapd-test) | Data admin + config admin passwords | Plaintext | Testing only |
 
 **Secrets layout:**
 
 | Secret | Contents | Created by | Scope |
 |---|---|---|---|
-| `<name>-credentials` | `admin-password`, `root-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA only (RBAC); LDAP bind during bootstrap |
-| `<name>-passwords` | `admin-password-hash`, `root-password-hash` (SSHA) | Operator (derived from `<name>-credentials`) | Init container (`rootpw` directives in slapd.conf) |
-| `<name>-replication` | `password` (plaintext, random) | Operator (create-only) | Init container (`credentials=` in syncrepl); operator (adds `cn=replication` LDAP entry) |
-| `slapd-test-passwords` | `admin-password`, `root-password` (plaintext); `readpw-<user>` (plaintext, one key per readpw account) | slapd-test chart | Testing only, not for production |
+| `<name>-passwords` | `admin-password` + `replication-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA + init container; LDAP bind during bootstrap and syncrepl |
+| `<name>-config-password` | `root-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA only (Phase 3 topology management via cn=config) |
+| `slapd-test-passwords` | `readpw-<user>` (plaintext, one key per readpw account) | slapd-test chart | Testing only; e2e tests bind as readpw users to verify ACLs |
 
 **Production scope:** The operator provides a correctly configured, healthy LDAP endpoint.
 Directory content (schemas, OUs, users) is the user's responsibility. The slapd-test bootstrap
@@ -386,29 +385,29 @@ StatefulSet. Breaking change for Phase 1 deployments (PVC names change). Accepta
 
 #### Replication Credentials
 
-A new `<name>-replication` Secret holds the plaintext replication bind password:
+The replication bind password is stored in the `<name>-passwords` Secret alongside the admin
+password (not in a separate Secret):
 
 | Secret | Key | Used by |
 |---|---|---|
-| `<name>-replication` | `password` | Init container: syncrepl bind password |
+| `<name>-passwords` | `replication-password` | Init container: syncrepl bind password; operator: adds `cn=replication` LDAP entry |
 
-The operator creates this Secret with a generated random password if it does not exist. Users
-may pre-create it. Never updated after creation.
+The operator generates a random `replication-password` when creating `<name>-passwords`. Users
+may pre-populate it via `spec.ldap.credentialsSecretName`. Never updated after creation.
 
-Replication bind DN: `cn=replication,cn=config`. The init container provisions this entry in the
-config database during bootstrap and grants it read access to the accesslog and data databases.
+Replication bind DN: `cn=replication,<domain>`. The operator adds this entry via live LDAP
+during bootstrap and the init container grants it read access to the accesslog and data databases.
 
 #### Operator Changes for Phase 2
 
-1. **Remove `replicas > 1` guard** (controller step 2).
-2. **Add `reconcileReplicationSecret`**: creates `<name>-replication` (create-only, random password).
-3. **Remove `reconcilePVCs`**: replaced by StatefulSet `volumeClaimTemplates`.
-4. **Update `buildStatefulSetSpec`**:
+1. **Remove `replicas > 1` guard** (controller step 2 in Phase 1).
+2. **Remove `reconcilePVCs`**: replaced by StatefulSet `volumeClaimTemplates`.
+3. **Update `buildStatefulSetSpec`**:
    - Add `ldap-accesslog` volume mount to init and main containers.
    - Move config/data/accesslog to `volumeClaimTemplates`.
    - Pass to init container: `LDAP_REPLICATION_ENABLED`, `LDAP_REPLICAS`,
      `LDAP_CLUSTER_HEADLESS_SVC` (`<name>-headless`), and `LDAP_REPLICATION_PASSWORD`
-     (from `<name>-replication` Secret).
+     (from `<name>-passwords` / `replication-password`).
 
 #### slapd-init Changes for Phase 2
 
