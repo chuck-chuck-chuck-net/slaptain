@@ -214,3 +214,11 @@ ldapsearch -x -H ldaps://$SLAPD_HOST \
   -D "uid=<user>,ou=$READPW_OU,$LDAP_DOMAIN" -w "<password>" \
   -b "ou=Mail,$LDAP_DOMAIN" -LLL -s sub "(objectClass=*)" userPassword
 ```
+
+### Reading slapd logs
+
+slapd logs use hex epoch timestamps (`69aafab1.06e09e7d`). To convert them to ISO 8601:
+
+```bash
+kubectl logs -n slaptain-testing slapd-0 | ./tests/decode-slapd-ts.sh
+```
