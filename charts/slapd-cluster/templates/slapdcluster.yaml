@@ -31,6 +31,10 @@ spec:
     acls:
       {{- toYaml .Values.ldap.acls | nindent 6 }}
     {{- end }}
+    {{- if .Values.ldap.schemas }}
+    schemas:
+      {{- toYaml .Values.ldap.schemas | nindent 6 }}
+    {{- end }}
 
   replicas: {{ .Values.replicas }}
   {{- if gt (int .Values.readReplicas) 0 }}

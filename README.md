@@ -1,5 +1,8 @@
 # Slaptain
 
+[![GitHub](https://img.shields.io/badge/github-chuck--chuck--chuck--net%2Fslaptain-blue?logo=github)](https://github.com/chuck-chuck-chuck-net/slaptain)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 A Kubernetes operator for deploying OpenLDAP (slapd) as a highly available, replicated directory service.
 
 Slaptain is built for workloads where LDAP is the source of truth for user identities across multiple applications — mail (Dovecot), identity (Keycloak), groupware (OX App Suite). It provides N-way multi-master replication with delta-syncrepl, operator-managed ACLs, and read-only consumer replicas: the class of problem where static Helm charts and bootstrap scripts reach their limits.
@@ -79,6 +82,7 @@ kubectl get slapdcluster -o wide
 - **N-way multi-master replication**: all pods are symmetric read-write peers via delta-syncrepl. No permanent primary, no leader election — any pod can serve reads and writes. Pod failure is handled gracefully.
 - **Read-only consumer replicas**: scale read-heavy workloads (auth lookups, address book queries) without adding write complexity. RO pods consume from all RW masters for resilience.
 - **Operator-managed ACLs**: declare ACL rules once in `spec.ldap.acls`; the operator applies them to every pod's `cn=config` individually and self-heals after pod replacement.
+- **Operator-managed schemas**: declare custom LDAP schemas in `spec.ldap.schemas`; the operator adds them to every pod's `cn=schema,cn=config` idempotently.
 - **Automatic credential management**: the operator generates and manages admin, config admin, and replication passwords in Kubernetes Secrets — or reads them from a user-provided Secret.
 - **Security**: rootless execution (UID 1024), no privilege escalation, read-only root filesystem, distroless runtime images, TLS encryption.
 - **Persistent storage**: per-pod PVCs via StatefulSet `volumeClaimTemplates` for config, data, and accesslog volumes.
@@ -112,6 +116,7 @@ spec:
     acls:                         # Ordered "access to ..." rules; empty = defaults
       - 'to attrs=userPassword by self write by anonymous auth by * none'
       - 'to * by * read'
+    schemas: []                   # JSON-encoded schema entries for cn=schema,cn=config
 
   replicas: 3                     # RW replicas (replication.enabled=true for >1)
   readReplicas: 0                 # RO consumer replicas (requires replication)
@@ -167,10 +172,14 @@ The core principle is **let slapd do what it does well** (LMDB storage, syncrepl
 - [Team Onboarding](docs/ONBOARDING.md) — LDAP concepts, OpenLDAP specifics, operator model, credential model
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
 - [Architecture Decision Records](docs/adrs/) — design rationale for double reconciliation, cn=config management
+- [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 
 ## Development
 
 ```bash
+git clone https://github.com/chuck-chuck-chuck-net/slaptain.git
+cd slaptain
+
 # Build all images
 make all
 

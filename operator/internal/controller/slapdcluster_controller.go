@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -118,6 +119,12 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	//    are logged and skipped — the next reconcile will retry them).
 	if err := r.reconcileACLs(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileACLs: %w", err)
+	}
+
+	// 7a. Apply spec.ldap.schemas to each pod's cn=schema,cn=config (idempotent;
+	//     DN existence check — existing schemas are skipped, unreachable pods retried).
+	if err := r.reconcileSchemas(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileSchemas: %w", err)
 	}
 
 	// 8. Observe StatefulSet status → update SlapdCluster status.
@@ -1240,6 +1247,216 @@ func aclsMatch(current, desired []string) bool {
 		}
 	}
 	return true
+}
+
+// ── Schema reconciliation ─────────────────────────────────────────────────────
+
+// schemaEntry is a parsed representation of a JSON-encoded schema to be added
+// to cn=schema,cn=config.
+type schemaEntry struct {
+	DN          string
+	ObjectClass []string
+	Attributes  map[string][]string
+}
+
+// parseSchemaJSON parses a JSON string into a schemaEntry.
+// The JSON format matches slapd-test's customSchemaJson: objectClass may be a
+// string or []string, and attribute values may be a string or []string.
+func parseSchemaJSON(raw string) (schemaEntry, error) {
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return schemaEntry{}, fmt.Errorf("unmarshal schema JSON: %w", err)
+	}
+
+	dn, _ := m["dn"].(string)
+	if dn == "" {
+		return schemaEntry{}, fmt.Errorf("schema JSON missing required 'dn' field")
+	}
+
+	var objectClass []string
+	switch v := m["objectClass"].(type) {
+	case string:
+		objectClass = []string{v}
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				objectClass = append(objectClass, s)
+			}
+		}
+	}
+
+	attrs := make(map[string][]string)
+	if attrMap, ok := m["attributes"].(map[string]interface{}); ok {
+		for k, v := range attrMap {
+			switch val := v.(type) {
+			case string:
+				attrs[k] = []string{val}
+			case []interface{}:
+				for _, item := range val {
+					if s, ok := item.(string); ok {
+						attrs[k] = append(attrs[k], s)
+					}
+				}
+			}
+		}
+	}
+
+	return schemaEntry{
+		DN:          dn,
+		ObjectClass: objectClass,
+		Attributes:  attrs,
+	}, nil
+}
+
+// reconcileSchemas applies spec.ldap.schemas to every pod's cn=schema,cn=config.
+// Like reconcileACLs, each pod is contacted individually via headless DNS because
+// cn=config is node-local. Missing schemas are added; existing ones are skipped.
+// Unreachable pods are logged and retried on the next reconcile.
+func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if len(sc.Spec.LDAP.Schemas) == 0 {
+		return nil
+	}
+
+	// Parse all schema entries up front so we fail fast on bad JSON.
+	schemas := make([]schemaEntry, 0, len(sc.Spec.LDAP.Schemas))
+	for i, raw := range sc.Spec.LDAP.Schemas {
+		entry, err := parseSchemaJSON(raw)
+		if err != nil {
+			return fmt.Errorf("spec.ldap.schemas[%d]: %w", i, err)
+		}
+		schemas = append(schemas, entry)
+	}
+
+	rootPW, err := r.getConfigPassword(ctx, sc)
+	if err != nil {
+		return err
+	}
+
+	log := logf.FromContext(ctx)
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	headlessSvc := sc.Name + "-headless"
+
+	for i := int32(0); i < replicas; i++ {
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
+			sc.Name, i, headlessSvc, sc.Namespace)
+		if err := r.applySchemaToPod(ctx, host, rootPW, schemas); err != nil {
+			log.Info("Schema reconcile skipped for pod (will retry on next reconcile)",
+				"ordinal", i, "host", host, "err", err)
+		}
+	}
+
+	// Apply schemas to read-only pods too (cn=config is node-local).
+	if sc.Spec.ReadReplicas > 0 {
+		roHeadless := sc.Name + "-readonly-headless"
+		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
+			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.cluster.local",
+				sc.Name, i, roHeadless, sc.Namespace)
+			if err := r.applySchemaToPod(ctx, host, rootPW, schemas); err != nil {
+				log.Info("Schema reconcile skipped for read-only pod (will retry on next reconcile)",
+					"ordinal", i, "host", host, "err", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// applySchemaToPod adds missing schema entries to one slapd pod's cn=schema,cn=config.
+// Existing schemas (by DN) are skipped.
+func (r *SlapdClusterReconciler) applySchemaToPod(
+	ctx context.Context,
+	host, rootPW string,
+	schemas []schemaEntry,
+) error {
+	log := logf.FromContext(ctx)
+
+	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
+	conn, err := ldap.DialURL("ldap://"+addr,
+		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+	)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
+		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
+	}
+
+	for _, s := range schemas {
+		exists, err := schemaExistsByCN(conn, schemaCNFromDN(s.DN))
+		if err != nil {
+			return fmt.Errorf("check schema DN %s at %s: %w", s.DN, host, err)
+		}
+		if exists {
+			log.V(1).Info("Schema already exists, skipping", "host", host, "dn", s.DN)
+			continue
+		}
+
+		log.Info("Adding schema", "host", host, "dn", s.DN)
+		addReq := ldap.NewAddRequest(s.DN, nil)
+		if len(s.ObjectClass) > 0 {
+			addReq.Attribute("objectClass", s.ObjectClass)
+		}
+		for attr, vals := range s.Attributes {
+			addReq.Attribute(attr, vals)
+		}
+		if err := conn.Add(addReq); err != nil {
+			// OpenLDAP returns err=80 (Other) with "Duplicate attributeType" when
+			// the schema's attribute types are already registered globally (e.g.
+			// added by the bootstrap job before the operator ran). Treat this as
+			// "already exists" rather than a hard failure.
+			if ldap.IsErrorWithCode(err, ldap.LDAPResultOther) && strings.Contains(err.Error(), "Duplicate") {
+				log.V(1).Info("Schema attributes already registered, skipping", "host", host, "dn", s.DN)
+				continue
+			}
+			return fmt.Errorf("add schema %s at %s: %w", s.DN, host, err)
+		}
+	}
+
+	return nil
+}
+
+// schemaCNFromDN extracts the cn value from a schema DN.
+// e.g. "cn=ox,cn=schema,cn=config" → "ox".
+func schemaCNFromDN(dn string) string {
+	parts := strings.SplitN(dn, ",", 2)
+	if len(parts) == 0 {
+		return ""
+	}
+	kv := strings.SplitN(parts[0], "=", 2)
+	if len(kv) != 2 {
+		return ""
+	}
+	return kv[1]
+}
+
+// schemaExistsByCN searches cn=schema,cn=config one level deep for an entry
+// whose cn matches the given name. OpenLDAP auto-numbers schema entries
+// (e.g. cn=ox becomes cn={4}ox), so a direct base-scope search on the
+// un-numbered DN always returns "no such object". A one-level search with
+// a cn equality filter works because OpenLDAP's config backend strips the
+// {N} ordering prefix for filter evaluation.
+func schemaExistsByCN(conn *ldap.Conn, cn string) (bool, error) {
+	if cn == "" {
+		return false, fmt.Errorf("empty cn for schema existence check")
+	}
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		"cn=schema,cn=config",
+		ldap.ScopeSingleLevel,
+		ldap.NeverDerefAliases,
+		1, 0, false,
+		fmt.Sprintf("(cn=%s)", ldap.EscapeFilter(cn)),
+		[]string{"dn"},
+		nil,
+	))
+	if err != nil {
+		return false, err
+	}
+	return len(sr.Entries) > 0, nil
 }
 
 // getConfigPassword reads the plaintext root (cn=config admin) password from

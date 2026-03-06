@@ -128,6 +128,15 @@ spec:
                       forceRebootstrap instructs the init container to re-run bootstrap even if
                       data already exists. Handle with care — this will overwrite existing data.
                     type: boolean
+                  schemas:
+                    description: |-
+                      schemas is a list of JSON-encoded schema entries to add to
+                      cn=schema,cn=config on every pod. Each string is a JSON object with
+                      keys: dn, objectClass, attributes. The operator adds missing schemas
+                      idempotently (DN existence check); existing schemas are not modified.
+                    items:
+                      type: string
+                    type: array
                   tls:
                     description: tls configures TLS/LDAPS.
                     properties:

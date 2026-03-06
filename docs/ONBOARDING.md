@@ -4,6 +4,8 @@ This document is for team members who are new to LDAP, to OpenLDAP specifically,
 operator model. Its goal is to build the mental models you need to operate this system and
 contribute to the codebase, without assuming prior LDAP experience.
 
+**Source:** [github.com/chuck-chuck-chuck-net/slaptain](https://github.com/chuck-chuck-chuck-net/slaptain)
+
 ---
 
 ## Table of Contents

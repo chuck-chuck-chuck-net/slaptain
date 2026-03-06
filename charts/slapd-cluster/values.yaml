@@ -19,6 +19,10 @@ ldap:
   # When empty, the init container's default ACLs are preserved (userPassword hidden,
   # everything else readable by *).
   acls: []
+  # -- Custom schema entries to add to cn=schema,cn=config on every pod.
+  # Each entry is a JSON string. See tests/values.slapd-test.yaml.with-custom-schemas
+  # for an OX schema example.
+  schemas: []
 
 # -- Credentials.
 # The operator auto-generates passwords when credentialsSecretName is not set,
