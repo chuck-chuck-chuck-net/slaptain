@@ -177,6 +177,8 @@ syncrepl rid=$RID
   provider=$PROVIDER_URI
   type=refreshAndPersist
   interval=00:00:05:00
+  network-timeout=5
+  timeout=3
   searchbase="$LDAP_DOMAIN_DC"
   filter="(objectClass=*)"
   scope=sub
@@ -188,7 +190,7 @@ syncrepl rid=$RID
   logfilter="(&(objectClass=auditWriteObject)(reqResult=0))"
   syncdata=accesslog
 ${SYNCREPL_TLS_OPT}
-  retry="5 10 60 +"
+  retry="5 +"
 EOF
         done
 
