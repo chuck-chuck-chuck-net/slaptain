@@ -116,8 +116,11 @@ e2e-in-cluster: push-e2e-runner
 		tests/e2e-runner-rbac.yaml | kubectl apply -f -
 	sed 's|__E2E_RUNNER_IMAGE__|$(E2E_RUNNER_IMAGE)|g; s|__NAMESPACE_TESTING__|$(NAMESPACE_TESTING)|g' \
 		tests/e2e-runner-job.yaml | kubectl apply -f -
-	kubectl logs -n $(NAMESPACE_TESTING) -f job/e2e-runner --pod-running-timeout=2m
-	kubectl wait job/e2e-runner -n $(NAMESPACE_TESTING) --for=condition=complete --timeout=1s
+	@echo "Waiting for e2e-runner pod to start..."
+	@until kubectl logs -n $(NAMESPACE_TESTING) -f job/e2e-runner 2>/dev/null; do sleep 2; done
+	@kubectl wait job/e2e-runner -n $(NAMESPACE_TESTING) \
+		--for=condition=complete --timeout=1s 2>/dev/null \
+		|| (echo "FAIL: e2e-runner job did not complete successfully" && exit 1)
 
 clean:
 	rm -f *.tar

@@ -109,7 +109,7 @@ make testing-helm-uninstall  # tear down
 
 | Component | Default | What it does |
 |---|---|---|
-| `bootstrap` | enabled | One-shot Job: loads custom schema, sets ACLs, creates OUs and readpw service accounts |
+| `bootstrap` | enabled | One-shot Job: loads custom schema (if configured), creates OUs and readpw service accounts |
 | `toolkit` | enabled | Long-running pod for interactive `kubectl exec` sessions |
 
 Watch the bootstrap Job complete:
@@ -128,17 +128,41 @@ make testing-helm-install TOOLKIT_ONLY=true
 
 ## Run the e2e tests
 
+### Option A — Local (kubectl port-forward)
+
 ```bash
 make e2e-run
 ```
 
-The suite auto-discovers the LDAP base DN from the server's rootDSE — no domain env var
-needed. It assumes slapd and slapd-test are already installed.
+Runs from your workstation. The suite starts a `kubectl port-forward svc/slapd` tunnel
+automatically. Works well for quick iteration but can be flaky due to port-forward reconnect
+latency after pod restarts (especially in resilience tests).
+
+### Option B — In-cluster (recommended for CI and resilience tests)
+
+```bash
+make e2e-in-cluster
+```
+
+Builds and pushes an `e2e-runner` image, deploys it as a Kubernetes Job in the test namespace,
+and streams logs. The test pod connects directly to `slapd.slaptain-testing.svc.cluster.local`
+— no port-forward, so pod restarts don't break the LDAP connection. Resilience tests (pod
+restarts, warm start) are **always enabled** in this mode since the port-forward flakiness
+that motivated the `E2E_RESILIENCE` gate doesn't apply in-cluster.
+
+The in-cluster runner requires a one-time RBAC setup (applied automatically by the target)
+and the `e2e-runner` image in the registry.
+
+### Common options
+
+Both modes auto-discover the LDAP base DN from the server's rootDSE — no domain env var
+needed. Both assume slapd and slapd-test are already installed.
 
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Namespace to test in |
-| `LDAP_SVC` | `svc/slapd` | Service to port-forward for LDAP access |
+| `LDAP_SVC` | `svc/slapd` | Service to port-forward for LDAP access (local mode only) |
+| `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable slow pod-restart and warm-start tests |
 
 **Readpw ACL tests** require plaintext passwords for the readpw service accounts. Set
 `bootstrap.readpwPasswords` in your `tests/values.slapd-test.secret.yaml` (see `.sample`).
