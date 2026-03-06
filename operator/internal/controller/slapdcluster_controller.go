@@ -93,6 +93,21 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
 	}
 
+	// 5a. Reconcile read-only headless Service.
+	if err := r.reconcileReadOnlyHeadlessService(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileReadOnlyHeadlessService: %w", err)
+	}
+
+	// 5b. Reconcile read-only ClusterIP Service.
+	if err := r.reconcileReadOnlyService(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileReadOnlyService: %w", err)
+	}
+
+	// 5c. Reconcile read-only StatefulSet.
+	if err := r.reconcileReadOnlyStatefulSet(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileReadOnlyStatefulSet: %w", err)
+	}
+
 	// 6. Bootstrap initial directory entries via LDAP once pod-0 is ready.
 	//    Sets sc.Status.BootstrapComplete = true on success; status persisted below.
 	if err := r.reconcileBootstrap(ctx, sc); err != nil {
@@ -120,6 +135,23 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	sc.Status.Replicas = sts.Status.Replicas
 	sc.Status.ReadyReplicas = ready
 	sc.Status.ObservedGeneration = sc.Generation
+
+	// Read-only StatefulSet status (informational only — does not affect phase).
+	if sc.Spec.ReadReplicas > 0 {
+		roSts := &appsv1.StatefulSet{}
+		roKey := client.ObjectKey{Name: sc.Name + "-readonly", Namespace: sc.Namespace}
+		if err := r.Get(ctx, roKey, roSts); err != nil {
+			if !errors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("get read-only StatefulSet: %w", err)
+			}
+		} else {
+			sc.Status.ReadOnlyReplicas = roSts.Status.Replicas
+			sc.Status.ReadOnlyReadyReplicas = roSts.Status.ReadyReplicas
+		}
+	} else {
+		sc.Status.ReadOnlyReplicas = 0
+		sc.Status.ReadOnlyReadyReplicas = 0
+	}
 
 	switch {
 	case ready == 0:
@@ -353,6 +385,340 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 		return err
 	}
 	return r.Patch(ctx, sts, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+}
+
+// reconcileReadOnlyHeadlessService applies the read-only headless Service via SSA.
+// Skipped when spec.readReplicas == 0.
+func (r *SlapdClusterReconciler) reconcileReadOnlyHeadlessService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if sc.Spec.ReadReplicas == 0 {
+		return nil
+	}
+	svc := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sc.Name + "-readonly-headless",
+			Namespace: sc.Namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: corev1.ClusterIPNone,
+			Selector:  readOnlySelectorLabels(sc.Name),
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "ldap",
+					Port:       ldapContainerPort,
+					TargetPort: intstr.FromString("ldap"),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "ldaps",
+					Port:       ldapsContainerPort,
+					TargetPort: intstr.FromString("ldaps"),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
+		return err
+	}
+	return r.Patch(ctx, svc, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+}
+
+// reconcileReadOnlyService applies the read-only ClusterIP Service via SSA.
+// Skipped when spec.readReplicas == 0.
+func (r *SlapdClusterReconciler) reconcileReadOnlyService(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if sc.Spec.ReadReplicas == 0 {
+		return nil
+	}
+	svcType := sc.Spec.Service.Type
+	if svcType == "" {
+		svcType = corev1.ServiceTypeClusterIP
+	}
+	ldapPort := sc.Spec.Service.LDAPPort
+	if ldapPort == 0 {
+		ldapPort = 389
+	}
+	ldapsPort := sc.Spec.Service.LDAPSPort
+	if ldapsPort == 0 {
+		ldapsPort = 636
+	}
+
+	svc := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sc.Name + "-readonly",
+			Namespace: sc.Namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     svcType,
+			Selector: readOnlySelectorLabels(sc.Name),
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "ldap",
+					Port:       ldapPort,
+					TargetPort: intstr.FromString("ldap"),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "ldaps",
+					Port:       ldapsPort,
+					TargetPort: intstr.FromString("ldaps"),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
+		return err
+	}
+	return r.Patch(ctx, svc, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+}
+
+// reconcileReadOnlyStatefulSet applies the read-only StatefulSet via SSA.
+// Skipped when spec.readReplicas == 0.
+func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if sc.Spec.ReadReplicas == 0 {
+		return nil
+	}
+	sts := &appsv1.StatefulSet{
+		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sc.Name + "-readonly",
+			Namespace: sc.Namespace,
+		},
+		Spec: r.buildReadOnlyStatefulSetSpec(sc),
+	}
+	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
+		return err
+	}
+	return r.Patch(ctx, sts, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+}
+
+// buildReadOnlyStatefulSetSpec constructs the StatefulSet spec for read-only replicas.
+// Compared to the RW spec: no accesslog volume, LDAP_READONLY_REPLICA=true,
+// LDAP_REPLICAS = number of RW masters, no self-skip in syncrepl.
+func (r *SlapdClusterReconciler) buildReadOnlyStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster) appsv1.StatefulSetSpec {
+	labels := readOnlySelectorLabels(sc.Name)
+	replicas := sc.Spec.ReadReplicas
+	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
+
+	rwReplicas := sc.Spec.Replicas
+	if rwReplicas == 0 {
+		rwReplicas = 1
+	}
+
+	// Pod security context.
+	podSecCtx := sc.Spec.SecurityContext
+	if podSecCtx == nil {
+		uid := int64(1024)
+		gid := int64(1024)
+		podSecCtx = &corev1.PodSecurityContext{
+			RunAsUser:  &uid,
+			RunAsGroup: &gid,
+			FSGroup:    &gid,
+		}
+	}
+
+	// ── Volumes (non-PVC) — no accesslog for RO replicas ─────────────────────
+	volumes := []corev1.Volume{
+		{
+			Name:         "ldap-run",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+	}
+
+	var volumeClaimTemplates []corev1.PersistentVolumeClaim
+
+	if sc.Spec.Persistence.Enabled {
+		cfgSize := sc.Spec.Persistence.Config.Size
+		if cfgSize == "" {
+			cfgSize = "1Gi"
+		}
+		dataSize := sc.Spec.Persistence.Data.Size
+		if dataSize == "" {
+			dataSize = "5Gi"
+		}
+		cfgAM := sc.Spec.Persistence.Config.AccessMode
+		if cfgAM == "" {
+			cfgAM = corev1.ReadWriteOnce
+		}
+		dataAM := sc.Spec.Persistence.Data.AccessMode
+		if dataAM == "" {
+			dataAM = corev1.ReadWriteOnce
+		}
+		volumeClaimTemplates = []corev1.PersistentVolumeClaim{
+			pvcTemplate("ldap-config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
+			pvcTemplate("ldap-data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
+		}
+		// No accesslog PVC for read-only replicas.
+	} else {
+		volumes = append(volumes,
+			corev1.Volume{
+				Name:         "ldap-config",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			},
+			corev1.Volume{
+				Name:         "ldap-data",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			},
+		)
+	}
+
+	if sc.Spec.LDAP.TLS.Enabled {
+		volumes = append(volumes, corev1.Volume{
+			Name: "ldap-tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: sc.Spec.LDAP.TLS.SecretName,
+				},
+			},
+		})
+	}
+
+	// ── Init container ────────────────────────────────────────────────────────
+	initEnv := []corev1.EnvVar{
+		{Name: "LDAP_DOMAIN_DC", Value: sc.Spec.LDAP.Domain},
+		{
+			Name: "LDAP_ADMIN_PW",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-passwords"},
+					Key:                  "admin-password",
+				},
+			},
+		},
+		{
+			Name: "LDAP_ROOT_PW",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-config-password"},
+					Key:                  "root-password",
+				},
+			},
+		},
+		{Name: "LDAP_TLS_ENABLED", Value: strconv.FormatBool(sc.Spec.LDAP.TLS.Enabled)},
+		{Name: "FORCE_REBOOTSTRAP", Value: strconv.FormatBool(sc.Spec.LDAP.ForceRebootstrap)},
+		{Name: "CONFIG_DIR", Value: "/ldap-config"},
+		{Name: "DATA_DIR", Value: "/ldap-data"},
+		{Name: "ACCESSLOG_DIR", Value: "/ldap-accesslog"},
+		// Read-only replica flags.
+		{Name: "LDAP_READONLY_REPLICA", Value: "true"},
+		{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
+		{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(rwReplicas))},
+		{Name: "LDAP_CLUSTER_NAME", Value: sc.Name},
+		{Name: "LDAP_CLUSTER_HEADLESS_SVC", Value: sc.Name + "-headless"},
+		{Name: "LDAP_NAMESPACE", Value: sc.Namespace},
+		{
+			Name: "LDAP_REPLICATION_PASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-passwords"},
+					Key:                  "replication-password",
+				},
+			},
+		},
+	}
+
+	if sc.Spec.LDAP.TLS.Enabled {
+		initEnv = append(initEnv,
+			corev1.EnvVar{Name: "LDAP_TLS_CACERT_PATH", Value: "/etc/openldap/tls/ca.crt"},
+			corev1.EnvVar{Name: "LDAP_TLS_CERT_PATH", Value: "/etc/openldap/tls/tls.crt"},
+			corev1.EnvVar{Name: "LDAP_TLS_KEY_PATH", Value: "/etc/openldap/tls/tls.key"},
+		)
+	}
+
+	initMounts := []corev1.VolumeMount{
+		{Name: "ldap-config", MountPath: "/ldap-config"},
+		{Name: "ldap-data", MountPath: "/ldap-data"},
+	}
+	// No accesslog mount for read-only replicas.
+	if sc.Spec.LDAP.TLS.Enabled {
+		initMounts = append(initMounts, corev1.VolumeMount{
+			Name:      "ldap-tls",
+			MountPath: "/etc/openldap/tls",
+			ReadOnly:  true,
+		})
+	}
+
+	initImage := sc.Spec.Images.Init.Repository
+	if sc.Spec.Images.Init.Tag != "" {
+		initImage += ":" + sc.Spec.Images.Init.Tag
+	}
+
+	initContainer := corev1.Container{
+		Name:            "init",
+		Image:           initImage,
+		ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
+		Env:             initEnv,
+		VolumeMounts:    initMounts,
+	}
+
+	// ── Main container ────────────────────────────────────────────────────────
+	mainMounts := []corev1.VolumeMount{
+		{Name: "ldap-config", MountPath: "/ldap-config"},
+		{Name: "ldap-data", MountPath: "/ldap-data"},
+		{Name: "ldap-run", MountPath: "/run/openldap"},
+	}
+	// No accesslog mount for read-only replicas.
+	if sc.Spec.LDAP.TLS.Enabled {
+		mainMounts = append(mainMounts, corev1.VolumeMount{
+			Name:      "ldap-tls",
+			MountPath: "/etc/openldap/tls",
+			ReadOnly:  true,
+		})
+	}
+
+	falseVal := false
+	trueVal := true
+	mainSecCtx := &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &falseVal,
+		ReadOnlyRootFilesystem:   &trueVal,
+	}
+
+	mainImage := sc.Spec.Images.Slapd.Repository
+	if sc.Spec.Images.Slapd.Tag != "" {
+		mainImage += ":" + sc.Spec.Images.Slapd.Tag
+	}
+
+	mainContainer := corev1.Container{
+		Name:            "slapd",
+		Image:           mainImage,
+		ImagePullPolicy: sc.Spec.Images.Slapd.PullPolicy,
+		Args: []string{
+			"-h", "ldap://:1024/ ldaps://:1025/ ldapi://%2frun%2fopenldap%2fslapd.ldapi",
+			"-d", logLevel,
+			"-F", "/ldap-config",
+		},
+		Ports: []corev1.ContainerPort{
+			{Name: "ldap", ContainerPort: ldapContainerPort, Protocol: corev1.ProtocolTCP},
+			{Name: "ldaps", ContainerPort: ldapsContainerPort, Protocol: corev1.ProtocolTCP},
+		},
+		VolumeMounts:    mainMounts,
+		SecurityContext: mainSecCtx,
+		Resources:       sc.Spec.Resources,
+	}
+
+	spec := appsv1.StatefulSetSpec{
+		ServiceName: sc.Name + "-readonly-headless",
+		Replicas:    &replicas,
+		Selector: &metav1.LabelSelector{
+			MatchLabels: labels,
+		},
+		Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: labels,
+			},
+			Spec: corev1.PodSpec{
+				SecurityContext: podSecCtx,
+				InitContainers:  []corev1.Container{initContainer},
+				Containers:      []corev1.Container{mainContainer},
+				Volumes:         volumes,
+			},
+		},
+		VolumeClaimTemplates: volumeClaimTemplates,
+	}
+
+	return spec
 }
 
 // reconcileBootstrap seeds the initial LDAP directory entries via a live LDAP connection
@@ -766,6 +1132,20 @@ func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1al
 				"ordinal", i, "host", host, "err", err)
 		}
 	}
+
+	// Apply ACLs to read-only pods too (cn=config is node-local).
+	if sc.Spec.ReadReplicas > 0 {
+		roHeadless := sc.Name + "-readonly-headless"
+		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
+			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.cluster.local",
+				sc.Name, i, roHeadless, sc.Namespace)
+			if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, sc.Spec.LDAP.ACLs); err != nil {
+				log.Info("ACL reconcile skipped for read-only pod (will retry on next reconcile)",
+					"ordinal", i, "host", host, "err", err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -896,6 +1276,14 @@ func selectorLabels(name string) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":     "slapd",
 		"app.kubernetes.io/instance": name,
+	}
+}
+
+// readOnlySelectorLabels returns the pod selector labels for read-only replicas.
+func readOnlySelectorLabels(name string) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":     "slapd",
+		"app.kubernetes.io/instance": name + "-readonly",
 	}
 }
 

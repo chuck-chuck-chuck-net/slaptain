@@ -48,6 +48,9 @@ images:
 # -- Number of replicas. Set replication.enabled=true when using replicas > 1.
 replicas: 1
 
+# -- Number of read-only consumer replicas. Requires replication.enabled=true.
+readReplicas: 0
+
 # -- slapd -d log level. 0 disables debug output.
 logLevel: 0
 

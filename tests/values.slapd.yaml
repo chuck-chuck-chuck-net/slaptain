@@ -25,5 +25,6 @@ ldap:
 logLevel: 256
 
 replicas: 3
+readReplicas: 1
 replication:
   enabled: true

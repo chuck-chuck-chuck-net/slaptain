@@ -26,6 +26,10 @@ spec:
     - jsonPath: .status.replicas
       name: Replicas
       type: integer
+    - jsonPath: .status.readOnlyReadyReplicas
+      name: RO-Ready
+      priority: 1
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -206,6 +210,14 @@ spec:
                       emptyDir is used.
                     type: boolean
                 type: object
+              readReplicas:
+                default: 0
+                description: |-
+                  readReplicas is the number of read-only consumer replicas.
+                  Requires replication.enabled=true and replicas>=1.
+                format: int32
+                minimum: 0
+                type: integer
               replicas:
                 default: 1
                 description: replicas is the number of slapd replicas. Set spec.replication.enabled=true
@@ -670,6 +682,16 @@ spec:
               phase:
                 description: phase summarises the current lifecycle state.
                 type: string
+              readOnlyReadyReplicas:
+                description: readOnlyReadyReplicas is the number of read-only pods
+                  reporting Ready.
+                format: int32
+                type: integer
+              readOnlyReplicas:
+                description: readOnlyReplicas is the total number of read-only pods
+                  (ready or not).
+                format: int32
+                type: integer
               readyReplicas:
                 description: readyReplicas is the number of pods reporting Ready.
                 format: int32

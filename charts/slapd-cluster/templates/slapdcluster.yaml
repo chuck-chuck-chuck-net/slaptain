@@ -33,6 +33,9 @@ spec:
     {{- end }}
 
   replicas: {{ .Values.replicas }}
+  {{- if gt (int .Values.readReplicas) 0 }}
+  readReplicas: {{ .Values.readReplicas }}
+  {{- end }}
   logLevel: {{ .Values.logLevel }}
 
   persistence:

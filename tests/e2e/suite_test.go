@@ -40,6 +40,9 @@ var (
 	// LDAP_HEADLESS_SVC — headless service name for per-pod DNS in in-cluster mode.
 	// Pods are reachable at <pod>.<headless>.<namespace>.svc.cluster.local:1024.
 	ldapHeadlessSvc = envOrDefault("LDAP_HEADLESS_SVC", "slapd-headless")
+
+	// LDAP_READONLY_HEADLESS_SVC — headless service for read-only replica pods.
+	ldapReadOnlyHeadlessSvc = envOrDefault("LDAP_READONLY_HEADLESS_SVC", "slapd-readonly-headless")
 )
 
 // ── Ginkgo bootstrap ──────────────────────────────────────────────────────────

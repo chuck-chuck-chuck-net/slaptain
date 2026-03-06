@@ -13,12 +13,17 @@ LDAP_CLUSTER_NAME="${LDAP_CLUSTER_NAME:-}"
 LDAP_CLUSTER_HEADLESS_SVC="${LDAP_CLUSTER_HEADLESS_SVC:-}"
 LDAP_NAMESPACE="${LDAP_NAMESPACE:-}"
 LDAP_REPLICATION_PASSWORD="${LDAP_REPLICATION_PASSWORD:-}"
+LDAP_READONLY_REPLICA="${LDAP_READONLY_REPLICA:-false}"
 
 # Pod ordinal from StatefulSet hostname (<name>-<ordinal>)
 ORDINAL="${HOSTNAME##*-}"
 
 REPLICATION_ENABLED=false
-if [[ "${LDAP_REPLICATION_ENABLED^^}" == "TRUE" ]] && [[ "${LDAP_REPLICAS}" -gt 1 ]]; then
+READONLY_REPLICA=false
+if [[ "${LDAP_READONLY_REPLICA^^}" == "TRUE" ]]; then
+    READONLY_REPLICA=true
+    REPLICATION_ENABLED=true
+elif [[ "${LDAP_REPLICATION_ENABLED^^}" == "TRUE" ]] && [[ "${LDAP_REPLICAS}" -gt 1 ]]; then
     REPLICATION_ENABLED=true
 fi
 
@@ -26,7 +31,7 @@ echo "Bootstrapping OpenLDAP"
 echo "User: $(id)"
 echo "Config Dir: $CONFIG_DIR"
 echo "Data Dir: $DATA_DIR"
-echo "Replication: $REPLICATION_ENABLED (replicas=${LDAP_REPLICAS}, ordinal=${ORDINAL})"
+echo "Replication: $REPLICATION_ENABLED (replicas=${LDAP_REPLICAS}, ordinal=${ORDINAL}, readonly=${READONLY_REPLICA})"
 
 fix_crc() {
     local target="$1"
@@ -39,7 +44,7 @@ fix_crc() {
 # Check writability
 touch "$CONFIG_DIR/.writable" && rm "$CONFIG_DIR/.writable" || { echo "ERROR: $CONFIG_DIR is not writable"; exit 1; }
 touch "$DATA_DIR/.writable" && rm "$DATA_DIR/.writable" || { echo "ERROR: $DATA_DIR is not writable"; exit 1; }
-if [[ "$REPLICATION_ENABLED" == "true" ]]; then
+if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]]; then
     touch "$ACCESSLOG_DIR/.writable" && rm "$ACCESSLOG_DIR/.writable" || { echo "ERROR: $ACCESSLOG_DIR is not writable"; exit 1; }
 fi
 
@@ -47,7 +52,7 @@ FORCE_REBOOTSTRAP="${FORCE_REBOOTSTRAP:-false}"
 if [[ "${FORCE_REBOOTSTRAP^^}" == "TRUE" ]]; then
     echo "FORCE_REBOOTSTRAP is TRUE. Cleaning up existing data..."
     rm -rf "$CONFIG_DIR"/* "$DATA_DIR"/*
-    if [[ "$REPLICATION_ENABLED" == "true" ]]; then
+    if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]]; then
         rm -rf "$ACCESSLOG_DIR"/*
     fi
 fi
@@ -66,7 +71,7 @@ modulepath /usr/lib/ldap
 moduleload back_mdb
 EOF
 
-    if [[ "$REPLICATION_ENABLED" == "true" ]]; then
+    if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]]; then
         cat <<EOF >> "$TMP_CONF"
 moduleload accesslog
 moduleload syncprov
@@ -98,8 +103,8 @@ rootdn "cn=admin,cn=config"
 rootpw $ROOT_PW_HASH
 EOF
 
-    # ── Accesslog database (replication only) ──────────────────────────────────
-    if [[ "$REPLICATION_ENABLED" == "true" ]]; then
+    # ── Accesslog database (RW replication only, not for read-only replicas) ──
+    if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]]; then
         cat <<EOF >> "$TMP_CONF"
 
 database mdb
@@ -141,7 +146,10 @@ EOF
             SYNCREPL_TLS_OPT=""
         fi
 
-        cat <<EOF >> "$TMP_CONF"
+        # RW masters: overlay accesslog + syncprov on data DB.
+        # RO replicas: no overlays, no mirrormode — pure consumer.
+        if [[ "$READONLY_REPLICA" != "true" ]]; then
+            cat <<EOF >> "$TMP_CONF"
 
 overlay accesslog
 logdb cn=accesslog
@@ -152,6 +160,11 @@ logpurge 07+00:00 01+00:00
 overlay syncprov
 syncprov-checkpoint 100 10
 syncprov-sessionlog 100
+EOF
+        fi
+
+        # Default ACLs (same for RW and RO).
+        cat <<EOF >> "$TMP_CONF"
 
 access to attrs=userPassword
   by self write
@@ -163,9 +176,10 @@ access to *
   by * read
 EOF
 
-        # One syncrepl block per peer (skip self); mirrormode must follow syncrepl
+        # Syncrepl blocks.
+        # RW: one block per peer, skip self. RO: one block per RW master, no self-skip.
         for (( i=0; i<LDAP_REPLICAS; i++ )); do
-            if [[ "$i" == "$ORDINAL" ]]; then
+            if [[ "$READONLY_REPLICA" != "true" ]] && [[ "$i" == "$ORDINAL" ]]; then
                 continue
             fi
             PEER_HOST="${LDAP_CLUSTER_NAME}-${i}.${LDAP_CLUSTER_HEADLESS_SVC}.${LDAP_NAMESPACE}.svc.cluster.local"
@@ -194,11 +208,13 @@ ${SYNCREPL_TLS_OPT}
 EOF
         done
 
-        # mirrormode must be declared after all syncrepl directives
-        cat <<'EOF' >> "$TMP_CONF"
+        # mirrormode must be declared after all syncrepl directives (RW only).
+        if [[ "$READONLY_REPLICA" != "true" ]]; then
+            cat <<'EOF' >> "$TMP_CONF"
 
 mirrormode on
 EOF
+        fi
     fi
 
     # Convert slapd.conf to slapd.d format

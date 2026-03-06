@@ -119,7 +119,7 @@ e2e-in-cluster: push-e2e-runner
 	@echo "Waiting for e2e-runner pod to start..."
 	@until kubectl logs -n $(NAMESPACE_TESTING) -f job/e2e-runner 2>/dev/null; do sleep 2; done
 	@kubectl wait job/e2e-runner -n $(NAMESPACE_TESTING) \
-		--for=condition=complete --timeout=1s 2>/dev/null \
+		--for=condition=complete --timeout=30s 2>/dev/null \
 		|| (echo "FAIL: e2e-runner job did not complete successfully" && exit 1)
 
 clean:

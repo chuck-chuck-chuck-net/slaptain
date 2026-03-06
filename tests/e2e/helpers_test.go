@@ -188,6 +188,18 @@ func dialPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc)
 	return connectLDAP("localhost:"+localPort, baseDN, adminPW), cancel
 }
 
+// dialReadOnlyPodLDAP connects directly to a specific read-only slapd pod as admin.
+// Same as dialPodLDAP but uses the read-only headless service for in-cluster DNS.
+func dialReadOnlyPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
+	if os.Getenv("LDAP_ADDR") != "" {
+		addr := fmt.Sprintf("%s.%s.%s.svc.cluster.local:1024", podName, ldapReadOnlyHeadlessSvc, ns)
+		return connectLDAP(addr, baseDN, adminPW), func() {}
+	}
+	cancel := startPortForward(ns, "pod/"+podName, localPort, "1024")
+	time.Sleep(2 * time.Second)
+	return connectLDAP("localhost:"+localPort, baseDN, adminPW), cancel
+}
+
 // addReplTestUser adds a minimal posixAccount entry to ou=People for use in
 // replication and resilience tests. Returns the DN. Caller is responsible for
 // deleting the entry when done.

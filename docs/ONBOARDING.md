@@ -322,6 +322,14 @@ The loop is idempotent — running it twice in a row produces the same result as
 once. This is by design: Kubernetes controllers can be restarted at any time and must always
 converge to the correct state.
 
+### Read-only replicas
+
+When `spec.readReplicas > 0`, the operator creates a second StatefulSet (`<name>-readonly`)
+with pure consumer pods. These replicas pull data from all RW masters via delta-syncrepl but
+never accept writes — they have no accesslog, no syncprov overlay, and no mirrormode. They
+are useful for scaling read-heavy workloads (e.g. Dovecot auth lookups) without adding write
+complexity. Each RO pod gets the same ACLs as RW pods (since cn=config is node-local).
+
 ### What the operator does not do
 
 - **Schema management** — custom schemas are loaded by the slapd-test bootstrap job (which

@@ -82,7 +82,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── slapd_test.go           # StatefulSet, Service, PVC, passwords Secret checks
         ├── bootstrap_test.go       # bootstrap Job and toolkit Deployment checks
         ├── ldap_test.go            # Directory content: base structure, user/group CRUD, ACL basics
-        └── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
+        ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
+        └── readonly_test.go        # Read-only replica tests: data sync, write rejection
 ```
 
 ---
@@ -123,6 +124,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.ldap.forceRebootstrap` | bool | Force init container to re-bootstrap (destructive) |
 | `spec.ldap.tls.{enabled,secretName}` | `SlapdTLSConfig` | TLS Secret must contain `tls.crt`, `tls.key`, `ca.crt` |
 | `spec.replicas` | int32 | Default 1; replication is only active when `replicas > 1` AND `replication.enabled=true` |
+| `spec.readReplicas` | int32 | Default 0; number of read-only consumer replicas. Requires `replication.enabled=true`. Creates a second StatefulSet `<name>-readonly` |
 | `spec.logLevel` | int32 | slapd `-d` flag, default 0 |
 | `spec.persistence.{enabled,config,data}` | `SlapdPersistenceConfig` | PVC sizes and storage class; emptyDir when disabled |
 | `spec.service.{type,ldapPort,ldapsPort}` | `SlapdServiceConfig` | ClusterIP service config, defaults 389/636 |
@@ -130,7 +132,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
 | `spec.replication.{enabled,role,mode,peers,externalPeers,accessLogEnabled}` | `SlapdReplicationConfig` | N-way multi-master delta-syncrepl; active when `enabled=true` and `replicas > 1` |
 
-**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `observedGeneration`, `bootstrapComplete`, `conditions`.
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `bootstrapComplete`, `conditions`.
 
 **Reconcile order:**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
@@ -138,8 +140,11 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 3. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (SSA patch)
 4. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (SSA patch)
 5. `reconcileStatefulSet` — `serviceName: <name>-headless`; uses `volumeClaimTemplates` when persistence enabled (SSA patch)
+5a. `reconcileReadOnlyHeadlessService` — `<name>-readonly-headless`, `clusterIP: None` (skipped when `readReplicas=0`)
+5b. `reconcileReadOnlyService` — `<name>-readonly`, ClusterIP (skipped when `readReplicas=0`)
+5c. `reconcileReadOnlyStatefulSet` — second StatefulSet for RO consumers: no accesslog, `LDAP_READONLY_REPLICA=true` (skipped when `readReplicas=0`)
 6. `reconcileBootstrap` — connect to pod-0 via pod IP on port 1024, bind as data rootdn, add root + admin + (optionally) replication entries; sets `status.bootstrapComplete=true`; no-op when already complete (see `docs/BOOTSTRAP.md`)
-7. `reconcileACLs` — for each pod ordinal 0..replicas-1: dial `<name>-<N>.<name>-headless.<ns>.svc.cluster.local:1024`, bind as `cn=admin,cn=config` (from `<name>-config-password`), compare current `olcAccess` values against `spec.ldap.acls` (stripping `{N}` prefixes), replace if different; logs warning and skips pods not yet reachable (retries on next reconcile)
+7. `reconcileACLs` — for each pod ordinal 0..replicas-1: dial `<name>-<N>.<name>-headless.<ns>.svc.cluster.local:1024`, bind as `cn=admin,cn=config` (from `<name>-config-password`), compare current `olcAccess` values against `spec.ldap.acls` (stripping `{N}` prefixes), replace if different; also applies to read-only pods (`<name>-readonly-<N>.<name>-readonly-headless`); logs warning and skips pods not yet reachable (retries on next reconcile)
 8. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, conditions (SSA patch on status subresource)
 9. Not Running → `RequeueAfter: 10s`
 
@@ -442,6 +447,21 @@ Pod ordinal is read from the hostname: `${HOSTNAME##*-}` (last segment of Statef
 | Replication credentials Secret | CSN lag monitoring and alerting |
 | Per-pod accesslog PVC | Per-peer TLS client certificate auth |
 | Operator-managed cn=config ACLs (`spec.ldap.acls`) | Operator-managed custom schemas (`spec.ldap.schemas`) |
+| Read-only consumer replicas (`spec.readReplicas`) | |
+
+#### Read-Only Replicas
+
+When `spec.readReplicas > 0` (requires `replication.enabled=true`), the operator creates a
+second StatefulSet `<name>-readonly` with pure consumer pods. These pods:
+
+- Consume from **all RW masters** via delta-syncrepl (no single point of failure).
+- Do **not** run `accesslog`, `syncprov`, or `mirrormode` — they never accept writes.
+- Have their own headless service (`<name>-readonly-headless`) and ClusterIP service (`<name>-readonly`).
+- Use label `app.kubernetes.io/instance: <name>-readonly` to separate from RW pods.
+- Have no accesslog volume or PVC (only `ldap-config` + `ldap-data`).
+- The init container receives `LDAP_READONLY_REPLICA=true`; `LDAP_REPLICAS` and `LDAP_CLUSTER_HEADLESS_SVC` point to the **RW** headless service.
+- ACLs are applied to RO pods the same way as RW pods (cn=config is node-local).
+- Status fields: `readOnlyReadyReplicas`, `readOnlyReplicas` (informational; do not affect phase).
 
 ---
 

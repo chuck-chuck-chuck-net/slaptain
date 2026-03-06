@@ -202,6 +202,12 @@ type SlapdClusterSpec struct {
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	Replicas int32 `json:"replicas,omitempty"`
+	// readReplicas is the number of read-only consumer replicas.
+	// Requires replication.enabled=true and replicas>=1.
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	ReadReplicas int32 `json:"readReplicas,omitempty"`
 	// logLevel is the slapd -d debug level. 0 disables debug output.
 	// +kubebuilder:default=0
 	LogLevel int32 `json:"logLevel,omitempty"`
@@ -234,6 +240,12 @@ type SlapdClusterStatus struct {
 	// replicas is the total number of pods (ready or not).
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
+	// readOnlyReadyReplicas is the number of read-only pods reporting Ready.
+	// +optional
+	ReadOnlyReadyReplicas int32 `json:"readOnlyReadyReplicas,omitempty"`
+	// readOnlyReplicas is the total number of read-only pods (ready or not).
+	// +optional
+	ReadOnlyReplicas int32 `json:"readOnlyReplicas,omitempty"`
 	// observedGeneration is the .metadata.generation the controller last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -254,6 +266,7 @@ type SlapdClusterStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
+// +kubebuilder:printcolumn:name="RO-Ready",type=integer,JSONPath=`.status.readOnlyReadyReplicas`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // SlapdCluster is the Schema for the slapdclusters API.
