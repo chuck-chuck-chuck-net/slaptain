@@ -176,45 +176,10 @@ access to *
   by * read
 EOF
 
-        # Syncrepl blocks.
-        # RW: one block per peer, skip self. RO: one block per RW master, no self-skip.
-        for (( i=0; i<LDAP_REPLICAS; i++ )); do
-            if [[ "$READONLY_REPLICA" != "true" ]] && [[ "$i" == "$ORDINAL" ]]; then
-                continue
-            fi
-            PEER_HOST="${LDAP_CLUSTER_NAME}-${i}.${LDAP_CLUSTER_HEADLESS_SVC}.${LDAP_NAMESPACE}.svc.cluster.local"
-            RID=$(printf "%03d" $(( i + 1 )))
-            PROVIDER_URI="${PEER_SCHEME}://${PEER_HOST}:${PEER_PORT}"
-            cat <<EOF >> "$TMP_CONF"
-
-syncrepl rid=$RID
-  provider=$PROVIDER_URI
-  type=refreshAndPersist
-  interval=00:00:05:00
-  network-timeout=5
-  timeout=3
-  searchbase="$LDAP_DOMAIN_DC"
-  filter="(objectClass=*)"
-  scope=sub
-  schemachecking=off
-  bindmethod=simple
-  binddn="cn=replication,$LDAP_DOMAIN_DC"
-  credentials=$LDAP_REPLICATION_PASSWORD
-  logbase="cn=accesslog"
-  logfilter="(&(objectClass=auditWriteObject)(reqResult=0))"
-  syncdata=accesslog
-${SYNCREPL_TLS_OPT}
-  retry="5 +"
-EOF
-        done
-
-        # mirrormode must be declared after all syncrepl directives (RW only).
-        if [[ "$READONLY_REPLICA" != "true" ]]; then
-            cat <<'EOF' >> "$TMP_CONF"
-
-mirrormode on
-EOF
-        fi
+        # Syncrepl stanzas and mirrormode are managed by the operator at runtime
+        # (reconcileReplication step 7b). See ADR-003.
+        # RO replicas: syncrepl is also operator-managed; the operator applies
+        # in-cluster RW master stanzas to each RO pod's cn=config.
     fi
 
     # Convert slapd.conf to slapd.d format

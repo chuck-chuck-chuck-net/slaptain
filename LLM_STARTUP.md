@@ -29,7 +29,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] Helm Chart for standalone deployment (`charts/slapd`) — superseded by operator, kept for reference.
 - [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller. e2e: 33/33 green.
 - [x] **Operator Phase 2**: N-way multi-master delta-syncrepl; operator-orchestrated bootstrap; per-pod `volumeClaimTemplates`; replication credential management. e2e: pending.
-- [ ] Operator Phase 3: cross-cluster replication via `ExternalPeers`, mTLS peer auth.
+- [x] **Operator Phase 3**: cross-cluster replication via `ExternalPeers`, mTLS peer auth. Operator owns all syncrepl configuration (in-cluster + external). See ADR-003.
 
 ---
 
@@ -44,7 +44,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── ONBOARDING.md               # Team onboarding: LDAP concepts, operator model, credential model
 │   └── adrs/
 │       ├── adr-001-double-reconcile-runs.md
-│       └── adr-002-cn-config-node-local-operator-managed.md
+│       ├── adr-002-cn-config-node-local-operator-managed.md
+│       └── adr-003-operator-owns-syncrepl.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -85,7 +86,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── bootstrap_test.go       # bootstrap Job and toolkit Deployment checks
         ├── ldap_test.go            # Directory content: base structure, user/group CRUD, ACL basics
         ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
-        └── readonly_test.go        # Read-only replica tests: data sync, write rejection
+        ├── readonly_test.go        # Read-only replica tests: data sync, write rejection
+        └── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
 ```
 
 ---
@@ -135,7 +137,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
 | `spec.replication.{enabled,role,mode,peers,externalPeers,accessLogEnabled}` | `SlapdReplicationConfig` | N-way multi-master delta-syncrepl; active when `enabled=true` and `replicas > 1` |
 
-**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `bootstrapComplete`, `conditions`.
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `bootstrapComplete`, `externalPeerStatuses` (per-peer connectivity), `conditions`.
 
 **Reconcile order:**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
@@ -149,7 +151,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 6. `reconcileBootstrap` — connect to pod-0 via pod IP on port 1024, bind as data rootdn, add root + admin + (optionally) replication entries; sets `status.bootstrapComplete=true`; no-op when already complete (see `docs/BOOTSTRAP.md`)
 7. `reconcileACLs` — for each pod ordinal 0..replicas-1: dial `<name>-<N>.<name>-headless.<ns>.svc.cluster.local:1024`, bind as `cn=admin,cn=config` (from `<name>-config-password`), compare current `olcAccess` values against `spec.ldap.acls` (stripping `{N}` prefixes), replace if different; also applies to read-only pods (`<name>-readonly-<N>.<name>-readonly-headless`); logs warning and skips pods not yet reachable (retries on next reconcile)
 7a. `reconcileSchemas` — for each RW pod + RO pod: dial via headless DNS, bind as `cn=admin,cn=config`, for each JSON schema entry in `spec.ldap.schemas`: check DN existence → add if missing, skip if present; unreachable pods logged and retried on next reconcile
-8. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, conditions (SSA patch on status subresource)
+7b. `reconcileReplication` — operator owns all syncrepl config (ADR-003). For each RW pod: dial via headless DNS, bind as `cn=admin,cn=config`, compute desired `olcSyncRepl` stanzas via `buildDesiredSyncRepl()` (in-cluster RID 1..N skip-self + external peers RID 101+), compare current values (RID-based, order-insensitive), `Replace olcSyncRepl` + `Replace olcMirrorMode` if different. For RO pods: stanzas for all RW masters (no self-skip, no external peers, no mirrormode). Also reports external peer connectivity status. Unreachable pods logged and retried.
+8. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, `externalPeerStatuses`, conditions (SSA patch on status subresource)
 9. Not Running → `RequeueAfter: 10s`
 
 **Service naming (Bitnami convention):**
@@ -240,6 +243,7 @@ runs without readpw configuration but skips those test cases.
 | `make testing-helm-install` | `helm upgrade --install slapd-test ./charts/slapd-test` |
 | `make testing-helm-uninstall` | Uninstall the slapd-test Helm release |
 | `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` |
+| `make e2e-external-replication` | Run cross-cluster external replication tests (E2E_EXTERNAL_REPL=1) |
 
 ### Makefile Targets (operator/)
 
@@ -448,9 +452,10 @@ Pod ordinal is read from the hostname: `${HOSTNAME##*-}` (last segment of Statef
 | In scope | Out of scope (Phase 3+) |
 |---|---|
 | Replicas > 1 with N-way multi-master | Changing replicas after cluster creation (scale-out) |
-| Graceful pod failure and restart | Cross-cluster replication (ExternalPeers) |
-| Replication credentials Secret | CSN lag monitoring and alerting |
-| Per-pod accesslog PVC | Per-peer TLS client certificate auth |
+| Graceful pod failure and restart | CSN lag monitoring and alerting |
+| Replication credentials Secret | |
+| Per-pod accesslog PVC | |
+| Cross-cluster replication (ExternalPeers, Phase 3) | |
 | Operator-managed cn=config ACLs (`spec.ldap.acls`) | |
 | Operator-managed custom schemas (`spec.ldap.schemas`) | |
 | Read-only consumer replicas (`spec.readReplicas`) | |

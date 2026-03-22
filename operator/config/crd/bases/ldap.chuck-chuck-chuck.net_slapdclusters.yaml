@@ -683,6 +683,27 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              externalPeerStatuses:
+                description: externalPeerStatuses reports per-peer replication connectivity.
+                items:
+                  description: ExternalPeerStatus reports the observed replication
+                    state of one external peer.
+                  properties:
+                    connected:
+                      description: connected indicates whether the operator can reach
+                        this peer.
+                      type: boolean
+                    lastError:
+                      description: lastError is the last connection error, if any.
+                      type: string
+                    name:
+                      description: name matches ExternalPeer.Name.
+                      type: string
+                  required:
+                  - connected
+                  - name
+                  type: object
+                type: array
               observedGeneration:
                 description: observedGeneration is the .metadata.generation the controller
                   last reconciled.

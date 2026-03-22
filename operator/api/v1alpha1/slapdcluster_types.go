@@ -235,6 +235,17 @@ type SlapdClusterSpec struct {
 	Replication SlapdReplicationConfig `json:"replication,omitempty"`
 }
 
+// ExternalPeerStatus reports the observed replication state of one external peer.
+type ExternalPeerStatus struct {
+	// name matches ExternalPeer.Name.
+	Name string `json:"name"`
+	// connected indicates whether the operator can reach this peer.
+	Connected bool `json:"connected"`
+	// lastError is the last connection error, if any.
+	// +optional
+	LastError string `json:"lastError,omitempty"`
+}
+
 // SlapdClusterStatus defines the observed state of SlapdCluster.
 type SlapdClusterStatus struct {
 	// phase summarises the current lifecycle state.
@@ -259,6 +270,9 @@ type SlapdClusterStatus struct {
 	// initial LDAP directory entries (root entry, admin, replication user).
 	// +optional
 	BootstrapComplete bool `json:"bootstrapComplete,omitempty"`
+	// externalPeerStatuses reports per-peer replication connectivity.
+	// +optional
+	ExternalPeerStatuses []ExternalPeerStatus `json:"externalPeerStatuses,omitempty"`
 	// conditions holds standard Kubernetes condition entries.
 	// +listType=map
 	// +listMapKey=type

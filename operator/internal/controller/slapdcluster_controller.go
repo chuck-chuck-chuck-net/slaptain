@@ -20,10 +20,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -125,6 +127,12 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	//     DN existence check — existing schemas are skipped, unreachable pods retried).
 	if err := r.reconcileSchemas(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSchemas: %w", err)
+	}
+
+	// 7b. Apply syncrepl + mirrormode to each pod's cn=config data DB entry.
+	//     Operator owns all syncrepl configuration (in-cluster + external). See ADR-003.
+	if err := r.reconcileReplication(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
 	}
 
 	// 8. Observe StatefulSet status → update SlapdCluster status.
@@ -949,6 +957,21 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		})
 	}
 
+	// External peer TLS CA cert volumes (Phase 3).
+	for _, peer := range sc.Spec.Replication.ExternalPeers {
+		if peer.TLSSecretName == "" {
+			continue
+		}
+		volumes = append(volumes, corev1.Volume{
+			Name: "peer-tls-" + peer.Name,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: peer.TLSSecretName,
+				},
+			},
+		})
+	}
+
 	// ── Init container ────────────────────────────────────────────────────────
 	initEnv := []corev1.EnvVar{
 		{Name: "LDAP_DOMAIN_DC", Value: sc.Spec.LDAP.Domain},
@@ -1051,6 +1074,18 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		mainMounts = append(mainMounts, corev1.VolumeMount{
 			Name:      "ldap-tls",
 			MountPath: "/etc/openldap/tls",
+			ReadOnly:  true,
+		})
+	}
+
+	// External peer TLS CA cert volume mounts (Phase 3).
+	for _, peer := range sc.Spec.Replication.ExternalPeers {
+		if peer.TLSSecretName == "" {
+			continue
+		}
+		mainMounts = append(mainMounts, corev1.VolumeMount{
+			Name:      "peer-tls-" + peer.Name,
+			MountPath: "/etc/openldap/tls/peers/" + peer.Name,
 			ReadOnly:  true,
 		})
 	}
@@ -1457,6 +1492,428 @@ func schemaExistsByCN(conn *ldap.Conn, cn string) (bool, error) {
 		return false, err
 	}
 	return len(sr.Entries) > 0, nil
+}
+
+// ── Replication reconciliation (Phase 3, ADR-003) ─────────────────────────────
+
+// parsedExternalPeer holds a resolved external peer with its bind password.
+type parsedExternalPeer struct {
+	Name     string
+	URI      string
+	BindDN   string
+	Password string
+	// TLS CA cert path inside the container (empty if no TLS secret).
+	TLSCACertPath string
+}
+
+// reconcileReplication applies syncrepl + mirrormode to each RW pod's cn=config
+// data DB entry. The operator is the sole owner of olcSyncRepl and olcMirrorMode
+// (see ADR-003). RO replicas also get syncrepl stanzas pointing to RW masters.
+func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	log := logf.FromContext(ctx)
+
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+
+	hasExternalPeers := len(sc.Spec.Replication.ExternalPeers) > 0
+	replicationEnabled := sc.Spec.Replication.Enabled && replicas > 1
+
+	// Nothing to do if replication is disabled and there are no external peers.
+	if !replicationEnabled && !hasExternalPeers {
+		// Clear external peer statuses if previously set.
+		sc.Status.ExternalPeerStatuses = nil
+		return nil
+	}
+
+	rootPW, err := r.getConfigPassword(ctx, sc)
+	if err != nil {
+		return err
+	}
+
+	// Read in-cluster replication password.
+	var replPassword string
+	if replicationEnabled {
+		pwSecret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{
+			Name:      sc.Name + "-passwords",
+			Namespace: sc.Namespace,
+		}, pwSecret); err != nil {
+			return fmt.Errorf("read passwords secret for replication: %w", err)
+		}
+		replPassword = string(pwSecret.Data["replication-password"])
+	}
+
+	// Resolve external peers: read bind passwords from their secrets.
+	var externalPeers []parsedExternalPeer
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		parsed := parsedExternalPeer{
+			Name:   ep.Name,
+			URI:    ep.URI,
+			BindDN: ep.BindDN,
+		}
+		if ep.TLSSecretName != "" {
+			parsed.TLSCACertPath = "/etc/openldap/tls/peers/" + ep.Name + "/ca.crt"
+		}
+		if ep.BindPasswordSecretName != "" {
+			secret := &corev1.Secret{}
+			if err := r.Get(ctx, client.ObjectKey{
+				Name:      ep.BindPasswordSecretName,
+				Namespace: sc.Namespace,
+			}, secret); err != nil {
+				log.Info("skipping external peer: cannot read bind password secret",
+					"peer", ep.Name, "secret", ep.BindPasswordSecretName, "err", err)
+				continue
+			}
+			parsed.Password = string(secret.Data["password"])
+			if parsed.Password == "" {
+				// Try replication-password key as fallback.
+				parsed.Password = string(secret.Data["replication-password"])
+			}
+		}
+		externalPeers = append(externalPeers, parsed)
+	}
+
+	headlessSvc := sc.Name + "-headless"
+	tlsEnabled := sc.Spec.LDAP.TLS.Enabled
+	tlsCACertPath := "/etc/openldap/tls/ca.crt"
+
+	// Apply syncrepl to RW pods.
+	for i := int32(0); i < replicas; i++ {
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
+			sc.Name, i, headlessSvc, sc.Namespace)
+
+		desired := buildDesiredSyncRepl(
+			sc.Name, headlessSvc, sc.Namespace, sc.Spec.LDAP.Domain,
+			replicas, i, replPassword,
+			tlsEnabled, tlsCACertPath,
+			externalPeers,
+		)
+		desiredMirrorMode := "TRUE"
+
+		if err := r.applySyncreplToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, desired, desiredMirrorMode); err != nil {
+			log.Info("Replication reconcile skipped for pod (will retry on next reconcile)",
+				"ordinal", i, "host", host, "err", err)
+		}
+	}
+
+	// Apply syncrepl to RO pods (in-cluster RW masters only, no external peers, no mirrormode).
+	if sc.Spec.ReadReplicas > 0 {
+		roHeadless := sc.Name + "-readonly-headless"
+		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
+			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.cluster.local",
+				sc.Name, i, roHeadless, sc.Namespace)
+
+			// RO replicas get stanzas for ALL RW masters (no self-skip).
+			desired := buildDesiredSyncReplRO(
+				sc.Name, headlessSvc, sc.Namespace, sc.Spec.LDAP.Domain,
+				replicas, replPassword,
+				tlsEnabled, tlsCACertPath,
+			)
+
+			if err := r.applySyncreplToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, desired, ""); err != nil {
+				log.Info("Replication reconcile skipped for read-only pod (will retry on next reconcile)",
+					"ordinal", i, "host", host, "err", err)
+			}
+		}
+	}
+
+	// External peer status reporting.
+	sc.Status.ExternalPeerStatuses = nil
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		status := ldapv1alpha1.ExternalPeerStatus{
+			Name: ep.Name,
+		}
+		if err := testExternalPeerConnectivity(ep.URI); err != nil {
+			status.Connected = false
+			status.LastError = err.Error()
+		} else {
+			status.Connected = true
+		}
+		sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
+	}
+
+	return nil
+}
+
+// applySyncreplToPod applies the desired olcSyncRepl and olcMirrorMode values to one pod.
+// mirrorMode should be "TRUE" for RW pods; empty string means do not set olcMirrorMode.
+func (r *SlapdClusterReconciler) applySyncreplToPod(
+	ctx context.Context,
+	host, rootPW, domain string,
+	desired []string,
+	mirrorMode string,
+) error {
+	log := logf.FromContext(ctx)
+
+	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
+	conn, err := ldap.DialURL("ldap://"+addr,
+		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+	)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
+		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
+	}
+
+	dataDN, err := findDataDBDN(conn, domain)
+	if err != nil {
+		return err
+	}
+
+	// Read current olcSyncRepl and olcMirrorMode.
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		1, 0, false, "(objectClass=*)", []string{"olcSyncRepl", "olcMirrorMode"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("read olcSyncRepl on %s at %s: %w", dataDN, host, err)
+	}
+	if len(sr.Entries) == 0 {
+		return fmt.Errorf("no entry at %s on %s", dataDN, host)
+	}
+
+	currentSyncRepl := sr.Entries[0].GetAttributeValues("olcSyncRepl")
+	currentMirrorMode := ""
+	if vals := sr.Entries[0].GetAttributeValues("olcMirrorMode"); len(vals) > 0 {
+		currentMirrorMode = vals[0]
+	}
+
+	syncreplChanged := !syncreplMatch(currentSyncRepl, desired)
+	mirrorModeChanged := mirrorMode != "" && !strings.EqualFold(currentMirrorMode, mirrorMode)
+
+	if !syncreplChanged && !mirrorModeChanged {
+		log.V(1).Info("syncrepl already up-to-date", "host", host)
+		return nil
+	}
+
+	log.Info("replacing syncrepl stanzas", "host", host, "stanzas", len(desired),
+		"syncreplChanged", syncreplChanged, "mirrorModeChanged", mirrorModeChanged)
+
+	modReq := ldap.NewModifyRequest(dataDN, nil)
+	if syncreplChanged {
+		modReq.Replace("olcSyncRepl", desired)
+	}
+	if mirrorModeChanged {
+		modReq.Replace("olcMirrorMode", []string{mirrorMode})
+	}
+	if err := conn.Modify(modReq); err != nil {
+		return fmt.Errorf("replace olcSyncRepl/olcMirrorMode on %s at %s: %w", dataDN, host, err)
+	}
+	return nil
+}
+
+// buildDesiredSyncRepl computes the desired olcSyncRepl stanzas for one RW pod.
+// In-cluster peers get RIDs 1..N (skip self), external peers get RIDs 101..100+M.
+func buildDesiredSyncRepl(
+	clusterName, headlessSvc, namespace, domain string,
+	replicas, ordinal int32,
+	replPassword string,
+	tlsEnabled bool, tlsCACertPath string,
+	externalPeers []parsedExternalPeer,
+) []string {
+	var stanzas []string
+
+	// Peer URL scheme and port depend on TLS.
+	peerScheme := "ldap"
+	peerPort := int32(1024)
+	syncreplTLSOpt := ""
+	if tlsEnabled {
+		peerScheme = "ldaps"
+		peerPort = 1025
+		syncreplTLSOpt = fmt.Sprintf(" tls_cacert=%s", tlsCACertPath)
+	}
+
+	// In-cluster stanzas: one per RW peer, skip self.
+	for i := int32(0); i < replicas; i++ {
+		if i == ordinal {
+			continue
+		}
+		rid := fmt.Sprintf("%03d", i+1)
+		peerHost := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", clusterName, i, headlessSvc, namespace)
+		providerURI := fmt.Sprintf("%s://%s:%d", peerScheme, peerHost, peerPort)
+
+		stanza := fmt.Sprintf("rid=%s provider=%s"+
+			" type=refreshAndPersist"+
+			" searchbase=\"%s\""+
+			" scope=sub"+
+			" schemachecking=off"+
+			" bindmethod=simple"+
+			" binddn=\"cn=replication,%s\""+
+			" credentials=%s"+
+			" logbase=\"cn=accesslog\""+
+			" logfilter=\"(&(objectClass=auditWriteObject)(reqResult=0))\""+
+			" syncdata=accesslog"+
+			"%s"+
+			" retry=\"5 +\"",
+			rid, providerURI, domain, domain, replPassword, syncreplTLSOpt)
+		stanzas = append(stanzas, stanza)
+	}
+
+	// External peer stanzas: RID 101..100+M.
+	for idx, ep := range externalPeers {
+		rid := fmt.Sprintf("%03d", 101+idx)
+		tlsOpts := ""
+		if ep.TLSCACertPath != "" {
+			tlsOpts = fmt.Sprintf(" tls_cacert=%s", ep.TLSCACertPath)
+			if tlsEnabled {
+				tlsOpts += " tls_cert=/etc/openldap/tls/tls.crt tls_key=/etc/openldap/tls/tls.key"
+			}
+		}
+
+		stanza := fmt.Sprintf("rid=%s provider=%s"+
+			" type=refreshAndPersist"+
+			" searchbase=\"%s\""+
+			" scope=sub"+
+			" schemachecking=off"+
+			" bindmethod=simple"+
+			" binddn=\"%s\""+
+			" credentials=%s"+
+			" logbase=\"cn=accesslog\""+
+			" logfilter=\"(&(objectClass=auditWriteObject)(reqResult=0))\""+
+			" syncdata=accesslog"+
+			"%s"+
+			" retry=\"5 +\"",
+			rid, ep.URI, domain, ep.BindDN, ep.Password, tlsOpts)
+		stanzas = append(stanzas, stanza)
+	}
+
+	return stanzas
+}
+
+// buildDesiredSyncReplRO computes syncrepl stanzas for a read-only replica.
+// RO replicas get stanzas for ALL RW masters (no self-skip, no external peers, no mirrormode).
+func buildDesiredSyncReplRO(
+	clusterName, headlessSvc, namespace, domain string,
+	rwReplicas int32,
+	replPassword string,
+	tlsEnabled bool, tlsCACertPath string,
+) []string {
+	var stanzas []string
+
+	peerScheme := "ldap"
+	peerPort := int32(1024)
+	syncreplTLSOpt := ""
+	if tlsEnabled {
+		peerScheme = "ldaps"
+		peerPort = 1025
+		syncreplTLSOpt = fmt.Sprintf(" tls_cacert=%s", tlsCACertPath)
+	}
+
+	for i := int32(0); i < rwReplicas; i++ {
+		rid := fmt.Sprintf("%03d", i+1)
+		peerHost := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", clusterName, i, headlessSvc, namespace)
+		providerURI := fmt.Sprintf("%s://%s:%d", peerScheme, peerHost, peerPort)
+
+		stanza := fmt.Sprintf("rid=%s provider=%s"+
+			" type=refreshAndPersist"+
+			" searchbase=\"%s\""+
+			" scope=sub"+
+			" schemachecking=off"+
+			" bindmethod=simple"+
+			" binddn=\"cn=replication,%s\""+
+			" credentials=%s"+
+			" logbase=\"cn=accesslog\""+
+			" logfilter=\"(&(objectClass=auditWriteObject)(reqResult=0))\""+
+			" syncdata=accesslog"+
+			"%s"+
+			" retry=\"5 +\"",
+			rid, providerURI, domain, domain, replPassword, syncreplTLSOpt)
+		stanzas = append(stanzas, stanza)
+	}
+
+	return stanzas
+}
+
+// syncreplMatch compares current olcSyncRepl values (with {N} prefixes) against desired.
+// Comparison is RID-based and order-insensitive.
+func syncreplMatch(current, desired []string) bool {
+	if len(current) != len(desired) {
+		return false
+	}
+	// Build maps keyed by RID.
+	currentByRID := parseSyncreplByRID(current)
+	desiredByRID := parseSyncreplByRID(desired)
+	if len(currentByRID) != len(desiredByRID) {
+		return false
+	}
+	for rid, dStanza := range desiredByRID {
+		cStanza, ok := currentByRID[rid]
+		if !ok {
+			return false
+		}
+		if normalizeStanza(cStanza) != normalizeStanza(dStanza) {
+			return false
+		}
+	}
+	return true
+}
+
+// parseSyncreplByRID extracts RID → stanza body (without {N} prefix) from olcSyncRepl values.
+func parseSyncreplByRID(stanzas []string) map[string]string {
+	result := make(map[string]string, len(stanzas))
+	for _, s := range stanzas {
+		bare := s
+		// Strip {N} prefix if present.
+		if len(s) > 0 && s[0] == '{' {
+			if idx := strings.Index(s, "}"); idx >= 0 {
+				bare = s[idx+1:]
+			}
+		}
+		// Extract RID from "rid=NNN ..."
+		bare = strings.TrimSpace(bare)
+		if strings.HasPrefix(bare, "rid=") {
+			parts := strings.SplitN(bare, " ", 2)
+			rid := strings.TrimPrefix(parts[0], "rid=")
+			result[rid] = bare
+		}
+	}
+	return result
+}
+
+// normalizeStanza normalizes whitespace in a syncrepl stanza for comparison.
+func normalizeStanza(s string) string {
+	fields := strings.Fields(s)
+	sort.Strings(fields)
+	return strings.Join(fields, " ")
+}
+
+// testExternalPeerConnectivity attempts a TLS/TCP connection to the external peer URI
+// to check basic network reachability. Returns nil on success.
+func testExternalPeerConnectivity(uri string) error {
+	// Parse URI: ldaps://host:port or ldap://host:port
+	addr := uri
+	useTLS := false
+	if strings.HasPrefix(uri, "ldaps://") {
+		addr = strings.TrimPrefix(uri, "ldaps://")
+		useTLS = true
+	} else if strings.HasPrefix(uri, "ldap://") {
+		addr = strings.TrimPrefix(uri, "ldap://")
+	}
+	// Strip trailing slash if any.
+	addr = strings.TrimRight(addr, "/")
+
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	if useTLS {
+		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // connectivity check only
+		})
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return nil
+	}
+	conn, err := dialer.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	conn.Close()
+	return nil
 }
 
 // getConfigPassword reads the plaintext root (cn=config admin) password from

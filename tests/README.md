@@ -170,6 +170,229 @@ These tests skip gracefully when not configured.
 
 ---
 
+## Cross-cluster replication tests
+
+These tests verify bidirectional delta-syncrepl between two independent SlapdClusters
+running in **separate Kubernetes clusters** (siteA and siteB). They are gated by
+`E2E_EXTERNAL_REPL=1` and skipped by default in `make e2e-run`.
+
+### Topology
+
+```
+┌─────────────────────────────┐         ┌─────────────────────────────┐
+│  siteA (local cluster)      │         │  siteB (remote cluster)     │
+│                             │         │                             │
+│  operator                   │         │  operator                   │
+│  SlapdCluster "slapd"       │ ◄─────► │  SlapdCluster "slapd"       │
+│    replicas: 3              │ syncrepl│    replicas: 3              │
+│    externalPeers:           │         │    externalPeers:           │
+│      - name: site-b         │         │      - name: site-a         │
+│        uri: ldaps://siteB   │         │        uri: ldaps://siteA   │
+│                             │         │                             │
+│  slapd-test (bootstrap+OUs) │         │  (no slapd-test needed)     │
+└─────────────────────────────┘         └─────────────────────────────┘
+         ▲                                         ▲
+         │                                         │
+         └────── test runner (your workstation) ───┘
+```
+
+The test runner runs on your workstation (or in siteA). It connects to siteA via
+`kubectl port-forward` (or direct if `LDAP_ADDR` is set) and to siteB via
+`E2E_REMOTE_LDAP_ADDR` (a routable address — NodePort, LoadBalancer, or VPN).
+
+### Prerequisites
+
+Both clusters need to exist and be reachable from your workstation. The setup below uses
+`KUBECONFIG` to switch between clusters. All commands run from the **project root**.
+
+#### 1. Shared credentials
+
+Both clusters must use the **same LDAP domain** and the **same admin + replication passwords**.
+The simplest approach: create a credentials secret with known passwords, and reference it
+via `credentialsSecretName` in the Helm values.
+
+```bash
+# Create identical credentials on both clusters.
+for KUBECONFIG in ~/.kube/config-siteA ~/.kube/config-siteB; do
+  export KUBECONFIG
+  kubectl create namespace slaptain-testing --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create secret generic slapd-credentials \
+    -n slaptain-testing \
+    --from-literal=admin-password=<ADMIN_PW> \
+    --from-literal=root-password=<ROOT_PW> \
+    --from-literal=replication-password=<REPL_PW> \
+    --dry-run=client -o yaml | kubectl apply -f -
+done
+```
+
+Then set `credentials.existingSecret: slapd-credentials` in both sites' Helm values (or
+add it to `tests/values.slapd.yaml`).
+
+#### 2. TLS certificates with cross-trust
+
+Each site needs its own TLS cert **and** the other site's CA cert:
+
+```bash
+# Generate TLS certs for each site (run once per site).
+KUBECONFIG=~/.kube/config-siteA make gencert
+KUBECONFIG=~/.kube/config-siteB make gencert
+
+# Extract CA certs.
+kubectl --kubeconfig=~/.kube/config-siteA -n slaptain-testing \
+  get secret slapd-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/site-a-ca.crt
+kubectl --kubeconfig=~/.kube/config-siteB -n slaptain-testing \
+  get secret slapd-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/site-b-ca.crt
+
+# Create cross-trust secrets: siteA gets siteB's CA and vice versa.
+kubectl --kubeconfig=~/.kube/config-siteA -n slaptain-testing \
+  create secret generic site-b-ca --from-file=ca.crt=/tmp/site-b-ca.crt \
+  --dry-run=client -o yaml | kubectl --kubeconfig=~/.kube/config-siteA apply -f -
+
+kubectl --kubeconfig=~/.kube/config-siteB -n slaptain-testing \
+  create secret generic site-a-ca --from-file=ca.crt=/tmp/site-a-ca.crt \
+  --dry-run=client -o yaml | kubectl --kubeconfig=~/.kube/config-siteB apply -f -
+```
+
+#### 3. Expose LDAP services
+
+Each site's LDAP must be reachable from the other site over the network. The exact
+method depends on your infrastructure:
+
+- **NodePort**: `kubectl expose svc/slapd --type=NodePort --name=slapd-external`
+- **LoadBalancer**: set `service.type: LoadBalancer` in values
+- **VPN/direct routing**: if your clusters share a flat network, ClusterIP may suffice
+
+The URI used in `externalPeers` must resolve from inside the slapd pod (not from your
+workstation). The URI in `E2E_REMOTE_LDAP_ADDR` must be reachable from your workstation.
+
+Example with NodePort (assuming siteB node IP is `10.0.1.50`, NodePort is `30636`):
+
+```yaml
+# siteA values: point at siteB
+replication:
+  enabled: true
+  externalPeers:
+    - name: site-b
+      uri: "ldaps://10.0.1.50:30636"
+      tlsSecretName: "site-b-ca"
+      bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
+      bindPasswordSecretName: "slapd-credentials"
+```
+
+```yaml
+# siteB values: point at siteA
+replication:
+  enabled: true
+  externalPeers:
+    - name: site-a
+      uri: "ldaps://10.0.0.50:30636"
+      tlsSecretName: "site-a-ca"
+      bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
+      bindPasswordSecretName: "slapd-credentials"
+```
+
+Note: `bindPasswordSecretName` points to a Secret containing a `password` or
+`replication-password` key. If you use the shared `slapd-credentials` Secret, the
+operator reads the `replication-password` key from it.
+
+#### 4. Install operator + SlapdCluster on both sites
+
+```bash
+# siteA
+KUBECONFIG=~/.kube/config-siteA make operator-helm-install
+KUBECONFIG=~/.kube/config-siteA make cluster-helm-install
+
+# siteB (with its own values pointing externalPeers at siteA)
+KUBECONFIG=~/.kube/config-siteB make operator-helm-install
+KUBECONFIG=~/.kube/config-siteB HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd-site-b.yaml ..." make cluster-helm-install
+```
+
+#### 5. Install slapd-test on siteA only
+
+```bash
+KUBECONFIG=~/.kube/config-siteA make testing-helm-install
+```
+
+The bootstrap job creates OUs and test users on siteA. These replicate to siteB
+automatically via the cross-cluster syncrepl.
+
+#### 6. Wait for replication convergence
+
+Before running the tests, verify that data has replicated from siteA to siteB:
+
+```bash
+# Check siteA
+ldapsearch -x -H ldap://localhost:13891 -D "cn=admin,dc=chuck-chuck-chuck,dc=net" \
+  -w <ADMIN_PW> -b "dc=chuck-chuck-chuck,dc=net" -LLL "(ou=People)"
+
+# Check siteB (use the routable address)
+ldapsearch -x -H ldap://10.0.1.50:30389 -D "cn=admin,dc=chuck-chuck-chuck,dc=net" \
+  -w <ADMIN_PW> -b "dc=chuck-chuck-chuck,dc=net" -LLL "(ou=People)"
+```
+
+Both should return `ou=People`.
+
+### Running the tests
+
+```bash
+export E2E_REMOTE_LDAP_ADDR="10.0.1.50:30389"   # siteB address reachable from workstation
+export E2E_REMOTE_ADMIN_PW="<ADMIN_PW>"           # siteB admin password (or omit if same as siteA)
+
+make e2e-external-replication
+```
+
+This sets `E2E_EXTERNAL_REPL=1` and runs only the `external-replication` labeled tests.
+
+| Env var | Required | Default | Description |
+|---|---|---|---|
+| `E2E_EXTERNAL_REPL` | set by Makefile | *(unset)* | Enables external replication tests |
+| `E2E_REMOTE_LDAP_ADDR` | **yes** | — | `host:port` of siteB's LDAP, reachable from test runner |
+| `E2E_REMOTE_ADMIN_PW` | no | siteA's admin password | Plaintext admin password for siteB |
+| `NAMESPACE_TESTING` | no | `slaptain-testing` | siteA namespace |
+
+If `E2E_REMOTE_ADMIN_PW` is not set, the test falls back to using siteA's admin password
+(read from `slapd-passwords` in the local cluster). This works when both sites share the
+same `credentialsSecretName`.
+
+### What the tests verify
+
+| # | Test | What it checks |
+|---|---|---|
+| 1 | Syncrepl stanzas present | Every RW pod on siteA has `rid=101` in `olcSyncRepl` |
+| 2 | siteA → siteB | Write on siteA appears on siteB within 60 s |
+| 3 | siteB → siteA | Write on siteB appears on siteA within 60 s |
+| 4 | Peer removal | *(skipped — requires live CR modification)* |
+| 5 | Status reporting | *(skipped — requires typed CRD client)* |
+
+### Troubleshooting
+
+**Syncrepl stanzas not appearing:** Check the operator logs on siteA. The `reconcileReplication`
+step connects to each pod via headless DNS. If the external peer's `bindPasswordSecretName`
+Secret is missing or empty, the operator logs a warning and skips that peer.
+
+```bash
+kubectl logs -n slaptain deploy/slaptain-operator-controller-manager | grep -i replication
+```
+
+**Data not replicating:** Verify syncrepl status from inside a pod:
+
+```bash
+kubectl exec -n slaptain-testing slapd-0 -c slapd -- \
+  ldapsearch -H ldapi://%2frun%2fopenldap%2fslapd.ldapi \
+  -Y EXTERNAL -b "olcDatabase={2}mdb,cn=config" olcSyncRepl olcMirrorMode 2>/dev/null
+```
+
+Check that the external peer URI is reachable from the pod (not just from your workstation):
+
+```bash
+kubectl exec -n slaptain-testing slapd-0 -c slapd -- \
+  ldapsearch -x -H ldaps://10.0.1.50:30636 -b "" -s base 2>&1 || echo "unreachable"
+```
+
+Note: the distroless slapd image has no shell. Use the toolkit pod for more advanced debugging.
+
+---
+
 ## Using the toolkit
 
 The toolkit pod has `ldap-utils`, `python3`, `ldap3`, and `pyyaml` pre-installed.

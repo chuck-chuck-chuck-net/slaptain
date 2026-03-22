@@ -88,6 +88,27 @@ kubectl get slapdcluster -o wide
 - **Persistent storage**: per-pod PVCs via StatefulSet `volumeClaimTemplates` for config, data, and accesslog volumes.
 - **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts, no accidental field overwrites.
 
+## Cross-Cluster Replication
+
+Slaptain supports cross-cluster replication via `spec.replication.externalPeers`. Each peer is an independent SlapdCluster running in a separate Kubernetes cluster. Replication is bidirectional (N-way multi-master) using simple bind over TLS.
+
+Each cluster's slapd TLS certificate is reused as the mTLS client certificate. The peer's CA is provided via `tlsSecretName` so each side can verify the other.
+
+```yaml
+replication:
+  enabled: true
+  externalPeers:
+    - name: site-b
+      uri: "ldaps://ldap.site-b.example.com:636"
+      tlsSecretName: "site-b-ca"           # Secret with peer's ca.crt
+      bindDN: "cn=replication,dc=example,dc=org"
+      bindPasswordSecretName: "site-b-repl-pw"  # Secret with 'password' key
+```
+
+The operator manages all syncrepl stanzas (in-cluster + external) at runtime. Adding or removing external peers from the spec triggers a reconcile that updates `cn=config` on every pod — no pod restarts needed. External peer connectivity is reported in `.status.externalPeerStatuses`.
+
+RID scheme: in-cluster peers use RIDs 1..99 (skip self), external peers use RIDs 101+. See [ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md) for the full design rationale.
+
 ## Configuration Reference
 
 ```yaml
@@ -124,6 +145,13 @@ spec:
 
   replication:
     enabled: true
+    # Cross-cluster peers (Phase 3)
+    externalPeers:
+      - name: site-b
+        uri: "ldaps://ldap.site-b.example.com:636"
+        tlsSecretName: "site-b-ca"
+        bindDN: "cn=replication,dc=example,dc=org"
+        bindPasswordSecretName: "site-b-replication-password"
 
   persistence:
     enabled: true

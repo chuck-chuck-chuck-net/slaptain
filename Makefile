@@ -10,7 +10,7 @@ TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:latest
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:latest
 E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:latest
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-in-cluster clean
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster clean
 
 all: build-init build-slapd build-toolkit build-operator
 
@@ -108,6 +108,10 @@ e2e-run:
 ## e2e-resilience: run all tests including slow pod-restart and warm-start tests
 e2e-resilience:
 	cd tests/e2e && E2E_RESILIENCE=1 go test -v ./... --ginkgo.v --ginkgo.timeout=30m
+
+## e2e-external-replication: run cross-cluster external replication tests
+e2e-external-replication:
+	cd tests/e2e && E2E_EXTERNAL_REPL=1 go test -v ./... --ginkgo.v --ginkgo.timeout=10m --ginkgo.label-filter=external-replication
 
 ## e2e-in-cluster: build + push e2e runner image, deploy as a Job, stream logs, report result
 e2e-in-cluster: push-e2e-runner

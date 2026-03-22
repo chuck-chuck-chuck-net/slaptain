@@ -80,6 +80,14 @@ persistence:
 # The replication bind password is stored in <name>-passwords under the replication-password key.
 replication:
   enabled: false
+  # -- Cross-cluster external peers (Phase 3).
+  # Each peer requires a name, URI, and optionally TLS secret + bind credentials.
+  externalPeers: []
+  # - name: site-b
+  #   uri: "ldaps://ldap.site-b.example.com:636"
+  #   tlsSecretName: "site-b-ca"
+  #   bindDN: "cn=replication,dc=example,dc=org"
+  #   bindPasswordSecretName: "site-b-replication-password"
 
 # -- Service configuration.
 service:
