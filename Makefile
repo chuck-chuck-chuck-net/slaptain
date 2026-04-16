@@ -4,6 +4,9 @@ NAMESPACE ?= slaptain
 NAMESPACE_TESTING ?= slaptain-testing
 CONTAINER_ENGINE ?= podman
 
+# Image delivery: "push" = registry, "import" = direct to k8s node containerd via SSH
+DELIVERY ?= import
+
 # Node import settings: auto-discover from kubectl, override with NODE_IPS="1.2.3.4 5.6.7.8"
 NODE_USER ?= debian
 NODE_IPS ?= $(shell kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
@@ -32,7 +35,7 @@ define import-image
 	done
 endef
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-operator deploy-operator clean
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean
 
 all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl
 
@@ -93,8 +96,16 @@ import: build-init build-slapd build-toolkit build-operator build-e2e-runner
 import-operator: build-operator
 	$(call import-image,$(OPERATOR_IMAGE))
 
-## Operator dev fast-path: build + import + helm upgrade + restart
-deploy-operator: import-operator operator-helm-install
+import-e2e-runner: build-e2e-runner
+	$(call import-image,$(E2E_RUNNER_IMAGE))
+
+## Delivery: dispatch to push or import based on DELIVERY variable
+deliver: $(DELIVERY)
+deliver-operator: $(DELIVERY)-operator
+deliver-e2e-runner: $(DELIVERY)-e2e-runner
+
+## Operator dev fast-path: build + deliver + helm upgrade + restart
+deploy-operator: deliver-operator operator-helm-install
 	kubectl rollout restart deployment/slaptain-operator -n $(NAMESPACE)
 
 operator-generate:
@@ -116,7 +127,7 @@ helm-install:
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
 		$(HELM_VALUES_SLAPD)
 
-helm-deploy: push gencert helm-install ## Full pipeline: build images, generate certs, deploy
+helm-deploy: deliver gencert helm-install ## Full pipeline: build images, deliver, generate certs, deploy
 
 helm-uninstall:
 	helm uninstall slapd --namespace $(NAMESPACE_TESTING)
@@ -172,8 +183,8 @@ e2e-resilience:
 e2e-external-replication:
 	cd tests/e2e && E2E_EXTERNAL_REPL=1 go test -v ./... --ginkgo.v --ginkgo.timeout=10m --ginkgo.label-filter=external-replication
 
-## e2e-in-cluster: build + push e2e runner image, deploy as a Job, stream logs, report result
-e2e-in-cluster: push-e2e-runner
+## e2e-in-cluster: build + deliver e2e runner image, deploy as a Job, stream logs, report result
+e2e-in-cluster: deliver-e2e-runner
 	kubectl delete job e2e-runner -n $(NAMESPACE_TESTING) --ignore-not-found
 	sed 's|__E2E_RUNNER_IMAGE__|$(E2E_RUNNER_IMAGE)|g; s|__NAMESPACE_TESTING__|$(NAMESPACE_TESTING)|g' \
 		tests/e2e-runner-rbac.yaml | kubectl apply -f -
