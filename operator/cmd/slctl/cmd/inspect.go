@@ -27,11 +27,19 @@ var shortOutput bool
 // ── JSON types ────────────────────────────────────────────────────────────────
 
 type inspectJSON struct {
-	Name      string        `json:"name"`
-	Namespace string        `json:"namespace"`
-	Pods      []podJSON     `json:"pods"`
-	Checks    []checkResult `json:"checks"`
-	Summary   string        `json:"summary"`
+	Name          string             `json:"name"`
+	Namespace     string             `json:"namespace"`
+	Pods          []podJSON          `json:"pods"`
+	ExternalPeers []externalPeerInfo `json:"externalPeers,omitempty"`
+	Checks        []checkResult      `json:"checks"`
+	Summary       string             `json:"summary"`
+}
+
+type externalPeerInfo struct {
+	Name      string `json:"name"`
+	URI       string `json:"uri"`
+	Connected bool   `json:"connected"`
+	LastError string `json:"lastError,omitempty"`
 }
 
 type podJSON struct {
@@ -176,6 +184,19 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 		ps := gatherPodState(ctx, coreClient, config, sc, pn, configPW)
 		roPods = append(roPods, ps)
 		result.Pods = append(result.Pods, ps.toJSON())
+	}
+
+	// Populate external peer info
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		epi := externalPeerInfo{Name: ep.Name, URI: ep.URI}
+		for _, eps := range sc.Status.ExternalPeerStatuses {
+			if eps.Name == ep.Name {
+				epi.Connected = eps.Connected
+				epi.LastError = eps.LastError
+				break
+			}
+		}
+		result.ExternalPeers = append(result.ExternalPeers, epi)
 	}
 
 	// Run checks against gathered state
@@ -579,6 +600,35 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 		} else {
 			check("external-peers", "fail", strings.Join(epIssues, "; "))
 		}
+
+		// ── External peer syncrepl stanzas present on each RW pod ──
+		epStanzaOK := true
+		var epStanzaIssues []string
+		for _, ep := range sc.Spec.Replication.ExternalPeers {
+			for _, ps := range rwPods {
+				if ps.err != "" {
+					continue
+				}
+				found := false
+				for _, sr := range ps.syncRepl {
+					if strings.Contains(sr, ep.URI) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					epStanzaOK = false
+					epStanzaIssues = append(epStanzaIssues,
+						fmt.Sprintf("%s: missing stanza for %s (%s)", ps.name, ep.Name, ep.URI))
+				}
+			}
+		}
+		if epStanzaOK {
+			check("external-syncrepl", "pass",
+				fmt.Sprintf("all RW pods have stanzas for all %d external peers", len(sc.Spec.Replication.ExternalPeers)))
+		} else {
+			check("external-syncrepl", "fail", strings.Join(epStanzaIssues, "; "))
+		}
 	}
 
 	return checks
@@ -615,12 +665,39 @@ func printInspectResult(result inspectJSON) {
 			}
 
 			if len(pod.SyncRepl) > 0 {
-				fmt.Println("    syncRepl:")
+				// Classify stanzas into in-cluster and external
+				var inCluster, external []string
 				for _, sr := range pod.SyncRepl {
-					if len(sr) > 120 {
-						sr = sr[:120] + "..."
+					isExternal := false
+					for _, ep := range result.ExternalPeers {
+						if strings.Contains(sr, ep.URI) {
+							label := fmt.Sprintf("[%s] ", ep.Name)
+							if len(sr) > 100 {
+								sr = sr[:100] + "..."
+							}
+							external = append(external, label+sr)
+							isExternal = true
+							break
+						}
 					}
-					fmt.Printf("      %s\n", sr)
+					if !isExternal {
+						if len(sr) > 120 {
+							sr = sr[:120] + "..."
+						}
+						inCluster = append(inCluster, sr)
+					}
+				}
+				if len(inCluster) > 0 {
+					fmt.Println("    syncRepl (in-cluster):")
+					for _, sr := range inCluster {
+						fmt.Printf("      %s\n", sr)
+					}
+				}
+				if len(external) > 0 {
+					fmt.Println("    syncRepl (external):")
+					for _, sr := range external {
+						fmt.Printf("      %s\n", sr)
+					}
 				}
 			}
 			if pod.MultiProvider != "" {
@@ -628,6 +705,21 @@ func printInspectResult(result inspectJSON) {
 			}
 			if pod.ConfigQueryError != "" {
 				fmt.Printf("    cn=config:    %s\n", pod.ConfigQueryError)
+			}
+		}
+
+		// External peers summary
+		if len(result.ExternalPeers) > 0 {
+			fmt.Println("\n  External Peers:")
+			for _, ep := range result.ExternalPeers {
+				status := "connected"
+				if !ep.Connected {
+					status = "disconnected"
+					if ep.LastError != "" {
+						status += " (" + ep.LastError + ")"
+					}
+				}
+				fmt.Printf("    %-20s %s  %s\n", ep.Name, ep.URI, status)
 			}
 		}
 
