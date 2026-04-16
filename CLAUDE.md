@@ -502,6 +502,8 @@ existence and adding missing schemas idempotently. See ADR-002.
 
 ### Backlog
 
-Items that follow the same pattern as existing work but are deferred to a future phase.
-
-(No pending items at this time.)
+- **Reduce env var dependency for e2e multisite setup.** Currently `e2e-multisite.sh` relies on
+  `HELM_VALUES_SLAPD_CLUSTER` and `HELM_VALUES_SLAPD_TESTING` being set in the shell environment.
+  These point at values files like `tests/values.slapd.yaml`. Investigate whether the script can
+  default to the test values files automatically (e.g. detect and use `tests/values.slapd.yaml`
+  when present), so running `./e2e-multisite.sh setup s1 s2` works without any env vars set.

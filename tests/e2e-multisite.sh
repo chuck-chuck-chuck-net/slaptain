@@ -60,9 +60,9 @@ Environment variables (with defaults):
   NODEPORT_LDAPS       = $NODEPORT_LDAPS
   REGISTRY             = $REGISTRY
   PROJECT              = $PROJECT
-  HELM_VALUES          = operator chart values
-  HELM_VALUES_SLAPD_CLUSTER = slapd-cluster chart values
-  HELM_VALUES_SLAPD_TESTING = slapd-test chart values
+  HELM_VALUES          = operator chart values (use absolute paths)
+  HELM_VALUES_SLAPD_CLUSTER = slapd-cluster chart values (use absolute paths)
+  HELM_VALUES_SLAPD_TESTING = slapd-test chart values (use absolute paths)
 EOF
     exit 1
 }
@@ -153,6 +153,11 @@ setup_cross_trust() {
 }
 
 setup_slapd_clusters() {
+    # Helm --set treats commas as value separators. Escape them with \, for
+    # values that contain literal commas (LDAP DNs like dc=example,dc=org).
+    local helm_domain="${LDAP_DOMAIN//,/\\,}"
+    local helm_bind_dn="cn=replication\\,${helm_domain}"
+
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Installing SlapdCluster..."
 
@@ -165,17 +170,17 @@ setup_slapd_clusters() {
                 --set "replication.externalPeers[$peer_idx].name=site-${other}"
                 --set "replication.externalPeers[$peer_idx].uri=ldaps://${NODE_IPS[$other]}:${NODEPORT_LDAPS}"
                 --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
-                --set "replication.externalPeers[$peer_idx].bindDN=cn=replication,${LDAP_DOMAIN}"
+                --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
                 --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=slapd-credentials"
             )
-            ((peer_idx++))
+            ((peer_idx++)) || true
         done
 
         hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-cluster" \
             --namespace "$NAMESPACE_TESTING" --create-namespace \
             --set "credentials.existingSecret=slapd-credentials" \
             --set "replication.enabled=true" \
-            --set "ldap.domain=${LDAP_DOMAIN}" \
+            --set "ldap.domain=${helm_domain}" \
             "${peer_sets[@]}" \
             ${HELM_VALUES_SLAPD_CLUSTER:-}
     done
@@ -218,6 +223,15 @@ setup_slapd_test() {
 
 wait_for_ready() {
     for ctx in "${CONTEXTS[@]}"; do
+        log "[$ctx] Waiting for StatefulSet slapd to appear..."
+        local attempts=0
+        while ! kctl "$ctx" -n "$NAMESPACE_TESTING" get statefulset/slapd &>/dev/null; do
+            ((attempts++)) || true
+            if [[ $attempts -ge 60 ]]; then
+                die "[$ctx] StatefulSet slapd did not appear within 60s"
+            fi
+            sleep 1
+        done
         log "[$ctx] Waiting for StatefulSet slapd to be ready..."
         kctl "$ctx" -n "$NAMESPACE_TESTING" rollout status statefulset/slapd --timeout=300s
     done
