@@ -10,7 +10,7 @@ TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:latest
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:latest
 E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:latest
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown clean
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown clean
 
 all: build-init build-slapd build-toolkit build-operator build-e2e-runner
 
@@ -28,6 +28,9 @@ build-operator:
 
 build-e2e-runner:
 	$(CONTAINER_ENGINE) build -f images/e2e-runner/Containerfile -t $(E2E_RUNNER_IMAGE) .
+
+build-slctl:
+	cd operator && go build -o ../bin/slctl ./cmd/slctl/
 
 operator-generate:
 	$(MAKE) -C operator generate
