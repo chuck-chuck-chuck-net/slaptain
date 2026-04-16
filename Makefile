@@ -4,33 +4,98 @@ NAMESPACE ?= slaptain
 NAMESPACE_TESTING ?= slaptain-testing
 CONTAINER_ENGINE ?= podman
 
+# Node import settings: auto-discover from kubectl, override with NODE_IPS="1.2.3.4 5.6.7.8"
+NODE_USER ?= debian
+NODE_IPS ?= $(shell kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
+
 INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:latest
 SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:latest
 TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:latest
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:latest
 E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:latest
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown clean
+# Stamp-file directory for incremental builds
+STAMPS := .stamps
 
-all: build-init build-slapd build-toolkit build-operator build-e2e-runner
+# Source file dependencies per image
+INIT_SRCS    := $(shell find images/slapd-init -type f)
+SLAPD_SRCS   := $(shell find images/slapd -type f)
+TOOLKIT_SRCS := $(shell find images/slapd-toolkit -type f)
+OPERATOR_SRCS := $(shell find images/operator -type f) $(shell find operator -type f -name '*.go') operator/go.mod operator/go.sum
+E2E_SRCS     := $(shell find images/e2e-runner -type f) $(shell find tests/e2e -type f)
 
-build-init:
+# Import a container image to all k8s nodes via SSH
+define import-image
+	@for node in $(NODE_IPS); do \
+		echo "Importing $(1) to $$node..."; \
+		$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node sudo ctr -n k8s.io images import -; \
+	done
+endef
+
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-operator deploy-operator clean
+
+all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl
+
+## Stamp-file backed build targets (incremental)
+
+$(STAMPS):
+	mkdir -p $(STAMPS)
+
+$(STAMPS)/init: $(INIT_SRCS) | $(STAMPS)
 	$(CONTAINER_ENGINE) build -t $(INIT_IMAGE) images/slapd-init/
+	@touch $@
 
-build-slapd:
+$(STAMPS)/slapd: $(SLAPD_SRCS) | $(STAMPS)
 	$(CONTAINER_ENGINE) build -t $(SLAPD_IMAGE) images/slapd/
+	@touch $@
 
-build-toolkit:
+$(STAMPS)/toolkit: $(TOOLKIT_SRCS) | $(STAMPS)
 	$(CONTAINER_ENGINE) build -t $(TOOLKIT_IMAGE) images/slapd-toolkit/
+	@touch $@
 
-build-operator:
+$(STAMPS)/operator: $(OPERATOR_SRCS) | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/operator/Containerfile -t $(OPERATOR_IMAGE) .
+	@touch $@
 
-build-e2e-runner:
+$(STAMPS)/e2e: $(E2E_SRCS) | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/e2e-runner/Containerfile -t $(E2E_RUNNER_IMAGE) .
+	@touch $@
+
+## Phony aliases so `make build-operator` etc. still work
+build-init: $(STAMPS)/init
+build-slapd: $(STAMPS)/slapd
+build-toolkit: $(STAMPS)/toolkit
+build-operator: $(STAMPS)/operator
+build-e2e-runner: $(STAMPS)/e2e
 
 build-slctl:
 	cd operator && go build -o ../bin/slctl ./cmd/slctl/
+
+## Push to container registry
+push: build-init build-slapd build-toolkit build-operator build-e2e-runner
+	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
+	$(CONTAINER_ENGINE) push $(TOOLKIT_IMAGE)
+	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
+	$(CONTAINER_ENGINE) push $(E2E_RUNNER_IMAGE)
+
+push-e2e-runner: build-e2e-runner
+	$(CONTAINER_ENGINE) push $(E2E_RUNNER_IMAGE)
+
+## Import images directly into k8s node containerd (no registry needed)
+import: build-init build-slapd build-toolkit build-operator build-e2e-runner
+	$(call import-image,$(INIT_IMAGE))
+	$(call import-image,$(SLAPD_IMAGE))
+	$(call import-image,$(TOOLKIT_IMAGE))
+	$(call import-image,$(OPERATOR_IMAGE))
+	$(call import-image,$(E2E_RUNNER_IMAGE))
+
+import-operator: build-operator
+	$(call import-image,$(OPERATOR_IMAGE))
+
+## Operator dev fast-path: build + import + helm upgrade + restart
+deploy-operator: import-operator operator-helm-install
+	kubectl rollout restart deployment/slaptain-operator -n $(NAMESPACE)
 
 operator-generate:
 	$(MAKE) -C operator generate
@@ -41,15 +106,6 @@ operator-manifests:
 
 operator-sync-crd:
 	cp operator/config/crd/bases/*.yaml charts/operator/crds/
-
-push: build-init build-slapd build-toolkit build-operator
-	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
-	$(CONTAINER_ENGINE) push $(TOOLKIT_IMAGE)
-	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
-
-push-e2e-runner: build-e2e-runner
-	$(CONTAINER_ENGINE) push $(E2E_RUNNER_IMAGE)
 
 gencert:
 	kubectl get namespace $(NAMESPACE_TESTING) >/dev/null 2>&1 || kubectl create namespace $(NAMESPACE_TESTING)
@@ -146,4 +202,4 @@ e2e-multisite-teardown:
 	./tests/e2e-multisite.sh teardown $(CONTEXTS)
 
 clean:
-	rm -f *.tar
+	rm -rf .stamps bin/ *.tar
