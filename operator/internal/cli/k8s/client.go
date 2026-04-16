@@ -24,12 +24,16 @@ import (
 // NewClient returns a controller-runtime client (for CR access), a standard
 // kubernetes clientset (for exec/logs), the REST config, and the default
 // namespace from kubeconfig.
-func NewClient(kubeconfig string) (client.Client, kubernetes.Interface, *rest.Config, string, error) {
+func NewClient(kubeconfig, kubeContext string) (client.Client, kubernetes.Interface, *rest.Config, string, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfig != "" {
 		rules.ExplicitPath = kubeconfig
 	}
-	cfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{})
+	overrides := &clientcmd.ConfigOverrides{}
+	if kubeContext != "" {
+		overrides.CurrentContext = kubeContext
+	}
+	cfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides)
 
 	restCfg, err := cfg.ClientConfig()
 	if err != nil {

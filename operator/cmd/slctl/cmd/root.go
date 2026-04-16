@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
@@ -17,6 +18,7 @@ import (
 
 var (
 	kubeconfig    string
+	kubeContext   string
 	namespace     string
 	allNamespaces bool
 	jsonOutput    bool
@@ -34,16 +36,18 @@ func Execute() error {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig file")
+	rootCmd.PersistentFlags().StringVar(&kubeContext, "context", "", "kubeconfig context to use")
 	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "target namespace (defaults to kubeconfig context)")
 	rootCmd.PersistentFlags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "list across all namespaces")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output in JSON format")
 
 	rootCmd.RegisterFlagCompletionFunc("namespace", completeNamespaces)
+	rootCmd.RegisterFlagCompletionFunc("context", completeContexts)
 }
 
 // initClient creates k8s clients and resolves the target namespace.
 func initClient() (client.Client, kubernetes.Interface, *rest.Config, string, error) {
-	k8sClient, coreClient, config, defaultNS, err := k8scli.NewClient(kubeconfig)
+	k8sClient, coreClient, config, defaultNS, err := k8scli.NewClient(kubeconfig, kubeContext)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
@@ -111,6 +115,19 @@ func completeNamespaces(cmd *cobra.Command, args []string, toComplete string) ([
 	var names []string
 	for _, ns := range nsList.Items {
 		names = append(names, ns.Name)
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
+func completeContexts(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	config, err := rules.Load()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	var names []string
+	for name := range config.Contexts {
+		names = append(names, name)
 	}
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
