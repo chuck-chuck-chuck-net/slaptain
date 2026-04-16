@@ -176,11 +176,14 @@ func retryConnectLDAP(ctx context.Context, addr, base, password string) *ldap.Co
 // In in-cluster mode (LDAP_ADDR set) the pod is reachable via headless-service
 // DNS and the returned cancel is a no-op.  In local mode a kubectl port-forward
 // is started on localPort and must be torn down by the caller via cancel().
+//
+// Uses retryConnectLDAP in in-cluster mode because headless DNS propagation can
+// lag behind pod readiness (e.g. after a pod restart).
 func dialPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
 	if os.Getenv("LDAP_ADDR") != "" {
 		// In-cluster: reach the pod directly over the headless service DNS.
 		addr := fmt.Sprintf("%s.%s.%s.svc.cluster.local:1024", podName, ldapHeadlessSvc, ns)
-		return connectLDAP(addr, baseDN, adminPW), func() {}
+		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
 	}
 	// Local: open a kubectl port-forward tunnel.
 	cancel := startPortForward(ns, "pod/"+podName, localPort, "1024")
@@ -193,7 +196,7 @@ func dialPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc)
 func dialReadOnlyPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
 	if os.Getenv("LDAP_ADDR") != "" {
 		addr := fmt.Sprintf("%s.%s.%s.svc.cluster.local:1024", podName, ldapReadOnlyHeadlessSvc, ns)
-		return connectLDAP(addr, baseDN, adminPW), func() {}
+		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
 	}
 	cancel := startPortForward(ns, "pod/"+podName, localPort, "1024")
 	time.Sleep(2 * time.Second)
