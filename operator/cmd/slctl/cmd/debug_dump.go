@@ -60,6 +60,15 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Collecting debug artifacts in %s/\n", dir)
 
 	var warnings int
+	writeFile := func(filename, data string) {
+		path := filepath.Join(dir, filename)
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: write %s: %v\n", path, err)
+			warnings++
+		} else {
+			fmt.Printf("  %s\n", filename)
+		}
+	}
 	collect := func(filename string, fn func() (string, error)) {
 		data, err := fn()
 		if err != nil {
@@ -70,13 +79,15 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 		if data == "" {
 			return
 		}
-		path := filepath.Join(dir, filename)
-		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: write %s: %v\n", path, err)
-			warnings++
-		} else {
-			fmt.Printf("  %s\n", filename)
+		writeFile(filename, data)
+	}
+	// collectOptional silently skips errors (e.g. previous logs when no crash).
+	collectOptional := func(filename string, fn func() (string, error)) {
+		data, err := fn()
+		if err != nil || data == "" {
+			return
 		}
+		writeFile(filename, data)
 	}
 
 	// 1. CR YAML
@@ -109,12 +120,12 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 			return getPodLogs(ctx, coreClient, ns, pn, "slapd", false)
 		})
 
-		collect(fmt.Sprintf("logs-%s-previous.txt", pn), func() (string, error) {
+		collectOptional(fmt.Sprintf("logs-%s-previous.txt", pn), func() (string, error) {
 			return getPodLogs(ctx, coreClient, ns, pn, "slapd", true)
 		})
 
-		collect(fmt.Sprintf("logs-%s-init.txt", pn), func() (string, error) {
-			return getPodLogs(ctx, coreClient, ns, pn, "slapd-init", false)
+		collectOptional(fmt.Sprintf("logs-%s-init.txt", pn), func() (string, error) {
+			return getPodLogs(ctx, coreClient, ns, pn, "init", false)
 		})
 
 		// LDAP queries via port-forward + go-ldap
