@@ -289,6 +289,15 @@ kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
 
 ---
 
+### Reconcile Loop Debugging
+
+`docs/reconcile-loop-fixes.md` is a log of bugs found and fixed in the operator's reconciliation
+loop. When debugging reconcile loop issues, **check this file first** — the issue may match a
+previously fixed pattern. After fixing a new reconcile loop bug, **update the log** with the
+symptom, root cause, why it was hard to spot, and the lesson learned.
+
+---
+
 ### Credential & Password Architecture
 
 **Design principle:** The operator manages Kubernetes objects. When it needs to interact with

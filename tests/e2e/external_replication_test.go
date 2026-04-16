@@ -87,7 +87,7 @@ var _ = Describe("external replication", Label("external-replication"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(sr.Entries).NotTo(BeEmpty(), "data DB entry not found on %s", podName)
 
-			syncreplVals := sr.Entries[0].GetAttributeValues("olcSyncRepl")
+			syncreplVals := sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
 			hasExternal := false
 			for _, v := range syncreplVals {
 				if containsRID(v, "101") {

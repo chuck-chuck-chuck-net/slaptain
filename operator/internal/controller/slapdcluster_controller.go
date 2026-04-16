@@ -119,20 +119,29 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// 7. Apply spec.ldap.acls to each pod's cn=config (idempotent; unreachable pods
 	//    are logged and skipped — the next reconcile will retry them).
-	if err := r.reconcileACLs(ctx, sc); err != nil {
+	//    Track whether any pod was skipped so we keep requeueing.
+	podsSkipped := false
+
+	if skipped, err := r.reconcileACLs(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileACLs: %w", err)
+	} else if skipped {
+		podsSkipped = true
 	}
 
 	// 7a. Apply spec.ldap.schemas to each pod's cn=schema,cn=config (idempotent;
 	//     DN existence check — existing schemas are skipped, unreachable pods retried).
-	if err := r.reconcileSchemas(ctx, sc); err != nil {
+	if skipped, err := r.reconcileSchemas(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSchemas: %w", err)
+	} else if skipped {
+		podsSkipped = true
 	}
 
 	// 7b. Apply syncrepl + mirrormode to each pod's cn=config data DB entry.
 	//     Operator owns all syncrepl configuration (in-cluster + external). See ADR-003.
-	if err := r.reconcileReplication(ctx, sc); err != nil {
+	if skipped, err := r.reconcileReplication(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
+	} else if skipped {
+		podsSkipped = true
 	}
 
 	// 8. Observe StatefulSet status → update SlapdCluster status.
@@ -211,8 +220,8 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 8. Requeue until fully Running.
-	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
+	// 8. Requeue until fully Running and all pods configured.
+	if sc.Status.Phase != ldapv1alpha1.PhaseRunning || podsSkipped {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
@@ -1149,14 +1158,14 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 // Pods that cannot be reached (not yet ready) are logged and skipped; the next
 // reconcile loop will retry.  A non-nil error is returned only for hard failures
 // such as a missing credential secret.
-func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, error) {
 	if len(sc.Spec.LDAP.ACLs) == 0 {
-		return nil
+		return false, nil
 	}
 
 	rootPW, err := r.getConfigPassword(ctx, sc)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	log := logf.FromContext(ctx)
@@ -1165,6 +1174,7 @@ func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1al
 		replicas = 1
 	}
 	headlessSvc := sc.Name + "-headless"
+	skipped := false
 
 	for i := int32(0); i < replicas; i++ {
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
@@ -1172,6 +1182,7 @@ func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1al
 		if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, sc.Spec.LDAP.ACLs); err != nil {
 			log.Info("ACL reconcile skipped for pod (will retry on next reconcile)",
 				"ordinal", i, "host", host, "err", err)
+			skipped = true
 		}
 	}
 
@@ -1184,11 +1195,12 @@ func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1al
 			if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, sc.Spec.LDAP.ACLs); err != nil {
 				log.Info("ACL reconcile skipped for read-only pod (will retry on next reconcile)",
 					"ordinal", i, "host", host, "err", err)
+				skipped = true
 			}
 		}
 	}
 
-	return nil
+	return skipped, nil
 }
 
 // applyACLsToPod applies the desired ACL rules to one slapd pod's cn=config data DB entry.
@@ -1231,7 +1243,7 @@ func (r *SlapdClusterReconciler) applyACLsToPod(
 		return fmt.Errorf("no entry at %s on %s", dataDN, host)
 	}
 
-	current := sr.Entries[0].GetAttributeValues("olcAccess")
+	current := sr.Entries[0].GetEqualFoldAttributeValues("olcAccess")
 	if aclsMatch(current, desired) {
 		log.V(1).Info("ACLs already up-to-date", "host", host)
 		return nil
@@ -1347,9 +1359,9 @@ func parseSchemaJSON(raw string) (schemaEntry, error) {
 // Like reconcileACLs, each pod is contacted individually via headless DNS because
 // cn=config is node-local. Missing schemas are added; existing ones are skipped.
 // Unreachable pods are logged and retried on the next reconcile.
-func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, error) {
 	if len(sc.Spec.LDAP.Schemas) == 0 {
-		return nil
+		return false, nil
 	}
 
 	// Parse all schema entries up front so we fail fast on bad JSON.
@@ -1357,14 +1369,14 @@ func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv
 	for i, raw := range sc.Spec.LDAP.Schemas {
 		entry, err := parseSchemaJSON(raw)
 		if err != nil {
-			return fmt.Errorf("spec.ldap.schemas[%d]: %w", i, err)
+			return false, fmt.Errorf("spec.ldap.schemas[%d]: %w", i, err)
 		}
 		schemas = append(schemas, entry)
 	}
 
 	rootPW, err := r.getConfigPassword(ctx, sc)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	log := logf.FromContext(ctx)
@@ -1373,6 +1385,7 @@ func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv
 		replicas = 1
 	}
 	headlessSvc := sc.Name + "-headless"
+	skipped := false
 
 	for i := int32(0); i < replicas; i++ {
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
@@ -1380,6 +1393,7 @@ func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv
 		if err := r.applySchemaToPod(ctx, host, rootPW, schemas); err != nil {
 			log.Info("Schema reconcile skipped for pod (will retry on next reconcile)",
 				"ordinal", i, "host", host, "err", err)
+			skipped = true
 		}
 	}
 
@@ -1392,11 +1406,12 @@ func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv
 			if err := r.applySchemaToPod(ctx, host, rootPW, schemas); err != nil {
 				log.Info("Schema reconcile skipped for read-only pod (will retry on next reconcile)",
 					"ordinal", i, "host", host, "err", err)
+				skipped = true
 			}
 		}
 	}
 
-	return nil
+	return skipped, nil
 }
 
 // applySchemaToPod adds missing schema entries to one slapd pod's cn=schema,cn=config.
@@ -1509,7 +1524,7 @@ type parsedExternalPeer struct {
 // reconcileReplication applies syncrepl + mirrormode to each RW pod's cn=config
 // data DB entry. The operator is the sole owner of olcSyncRepl and olcMirrorMode
 // (see ADR-003). RO replicas also get syncrepl stanzas pointing to RW masters.
-func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	replicas := sc.Spec.Replicas
@@ -1524,12 +1539,12 @@ func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *l
 	if !replicationEnabled && !hasExternalPeers {
 		// Clear external peer statuses if previously set.
 		sc.Status.ExternalPeerStatuses = nil
-		return nil
+		return false, nil
 	}
 
 	rootPW, err := r.getConfigPassword(ctx, sc)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Read in-cluster replication password.
@@ -1540,7 +1555,7 @@ func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *l
 			Name:      sc.Name + "-passwords",
 			Namespace: sc.Namespace,
 		}, pwSecret); err != nil {
-			return fmt.Errorf("read passwords secret for replication: %w", err)
+			return false, fmt.Errorf("read passwords secret for replication: %w", err)
 		}
 		replPassword = string(pwSecret.Data["replication-password"])
 	}
@@ -1578,6 +1593,7 @@ func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *l
 	headlessSvc := sc.Name + "-headless"
 	tlsEnabled := sc.Spec.LDAP.TLS.Enabled
 	tlsCACertPath := "/etc/openldap/tls/ca.crt"
+	skipped := false
 
 	// Apply syncrepl to RW pods.
 	for i := int32(0); i < replicas; i++ {
@@ -1595,6 +1611,7 @@ func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *l
 		if err := r.applySyncreplToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, desired, desiredMirrorMode); err != nil {
 			log.Info("Replication reconcile skipped for pod (will retry on next reconcile)",
 				"ordinal", i, "host", host, "err", err)
+			skipped = true
 		}
 	}
 
@@ -1615,6 +1632,7 @@ func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *l
 			if err := r.applySyncreplToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, desired, ""); err != nil {
 				log.Info("Replication reconcile skipped for read-only pod (will retry on next reconcile)",
 					"ordinal", i, "host", host, "err", err)
+				skipped = true
 			}
 		}
 	}
@@ -1634,11 +1652,12 @@ func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *l
 		sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
 	}
 
-	return nil
+	return skipped, nil
 }
 
-// applySyncreplToPod applies the desired olcSyncRepl and olcMirrorMode values to one pod.
-// mirrorMode should be "TRUE" for RW pods; empty string means do not set olcMirrorMode.
+// applySyncreplToPod applies the desired olcSyncRepl and olcMultiProvider values to one pod.
+// mirrorMode should be "TRUE" for RW pods; empty string means do not set olcMultiProvider.
+// Note: olcMultiProvider is the OpenLDAP 2.6+ name for the former olcMirrorMode attribute.
 func (r *SlapdClusterReconciler) applySyncreplToPod(
 	ctx context.Context,
 	host, rootPW, domain string,
@@ -1665,10 +1684,10 @@ func (r *SlapdClusterReconciler) applySyncreplToPod(
 		return err
 	}
 
-	// Read current olcSyncRepl and olcMirrorMode.
+	// Read current olcSyncRepl and olcMultiProvider (formerly olcMirrorMode in OpenLDAP <2.6).
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dataDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-		1, 0, false, "(objectClass=*)", []string{"olcSyncRepl", "olcMirrorMode"}, nil,
+		1, 0, false, "(objectClass=*)", []string{"olcSyncRepl", "olcMultiProvider"}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("read olcSyncRepl on %s at %s: %w", dataDN, host, err)
@@ -1677,9 +1696,9 @@ func (r *SlapdClusterReconciler) applySyncreplToPod(
 		return fmt.Errorf("no entry at %s on %s", dataDN, host)
 	}
 
-	currentSyncRepl := sr.Entries[0].GetAttributeValues("olcSyncRepl")
+	currentSyncRepl := sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
 	currentMirrorMode := ""
-	if vals := sr.Entries[0].GetAttributeValues("olcMirrorMode"); len(vals) > 0 {
+	if vals := sr.Entries[0].GetEqualFoldAttributeValues("olcMultiProvider"); len(vals) > 0 {
 		currentMirrorMode = vals[0]
 	}
 
@@ -1699,10 +1718,10 @@ func (r *SlapdClusterReconciler) applySyncreplToPod(
 		modReq.Replace("olcSyncRepl", desired)
 	}
 	if mirrorModeChanged {
-		modReq.Replace("olcMirrorMode", []string{mirrorMode})
+		modReq.Replace("olcMultiProvider", []string{mirrorMode})
 	}
 	if err := conn.Modify(modReq); err != nil {
-		return fmt.Errorf("replace olcSyncRepl/olcMirrorMode on %s at %s: %w", dataDN, host, err)
+		return fmt.Errorf("replace olcSyncRepl/olcMultiProvider on %s at %s: %w", dataDN, host, err)
 	}
 	return nil
 }
