@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
 	"github.com/spf13/cobra"
@@ -82,8 +83,9 @@ func (ps podState) toJSON() podJSON {
 // ── Command ───────────────────────────────────────────────────────────────────
 
 var inspectCmd = &cobra.Command{
-	Use:   "inspect [name]",
-	Short: "Inspect and verify a SlapdCluster",
+	Use:           "inspect [name]",
+	Short:         "Inspect and verify a SlapdCluster",
+	SilenceUsage:  true,
 	Long: `Query each pod's LDAP instance and run consistency checks.
 
 Shows per-pod detail (namingContexts, contextCSN, syncRepl, multiProvider)
@@ -385,6 +387,8 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 	allPods := append(rwPods, roPods...)
 	var csnSets []string
 	csnPodMap := make(map[string][]string)
+	// Track newest CSN timestamp per pod for lag calculation
+	podNewest := make(map[string]time.Time)
 	for _, ps := range allPods {
 		if ps.err != "" || len(ps.contextCSN) == 0 {
 			continue
@@ -392,6 +396,16 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 		normalized := normalizeCSN(ps.contextCSN)
 		csnSets = append(csnSets, normalized)
 		csnPodMap[normalized] = append(csnPodMap[normalized], ps.name)
+		// Find newest CSN timestamp for this pod
+		var newest time.Time
+		for _, csn := range ps.contextCSN {
+			if t, err := parseCSNTime(csn); err == nil && t.After(newest) {
+				newest = t
+			}
+		}
+		if !newest.IsZero() {
+			podNewest[ps.name] = newest
+		}
 	}
 	if len(csnSets) == 0 {
 		check("csn-convergence", "warn", "no contextCSN data available")
@@ -401,13 +415,32 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 			check("csn-convergence", "pass",
 				fmt.Sprintf("all %d pods report identical CSN", len(csnSets)))
 		} else {
+			// Find newest and oldest across all pods to compute lag
+			var newest, oldest time.Time
+			var newestPod, oldestPod string
+			for pod, t := range podNewest {
+				if newest.IsZero() || t.After(newest) {
+					newest = t
+					newestPod = pod
+				}
+				if oldest.IsZero() || t.Before(oldest) {
+					oldest = t
+					oldestPod = pod
+				}
+			}
+			lag := newest.Sub(oldest)
+
 			var groups []string
-			for csn, pods := range csnPodMap {
-				groups = append(groups, fmt.Sprintf("[%s]: %s", strings.Join(pods, ","), csn))
+			for _, csn := range unique {
+				pods := csnPodMap[csn]
+				groups = append(groups, fmt.Sprintf("[%s]", strings.Join(pods, ",")))
 			}
 			sort.Strings(groups)
-			check("csn-convergence", "warn",
-				fmt.Sprintf("%d distinct CSN vectors: %s", len(unique), strings.Join(groups, " vs ")))
+
+			detail := fmt.Sprintf("%d distinct CSN vectors (%s behind %s by %s): %s",
+				len(unique), oldestPod, newestPod, formatDuration(lag),
+				strings.Join(groups, " vs "))
+			check("csn-convergence", "warn", detail)
 		}
 	}
 
@@ -659,4 +692,30 @@ func uniqueStrings(ss []string) []string {
 		}
 	}
 	return result
+}
+
+// parseCSNTime extracts the timestamp from a contextCSN value.
+// Format: YYYYMMDDHHMMSS.µsZ#count#serverID#modcount
+func parseCSNTime(csn string) (time.Time, error) {
+	// Take everything before the first '#'
+	parts := strings.SplitN(csn, "#", 2)
+	if len(parts) == 0 {
+		return time.Time{}, fmt.Errorf("invalid CSN: %s", csn)
+	}
+	ts := strings.TrimSuffix(parts[0], "Z")
+	return time.Parse("20060102150405.000000", ts)
+}
+
+// formatDuration produces a human-friendly duration string.
+func formatDuration(d time.Duration) string {
+	switch {
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	case d < time.Minute:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	case d < time.Hour:
+		return fmt.Sprintf("%.1fm", d.Minutes())
+	default:
+		return fmt.Sprintf("%.1fh", d.Hours())
+	}
 }
