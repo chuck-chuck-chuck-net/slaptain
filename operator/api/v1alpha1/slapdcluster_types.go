@@ -33,14 +33,14 @@ const (
 
 // SlapdImageConfig defines the image repository, tag, and pull policy for one image.
 type SlapdImageConfig struct {
-	// repository is the image repository (e.g. "registry.internal/slaptain/slapd").
+	// repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
 	// +required
 	Repository string `json:"repository"`
 	// tag is the image tag.
 	// +kubebuilder:default="latest"
 	Tag string `json:"tag,omitempty"`
 	// pullPolicy is the image pull policy.
-	// +kubebuilder:default=Always
+	// +kubebuilder:default=IfNotPresent
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
 }
 

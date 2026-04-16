@@ -41,13 +41,13 @@ credentials:
 # -- Container images.
 images:
   slapd:
-    repository: registry.internal/slaptain/slapd
+    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
     tag: latest
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
   init:
-    repository: registry.internal/slaptain/slapd-init
+    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
     tag: latest
-    pullPolicy: Always
+    pullPolicy: IfNotPresent
 
 # -- Number of replicas. Set replication.enabled=true when using replicas > 1.
 replicas: 1

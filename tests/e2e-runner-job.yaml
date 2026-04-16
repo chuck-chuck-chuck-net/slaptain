@@ -1,7 +1,7 @@
 # In-cluster e2e test runner Job.
 #
 # Applied by `make e2e-in-cluster`, which substitutes the two placeholders:
-#   __E2E_RUNNER_IMAGE__   — e.g. registry.internal/slaptain/e2e-runner:latest
+#   __E2E_RUNNER_IMAGE__   — e.g. ghcr.io/chuck-chuck-chuck-net/slaptain/e2e-runner:latest
 #   __NAMESPACE_TESTING__  — e.g. slaptain-testing
 #
 # The Job runs the compiled Ginkgo binary in the cluster so tests can reach
@@ -21,7 +21,7 @@ spec:
       containers:
         - name: e2e-runner
           image: __E2E_RUNNER_IMAGE__
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           args:
             - "--ginkgo.v"
             - "-test.v"

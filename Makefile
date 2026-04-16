@@ -1,4 +1,4 @@
-REGISTRY ?= registry.internal
+REGISTRY ?= ghcr.io/chuck-chuck-chuck-net
 PROJECT ?= slaptain
 NAMESPACE ?= slaptain
 NAMESPACE_TESTING ?= slaptain-testing

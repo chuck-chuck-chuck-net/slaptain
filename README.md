@@ -121,11 +121,11 @@ spec:
     slapd:
       repository: registry.example.com/slaptain/slapd
       tag: latest
-      pullPolicy: Always
+      pullPolicy: IfNotPresent
     init:
       repository: registry.example.com/slaptain/slapd-init
       tag: latest
-      pullPolicy: Always
+      pullPolicy: IfNotPresent
 
   ldap:
     domain: "dc=example,dc=org"

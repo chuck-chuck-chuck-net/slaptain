@@ -21,7 +21,7 @@ slapd:
   rootPassword: ""   # required when secretName and configPasswordSecretName are not set
 
 image:
-  repository: registry.internal/slaptain/slapd-toolkit
+  repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit
   tag: latest
   pullPolicy: IfNotPresent
 

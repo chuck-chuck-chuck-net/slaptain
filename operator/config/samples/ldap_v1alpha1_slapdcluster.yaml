@@ -5,13 +5,13 @@ metadata:
 spec:
   images:
     slapd:
-      repository: registry.internal/slaptain/slapd
+      repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
       tag: latest
-      pullPolicy: Always
+      pullPolicy: IfNotPresent
     init:
-      repository: registry.internal/slaptain/slapd-init
+      repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
       tag: latest
-      pullPolicy: Always
+      pullPolicy: IfNotPresent
 
   ldap:
     domain: "dc=example,dc=org"

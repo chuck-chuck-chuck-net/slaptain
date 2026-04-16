@@ -1,7 +1,7 @@
 image:
-  repository: registry.internal/slaptain/operator
+  repository: ghcr.io/chuck-chuck-chuck-net/slaptain/operator
   tag: latest
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
 
 replicas: 1
 
