@@ -393,6 +393,78 @@ Note: the distroless slapd image has no shell. Use the toolkit pod for more adva
 
 ---
 
+## Automated multi-site testing
+
+The `e2e-multisite.sh` script automates the entire cross-cluster workflow: it deploys the
+operator, SlapdClusters with mutual `externalPeers`, slapd-test, and runs the full e2e suite
+(including external replication tests) — all from a single command.
+
+### Prerequisites
+
+- N Kubernetes clusters (minimum 2) reachable via kubectl contexts
+- Container images pushed to a registry accessible from all clusters
+- Helm 3 and Go installed on the workstation
+- The usual `HELM_VALUES_SLAPD_CLUSTER` and `HELM_VALUES_SLAPD_TESTING` env vars set
+  (see [Environment variables](#environment-variables))
+
+### Quick start
+
+```bash
+# Full cycle: setup → test → teardown
+make e2e-multisite CONTEXTS="s1 s2 s3"
+
+# Or step by step:
+make e2e-multisite-setup    CONTEXTS="s1 s2 s3"
+make e2e-multisite-test     CONTEXTS="s1 s2 s3"
+make e2e-multisite-teardown CONTEXTS="s1 s2 s3"
+```
+
+### What setup does
+
+```
+┌──────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
+│ s1 (context[0])      │   │ s2 (context[1])      │   │ s3 (context[2])      │
+│                      │   │                      │   │                      │
+│ operator             │   │ operator             │   │ operator             │
+│ SlapdCluster "slapd" │◄─►│ SlapdCluster "slapd" │◄─►│ SlapdCluster "slapd" │
+│   replicas: 3        │   │   replicas: 3        │   │   replicas: 3        │
+│   externalPeers:     │   │   externalPeers:     │   │   externalPeers:     │
+│     site-s2, site-s3 │   │     site-s1, site-s3 │   │     site-s1, site-s2 │
+│                      │   │                      │   │                      │
+│ slapd-test (data)    │   │ (data replicates in) │   │ (data replicates in) │
+│ slapd-external (NP)  │   │ slapd-external (NP)  │   │ slapd-external (NP)  │
+└──────────────────────┘   └──────────────────────┘   └──────────────────────┘
+        ▲                           ▲
+        │       test runner         │
+        └───── (workstation) ───────┘
+```
+
+1. Discovers each cluster's node IP
+2. Generates random shared credentials (admin, root, replication passwords)
+3. Per cluster: creates namespace, credentials Secret, TLS cert (with node IP SAN), operator
+4. Extracts each cluster's CA, creates cross-trust Secrets on every other cluster
+5. Deploys SlapdCluster on each cluster with `externalPeers` pointing at all others via
+   `ldaps://<nodeIP>:30636` (NodePort)
+6. Creates `slapd-external` NodePort service on each cluster (ldap + ldaps)
+7. Installs `slapd-test` on context[0] only (bootstrap data replicates to all others)
+8. Waits for StatefulSets + bootstrap convergence
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `CONTEXTS` | *(required)* | Space-separated kubectl context names |
+| `NAMESPACE` | `slaptain` | Operator namespace |
+| `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
+| `LDAP_DOMAIN` | `dc=chuck-chuck-chuck,dc=net` | LDAP base DN |
+| `NODEPORT_LDAP` | `30389` | NodePort for plain LDAP (test runner access) |
+| `NODEPORT_LDAPS` | `30636` | NodePort for LDAPS (cross-cluster syncrepl) |
+| `HELM_VALUES_SLAPD_CLUSTER` | *(unset)* | Extra values for slapd-cluster chart |
+| `HELM_VALUES_SLAPD_TESTING` | *(unset)* | Extra values for slapd-test chart |
+| `HELM_VALUES` | *(unset)* | Extra values for operator chart |
+
+---
+
 ## Using the toolkit
 
 The toolkit pod has `ldap-utils`, `python3`, `ldap3`, and `pyyaml` pre-installed.

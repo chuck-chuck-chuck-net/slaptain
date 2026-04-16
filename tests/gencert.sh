@@ -8,20 +8,37 @@ join_by() {
     fi
 }
 
+# kubectl wrapper that injects --context when -c was given.
+kube_context=""
+kctl() {
+    if [[ -n "$kube_context" ]]; then
+        kubectl --context "$kube_context" "$@"
+    else
+        kubectl "$@"
+    fi
+}
+
 sts=""
 service=""
 headless_svc=""
 dns_names=""
+ip_sans=""
 namespace=""
 
-usage() { echo "Usage: $0 <secret>" 1>&2; exit 1; }
-while getopts ":d:H:n:s:t:" o; do
+usage() { echo "Usage: $0 [-c context] [-d dns_names] [-H headless_svc] [-i ips] [-n namespace] [-s service] [-t statefulset] <secret>" 1>&2; exit 1; }
+while getopts ":c:d:H:i:n:s:t:" o; do
     case "${o}" in
+        c)
+            kube_context="$OPTARG"
+            ;;
         d)
             dns_names="$OPTARG"
             ;;
         H)
             headless_svc="$OPTARG"
+            ;;
+        i)
+            ip_sans="$OPTARG"
             ;;
         n)
             namespace="$OPTARG"
@@ -59,7 +76,7 @@ then
 fi
 
 # If the TLS secret already exists there is nothing to do.
-if kubectl get secret -n "$namespace" "$secret" &>/dev/null; then
+if kctl get secret -n "$namespace" "$secret" &>/dev/null; then
     echo "Secret $secret already exists in namespace $namespace — skipping."
     exit 0
 fi
@@ -73,14 +90,14 @@ domain=$(sed -ne '/^search/s/.* svc\.\([^ ]*\).*/\1/pg' /etc/resolv.conf)
 
 # Stage 2: running from a developer laptop with kubectl — query coredns Corefile.
 if [[ -z "$domain" ]]; then
-    domain=$(kubectl get configmap coredns -n kube-system \
+    domain=$(kctl get configmap coredns -n kube-system \
         -o jsonpath='{.data.Corefile}' 2>/dev/null \
         | awk '/kubernetes/{print $2; exit}')
 fi
 
 # Stage 3: kube-dns clusters store it in a dedicated key.
 if [[ -z "$domain" ]]; then
-    domain=$(kubectl get configmap kube-dns -n kube-system \
+    domain=$(kctl get configmap kube-dns -n kube-system \
         -o jsonpath='{.data.domain}' 2>/dev/null || true)
 fi
 
@@ -133,6 +150,14 @@ then
     )
 fi
 
+# IP SANs — for NodePort access from outside the cluster.
+if [[ -n "$ip_sans" ]]; then
+    IFS=',' read -ra ips <<< "$ip_sans"
+    for ip in "${ips[@]}"; do
+        sans+=("IP:$ip")
+    done
+fi
+
 joined_sans=$(join_by ", " "${sans[@]}")
 
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -out $label.key
@@ -154,16 +179,16 @@ spec:
 EOF
 
 # Clean up any stale CSR from a previous failed run before creating a fresh one.
-kubectl delete csr $label-$namespace-csr --ignore-not-found=true
-kubectl apply -f $label-$namespace-csr.yaml
-kubectl certificate approve $label-$namespace-csr
+kctl delete csr $label-$namespace-csr --ignore-not-found=true
+kctl apply -f $label-$namespace-csr.yaml
+kctl certificate approve $label-$namespace-csr
 
 # because we put the "kubernetes.io/kubelet-serving" signer name there, it will be automatically issued by the k8s root ca
 
 # wait for the csr to go to condition "Issued"
 # which seems technically to be the same as .status.certificate exists
 # cf minio-operator, csr.go, lines 181ff
-kubectl wait certificatesigningrequest $label-$namespace-csr --for='jsonpath={.status.certificate}' --timeout=600s
+kctl wait certificatesigningrequest $label-$namespace-csr --for='jsonpath={.status.certificate}' --timeout=600s
 
 # nomenclature: no namespace in the secret name because it's namespaced anyways
 # the certificatesigningrequest name carries the namespace name because it is a cluster resource
@@ -174,9 +199,9 @@ type: kubernetes.io/tls
 metadata:
   name: $secret
 data:
-  ca.crt: $(kubectl get cm -n $namespace kube-root-ca.crt -o jsonpath='{.data.ca\.crt}' | base64 -w 0)
-  tls.crt: $(kubectl get certificatesigningrequest $label-$namespace-csr -o jsonpath='{.status.certificate}')
+  ca.crt: $(kctl get cm -n $namespace kube-root-ca.crt -o jsonpath='{.data.ca\.crt}' | base64 -w 0)
+  tls.crt: $(kctl get certificatesigningrequest $label-$namespace-csr -o jsonpath='{.status.certificate}')
   tls.key: $(base64 -w 0 <$label.key)
 EOF
 
-kubectl apply -n $namespace -f $secret.yaml
+kctl apply -n $namespace -f $secret.yaml

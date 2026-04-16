@@ -10,9 +10,9 @@ TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:latest
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:latest
 E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:latest
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster clean
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown clean
 
-all: build-init build-slapd build-toolkit build-operator
+all: build-init build-slapd build-toolkit build-operator build-e2e-runner
 
 build-init:
 	$(CONTAINER_ENGINE) build -t $(INIT_IMAGE) images/slapd-init/
@@ -125,6 +125,22 @@ e2e-in-cluster: push-e2e-runner
 	@kubectl wait job/e2e-runner -n $(NAMESPACE_TESTING) \
 		--for=condition=complete --timeout=30s 2>/dev/null \
 		|| (echo "FAIL: e2e-runner job did not complete successfully" && exit 1)
+
+## e2e-multisite: full multi-site setup + test + teardown (pass CONTEXTS="s1 s2 s3")
+e2e-multisite:
+	./tests/e2e-multisite.sh all $(CONTEXTS)
+
+## e2e-multisite-setup: deploy multi-site infrastructure
+e2e-multisite-setup:
+	./tests/e2e-multisite.sh setup $(CONTEXTS)
+
+## e2e-multisite-test: run tests against existing multi-site deployment
+e2e-multisite-test:
+	./tests/e2e-multisite.sh test $(CONTEXTS)
+
+## e2e-multisite-teardown: remove multi-site infrastructure
+e2e-multisite-teardown:
+	./tests/e2e-multisite.sh teardown $(CONTEXTS)
 
 clean:
 	rm -f *.tar
