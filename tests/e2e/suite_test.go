@@ -29,12 +29,13 @@ var (
 	namespace = envOrDefault("NAMESPACE_TESTING", "slaptain-testing")
 
 	// LDAP_SVC — service to port-forward for plain LDAP access (port 389).
-	// Only used in local mode (when LDAP_ADDR is not set).
+	// Only used when LDAP_ADDR is not set.
 	ldapSvc = envOrDefault("LDAP_SVC", "svc/slapd")
 
-	// LDAP_ADDR — direct LDAP address used when running in-cluster.
-	// When set, kubectl port-forward is skipped entirely.
-	// Example: slapd.slaptain-testing.svc.cluster.local:389
+	// LDAP_ADDR — direct LDAP address (host:port). When set, kubectl port-forward
+	// for the main ldapConn is skipped. Works with both in-cluster DNS
+	// (e.g. slapd.slaptain-testing.svc.cluster.local:389) and NodePort
+	// (e.g. 192.168.7.11:30389).
 	localLDAPAddr = envOrDefault("LDAP_ADDR", "localhost:13891")
 
 	// LDAP_HEADLESS_SVC — headless service name for per-pod DNS in in-cluster mode.

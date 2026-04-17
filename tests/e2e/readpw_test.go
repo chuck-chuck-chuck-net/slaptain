@@ -158,19 +158,21 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 
 	// ── Readpw access ─────────────────────────────────────────────────────────
 
-	It("each readpw user can bind", func() {
+	It("each readpw user can bind", func(ctx SpecContext) {
 		for user, pw := range readpwPWs {
-			func() {
+			user, pw := user, pw // capture for closure
+			dn := fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN)
+			Eventually(ctx, func() error {
 				conn, err := ldap.Dial("tcp", localLDAPAddr)
-				Expect(err).NotTo(HaveOccurred())
+				if err != nil {
+					return err
+				}
 				defer conn.Close()
-
-				dn := fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN)
-				Expect(conn.Bind(dn, pw)).To(Succeed(),
-					"readpw user %q should be able to bind", user)
-			}()
+				return conn.Bind(dn, pw)
+			}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed(),
+				"readpw user %q should be able to bind", user)
 		}
-	})
+	}, SpecTimeout(60*time.Second))
 
 	It("a readpw user can read userPassword from ou=Mail", func(ctx SpecContext) {
 		// ACL rule {0}: to dn.subtree="ou=Mail,..." attrs=userPassword

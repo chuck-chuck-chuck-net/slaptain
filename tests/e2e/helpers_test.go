@@ -171,17 +171,38 @@ func retryConnectLDAP(ctx context.Context, addr, base, password string) *ldap.Co
 	return conn
 }
 
+// podNodePortAddr returns the NodePort address for a specific pod if per-pod
+// NodePort env vars are configured (E2E_NODE_IP + E2E_POD_NODEPORT_BASE).
+// Returns "" if not configured. The ordinal is extracted from the pod name
+// (e.g. "slapd-2" → 2).
+func podNodePortAddr(podName, baseEnv string) string {
+	nodeIP := os.Getenv("E2E_NODE_IP")
+	baseStr := os.Getenv(baseEnv)
+	if nodeIP == "" || baseStr == "" {
+		return ""
+	}
+	// Extract ordinal from pod name: last segment after "-"
+	parts := strings.Split(podName, "-")
+	ordinalStr := parts[len(parts)-1]
+	ordinal := 0
+	fmt.Sscanf(ordinalStr, "%d", &ordinal)
+
+	base := 0
+	fmt.Sscanf(baseStr, "%d", &base)
+	return fmt.Sprintf("%s:%d", nodeIP, base+ordinal)
+}
+
 // dialPodLDAP connects directly to a specific slapd pod as admin.
 //
-// In in-cluster mode (LDAP_ADDR set) the pod is reachable via headless-service
-// DNS and the returned cancel is a no-op.  In local mode a kubectl port-forward
-// is started on localPort and must be torn down by the caller via cancel().
-//
-// Uses retryConnectLDAP in in-cluster mode because headless DNS propagation can
-// lag behind pod readiness (e.g. after a pod restart).
+// Three modes (checked in order):
+//   - NodePort mode (E2E_NODE_IP + E2E_POD_NODEPORT_BASE set): connect via per-pod NodePort.
+//   - In-cluster mode (E2E_IN_CLUSTER=1): connect via headless DNS.
+//   - Local mode (default): kubectl port-forward to the pod.
 func dialPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
-	if os.Getenv("LDAP_ADDR") != "" {
-		// In-cluster: reach the pod directly over the headless service DNS.
+	if addr := podNodePortAddr(podName, "E2E_POD_NODEPORT_BASE"); addr != "" {
+		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
+	}
+	if os.Getenv("E2E_IN_CLUSTER") == "1" {
 		addr := fmt.Sprintf("%s.%s.%s.svc.cluster.local:1024", podName, ldapHeadlessSvc, ns)
 		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
 	}
@@ -192,9 +213,12 @@ func dialPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc)
 }
 
 // dialReadOnlyPodLDAP connects directly to a specific read-only slapd pod as admin.
-// Same as dialPodLDAP but uses the read-only headless service for in-cluster DNS.
+// Same as dialPodLDAP but uses the read-only NodePort base / headless service.
 func dialReadOnlyPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
-	if os.Getenv("LDAP_ADDR") != "" {
+	if addr := podNodePortAddr(podName, "E2E_RO_POD_NODEPORT_BASE"); addr != "" {
+		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
+	}
+	if os.Getenv("E2E_IN_CLUSTER") == "1" {
 		addr := fmt.Sprintf("%s.%s.%s.svc.cluster.local:1024", podName, ldapReadOnlyHeadlessSvc, ns)
 		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
 	}

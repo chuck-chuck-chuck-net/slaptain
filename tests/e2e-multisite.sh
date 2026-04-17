@@ -20,6 +20,8 @@ NAMESPACE_TESTING="${NAMESPACE_TESTING:-slaptain-testing}"
 LDAP_DOMAIN="${LDAP_DOMAIN:-dc=chuck-chuck-chuck,dc=net}"
 NODEPORT_LDAP="${NODEPORT_LDAP:-30389}"
 NODEPORT_LDAPS="${NODEPORT_LDAPS:-30636}"
+NODEPORT_POD_BASE="${NODEPORT_POD_BASE:-30400}"
+NODEPORT_RO_POD_BASE="${NODEPORT_RO_POD_BASE:-30410}"
 REGISTRY="${REGISTRY:-ghcr.io/chuck-chuck-chuck-net}"
 PROJECT="${PROJECT:-slaptain}"
 
@@ -210,6 +212,56 @@ spec:
       targetPort: 1025
       nodePort: $NODEPORT_LDAPS
 EOF
+
+        # Per-pod NodePort services for direct pod access (replaces kubectl port-forward).
+        # Uses statefulset.kubernetes.io/pod-name label to target individual pods.
+        log "[$ctx] Creating per-pod NodePort services..."
+        local replicas
+        replicas=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get statefulset/slapd \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 3)
+        for i in $(seq 0 $((replicas - 1))); do
+            local np=$((NODEPORT_POD_BASE + i))
+            kctl "$ctx" apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: slapd-pod-$i
+  namespace: $NAMESPACE_TESTING
+spec:
+  type: NodePort
+  selector:
+    statefulset.kubernetes.io/pod-name: slapd-$i
+  ports:
+    - name: ldap
+      port: 389
+      targetPort: 1024
+      nodePort: $np
+EOF
+        done
+
+        # Per-pod NodePort for read-only replicas.
+        local ro_replicas
+        ro_replicas=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get statefulset/slapd-readonly \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)
+        for i in $(seq 0 $((ro_replicas - 1))); do
+            local np=$((NODEPORT_RO_POD_BASE + i))
+            kctl "$ctx" apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: slapd-readonly-pod-$i
+  namespace: $NAMESPACE_TESTING
+spec:
+  type: NodePort
+  selector:
+    statefulset.kubernetes.io/pod-name: slapd-readonly-$i
+  ports:
+    - name: ldap
+      port: 389
+      targetPort: 1024
+      nodePort: $np
+EOF
+        done
     done
 }
 
@@ -256,8 +308,9 @@ run_tests() {
     admin_pw=$(kctl "$ctx0" -n "$NAMESPACE_TESTING" get secret slapd-credentials \
         -o jsonpath='{.data.admin-password}' | base64 -d)
 
+    local local_ip="${NODE_IPS[$ctx0]}"
     local remote_ip="${NODE_IPS[$ctx1]}"
-    log "Test target: local=$ctx0, remote=$ctx1 ($remote_ip:$NODEPORT_LDAP)"
+    log "Test target: local=$ctx0 ($local_ip:$NODEPORT_LDAP), remote=$ctx1 ($remote_ip:$NODEPORT_LDAP)"
 
     # Create a temp kubeconfig scoped to ctx0 so the Go test suite's k8s client
     # connects to the right cluster without mutating the user's kubeconfig.
@@ -271,6 +324,10 @@ run_tests() {
         cd "$PROJECT_ROOT/tests/e2e"
         KUBECONFIG="$tmp_kubeconfig" \
         NAMESPACE_TESTING="$NAMESPACE_TESTING" \
+        LDAP_ADDR="${local_ip}:${NODEPORT_LDAP}" \
+        E2E_NODE_IP="${local_ip}" \
+        E2E_POD_NODEPORT_BASE="${NODEPORT_POD_BASE}" \
+        E2E_RO_POD_NODEPORT_BASE="${NODEPORT_RO_POD_BASE}" \
         E2E_EXTERNAL_REPL=1 \
         E2E_REMOTE_LDAP_ADDR="${remote_ip}:${NODEPORT_LDAP}" \
         E2E_REMOTE_ADMIN_PW="$admin_pw" \
@@ -294,8 +351,14 @@ teardown_all() {
         # SlapdCluster
         hctl "$ctx" uninstall slapd -n "$NAMESPACE_TESTING" 2>/dev/null || true
 
-        # NodePort service
+        # NodePort services (main + per-pod)
+        kctl "$ctx" delete svc -n "$NAMESPACE_TESTING" -l '!app.kubernetes.io/managed-by' \
+            --field-selector metadata.name!=kubernetes --ignore-not-found 2>/dev/null || true
         kctl "$ctx" delete svc slapd-external -n "$NAMESPACE_TESTING" --ignore-not-found || true
+        for i in 0 1 2 3 4 5 6 7; do
+            kctl "$ctx" delete svc "slapd-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+            kctl "$ctx" delete svc "slapd-readonly-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        done
 
         # Cross-trust secrets
         for other in "${CONTEXTS[@]}"; do
