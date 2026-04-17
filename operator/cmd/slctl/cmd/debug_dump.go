@@ -290,15 +290,18 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 	conn.Close()
 
 	// cn=config queries (config admin)
+	// The data DB index varies: {1}mdb without accesslog, {2}mdb with accesslog.
+	// Search by olcSuffix to find the right entry.
 	if configPW != "" {
 		configConn, err := ldap.Dial("tcp", addr)
 		if err == nil {
 			if err := configConn.Bind("cn=admin,cn=config", configPW); err == nil {
-				// syncrepl + mirrormode
+				dbFilter := fmt.Sprintf("(&(objectClass=olcMdbConfig)(olcSuffix=%s))", sc.Spec.LDAP.Domain)
+
+				// syncrepl + multiProvider
 				syncResult, err := configConn.Search(ldap.NewSearchRequest(
-					"olcDatabase={1}mdb,cn=config",
-					ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-					"(objectClass=*)", []string{"olcSyncRepl", "olcMirrorMode"}, nil,
+					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 5, false,
+					dbFilter, []string{"olcSyncRepl", "olcMultiProvider"}, nil,
 				))
 				if err == nil && len(syncResult.Entries) > 0 {
 					write(fmt.Sprintf("syncrepl-%s.txt", podName), formatLDAPEntry(syncResult.Entries[0]))
@@ -306,9 +309,8 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 
 				// ACLs
 				aclResult, err := configConn.Search(ldap.NewSearchRequest(
-					"olcDatabase={1}mdb,cn=config",
-					ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-					"(objectClass=*)", []string{"olcAccess"}, nil,
+					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 5, false,
+					dbFilter, []string{"olcAccess"}, nil,
 				))
 				if err == nil && len(aclResult.Entries) > 0 {
 					write(fmt.Sprintf("acls-%s.txt", podName), formatLDAPEntry(aclResult.Entries[0]))
