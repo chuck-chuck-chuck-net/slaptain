@@ -265,15 +265,7 @@ EOF
     done
 }
 
-setup_slapd_test() {
-    local ctx="${CONTEXTS[0]}"
-    log "[$ctx] Installing slapd-test (first site only)..."
-    hctl "$ctx" upgrade --install slapd-test "$PROJECT_ROOT/charts/slapd-test" \
-        --namespace "$NAMESPACE_TESTING" --create-namespace \
-        ${HELM_VALUES_SLAPD_TESTING:-}
-}
-
-wait_for_ready() {
+wait_for_clusters_ready() {
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Waiting for StatefulSet slapd to appear..."
         local attempts=0
@@ -286,10 +278,37 @@ wait_for_ready() {
         done
         log "[$ctx] Waiting for StatefulSet slapd to be ready..."
         kctl "$ctx" -n "$NAMESPACE_TESTING" rollout status statefulset/slapd --timeout=300s
-    done
 
+        log "[$ctx] Waiting for SlapdCluster to reach Running phase..."
+        attempts=0
+        while true; do
+            local phase
+            phase=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapdclusters.ldap.chuck-chuck-chuck.net slapd \
+                -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+            if [[ "$phase" == "Running" ]]; then
+                break
+            fi
+            ((attempts++)) || true
+            if [[ $attempts -ge 180 ]]; then
+                die "[$ctx] SlapdCluster did not reach Running phase within 180s (current: $phase)"
+            fi
+            sleep 1
+        done
+        log "[$ctx] SlapdCluster is Running."
+    done
+}
+
+setup_slapd_test() {
     local ctx="${CONTEXTS[0]}"
-    log "[$ctx] Waiting for bootstrap job to complete..."
+    log "[$ctx] Installing slapd-test (first site only)..."
+    hctl "$ctx" upgrade --install slapd-test "$PROJECT_ROOT/charts/slapd-test" \
+        --namespace "$NAMESPACE_TESTING" --create-namespace \
+        ${HELM_VALUES_SLAPD_TESTING:-}
+}
+
+wait_for_slapd_test() {
+    local ctx="${CONTEXTS[0]}"
+    log "[$ctx] Waiting for slapd-test bootstrap job to complete..."
     kctl "$ctx" -n "$NAMESPACE_TESTING" wait job/slapd-test \
         --for=condition=complete --timeout=300s
 
@@ -407,8 +426,9 @@ case "$subcommand" in
         setup_cross_trust
         setup_slapd_clusters
         setup_nodeport_services
-        setup_slapd_test
-        wait_for_ready
+        wait_for_clusters_ready   # StatefulSets + CR phase=Running (operator bootstrap done)
+        setup_slapd_test          # safe to run: root entry exists
+        wait_for_slapd_test       # bootstrap job + convergence
         log "Setup complete. Clusters: ${CONTEXTS[*]}"
         ;;
     test)
@@ -425,8 +445,9 @@ case "$subcommand" in
         setup_cross_trust
         setup_slapd_clusters
         setup_nodeport_services
+        wait_for_clusters_ready
         setup_slapd_test
-        wait_for_ready
+        wait_for_slapd_test
         run_tests
         teardown_all
         ;;

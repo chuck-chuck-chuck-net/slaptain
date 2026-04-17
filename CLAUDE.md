@@ -529,3 +529,18 @@ existence and adding missing schemas idempotently. See ADR-002.
   These point at values files like `tests/values.slapd.yaml`. Investigate whether the script can
   default to the test values files automatically (e.g. detect and use `tests/values.slapd.yaml`
   when present), so running `./e2e-multisite.sh setup s1 s2` works without any env vars set.
+
+- **CR status should reflect full bootstrap readiness.** Currently `PhaseRunning` means
+  StatefulSet replicas ready + `bootstrapComplete`, but `bootstrapComplete` is set after the
+  operator adds the root entry to pod-0. By the time the CR shows `Running`, the root entry
+  may not have replicated to all pods. A consumer (like the slapd-test bootstrap Job) that
+  deploys after `Running` can hit a pod without the root entry and fail.
+  The slapd-test bootstrap.sh has a temporary `until` loop waiting for the root entry as a
+  workaround. The proper fix needs design thought:
+  - Should `PhaseRunning` require the root entry to be visible on ALL pods?
+  - Should there be a `Ready` condition that downstream resources (Jobs, other CRs) can
+    `wait --for=condition=Ready` on?
+  - In the future, if slapd-test becomes a CR managed by the operator, the operator itself
+    would sequence the bootstrap — no shell loop needed.
+  - For production (long-lived clusters), this race only matters at initial deployment.
+    But for CI/e2e (frequent teardown/setup cycles), it's a reliability issue.

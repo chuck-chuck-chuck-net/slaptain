@@ -1,5 +1,15 @@
 # Cluster Bootstrap
 
+> **Partially outdated.** This document was written before ADR-003 (operator owns all syncrepl
+> configuration). Key changes not yet reflected:
+> - The init container no longer writes syncrepl stanzas or mirrormode — the operator applies
+>   these at runtime via `reconcileReplication` (step 7b).
+> - The operator now prepends a replication ACL rule automatically when replication is enabled.
+> - The reconcile steps after bootstrap (ACLs, schemas, replication) and their timing relative
+>   to `PhaseRunning` are not documented here. See `docs/reconcile-loop-fixes.md` for known
+>   issues with the bootstrap→ready sequencing.
+> - Cross-cluster replication (externalPeers) is not covered. See `docs/REPLICATION.md`.
+
 This document explains how a new `SlapdCluster` is bootstrapped: from an empty namespace to a
 running, fully-replicated LDAP directory. It also covers how to verify that replication is
 working and what to check when it isn't.

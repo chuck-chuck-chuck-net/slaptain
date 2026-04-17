@@ -71,6 +71,7 @@ class LdapClient:
         return self.conn.result
 
 def handle(ldapClient, sj):
+    """Apply one LDAP operation. Returns True on success, False on failure."""
     if sj['changetype']=="add":
         success = ldapClient.add(sj['dn'], sj['objectClass'], sj['attributes'])
         result = ldapClient.get_result()
@@ -79,6 +80,7 @@ def handle(ldapClient, sj):
             logger.info(f"Result: success ({info})")
         else:
             logger.warning(f"Result: failed ({info})")
+        return success
     elif sj['changetype']=="modify":
         if 'replace' in sj:
             success = ldapClient.modify(sj['dn'], { sj['replace']: [(ldap3.MODIFY_REPLACE, sj['attributes'][sj['replace']])]})
@@ -88,8 +90,11 @@ def handle(ldapClient, sj):
                 logger.info(f"Result: success ({info})")
             else:
                 logger.warning(f"Result: failed ({info})")
+            return success
         else:
             logger.error("changetype not yet implemented, please contribute")
+            return False
+    return False
 
 def main():
     global logger
@@ -243,6 +248,7 @@ environment variables:
 
     ldapClient = LdapClient(ldapuri, binddn, bindpw)
 
+    failures = 0
     additional_jsons = []
     if args.auto_readpw:
         additional_jsons += [
@@ -279,7 +285,8 @@ environment variables:
 
                 for i in entries:
                     logger.info(f"Applying content from {f.name} for {i['dn']}")
-                    handle(ldapClient, i)
+                    if not handle(ldapClient, i):
+                        failures += 1
         except Exception as e:
             logger.error(e)
             logger.error("Error reading ldap content json file!")
@@ -288,7 +295,12 @@ environment variables:
     if additional_jsons:
         for i in additional_jsons:
             logger.info(f"Adding automatic readpw user from {args.auto_readpw} for {i['dn']}")
-            handle(ldapClient, i)
+            if not handle(ldapClient, i):
+                failures += 1
+
+    if failures > 0:
+        logger.error(f"{failures} LDAP operation(s) failed")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

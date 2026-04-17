@@ -26,6 +26,19 @@ until ldapsearch -x -H "ldaps://${SLAPD_HOST}" -LLL -s base; do
     sleep 2
 done
 
+# ── TEMPORARY: Wait for root entry (operator bootstrap race) ─────────────────
+# The operator's reconcileBootstrap creates the root entry after the CR reaches
+# Running phase. The slapd-test Job may start before this completes. This loop
+# is a workaround — the proper fix is for the CR status to reflect bootstrap
+# completion more accurately. See backlog.
+echo "Waiting for root entry ${LDAP_DOMAIN}..."
+until ldapsearch -x -H "ldaps://${SLAPD_HOST}" \
+    -D "cn=admin,${LDAP_DOMAIN}" -w "${LDAP_ADMIN_PW}" \
+    -b "${LDAP_DOMAIN}" -s base "(objectClass=*)" dn -LLL 2>/dev/null | grep -q "^dn:"; do
+    sleep 2
+done
+echo "Root entry exists."
+
 # ── Step 1: Custom schema (cn=config, optional) ───────────────────────────────
 # ACL management is handled by the operator (spec.ldap.acls on the SlapdCluster
 # CR), not here.  This step only loads application-specific schema extensions.
