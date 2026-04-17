@@ -242,8 +242,9 @@ any node can serve writes.
 
 ### Delta-syncrepl: incremental change propagation
 
-OpenLDAP uses a pull-based replication protocol called **syncrepl**. Every replica (consumer)
-maintains a persistent connection to each provider and asks "give me all changes since CSN X".
+OpenLDAP uses a replication protocol called **syncrepl**. In `refreshAndPersist` mode (which we
+use), every replica (consumer) opens a persistent connection to each provider, does an initial
+catch-up, then the provider **pushes changes in real-time** over the same connection.
 The CSN (Change Sequence Number) is a timestamp-based identifier that tracks the position in
 the change stream.
 
