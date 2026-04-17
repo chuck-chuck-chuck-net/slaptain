@@ -35,7 +35,7 @@ define import-image
 	done
 endef
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean
 
 all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl
 
@@ -73,6 +73,9 @@ build-e2e-runner: $(STAMPS)/e2e
 
 build-slctl:
 	cd operator && go build -o ../bin/slctl ./cmd/slctl/
+
+install-slctl: build-slctl
+	sudo install -m 0755 bin/slctl /usr/local/bin/slctl
 
 ## Push to container registry
 push: build-init build-slapd build-toolkit build-operator build-e2e-runner

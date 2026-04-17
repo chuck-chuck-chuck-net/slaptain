@@ -289,6 +289,28 @@ kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
 
 ---
 
+### slctl — Diagnostic CLI
+
+`bin/slctl` (also installed to `/usr/local/bin/slctl`) is a diagnostic and management tool
+for SlapdCluster resources. Source: `operator/cmd/slctl/`. Use it when debugging e2e failures
+or inspecting cluster state.
+
+| Command | Purpose |
+|---|---|
+| `slctl status [-n ns] [name]` | Quick overview: phase, replicas, replication, conditions |
+| `slctl inspect [-n ns] [name]` | Per-pod LDAP queries + automated consistency checks (CSN convergence, topology, stanza counts). `--short` for CI. Exits non-zero on check failure |
+| `slctl debug-dump [-n ns] <name>` | Collect CR YAML, pod logs, LDAP state (rootDSE, contextCSN, syncrepl, ACLs), services, PVCs, events, operator logs into a timestamped directory |
+
+Common flags: `--context`, `--kubeconfig`, `-n namespace`, `--json`, `-A` (all namespaces).
+
+Example after a failed e2e test:
+```bash
+slctl inspect -n slaptain-testing slapd
+slctl debug-dump -n slaptain-testing slapd
+```
+
+---
+
 ### Reconcile Loop Debugging
 
 `docs/reconcile-loop-fixes.md` is a log of bugs found and fixed in the operator's reconciliation
