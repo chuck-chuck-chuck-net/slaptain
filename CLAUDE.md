@@ -1,4 +1,4 @@
-# LLM_STARTUP.md
+# CLAUDE.md
 
 ## Project: slaptain (Kubernetes OpenLDAP Operator)
 
@@ -38,7 +38,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ```
 .
 ├── Makefile                        # Root build targets (see Makefile Targets below)
-├── LLM_STARTUP.md
+├── CLAUDE.md
 ├── docs/
 │   ├── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
 │   ├── ONBOARDING.md               # Team onboarding: LDAP concepts, operator model, credential model

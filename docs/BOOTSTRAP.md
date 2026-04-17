@@ -4,7 +4,7 @@ This document explains how a new `SlapdCluster` is bootstrapped: from an empty n
 running, fully-replicated LDAP directory. It also covers how to verify that replication is
 working and what to check when it isn't.
 
-If you are new to LDAP, read [LLM_STARTUP.md](LLM_STARTUP.md) first — it builds the mental
+If you are new to LDAP, read [CLAUDE.md](CLAUDE.md) first — it builds the mental
 model you need to understand what this document is doing and why.
 
 ---
@@ -150,7 +150,7 @@ radius:
 
 This section explains how the three (or N) slapd nodes find each other and set up replication.
 If you are not familiar with LDAP replication concepts, read the
-[Replication Model](LLM_STARTUP.md#replication-model) section of LLM_STARTUP.md first.
+[Replication Model](CLAUDE.md#replication-model) section of CLAUDE.md first.
 
 ### What "N-way multi-master mirrormode" means in practice
 
