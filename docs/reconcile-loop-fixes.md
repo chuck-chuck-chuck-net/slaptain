@@ -1,6 +1,6 @@
-# Reconcile Loop Fixes
+# Reconcile & Replication Fixes
 
-Log of bugs found and fixed in the operator's reconciliation loop.
+Log of bugs found and fixed in the operator's reconciliation loop and replication setup.
 Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
@@ -37,3 +37,47 @@ Both reads returned empty, so the operator always saw a diff and replaced.
 **Why it was hard to spot:** The operator logs said "will retry on next reconcile" but there was no next reconcile — `PhaseRunning` suppressed the requeue. The slapd pods appeared healthy (Running, Ready) because the init container handled the base setup; only the operator-managed layers (ACLs, schemas, syncrepl stanzas) were missing.
 
 **Lesson:** Any reconcile step that skips work due to transient errors must propagate that fact to the requeue decision. "Log and skip" without forcing a retry is a silent failure mode.
+
+---
+
+## 2026-04-17: User ACLs block userPassword replication
+
+**Symptom:** Readpw users exist on all pods but `userPassword` is empty on pods 1 and 2.
+Only pod-0 (where the bootstrap job ran) has the password hashes. Bind attempts against
+pods 1/2 fail with error 49 (Invalid Credentials). `slctl inspect` shows no replication lag
+(CSNs match) — the entries replicated, just without the password attribute.
+
+**Root cause:** The user-specified ACL rule:
+```
+to attrs=userPassword by self write by anonymous auth by * none
+```
+The syncrepl consumer binds as `cn=replication,<domain>`, which matches `by * none`. The
+provider's ACL evaluation strips `userPassword` from the search results sent to the consumer.
+The entry replicates, but the password attribute is silently excluded. This affects any
+attribute that user ACLs deny to `*`.
+
+**Why it was hard to spot:**
+- CSN convergence showed no lag — replication was working perfectly, it was faithfully
+  replicating what the consumer could *see*, which excluded `userPassword`.
+- The entries existed on all pods, so `ldapExists()` checks passed.
+- With `kubectl port-forward`, all test connections went through one tunnel to one pod
+  (the bootstrap pod that had the data). The issue only manifested with NodePort routing,
+  where each connection could hit a different pod.
+- Error 49 (Invalid Credentials) is indistinguishable from "user doesn't exist" vs "wrong
+  password" vs "password attribute missing" — OpenLDAP returns the same error for all three.
+
+**Fix:** When replication is enabled, `reconcileACLs` now automatically prepends an ACL rule
+granting the replication bind DN unconditional read access:
+```
+to * by dn.exact="cn=replication,<domain>" read by * break
+```
+The `by * break` passes control to the next rule for all other users, so user-specified ACLs
+are unaffected. Users never need to include the replication user in their ACLs — the operator
+handles it transparently.
+
+**Lesson:** The replication user must have read access to ALL attributes, including those that
+user ACLs deny to `*`. Any attribute invisible to the replication bind DN will not replicate.
+This is a property of syncrepl itself — the provider's ACLs apply to the consumer's bind DN.
+The rootDN bypasses ACLs, but the replication user is not the rootDN (by design — it has a
+narrower role). The operator must ensure the replication user's access is not constrained by
+user-specified ACLs.

@@ -1168,6 +1168,20 @@ func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1al
 		return false, err
 	}
 
+	// Build effective ACL list. When replication is enabled, prepend a rule
+	// granting the replication bind DN read access to all attributes. Without
+	// this, user-specified ACLs that deny attribute reads (e.g. userPassword)
+	// would prevent the syncrepl consumer from receiving those attributes,
+	// causing silent data loss on replicas.
+	acls := sc.Spec.LDAP.ACLs
+	replicationEnabled := sc.Spec.Replication.Enabled && sc.Spec.Replicas > 1
+	if replicationEnabled || len(sc.Spec.Replication.ExternalPeers) > 0 {
+		replACL := fmt.Sprintf(
+			`to * by dn.exact="cn=replication,%s" read by * break`,
+			sc.Spec.LDAP.Domain)
+		acls = append([]string{replACL}, acls...)
+	}
+
 	log := logf.FromContext(ctx)
 	replicas := sc.Spec.Replicas
 	if replicas == 0 {
@@ -1179,7 +1193,7 @@ func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1al
 	for i := int32(0); i < replicas; i++ {
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
 			sc.Name, i, headlessSvc, sc.Namespace)
-		if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, sc.Spec.LDAP.ACLs); err != nil {
+		if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, acls); err != nil {
 			log.Info("ACL reconcile skipped for pod (will retry on next reconcile)",
 				"ordinal", i, "host", host, "err", err)
 			skipped = true
@@ -1192,7 +1206,7 @@ func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1al
 		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
 			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.cluster.local",
 				sc.Name, i, roHeadless, sc.Namespace)
-			if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, sc.Spec.LDAP.ACLs); err != nil {
+			if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, acls); err != nil {
 				log.Info("ACL reconcile skipped for read-only pod (will retry on next reconcile)",
 					"ordinal", i, "host", host, "err", err)
 				skipped = true
