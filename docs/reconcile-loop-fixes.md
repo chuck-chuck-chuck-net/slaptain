@@ -118,3 +118,57 @@ blockage.
 **Lesson:** Dial timeouts only protect against unreachable hosts. A connected-but-hung server
 is equally dangerous to an operator with a single reconcile worker. Every network client in a
 controller needs request-level timeouts, not just connection-level ones.
+
+---
+
+## 2026-04-18: Schema existence check never worked — duplicate ADD deadlocks slapd
+
+**Symptom:** On the second reconcile after initial deployment, the operator tries to add
+`cn=ox,cn=schema,cn=config` to slapd-0 even though it was successfully added 5 seconds
+earlier. slapd deadlocks (all threads in `futex_do_wait`, zero syscall activity, LDAP
+completely unresponsive). With the timeout fix above, the operator would eventually recover,
+but slapd stays deadlocked until the pod is restarted.
+
+**Root cause:** The `schemaExistsByCN` function searched `cn=schema,cn=config` with filter
+`(cn=ox)` to check if the schema already existed. The code comment stated that "OpenLDAP's
+config backend strips the {N} ordering prefix for filter evaluation." This is **wrong** for
+OpenLDAP 2.6.10 — verified empirically:
+
+```
+ldapsearch -b "cn=schema,cn=config" -s one "(cn=core)"        → 0 results
+ldapsearch -b "cn=schema,cn=config" -s one "(cn={0}core)"     → 1 result
+```
+
+The `{N}` prefix is part of the cn attribute value and is not stripped during filter
+evaluation. The search `(cn=ox)` never matches `cn={4}ox`. This means the existence check
+returned "not found" on every reconcile, causing a duplicate ADD every 10 seconds.
+
+The first reconcile succeeded because the schema genuinely didn't exist yet — the search
+correctly returned 0 entries, and the ADD created it. On the second reconcile, the search
+again returned 0 (filter bug), and the ADD of the already-existing schema triggered a
+deadlock inside slapd when syncrepl threads were concurrently active (likely a lock ordering
+conflict between the cn=config write path and the syncrepl retry threads).
+
+**Fix:** Replaced the broken filter-based existence check with `listSchemaCNs`: a one-level
+search of `cn=schema,cn=config` with `(objectClass=*)` that retrieves all schema entries,
+reads their `cn` attribute values, and strips the `{N}` ordering prefix ourselves
+(`stripOrderingPrefix`). This builds a `map[string]bool` of existing schema names. Only
+schemas not in this set are ADDed.
+
+The existence check is critical — not just an optimisation. A duplicate ADD while syncrepl
+threads are active deadlocks slapd permanently (confirmed on two independent clusters with
+different hardware and OS). slapd never returns an error — it hangs before it can respond.
+Error 68 (`EntryAlreadyExists`) and error 80 (`Duplicate`) handlers are retained as defence
+in depth but cannot be the primary idempotency mechanism because they would never fire in
+the deadlock scenario. The LDAP request timeout (10 seconds) protects the operator from
+blocking, but slapd itself would remain deadlocked until the pod is restarted.
+
+**Why not just ADD and handle errors?** Because the error never arrives. The slapd deadlock
+occurs inside the ADD processing, before any LDAP result is sent back. Relying on error
+handling alone would deadlock slapd on every fresh deployment: the first ADD succeeds
+(no syncrepl threads yet), syncrepl stanzas are applied, and the next reconcile's ADD
+deadlocks slapd. The existence check prevents the duplicate ADD from ever being issued.
+
+**Lesson:** When a server-side bug causes a hang (not an error), error handling cannot be the
+primary defence. You must avoid triggering the bug in the first place. Error handling and
+timeouts are defence in depth, not substitutes for correct pre-conditions.

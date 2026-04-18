@@ -1443,8 +1443,20 @@ func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv
 	return skipped, nil
 }
 
-// applySchemaToPod adds missing schema entries to one slapd pod's cn=schema,cn=config.
-// Existing schemas (by DN) are skipped.
+// applySchemaToPod adds schema entries to one slapd pod's cn=schema,cn=config.
+//
+// Existence check: OpenLDAP auto-numbers schema entries (cn=ox becomes cn={4}ox).
+// The {N} prefix is NOT stripped during filter evaluation in OpenLDAP 2.6.x, so
+// a search for (cn=ox) will never find cn={4}ox. Instead, we list all schema
+// entries once and strip the {N} prefix ourselves to build a set of existing
+// schema names. Only schemas not in this set are ADDed.
+//
+// This existence check is critical — not just an optimisation. A duplicate ADD
+// of an already-existing schema while syncrepl threads are active deadlocks slapd
+// (all threads block on internal mutexes, the process becomes permanently
+// unresponsive). The ADD error handlers below are defence in depth for edge cases
+// but must not be relied upon as the primary idempotency mechanism, because slapd
+// may deadlock before returning an error.
 func (r *SlapdClusterReconciler) applySchemaToPod(
 	ctx context.Context,
 	host, rootPW string,
@@ -1466,12 +1478,16 @@ func (r *SlapdClusterReconciler) applySchemaToPod(
 		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
 	}
 
+	// Build a set of existing schema cn values by listing all entries under
+	// cn=schema,cn=config and stripping the {N} ordering prefix.
+	existing, err := listSchemaCNs(conn)
+	if err != nil {
+		return fmt.Errorf("list existing schemas at %s: %w", host, err)
+	}
+
 	for _, s := range schemas {
-		exists, err := schemaExistsByCN(conn, schemaCNFromDN(s.DN))
-		if err != nil {
-			return fmt.Errorf("check schema DN %s at %s: %w", s.DN, host, err)
-		}
-		if exists {
+		cn := schemaCNFromDN(s.DN)
+		if existing[cn] {
 			log.V(1).Info("Schema already exists, skipping", "host", host, "dn", s.DN)
 			continue
 		}
@@ -1485,10 +1501,15 @@ func (r *SlapdClusterReconciler) applySchemaToPod(
 			addReq.Attribute(attr, vals)
 		}
 		if err := conn.Add(addReq); err != nil {
-			// OpenLDAP returns err=80 (Other) with "Duplicate attributeType" when
-			// the schema's attribute types are already registered globally (e.g.
-			// added by the bootstrap job before the operator ran). Treat this as
-			// "already exists" rather than a hard failure.
+			// Defence in depth: handle "already exists" errors in case the
+			// existence check has a gap (e.g. concurrent schema addition).
+			// Note: slapd may deadlock on duplicate ADDs with active syncrepl
+			// threads before returning these errors — the check above is the
+			// primary guard; the timeout on the connection is the safety net.
+			if ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+				log.V(1).Info("Schema already exists (ADD returned 68), skipping", "host", host, "dn", s.DN)
+				continue
+			}
 			if ldap.IsErrorWithCode(err, ldap.LDAPResultOther) && strings.Contains(err.Error(), "Duplicate") {
 				log.V(1).Info("Schema attributes already registered, skipping", "host", host, "dn", s.DN)
 				continue
@@ -1514,29 +1535,39 @@ func schemaCNFromDN(dn string) string {
 	return kv[1]
 }
 
-// schemaExistsByCN searches cn=schema,cn=config one level deep for an entry
-// whose cn matches the given name. OpenLDAP auto-numbers schema entries
-// (e.g. cn=ox becomes cn={4}ox), so a direct base-scope search on the
-// un-numbered DN always returns "no such object". A one-level search with
-// a cn equality filter works because OpenLDAP's config backend strips the
-// {N} ordering prefix for filter evaluation.
-func schemaExistsByCN(conn *ldap.Conn, cn string) (bool, error) {
-	if cn == "" {
-		return false, fmt.Errorf("empty cn for schema existence check")
+// stripOrderingPrefix removes the {N} ordering prefix from an OpenLDAP cn value.
+// e.g. "{4}ox" → "ox", "{0}core" → "core", "plain" → "plain".
+func stripOrderingPrefix(cn string) string {
+	if len(cn) > 0 && cn[0] == '{' {
+		if idx := strings.IndexByte(cn, '}'); idx >= 0 {
+			return cn[idx+1:]
+		}
 	}
+	return cn
+}
+
+// listSchemaCNs returns a set of schema cn values (with {N} prefix stripped)
+// that exist under cn=schema,cn=config.
+func listSchemaCNs(conn *ldap.Conn) (map[string]bool, error) {
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		"cn=schema,cn=config",
 		ldap.ScopeSingleLevel,
 		ldap.NeverDerefAliases,
-		1, 0, false,
-		fmt.Sprintf("(cn=%s)", ldap.EscapeFilter(cn)),
-		[]string{"dn"},
+		0, 0, false,
+		"(objectClass=*)",
+		[]string{"cn"},
 		nil,
 	))
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return len(sr.Entries) > 0, nil
+	result := make(map[string]bool, len(sr.Entries))
+	for _, entry := range sr.Entries {
+		for _, cn := range entry.GetAttributeValues("cn") {
+			result[stripOrderingPrefix(cn)] = true
+		}
+	}
+	return result, nil
 }
 
 // ── Replication reconciliation (Phase 3, ADR-003) ─────────────────────────────
