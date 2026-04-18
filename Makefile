@@ -4,8 +4,11 @@ NAMESPACE ?= slaptain
 NAMESPACE_TESTING ?= slaptain-testing
 CONTAINER_ENGINE ?= podman
 
-# Image delivery: "push" = registry, "import" = direct to k8s node containerd via SSH
+# Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= import
+
+# Container runtime on k8s nodes: "containerd" or "crio"
+CRI ?= containerd
 
 # Node import settings: auto-discover from kubectl, override with NODE_IPS="1.2.3.4 5.6.7.8"
 NODE_USER ?= debian
@@ -28,12 +31,22 @@ OPERATOR_SRCS := $(shell find images/operator -type f) $(shell find operator -ty
 E2E_SRCS     := $(shell find images/e2e-runner -type f) $(shell find tests/e2e -type f)
 
 # Import a container image to all k8s nodes via SSH
+ifeq ($(CRI),crio)
 define import-image
 	@for node in $(NODE_IPS); do \
-		echo "Importing $(1) to $$node..."; \
+		echo "Importing $(1) to $$node (cri-o)..."; \
+		$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node \
+			'cat > /tmp/_cri_import.tar && sudo skopeo copy docker-archive:/tmp/_cri_import.tar containers-storage:$(1) && rm -f /tmp/_cri_import.tar'; \
+	done
+endef
+else
+define import-image
+	@for node in $(NODE_IPS); do \
+		echo "Importing $(1) to $$node (containerd)..."; \
 		$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node sudo ctr -n k8s.io images import -; \
 	done
 endef
+endif
 
 .PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean
 
@@ -98,6 +111,9 @@ import: build-init build-slapd build-toolkit build-operator build-e2e-runner
 
 import-operator: build-operator
 	$(call import-image,$(OPERATOR_IMAGE))
+
+import-toolkit: build-toolkit
+	$(call import-image,$(TOOLKIT_IMAGE))
 
 import-e2e-runner: build-e2e-runner
 	$(call import-image,$(E2E_RUNNER_IMAGE))

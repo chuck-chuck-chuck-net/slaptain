@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -94,6 +95,8 @@ func Exec(ctx context.Context, coreClient kubernetes.Interface, config *rest.Con
 
 // PortForward opens a port-forward tunnel to a pod and returns the local port
 // and a cancel function. The local port is dynamically allocated.
+// Respects the context deadline — returns an error if the tunnel is not
+// established before the context expires.
 func PortForward(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, namespace, podName string, remotePort int) (localPort int, cancel func(), err error) {
 	// Find a free local port
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -103,7 +106,18 @@ func PortForward(ctx context.Context, coreClient kubernetes.Interface, config *r
 	localPort = ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
 
-	transport, upgrader, err := spdy.RoundTripperFor(config)
+	// Apply a timeout to the HTTP transport so the SPDY dial doesn't block forever
+	cfgCopy := rest.CopyConfig(config)
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout := time.Until(deadline)
+		if timeout > 0 {
+			cfgCopy.Timeout = timeout
+		}
+	} else {
+		cfgCopy.Timeout = 10 * time.Second
+	}
+
+	transport, upgrader, err := spdy.RoundTripperFor(cfgCopy)
 	if err != nil {
 		return 0, nil, fmt.Errorf("create SPDY round tripper: %w", err)
 	}
@@ -115,7 +129,7 @@ func PortForward(ctx context.Context, coreClient kubernetes.Interface, config *r
 		SubResource("portforward").
 		URL()
 
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", url)
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport, Timeout: cfgCopy.Timeout}, "POST", url)
 
 	ports := []string{fmt.Sprintf("%d:%d", localPort, remotePort)}
 	readyCh := make(chan struct{})

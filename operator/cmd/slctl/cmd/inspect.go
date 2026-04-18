@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -176,12 +178,18 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 	var rwPods, roPods []podState
 
 	for _, pn := range podNames(sc.Name, sc.Spec.Replicas) {
-		ps := gatherPodState(ctx, coreClient, config, sc, pn, configPW)
+		if !jsonOutput && !shortOutput {
+			fmt.Fprintf(os.Stderr, "  Inspecting %s...\n", pn)
+		}
+		ps := gatherPodStateWithTimeout(ctx, coreClient, config, sc, pn, configPW)
 		rwPods = append(rwPods, ps)
 		result.Pods = append(result.Pods, ps.toJSON())
 	}
 	for _, pn := range roPodNames(sc.Name, sc.Spec.ReadReplicas) {
-		ps := gatherPodState(ctx, coreClient, config, sc, pn, configPW)
+		if !jsonOutput && !shortOutput {
+			fmt.Fprintf(os.Stderr, "  Inspecting %s...\n", pn)
+		}
+		ps := gatherPodStateWithTimeout(ctx, coreClient, config, sc, pn, configPW)
 		roPods = append(roPods, ps)
 		result.Pods = append(result.Pods, ps.toJSON())
 	}
@@ -220,6 +228,39 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 
 // ── Pod state gathering ───────────────────────────────────────────────────────
 
+const perPodTimeout = 15 * time.Second
+
+// gatherPodStateWithTimeout wraps gatherPodState with a hard timeout.
+// The SPDY port-forward dialer doesn't respect context cancellation,
+// so we run the gather in a goroutine and abandon it if it takes too long.
+func gatherPodStateWithTimeout(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, podName, configPW string) podState {
+	// Quick check: if the pod isn't ready, skip without starting a goroutine
+	pod, err := coreClient.CoreV1().Pods(sc.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return podState{name: podName, err: fmt.Sprintf("pod not found: %v", err)}
+	}
+	if !isPodReady(pod) {
+		return podState{name: podName, phase: string(pod.Status.Phase), err: "pod not ready"}
+	}
+
+	ch := make(chan podState, 1)
+	go func() {
+		ch <- gatherPodState(ctx, coreClient, config, sc, podName, configPW)
+	}()
+
+	select {
+	case ps := <-ch:
+		return ps
+	case <-time.After(perPodTimeout):
+		return podState{
+			name:  podName,
+			phase: string(pod.Status.Phase),
+			ready: true,
+			err:   fmt.Sprintf("timed out after %s (pod ready but LDAP unresponsive)", perPodTimeout),
+		}
+	}
+}
+
 func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, podName, configPW string) podState {
 	ps := podState{name: podName}
 
@@ -236,7 +277,11 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 		return ps
 	}
 
-	localPort, cancel, err := k8scli.PortForward(ctx, coreClient, config, sc.Namespace, podName, 1024)
+	// Per-pod timeout to avoid hanging on unresponsive pods
+	podCtx, podCancel := context.WithTimeout(ctx, perPodTimeout)
+	defer podCancel()
+
+	localPort, cancel, err := k8scli.PortForward(podCtx, coreClient, config, sc.Namespace, podName, 1024)
 	if err != nil {
 		ps.err = fmt.Sprintf("port-forward: %v", err)
 		return ps
@@ -245,7 +290,14 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 
 	addr := fmt.Sprintf("localhost:%d", localPort)
 
-	conn, err := ldap.Dial("tcp", addr)
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	netConn, err := dialer.DialContext(podCtx, "tcp", addr)
+	if err != nil {
+		ps.err = fmt.Sprintf("LDAP dial: %v", err)
+		return ps
+	}
+	conn := ldap.NewConn(netConn, false)
+	conn.Start()
 	if err != nil {
 		ps.err = fmt.Sprintf("LDAP dial: %v", err)
 		return ps

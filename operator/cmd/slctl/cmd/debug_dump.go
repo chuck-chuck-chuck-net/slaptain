@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,8 +129,18 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 			return getPodLogs(ctx, coreClient, ns, pn, "init", false)
 		})
 
-		// LDAP queries via port-forward + go-ldap
-		collectLDAPArtifacts(ctx, coreClient, config, ns, pn, sc, configPW, dir, cmd, &warnings)
+		// LDAP queries via port-forward + go-ldap (with timeout to avoid hanging)
+		done := make(chan struct{}, 1)
+		go func() {
+			collectLDAPArtifacts(ctx, coreClient, config, ns, pn, sc, configPW, dir, cmd, &warnings)
+			done <- struct{}{}
+		}()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: LDAP queries for %s timed out after 15s\n", pn)
+			warnings++
+		}
 	}
 
 	// 4. Services
@@ -241,7 +252,11 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 }
 
 func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, ns, podName string, sc *ldapv1alpha1.SlapdCluster, configPW, dir string, cmd *cobra.Command, warnings *int) {
-	localPort, cancel, err := k8scli.PortForward(ctx, coreClient, config, ns, podName, 1024)
+	// Per-pod timeout to avoid hanging on unresponsive pods
+	podCtx, podCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer podCancel()
+
+	localPort, cancel, err := k8scli.PortForward(podCtx, coreClient, config, ns, podName, 1024)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: port-forward %s: %v\n", podName, err)
 		*warnings++
@@ -264,12 +279,15 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 	}
 
 	// rootDSE (anonymous)
-	conn, err := ldap.Dial("tcp", addr)
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	netConn, err := dialer.DialContext(podCtx, "tcp", addr)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: LDAP dial %s: %v\n", podName, err)
 		*warnings++
 		return
 	}
+	conn := ldap.NewConn(netConn, false)
+	conn.Start()
 
 	rootDSE, err := conn.Search(ldap.NewSearchRequest(
 		"", ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,

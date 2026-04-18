@@ -498,6 +498,86 @@ kubectl get secret -n slaptain-testing slapd-config-password -o json | jq '.data
 # Should show: root-password
 ```
 
+**5. Ephemeral debug container — inspect the filesystem or run LDAP queries from inside the pod**
+
+The slapd runtime image is distroless (no shell). Use an ephemeral debug container with the
+`slapd-toolkit` image, which has `bash`, `ldapsearch`, `ldapmodify`, and `python3`:
+
+```bash
+kubectl debug -n slaptain-testing slapd-0 -it \
+  --image=ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit:latest \
+  --image-pull-policy=Never \
+  --target=slapd -- bash
+```
+
+Notes:
+- `--image-pull-policy=Never` uses the image already present on the node (avoids pull credential
+  issues).
+- `--target=slapd` shares the process namespace with the slapd container so you can access its
+  filesystem via `/proc/1/root/` (slapd is PID 1 in its container).
+- You are not root in the debug container, but you have enough access for most tasks.
+
+For root access (needed for e.g. `/proc/1/task/*/stack` thread traces), use the custom
+debug profile in `tests/debug-profile.json`:
+```bash
+kubectl debug -n slaptain-testing slapd-0 -it \
+  --image=ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit:latest \
+  --image-pull-policy=Never \
+  --target=slapd \
+  --custom=tests/debug-profile.json \
+  -- bash
+```
+
+Example: inspect the cn=config schema files:
+```bash
+ls /proc/1/root/ldap-config/cn=config/cn=schema/
+```
+
+**6. Deep process inspection — diagnosing hangs and deadlocks**
+
+When slapd appears running (pod is `Running, ready`) but is unresponsive to LDAP queries, use
+the root debug container to inspect the process internals:
+
+```bash
+# Thread states — are threads sleeping normally or stuck on locks?
+for t in /proc/1/task/*/; do tid=$(basename $t); printf "TID $tid: wchan="; cat $t/wchan 2>/dev/null; echo; done
+```
+
+Healthy slapd shows most threads in `ep_poll` (idle, waiting for connections) or `poll_schedule_timeout`.
+If most threads show `futex_do_wait`, they are blocked on mutexes — likely a deadlock.
+
+```bash
+# Kernel stack traces — shows exactly where each thread is blocked
+cat /proc/1/task/*/stack
+
+# Attach strace to see if any syscalls are happening (5 second sample)
+timeout 5 strace -p 1 -f -e trace=futex,write,recvmsg -t 2>&1 | tail -30
+
+# Smoke test — does slapd respond to any LDAP query at all?
+ldapsearch -x -H ldap://localhost:1024 -b "" -s base namingContexts
+
+# TCP connections — who is connected?
+cat /proc/1/net/tcp
+```
+
+**Interpreting results:**
+
+| Observation | Diagnosis |
+|---|---|
+| All threads `futex_do_wait`, strace produces zero output in 5s, ldapsearch hangs | **Deadlock.** slapd is permanently stuck. Pod restart required to recover. |
+| Threads in `ep_poll`, strace shows activity, ldapsearch responds | slapd is healthy; problem is elsewhere (network, operator, DNS). |
+| Some threads `futex_do_wait`, strace shows some activity | Partial lock contention; may recover on its own or may be progressing slowly. |
+
+**Known deadlock trigger (OpenLDAP 2.6.10):** Adding a schema entry to `cn=config` that
+already exists (by a different DN, e.g. `cn=ox` vs `cn={4}ox`) while active syncrepl threads
+are running can deadlock slapd. The `cn=config` write path and syncrepl threads compete for
+internal locks with no timeout. See `docs/reconcile-loop-fixes.md` for the operator-side fix.
+
+There is also an automated script that collects all of the above into a timestamped directory:
+```bash
+./tests/pod-debug.sh [-n namespace] <pod-name>
+```
+
 **Common failure modes:**
 
 | Symptom | Likely cause |
