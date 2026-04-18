@@ -10,6 +10,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
 // External replication tests verify cross-cluster delta-syncrepl between two
@@ -137,14 +141,93 @@ var _ = Describe("external replication", Label("external-replication"), func() {
 	// ── 4. Removing external peer removes stanza ─────────────────────────────
 
 	It("removing an external peer from the spec removes its syncrepl stanza", func(ctx SpecContext) {
-		Skip("requires live SlapdCluster CR modification; implement when test infrastructure supports typed client")
-	})
+		// Read the current SlapdCluster CR.
+		sc := &ldapv1alpha1.SlapdCluster{}
+		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
+
+		// Save original peers for restoration.
+		originalPeers := sc.Spec.Replication.ExternalPeers
+		Expect(originalPeers).NotTo(BeEmpty(), "test requires at least one external peer")
+
+		// Remove all external peers.
+		patch := client.MergeFrom(sc.DeepCopy())
+		sc.Spec.Replication.ExternalPeers = nil
+		Expect(crdClient.Patch(ctx, sc, patch)).To(Succeed())
+
+		// Wait for the operator to remove the syncrepl stanza from all RW pods.
+		Eventually(ctx, func() bool {
+			for i := int32(0); i < replicas; i++ {
+				podName := fmt.Sprintf("slapd-%d", i)
+				localPort := fmt.Sprintf("%d", 14000+i)
+				conn, cancel := dialPodLDAP(namespace, podName, localPort)
+				defer cancel()
+				defer conn.Close()
+
+				Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed())
+				sr, err := conn.Search(ldap.NewSearchRequest(
+					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+					0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
+					[]string{"olcSyncRepl"}, nil))
+				Expect(err).NotTo(HaveOccurred())
+				if len(sr.Entries) == 0 {
+					return false
+				}
+				syncreplVals := sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
+				for _, v := range syncreplVals {
+					if containsRID(v, "101") {
+						return false // stanza still present
+					}
+				}
+			}
+			return true
+		}).WithTimeout(60 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
+			"external peer syncrepl stanza (rid=101) should be removed from all RW pods")
+
+		// Restore original peers.
+		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
+		patch = client.MergeFrom(sc.DeepCopy())
+		sc.Spec.Replication.ExternalPeers = originalPeers
+		Expect(crdClient.Patch(ctx, sc, patch)).To(Succeed())
+
+		// Wait for the stanza to reappear.
+		Eventually(ctx, func() bool {
+			conn, cancel := dialPodLDAP(namespace, "slapd-0", "14000")
+			defer cancel()
+			defer conn.Close()
+			Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed())
+			sr, err := conn.Search(ldap.NewSearchRequest(
+				"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+				0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
+				[]string{"olcSyncRepl"}, nil))
+			Expect(err).NotTo(HaveOccurred())
+			if len(sr.Entries) == 0 {
+				return false
+			}
+			for _, v := range sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl") {
+				if containsRID(v, "101") {
+					return true
+				}
+			}
+			return false
+		}).WithTimeout(60 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
+			"external peer syncrepl stanza (rid=101) should be restored after re-adding peer")
+	}, NodeTimeout(3*time.Minute))
 
 	// ── 5. External peer status reported in CR ───────────────────────────────
 
 	It("external peer status is reported in the SlapdCluster status", func(ctx SpecContext) {
-		Skip("requires CRD client; implement when test infrastructure supports typed client")
-	})
+		sc := &ldapv1alpha1.SlapdCluster{}
+		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
+
+		Expect(sc.Status.ExternalPeerStatuses).NotTo(BeEmpty(),
+			"status.externalPeerStatuses should be populated")
+
+		for _, ps := range sc.Status.ExternalPeerStatuses {
+			Expect(ps.Name).NotTo(BeEmpty(), "peer status should have a name")
+			Expect(ps.Connected).To(BeTrue(),
+				"external peer %q should be connected (got lastError: %s)", ps.Name, ps.LastError)
+		}
+	}, NodeTimeout(30*time.Second))
 })
 
 // containsRID checks if an olcSyncRepl value contains the given RID.

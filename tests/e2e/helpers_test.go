@@ -14,34 +14,50 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
 // ── Kubernetes helpers ────────────────────────────────────────────────────────
 
 func newK8sClient() *kubernetes.Clientset {
+	c, err := kubernetes.NewForConfig(restConfig())
+	Expect(err).NotTo(HaveOccurred(), "failed to create k8s client")
+	return c
+}
+
+func newCRDClient() client.Client {
+	cfg := restConfig()
+	s := runtime.NewScheme()
+	Expect(ldapv1alpha1.AddToScheme(s)).To(Succeed(), "failed to add ldap scheme")
+	c, err := client.New(cfg, client.Options{Scheme: s})
+	Expect(err).NotTo(HaveOccurred(), "failed to create CRD client")
+	return c
+}
+
+// restConfig returns the *rest.Config used by both newK8sClient and newCRDClient.
+func restConfig() *rest.Config {
 	var config *rest.Config
 	var err error
 	if kubeconfig := os.Getenv("KUBECONFIG"); kubeconfig != "" {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 	} else {
-		// Try in-cluster config (ServiceAccount token inside a pod).
 		config, err = rest.InClusterConfig()
 		if err != nil {
-			// Fall back to local kubeconfig for developer workstations.
 			config, err = clientcmd.BuildConfigFromFlags("", os.ExpandEnv("$HOME/.kube/config"))
 		}
 	}
 	Expect(err).NotTo(HaveOccurred(), "failed to build k8s config")
-	client, err := kubernetes.NewForConfig(config)
-	Expect(err).NotTo(HaveOccurred(), "failed to create k8s client")
-	return client
+	return config
 }
 
-func statefulSetReady(client *kubernetes.Clientset, ns, name string) bool {
-	sts, err := client.AppsV1().StatefulSets(ns).Get(context.Background(), name, metav1.GetOptions{})
+func statefulSetReady(c *kubernetes.Clientset, ns, name string) bool {
+	sts, err := c.AppsV1().StatefulSets(ns).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		return false
 	}
@@ -53,8 +69,8 @@ func statefulSetReady(client *kubernetes.Clientset, ns, name string) bool {
 }
 
 // podReady returns true when pod <name> is in Running phase with every container ready.
-func podReady(client *kubernetes.Clientset, ns, name string) bool {
-	pod, err := client.CoreV1().Pods(ns).Get(context.Background(), name, metav1.GetOptions{})
+func podReady(c *kubernetes.Clientset, ns, name string) bool {
+	pod, err := c.CoreV1().Pods(ns).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		return false
 	}
@@ -72,21 +88,21 @@ func podReady(client *kubernetes.Clientset, ns, name string) bool {
 	return true
 }
 
-func jobSucceeded(client *kubernetes.Clientset, ns, name string) bool {
-	job, err := client.BatchV1().Jobs(ns).Get(context.Background(), name, metav1.GetOptions{})
+func jobSucceeded(c *kubernetes.Clientset, ns, name string) bool {
+	job, err := c.BatchV1().Jobs(ns).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		return false
 	}
-	for _, c := range job.Status.Conditions {
-		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
 			return true
 		}
 	}
 	return false
 }
 
-func deploymentReady(client *kubernetes.Clientset, ns, name string) bool {
-	d, err := client.AppsV1().Deployments(ns).Get(context.Background(), name, metav1.GetOptions{})
+func deploymentReady(c *kubernetes.Clientset, ns, name string) bool {
+	d, err := c.AppsV1().Deployments(ns).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		return false
 	}
@@ -147,6 +163,24 @@ func ldapAdd(conn *ldap.Conn, req *ldap.AddRequest) {
 		return
 	}
 	Expect(err).NotTo(HaveOccurred(), "ldapAdd(%s) failed", req.DN)
+}
+
+// refreshLDAPConn checks if ldapConn is still alive and reconnects if needed.
+// This guards against server-side connection resets caused by operator
+// reconciliation (e.g. olcSyncRepl replacement restarts slapd's replication
+// engine and can drop existing client connections).
+func refreshLDAPConn() {
+	if ldapConn == nil {
+		ldapConn = retryConnectLDAP(context.Background(), localLDAPAddr, baseDN, adminPW)
+		return
+	}
+	// Lightweight rootDSE search as a connection health check.
+	req := ldap.NewSearchRequest("", ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=*)", []string{"1.1"}, nil)
+	if _, err := ldapConn.Search(req); err != nil {
+		ldapConn.Close()
+		ldapConn = retryConnectLDAP(context.Background(), localLDAPAddr, baseDN, adminPW)
+	}
 }
 
 // retryConnectLDAP retries dialing + binding as admin until success or the

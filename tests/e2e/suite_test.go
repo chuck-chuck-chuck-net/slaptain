@@ -12,12 +12,14 @@ import (
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ── Suite-wide variables ──────────────────────────────────────────────────────
 
 var (
 	k8sClient *kubernetes.Clientset
+	crdClient client.Client // controller-runtime client for SlapdCluster CRD access
 	ldapConn  *ldap.Conn
 	pfCancel  context.CancelFunc
 	adminPW   string
@@ -56,6 +58,9 @@ func TestE2E(t *testing.T) {
 var _ = BeforeSuite(func(ctx SpecContext) {
 	By("Setting up Kubernetes client")
 	k8sClient = newK8sClient()
+
+	By("Setting up CRD client for SlapdCluster access")
+	crdClient = newCRDClient()
 
 	By("Waiting for slapd StatefulSet to be ready")
 	Eventually(ctx, func() bool {
@@ -134,6 +139,16 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
 		"ou=People not visible — bootstrap may not have run or replication has not converged")
 }, NodeTimeout(12*time.Minute))
+
+// Refresh the shared ldapConn before every test. Tests that restart pods or
+// trigger operator reconciliation (syncrepl replacement) can cause the server
+// to drop existing connections. A lightweight rootDSE ping catches this early
+// and reconnects transparently instead of failing with "connection closed".
+var _ = BeforeEach(func() {
+	if baseDN != "" { // skip until BeforeSuite has completed
+		refreshLDAPConn()
+	}
+})
 
 var _ = AfterSuite(func() {
 	if ldapConn != nil {

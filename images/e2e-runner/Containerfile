@@ -7,7 +7,12 @@
 
 FROM golang:1.25 AS builder
 
-WORKDIR /workspace
+WORKDIR /workspace/tests/e2e
+
+# Copy the operator module (e2e depends on it via replace ../../operator).
+COPY operator/go.mod operator/go.sum /workspace/operator/
+RUN cd /workspace/operator && go mod download
+COPY operator/api/ /workspace/operator/api/
 
 # Dependency layer (cached separately from source changes).
 COPY tests/e2e/go.mod tests/e2e/go.sum ./
