@@ -533,6 +533,26 @@ Example: inspect the cn=config schema files:
 ls /proc/1/root/ldap-config/cn=config/cn=schema/
 ```
 
+**Automated debug script (`tests/pod-debug.sh`)**
+
+There is a convenience script that wraps the above into two modes:
+
+```bash
+# Collect all diagnostic artifacts (thread states, strace, LDAP smoke test, etc.)
+./tests/pod-debug.sh [-n namespace] <pod-name>
+
+# Interactive shell with credentials pre-loaded as $ROOT_PW, $ADMIN_PW, $BASE_DN
+./tests/pod-debug.sh [-n namespace] -i <pod-name>
+```
+
+The `-i` flag fetches credentials from the Kubernetes secrets, launches a root debug container,
+and drops you into a bash shell with `$ROOT_PW` (cn=config admin), `$ADMIN_PW` (data admin),
+and `$BASE_DN` ready to use. It also prints example `ldapsearch` commands on entry.
+
+Note: kubectl debug ephemeral containers cannot mount Secrets or use `envFrom`, so there is no
+way to inject credentials via Helm or Pod spec. The script handles this by fetching credentials
+via `kubectl get secret` before launching the container and embedding them in the startup command.
+
 **6. Deep process inspection — diagnosing hangs and deadlocks**
 
 When slapd appears running (pod is `Running, ready`) but is unresponsive to LDAP queries, use
