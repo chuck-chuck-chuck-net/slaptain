@@ -50,6 +50,10 @@ const (
 	ldapContainerPort  = int32(1024)
 	ldapsContainerPort = int32(1025)
 	fieldManager       = "slapdcluster-controller"
+
+	// ldapRequestTimeout caps every LDAP operation (Bind, Search, Add, Modify)
+	// so that a hung or deadlocked slapd cannot block the reconcile loop forever.
+	ldapRequestTimeout = 10 * time.Second
 )
 
 // SlapdClusterReconciler reconciles a SlapdCluster object.
@@ -797,6 +801,7 @@ func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *lda
 		return nil
 	}
 	defer conn.Close()
+	conn.SetTimeout(ldapRequestTimeout)
 
 	// Bind as the rootdn.  In OpenLDAP the rootdn+rootpw defined in slapd.conf
 	// allow authentication even before the LDAP entry for that DN exists.
@@ -1243,6 +1248,7 @@ func (r *SlapdClusterReconciler) applyACLsToPod(
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer conn.Close()
+	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
 		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
@@ -1454,6 +1460,7 @@ func (r *SlapdClusterReconciler) applySchemaToPod(
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer conn.Close()
+	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
 		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
@@ -1697,6 +1704,7 @@ func (r *SlapdClusterReconciler) applySyncreplToPod(
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	defer conn.Close()
+	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
 		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)

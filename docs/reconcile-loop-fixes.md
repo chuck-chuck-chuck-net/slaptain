@@ -81,3 +81,40 @@ This is a property of syncrepl itself — the provider's ACLs apply to the consu
 The rootDN bypasses ACLs, but the replication user is not the rootDN (by design — it has a
 narrower role). The operator must ensure the replication user's access is not constrained by
 user-specified ACLs.
+
+---
+
+## 2026-04-18: No LDAP operation timeout — hung slapd blocks operator permanently
+
+**Symptom:** Operator stops reconciling entirely. Operator logs end mid-operation (e.g.
+"Adding schema" with no follow-up). `slctl inspect` shows some pods fully configured, others
+with 0 syncrepl stanzas and no custom schemas. The operator pod is running but produces no
+further log output. Restarting the operator temporarily unblocks it until the same pod hangs
+again.
+
+**Root cause:** All four LDAP-speaking reconcile steps (`reconcileBootstrap`,
+`applyACLsToPod`, `applySchemaToPod`, `applyReplicationToPod`) used a 5-second **dial
+timeout** (`net.Dialer{Timeout: 5s}`) but set no **request timeout** on the LDAP connection.
+Once connected, operations like `conn.Add()`, `conn.Modify()`, or `conn.Search()` blocked
+indefinitely waiting for slapd's response. If slapd deadlocked or hung for any reason, the
+calling goroutine — the operator's single reconcile worker (ADR-001) — blocked forever. No
+further reconcile runs for any `SlapdCluster` in any namespace.
+
+**Trigger observed:** A duplicate schema ADD (`cn=ox,cn=schema,cn=config`) while active
+syncrepl threads were running caused slapd to deadlock (confirmed via `/proc/PID/task/*/stack`
+showing all threads in `futex_do_wait`, zero strace output over 5 seconds, and `ldapsearch`
+hanging indefinitely). The operator's `conn.Add()` never returned.
+
+**Fix:** Added `conn.SetTimeout(ldapRequestTimeout)` (10 seconds) after every `ldap.DialURL`
+call. go-ldap's `SetTimeout` applies to all subsequent operations on the connection (Bind,
+Search, Add, Modify). If any operation exceeds 10 seconds, go-ldap returns a timeout error.
+The reconcile step logs the error, skips the pod, and continues — the next reconcile retries.
+
+**Why 10 seconds:** Normal LDAP operations against cn=config complete in single-digit
+milliseconds. 10 seconds is generous enough to never false-positive, but short enough that
+a deadlocked pod only costs one 10-second stall per reconcile cycle instead of permanent
+blockage.
+
+**Lesson:** Dial timeouts only protect against unreachable hosts. A connected-but-hung server
+is equally dangerous to an operator with a single reconcile worker. Every network client in a
+controller needs request-level timeouts, not just connection-level ones.
