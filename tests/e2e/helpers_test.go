@@ -187,6 +187,10 @@ func refreshLDAPConn() {
 // context deadline is reached. Use this instead of connectLDAP when a transient
 // failure is expected — e.g. immediately after a pod restart when kubectl
 // port-forward may briefly return EOF while it re-establishes to a new backend.
+//
+// The retry loop verifies the connection with a rootDSE search after binding.
+// This catches connections that are TCP-established but about to be dropped
+// (e.g. during operator reconciliation of syncrepl stanzas).
 func retryConnectLDAP(ctx context.Context, addr, base, password string) *ldap.Conn {
 	var conn *ldap.Conn
 	Eventually(ctx, func() bool {
@@ -199,11 +203,45 @@ func retryConnectLDAP(ctx context.Context, addr, base, password string) *ldap.Co
 			c.Close()
 			return false
 		}
+		// Verify the connection is responsive, not just TCP-connected.
+		req := ldap.NewSearchRequest("", ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+			0, 0, false, "(objectClass=*)", []string{"1.1"}, nil)
+		if _, err := c.Search(req); err != nil {
+			c.Close()
+			return false
+		}
 		conn = c
 		return true
 	}).WithTimeout(30*time.Second).WithPolling(2*time.Second).Should(BeTrue(),
 		"should reconnect to LDAP at %s within 30 s", addr)
 	return conn
+}
+
+// refreshPodConn checks if a per-pod LDAP connection is still alive and
+// re-establishes it via dialPodLDAP if dead. Call this before first use when
+// the connection may have sat idle (e.g. while other connections were being
+// established). The old cancel function is called on reconnect.
+func refreshPodConn(conn *ldap.Conn, cancel context.CancelFunc, ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
+	req := ldap.NewSearchRequest("", ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=*)", []string{"1.1"}, nil)
+	if _, err := conn.Search(req); err == nil {
+		return conn, cancel // still alive
+	}
+	conn.Close()
+	cancel()
+	return dialPodLDAP(ns, podName, localPort)
+}
+
+// refreshReadOnlyPodConn is the read-only variant of refreshPodConn.
+func refreshReadOnlyPodConn(conn *ldap.Conn, cancel context.CancelFunc, ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
+	req := ldap.NewSearchRequest("", ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=*)", []string{"1.1"}, nil)
+	if _, err := conn.Search(req); err == nil {
+		return conn, cancel
+	}
+	conn.Close()
+	cancel()
+	return dialReadOnlyPodLDAP(ns, podName, localPort)
 }
 
 // podNodePortAddr returns the NodePort address for a specific pod if per-pod

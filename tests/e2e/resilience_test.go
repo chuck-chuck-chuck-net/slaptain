@@ -87,8 +87,7 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 
 		By("verifying replication to slapd-1 works after its restart")
 		conn1, cancel1 := dialPodLDAP(namespace, "slapd-1", podPort1)
-		defer cancel1()
-		defer conn1.Close()
+		defer func() { cancel1(); conn1.Close() }()
 
 		uid := fmt.Sprintf("resil-p1-%d", GinkgoRandomSeed())
 		var dn string
@@ -99,8 +98,8 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 			// subsequent replication test writing to slapd-2 would then race against
 			// that channel still reconnecting.
 			conn2, cancel2 := dialPodLDAP(namespace, "slapd-2", podPort2)
-			defer cancel2()
-			defer conn2.Close()
+			defer func() { cancel2(); conn2.Close() }()
+			conn1, cancel1 = refreshPodConn(conn1, cancel1, namespace, "slapd-1", podPort1)
 			dn = addReplTestUser(conn2, uid, 65520)
 			defer conn2.Del(ldap.NewDelRequest(dn, nil)) //nolint:errcheck
 		} else {
@@ -239,12 +238,12 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		if stsAfter.Spec.Replicas != nil && *stsAfter.Spec.Replicas >= 2 {
 			conn0, cancel0 := dialPodLDAP(namespace, "slapd-0", podPort0)
-			defer cancel0()
-			defer conn0.Close()
+			defer func() { cancel0(); conn0.Close() }()
 
 			conn1, cancel1 := dialPodLDAP(namespace, "slapd-1", podPort1)
-			defer cancel1()
-			defer conn1.Close()
+			defer func() { cancel1(); conn1.Close() }()
+
+			conn0, cancel0 = refreshPodConn(conn0, cancel0, namespace, "slapd-0", podPort0)
 
 			uid := fmt.Sprintf("resil-warmstart-%d", GinkgoRandomSeed())
 			dn := addReplTestUser(conn0, uid, 65530)

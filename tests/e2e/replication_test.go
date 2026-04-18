@@ -42,12 +42,13 @@ var _ = Describe("replication", Label("replication"), func() {
 
 	It("a write to slapd-0 is visible on slapd-1", func(ctx SpecContext) {
 		conn0, cancel0 := dialPodLDAP(namespace, "slapd-0", podPort0)
-		defer cancel0()
-		defer conn0.Close()
+		defer func() { cancel0(); conn0.Close() }()
 
 		conn1, cancel1 := dialPodLDAP(namespace, "slapd-1", podPort1)
-		defer cancel1()
-		defer conn1.Close()
+		defer func() { cancel1(); conn1.Close() }()
+
+		// conn0 may have gone stale while conn1 was being established.
+		conn0, cancel0 = refreshPodConn(conn0, cancel0, namespace, "slapd-0", podPort0)
 
 		uid := fmt.Sprintf("rtest0to1-%d", GinkgoRandomSeed())
 		dn := addReplTestUser(conn0, uid, 65510)
@@ -62,12 +63,12 @@ var _ = Describe("replication", Label("replication"), func() {
 
 	It("a write to slapd-1 is visible on slapd-0", func(ctx SpecContext) {
 		conn0, cancel0 := dialPodLDAP(namespace, "slapd-0", podPort0)
-		defer cancel0()
-		defer conn0.Close()
+		defer func() { cancel0(); conn0.Close() }()
 
 		conn1, cancel1 := dialPodLDAP(namespace, "slapd-1", podPort1)
-		defer cancel1()
-		defer conn1.Close()
+		defer func() { cancel1(); conn1.Close() }()
+
+		conn0, cancel0 = refreshPodConn(conn0, cancel0, namespace, "slapd-0", podPort0)
 
 		uid := fmt.Sprintf("rtest1to0-%d", GinkgoRandomSeed())
 		dn := addReplTestUser(conn1, uid, 65511)
@@ -86,16 +87,17 @@ var _ = Describe("replication", Label("replication"), func() {
 		}
 
 		conn0, cancel0 := dialPodLDAP(namespace, "slapd-0", podPort0)
-		defer cancel0()
-		defer conn0.Close()
+		defer func() { cancel0(); conn0.Close() }()
 
 		conn1, cancel1 := dialPodLDAP(namespace, "slapd-1", podPort1)
-		defer cancel1()
-		defer conn1.Close()
+		defer func() { cancel1(); conn1.Close() }()
 
 		conn2, cancel2 := dialPodLDAP(namespace, "slapd-2", podPort2)
-		defer cancel2()
-		defer conn2.Close()
+		defer func() { cancel2(); conn2.Close() }()
+
+		// Earlier connections may have gone stale while later ones were established.
+		conn0, cancel0 = refreshPodConn(conn0, cancel0, namespace, "slapd-0", podPort0)
+		conn1, cancel1 = refreshPodConn(conn1, cancel1, namespace, "slapd-1", podPort1)
 
 		uid := fmt.Sprintf("rtest2toall-%d", GinkgoRandomSeed())
 		dn := addReplTestUser(conn2, uid, 65512)
@@ -115,12 +117,12 @@ var _ = Describe("replication", Label("replication"), func() {
 
 	It("a delete on slapd-0 is propagated to slapd-1", func(ctx SpecContext) {
 		conn0, cancel0 := dialPodLDAP(namespace, "slapd-0", podPort0)
-		defer cancel0()
-		defer conn0.Close()
+		defer func() { cancel0(); conn0.Close() }()
 
 		conn1, cancel1 := dialPodLDAP(namespace, "slapd-1", podPort1)
-		defer cancel1()
-		defer conn1.Close()
+		defer func() { cancel1(); conn1.Close() }()
+
+		conn0, cancel0 = refreshPodConn(conn0, cancel0, namespace, "slapd-0", podPort0)
 
 		// Write via the ClusterIP so cleanup is not pod-specific.
 		uid := fmt.Sprintf("rtest-del-%d", GinkgoRandomSeed())
