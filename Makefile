@@ -7,12 +7,31 @@ CONTAINER_ENGINE ?= podman
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= import
 
-# Container runtime on k8s nodes: "containerd" or "crio"
-CRI ?= containerd
+# Kubecontext: pass CONTEXT=<name> to target a specific cluster.
+# Threads --context / --kube-context through all kubectl and helm calls.
+ifdef CONTEXT
+  KUBECTL := kubectl --context $(CONTEXT)
+  HELM   := helm --kube-context $(CONTEXT)
+else
+  KUBECTL := kubectl
+  HELM   := helm
+endif
 
-# Node import settings: auto-discover from kubectl, override with NODE_IPS="1.2.3.4 5.6.7.8"
-NODE_USER ?= debian
-NODE_IPS ?= $(shell kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
+# Container runtime on k8s nodes: env/CLI > node annotation > default.
+# Set once per cluster:
+#   kubectl annotate nodes --all slaptain.chuck-chuck-chuck.net/cri=crio
+ifndef CRI
+  CRI := $(or $(shell $(KUBECTL) get nodes -o jsonpath='{.items[0].metadata.annotations.slaptain\.chuck-chuck-chuck\.net/cri}' 2>/dev/null),containerd)
+endif
+
+# SSH user for node imports: env/CLI > node annotation > default.
+#   kubectl annotate nodes --all slaptain.chuck-chuck-chuck.net/node-user=dominik
+ifndef NODE_USER
+  NODE_USER := $(or $(shell $(KUBECTL) get nodes -o jsonpath='{.items[0].metadata.annotations.slaptain\.chuck-chuck-chuck\.net/node-user}' 2>/dev/null),debian)
+endif
+
+# Node IPs: auto-discover from kubectl, override with NODE_IPS="1.2.3.4 5.6.7.8"
+NODE_IPS ?= $(shell $(KUBECTL) get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
 
 INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:latest
 SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:latest
@@ -20,8 +39,10 @@ TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:latest
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:latest
 E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:latest
 
-# Stamp-file directory for incremental builds
+# Stamp-file directory for incremental builds and imports.
+# Import stamps include the context name so switching clusters re-imports.
 STAMPS := .stamps
+_ICTX  := $(if $(CONTEXT),$(CONTEXT)-,)
 
 # Source file dependencies per image
 INIT_SRCS    := $(shell find images/slapd-init -type f)
@@ -48,7 +69,7 @@ define import-image
 endef
 endif
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-init import-slapd import-toolkit import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean clean-import
 
 all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl
 
@@ -101,22 +122,35 @@ push: build-init build-slapd build-toolkit build-operator build-e2e-runner
 push-e2e-runner: build-e2e-runner
 	$(CONTAINER_ENGINE) push $(E2E_RUNNER_IMAGE)
 
-## Import images directly into k8s node containerd (no registry needed)
-import: build-init build-slapd build-toolkit build-operator build-e2e-runner
+## Import images directly into k8s node CRI via SSH (incremental: only re-imports after rebuild)
+
+$(STAMPS)/import-$(_ICTX)init: $(STAMPS)/init | $(STAMPS)
 	$(call import-image,$(INIT_IMAGE))
+	@touch $@
+
+$(STAMPS)/import-$(_ICTX)slapd: $(STAMPS)/slapd | $(STAMPS)
 	$(call import-image,$(SLAPD_IMAGE))
+	@touch $@
+
+$(STAMPS)/import-$(_ICTX)toolkit: $(STAMPS)/toolkit | $(STAMPS)
 	$(call import-image,$(TOOLKIT_IMAGE))
+	@touch $@
+
+$(STAMPS)/import-$(_ICTX)operator: $(STAMPS)/operator | $(STAMPS)
 	$(call import-image,$(OPERATOR_IMAGE))
+	@touch $@
+
+$(STAMPS)/import-$(_ICTX)e2e: $(STAMPS)/e2e | $(STAMPS)
 	$(call import-image,$(E2E_RUNNER_IMAGE))
+	@touch $@
 
-import-operator: build-operator
-	$(call import-image,$(OPERATOR_IMAGE))
+import: $(STAMPS)/import-$(_ICTX)init $(STAMPS)/import-$(_ICTX)slapd $(STAMPS)/import-$(_ICTX)toolkit $(STAMPS)/import-$(_ICTX)operator $(STAMPS)/import-$(_ICTX)e2e
 
-import-toolkit: build-toolkit
-	$(call import-image,$(TOOLKIT_IMAGE))
-
-import-e2e-runner: build-e2e-runner
-	$(call import-image,$(E2E_RUNNER_IMAGE))
+import-init: $(STAMPS)/import-$(_ICTX)init
+import-slapd: $(STAMPS)/import-$(_ICTX)slapd
+import-toolkit: $(STAMPS)/import-$(_ICTX)toolkit
+import-operator: $(STAMPS)/import-$(_ICTX)operator
+import-e2e-runner: $(STAMPS)/import-$(_ICTX)e2e
 
 ## Delivery: dispatch to push or import based on DELIVERY variable
 deliver: $(DELIVERY)
@@ -125,7 +159,7 @@ deliver-e2e-runner: $(DELIVERY)-e2e-runner
 
 ## Operator dev fast-path: build + deliver + helm upgrade + restart
 deploy-operator: deliver-operator operator-helm-install
-	kubectl rollout restart deployment/slaptain-operator -n $(NAMESPACE)
+	$(KUBECTL) rollout restart deployment/slaptain-operator -n $(NAMESPACE)
 
 operator-generate:
 	$(MAKE) -C operator generate
@@ -138,54 +172,54 @@ operator-sync-crd:
 	cp operator/config/crd/bases/*.yaml charts/operator/crds/
 
 gencert:
-	kubectl get namespace $(NAMESPACE_TESTING) >/dev/null 2>&1 || kubectl create namespace $(NAMESPACE_TESTING)
-	cd tests && ./gencert.sh -n $(NAMESPACE_TESTING) -t slapd -s slapd -H slapd-headless slapd-tls
+	$(KUBECTL) get namespace $(NAMESPACE_TESTING) >/dev/null 2>&1 || $(KUBECTL) create namespace $(NAMESPACE_TESTING)
+	cd tests && ./gencert.sh $(if $(CONTEXT),-c $(CONTEXT)) -n $(NAMESPACE_TESTING) -t slapd -s slapd -H slapd-headless slapd-tls
 
 helm-install:
-	helm upgrade --install slapd ./charts/slapd \
+	$(HELM) upgrade --install slapd ./charts/slapd \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
 		$(HELM_VALUES_SLAPD)
 
 helm-deploy: deliver gencert helm-install ## Full pipeline: build images, deliver, generate certs, deploy
 
 helm-uninstall:
-	helm uninstall slapd --namespace $(NAMESPACE_TESTING)
+	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
 
 ifeq ($(TOOLKIT_ONLY),true)
   HELM_SET_SLAPD_TESTING = --set bootstrap.enabled=false
 endif
 
 testing-helm-install:
-	helm upgrade --install slapd-test ./charts/slapd-test \
+	$(HELM) upgrade --install slapd-test ./charts/slapd-test \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
 		$(HELM_VALUES_SLAPD_TESTING) $(HELM_SET_SLAPD_TESTING)
 
 testing-helm-uninstall:
-	helm uninstall slapd-test --namespace $(NAMESPACE_TESTING)
+	$(HELM) uninstall slapd-test --namespace $(NAMESPACE_TESTING)
 
 cluster-helm-install:
-	helm upgrade --install slapd ./charts/slapd-cluster \
+	$(HELM) upgrade --install slapd ./charts/slapd-cluster \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
 		$(HELM_VALUES_SLAPD_CLUSTER)
 
 cluster-helm-uninstall:
-	helm uninstall slapd --namespace $(NAMESPACE_TESTING)
+	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
 
 operator-helm-install:
-	helm upgrade --install slaptain-operator ./charts/operator \
+	$(HELM) upgrade --install slaptain-operator ./charts/operator \
 		--namespace $(NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(PROJECT)/operator \
 		$(HELM_VALUES)
 
 operator-helm-uninstall:
-	helm uninstall slaptain-operator --namespace $(NAMESPACE)
+	$(HELM) uninstall slaptain-operator --namespace $(NAMESPACE)
 
 test:
-	helm upgrade --install slapd-test ./charts/slapd-test \
+	$(HELM) upgrade --install slapd-test ./charts/slapd-test \
 		--namespace $(NAMESPACE_TESTING) --create-namespace
 
 test-uninstall:
-	helm uninstall slapd-test --namespace $(NAMESPACE_TESTING)
+	$(HELM) uninstall slapd-test --namespace $(NAMESPACE_TESTING)
 
 ## e2e: full setup + test run + teardown
 e2e: e2e-run
@@ -204,14 +238,14 @@ e2e-external-replication:
 
 ## e2e-in-cluster: build + deliver e2e runner image, deploy as a Job, stream logs, report result
 e2e-in-cluster: deliver-e2e-runner
-	kubectl delete job e2e-runner -n $(NAMESPACE_TESTING) --ignore-not-found
+	$(KUBECTL) delete job e2e-runner -n $(NAMESPACE_TESTING) --ignore-not-found
 	sed 's|__E2E_RUNNER_IMAGE__|$(E2E_RUNNER_IMAGE)|g; s|__NAMESPACE_TESTING__|$(NAMESPACE_TESTING)|g' \
-		tests/e2e-runner-rbac.yaml | kubectl apply -f -
+		tests/e2e-runner-rbac.yaml | $(KUBECTL) apply -f -
 	sed 's|__E2E_RUNNER_IMAGE__|$(E2E_RUNNER_IMAGE)|g; s|__NAMESPACE_TESTING__|$(NAMESPACE_TESTING)|g' \
-		tests/e2e-runner-job.yaml | kubectl apply -f -
+		tests/e2e-runner-job.yaml | $(KUBECTL) apply -f -
 	@echo "Waiting for e2e-runner pod to start..."
-	@until kubectl logs -n $(NAMESPACE_TESTING) -f job/e2e-runner 2>/dev/null; do sleep 2; done
-	@kubectl wait job/e2e-runner -n $(NAMESPACE_TESTING) \
+	@until $(KUBECTL) logs -n $(NAMESPACE_TESTING) -f job/e2e-runner 2>/dev/null; do sleep 2; done
+	@$(KUBECTL) wait job/e2e-runner -n $(NAMESPACE_TESTING) \
 		--for=condition=complete --timeout=30s 2>/dev/null \
 		|| (echo "FAIL: e2e-runner job did not complete successfully" && exit 1)
 
@@ -233,3 +267,6 @@ e2e-multisite-teardown:
 
 clean:
 	rm -rf .stamps bin/ *.tar
+
+clean-import:
+	rm -f .stamps/import-*
