@@ -184,6 +184,12 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		sc.Status.Phase = ldapv1alpha1.PhaseDegraded
 	case !sc.Status.BootstrapComplete:
 		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping
+	case podsSkipped:
+		// All replicas are ready and bootstrap is done, but some pods haven't
+		// been fully configured yet (ACLs, schemas, or syncrepl stanzas not
+		// applied). Stay in Bootstrapping until the next reconcile succeeds
+		// on all pods.
+		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping
 	default:
 		sc.Status.Phase = ldapv1alpha1.PhaseRunning
 	}
@@ -191,9 +197,12 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	readyStatus := metav1.ConditionFalse
 	readyReason := "NotReady"
 	readyMsg := fmt.Sprintf("%d/%d replicas ready", ready, desired)
-	if ready >= desired && sc.Status.BootstrapComplete {
+	if ready >= desired && sc.Status.BootstrapComplete && !podsSkipped {
 		readyStatus = metav1.ConditionTrue
 		readyReason = "AllReplicasReady"
+	} else if podsSkipped {
+		readyReason = "PodsNotConfigured"
+		readyMsg = fmt.Sprintf("%d/%d replicas ready, some pods pending configuration", ready, desired)
 	}
 	setCondition(&sc.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
