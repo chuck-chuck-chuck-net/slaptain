@@ -20,6 +20,8 @@ NAMESPACE_TESTING="${NAMESPACE_TESTING:-slaptain-testing}"
 NODEPORT_LDAP="${NODEPORT_LDAP:-30389}"
 NODEPORT_POD_BASE="${NODEPORT_POD_BASE:-30400}"
 NODEPORT_RO_POD_BASE="${NODEPORT_RO_POD_BASE:-30410}"
+REGISTRY="${REGISTRY:-ghcr.io/chuck-chuck-chuck-net}"
+PROJECT="${PROJECT:-slaptain}"
 TEST_RESOURCES="${TEST_RESOURCES:-example}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -120,7 +122,7 @@ setup_operator() {
     log "Installing operator (tag: $GIT_TAG)..."
     $HELM upgrade --install slaptain-operator "$PROJECT_ROOT/charts/operator" \
         --namespace "$NAMESPACE" --create-namespace \
-        --set "image.repository=ghcr.io/chuck-chuck-chuck-net/slaptain/operator" \
+        --set "image.repository=$REGISTRY/$PROJECT/operator" \
         --set "image.tag=$GIT_TAG" \
         "${PULL_SECRET_HELM_ARGS[@]}" \
         ${HELM_VALUES:-}
@@ -143,7 +145,9 @@ setup_cluster() {
     $HELM upgrade --install slapd "$PROJECT_ROOT/charts/slapd-cluster" \
         --namespace "$NAMESPACE_TESTING" --create-namespace \
         -f "$PROJECT_ROOT/tests/values.slapd.yaml" \
+        --set "images.slapd.repository=$REGISTRY/$PROJECT/slapd" \
         --set "images.slapd.tag=$GIT_TAG" \
+        --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
         --set "images.init.tag=$GIT_TAG" \
         "${PULL_SECRET_HELM_ARGS[@]}" \
         ${HELM_VALUES_SLAPD_CLUSTER:-}

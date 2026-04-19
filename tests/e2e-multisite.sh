@@ -231,7 +231,9 @@ setup_slapd_clusters() {
         hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-cluster" \
             --namespace "$NAMESPACE_TESTING" --create-namespace \
             -f "$PROJECT_ROOT/tests/values.slapd.yaml" \
+            --set "images.slapd.repository=$REGISTRY/$PROJECT/slapd" \
             --set "images.slapd.tag=$GIT_TAG" \
+            --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
             --set "images.init.tag=$GIT_TAG" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \
