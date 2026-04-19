@@ -490,17 +490,32 @@ during bootstrap and the init container grants it read access to the accesslog a
 
 #### slapd-init Changes for Phase 2
 
-The init script gains a conditional replication path, gated on `LDAP_REPLICATION_ENABLED=true`:
+Post-ADR-004, the init container handles **cn=config infrastructure only**. Anything that
+lives in the data tree or references a specific data database is the SlapdDatabase
+controller's responsibility.
 
-- Extend `slapd.conf` with: accesslog DB config, `overlay accesslog`, `overlay syncprov` on
-  both databases, `mirrormode on`, and N-1 `syncrepl` blocks (one per peer ordinal, skipping self).
-- Peer URL template: `ldaps://<name>-<ordinal>.<headless-svc>.<ns>.svc.cluster.local:1025`
-- On first bootstrap: add `cn=replication` entry to config DB and its ACL grants.
-- On pod restart (config exists): patch existing `cn=config` via `ldapmodify` on the ldapi
-  socket to add/update syncrepl entries. This is what enables future scale-out without full
-  re-bootstrap.
+Init container, gated on `LDAP_REPLICATION_ENABLED=true`:
+- Load `accesslog` and `syncprov` modules.
+- Create the accesslog DB (`olcDatabase={N}mdb cn=accesslog`) with its backing directory.
+- Add `overlay syncprov` to the accesslog DB so peers can pull incremental updates.
+- Accesslog DB ACLs granting `cn=replication,<suffix>` read access.
+- Skip accesslog setup entirely when `LDAP_READONLY_REPLICA=true` (RO pods don't produce changes).
+
+SlapdDatabase controller, per data database, when `spec.replication.deltaSync=true`:
+- Add `overlay accesslog` and `overlay syncprov` to the data DB (`ensureReplicationOverlays`).
+- Set `olcMultiProvider: TRUE` on the data DB (the OL 2.5+ rename of `olcMirrorMode`).
+- Write N-1 in-cluster `olcSyncRepl` stanzas plus external peer stanzas (see ADR-003).
+- Add `cn=replication,<suffix>` bind entry to the data tree (`ensureReplicationUser`).
+- Prepend an ACL granting `cn=replication,<suffix>` read-all (see reconcile-loop-fixes.md:
+  "User ACLs block userPassword replication").
+
+Peer URL template: `ldaps://<name>-<ordinal>.<headless-svc>.<ns>.svc.cluster.local:1025`
 
 Pod ordinal is read from the hostname: `${HOSTNAME##*-}` (last segment of StatefulSet pod name).
+
+RID scheme (lives on SlapdDatabase.spec.replication.ridBase): in-cluster peer `i` →
+`ridBase+i+1`; external peer `j` → `ridBase+50+j+1`. Each database gets a unique ridBase
+so stanzas don't collide across databases.
 
 #### Phase 2 Scope and Non-Goals
 

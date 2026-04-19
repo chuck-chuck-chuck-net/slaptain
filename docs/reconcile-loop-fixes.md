@@ -236,3 +236,149 @@ section documents how each previously fixed bug is preserved in the new architec
 | **No LDAP request timeout** | All three | Every `ldap.DialURL` is followed by `conn.SetTimeout(ldapRequestTimeout)`. |
 | **Schema deadlock on duplicate ADD** | SlapdSchema | Uses `Modify` (LDAP_MOD_ADD on existing `cn=schema,cn=config`) instead of `Add` (create new sub-entry). This avoids the deadlock entirely — no new schema entry is ever created, only attributes are added to the existing entry. Existence check reads all `olcAttributeTypes`/`olcObjectClasses` values and matches by NAME (case-insensitive, `{N}` prefix stripped). |
 | **PhaseRunning before convergence** | SlapdDatabase | `seedApplied` is set after successful seed on one pod. Replication convergence to other pods is handled by syncrepl (not polled). The database phase gates on all per-pod operations completing, not just seed. |
+
+---
+
+## 2026-04-19: Missing `cn=replication` bind entry after ADR-004 split
+
+**Symptom:** Fresh multi-replica deployment comes up with all pods Running, syncrepl
+stanzas configured, but replication never converges. Consumer pod logs show repeated
+`rc=49 (Invalid Credentials)` errors from every peer. `slctl inspect` reports CSN
+divergence that never resolves.
+
+**Root cause:** Pre-refactor, the slapd-init container created the
+`cn=replication,<suffix>` bind entry in the data tree on first bootstrap. The ADR-004
+split moved data-tree bootstrapping (root entry, indices, seed) to the SlapdDatabase
+controller, but the replication bind entry was not migrated. The controller happily
+wrote syncrepl stanzas referencing `cn=replication,<suffix>` even though the entry
+itself never existed on any pod.
+
+**Fix:** Added `ensureReplicationUser` step to the SlapdDatabase reconcile loop
+(`slapddatabase_controller.go` — step 9, before syncrepl stanza reconciliation). It
+binds to any reachable RW pod as the data rootDN, checks whether
+`cn=replication,<suffix>` exists, and if not, adds it as a
+`simpleSecurityObject`/`organizationalRole` with an SSHA-hashed password from the
+database's `replication-password` Secret key. Idempotent; handles
+`EntryAlreadyExists` as success.
+
+**Why it was invisible initially:** Single-replica clusters work fine — no syncrepl
+means no bind attempts. ACL-only tests also pass — the data tree looks healthy. The
+failure only manifests when two or more RW pods try to sync from each other, and it
+produces the same `rc=49` as a wrong password or a non-existent user, which makes it
+easy to chase the wrong hypothesis.
+
+**Lesson:** When moving bootstrap responsibilities between components, audit every
+piece of state each component was creating. "The controller adds syncrepl stanzas" is
+only useful if something else also adds the identities those stanzas bind as. The
+refactor checklist missed that `cn=replication` lives in the data tree, not in
+`cn=config`, and so belongs to the SlapdDatabase controller's domain, not the
+init container's.
+
+---
+
+## 2026-04-19: Missing `overlay accesslog`/`overlay syncprov` on data DB after ADR-004 split
+
+**Symptom:** With replication enabled, writes to the provider pod never propagate
+to consumers. The accesslog DB (`cn=accesslog`) exists but stays empty — no entries
+are ever written to it. `contextCSN` on consumers never advances past their initial
+value. `slctl inspect` shows persistent CSN divergence.
+
+**Root cause:** Delta-syncrepl requires two overlays on the **data** database (not the
+accesslog DB): `overlay accesslog` to log writes into the accesslog DB, and
+`overlay syncprov` to expose the data DB as a syncrepl provider. Pre-refactor, the
+init container added these to `slapd.conf` when `LDAP_REPLICATION_ENABLED=true`.
+Post-ADR-004, the init container no longer touches data databases at all (they're
+created by the SlapdDatabase controller). The overlay setup was never ported.
+
+**Fix:** Added `ensureReplicationOverlays` to the per-pod database reconcile path.
+When `sd.Spec.Replication.DeltaSync == true` and the pod is not a read-only replica,
+the controller searches for existing overlays under the data DB's `cn=config` entry,
+and adds `olcOverlay=accesslog,<dataDN>` and `olcOverlay=syncprov,<dataDN>` if
+missing. `olcAccessLogDB=cn=accesslog`, `olcAccessLogOps=writes`,
+`olcAccessLogSuccess=TRUE`, plus optional `olcAccessLogPurge` and
+`olcSpCheckpoint` from the CR spec. Idempotent via pre-check and
+`EntryAlreadyExists` tolerance.
+
+**Why it was hard to spot:** The accesslog DB itself exists (init container creates
+it) and `overlay syncprov` *on the accesslog DB* is set up by the init container
+too — so cursory inspection shows a healthy accesslog infrastructure. Only a careful
+`ldapsearch -b "olcDatabase={N}mdb,cn=config" -s one "(objectClass=olcOverlayConfig)"`
+on the **data** database reveals the missing overlays. `slctl inspect` didn't check
+for these.
+
+**Lesson:** Delta-syncrepl needs overlays on both databases — accesslog overlay on
+the data DB (producer side) and syncprov on both (provider-side exposure of both the
+data DB for initial sync and the accesslog DB for incremental updates). Splitting
+"init container owns cn=config" from "controller owns data DB" needs to account for
+overlays that logically belong to the data DB even though they're registered as
+`cn=config` sub-entries.
+
+---
+
+## 2026-04-19: Seed data lost on rolling restart, not re-applied
+
+**Symptom:** After editing a SlapdCluster or SlapdDatabase field that triggers a
+StatefulSet rolling restart, pods come back up with empty data databases —
+`ldapsearch` returns "No such object" for the root DN. The SlapdDatabase CR still
+shows `status.seedApplied: true`, so the controller never retries seeding. The
+cluster appears healthy (Running, Ready=True) but has no data.
+
+**Root cause:** The SlapdDatabase controller sets `status.seedApplied = true` the
+first time `applySeedData` succeeds and short-circuits on all future reconciles.
+`seedApplied` is a one-way latch: set once, never re-evaluated. Any scenario that
+leaves the CR intact but empties the data DB — pod replacement onto a fresh data
+PVC, `forceRebootstrap=true`, manual PVC intervention, or a StatefulSet rollout
+that happens to recreate LMDB state — produces a Running cluster with no data, and
+the controller never re-seeds because the status flag says the work is already
+done.
+
+**Fix:** When `status.seedApplied == true`, call `verifySeedExists` before
+short-circuiting. It binds to each RW pod as the data rootDN and checks whether the
+first seed entry's DN exists. If it's missing on all reachable pods, set
+`needsSeed = true` and reapply. Returns true early when the seed spec has no
+entries (nothing to verify). On failure to reach any pod, assume missing
+(conservative — retry on next reconcile).
+
+**Why it was hard to spot:** Day-to-day operation doesn't trigger it — rolling
+restarts are rare and seed data is usually idempotent at the LDAP level. The CR
+status looks correct (`seedApplied: true`). The only failing signal is that
+directory queries return no data. Initial deployment works because
+`seedApplied` starts false.
+
+**Lesson:** Status fields that gate idempotency checks (`seedApplied`,
+`bootstrapComplete`, etc.) must be validated against current cluster reality on
+every reconcile, not just set-and-forget. "We already did X" is only valid if the
+effect of X is still visible.
+
+---
+
+## 2026-04-20: SlapdDatabase controller missed externalPeers changes on SlapdCluster
+
+**Symptom:** Editing `spec.replication.externalPeers` on a SlapdCluster (adding or
+removing a cross-cluster peer) had no effect on syncrepl stanzas until a SlapdDatabase
+CR was also modified. Removing a peer left its stanza in place; adding a peer didn't
+create one. `slctl inspect` kept showing stale external peer topology. Tests in
+`external_replication_test.go` that relied on prompt convergence were flaky.
+
+**Root cause:** The SlapdDatabase controller owns all syncrepl stanzas, including
+external peer stanzas (per ADR-003), but its `SetupWithManager` only called
+`For(&SlapdDatabase{})`. Changes to a SlapdCluster CR never enqueued the
+SlapdDatabases that reference it. Reconciliation only happened when the
+SlapdDatabase itself changed, or on the controller's periodic requeue (which only
+fires while there is pending work — a fully-converged database sits idle).
+
+**Fix:** Added a `Watches(&SlapdCluster{}, EnqueueRequestsFromMapFunc(...))` to
+`SetupWithManager`. The mapper lists all SlapdDatabases in the SlapdCluster's
+namespace and enqueues every one whose `spec.clusterRef` matches. Corresponding RBAC:
+`+kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters,verbs=get;list;watch`.
+
+**Why it was hard to spot:** A reconcile fires on every CR update *by the user*, but
+when the SlapdCluster changes, the *SlapdDatabase* is unchanged — so its controller
+sees no event. External peer changes are rare, and the usual debugging reflex (save
+the CR again, watch the controller log) accidentally triggers a SlapdDatabase
+reconcile that fixes the state, masking the root cause.
+
+**Lesson:** When controller A owns state derived from multiple CRs, it needs a
+Watch on every CR kind it reads from — not just the one it lists under `For(...)`.
+A cross-CR dependency without a cross-CR Watch is a silent liveness bug: it looks
+like it works because every manual poke causes a reconcile.
