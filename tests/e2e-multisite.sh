@@ -43,6 +43,14 @@ if [[ -z "${GIT_TAG:-}" ]]; then
     fi
 fi
 
+# ── Image pull secret ────────────────────────────────────────────────────────
+PULL_SECRET_FILE="$SCRIPT_DIR/image-pull-secret.yaml"
+PULL_SECRET_HELM_ARGS=()
+if [[ -f "$PULL_SECRET_FILE" ]]; then
+    PULL_SECRET_NAME=$(awk '/^  name:/{print $2; exit}' "$PULL_SECRET_FILE")
+    PULL_SECRET_HELM_ARGS=(--set "imagePullSecrets[0].name=$PULL_SECRET_NAME")
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 log() { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
@@ -135,6 +143,12 @@ setup_foundation() {
         kctl "$ctx" create namespace "$NAMESPACE_TESTING" --dry-run=client -o yaml \
             | kctl "$ctx" apply -f -
 
+        if [[ -f "$PULL_SECRET_FILE" ]]; then
+            log "[$ctx] Applying image pull secret to $NAMESPACE and $NAMESPACE_TESTING..."
+            kctl "$ctx" apply -n "$NAMESPACE" -f "$PULL_SECRET_FILE"
+            kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$PULL_SECRET_FILE"
+        fi
+
         log "[$ctx] Pre-creating shared database credentials ($DB_CREDENTIALS_SECRET)..."
         kctl "$ctx" create secret generic "$DB_CREDENTIALS_SECRET" \
             -n "$NAMESPACE_TESTING" \
@@ -161,6 +175,7 @@ setup_foundation() {
             --namespace "$NAMESPACE" --create-namespace \
             --set "image.repository=$REGISTRY/$PROJECT/operator" \
             --set "image.tag=$GIT_TAG" \
+            "${PULL_SECRET_HELM_ARGS[@]}" \
             ${HELM_VALUES:-}
     done
 }
@@ -218,6 +233,7 @@ setup_slapd_clusters() {
             -f "$PROJECT_ROOT/tests/values.slapd.yaml" \
             --set "images.slapd.tag=$GIT_TAG" \
             --set "images.init.tag=$GIT_TAG" \
+            "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \
             ${HELM_VALUES_SLAPD_CLUSTER:-}
     done

@@ -39,6 +39,16 @@ if [[ -z "${GIT_TAG:-}" ]]; then
     fi
 fi
 
+# ── Image pull secret ────────────────────────────────────────────────────────
+# If tests/image-pull-secret.yaml exists, apply it to the namespace and pass
+# the secret name to helm installs. The file is gitignored.
+PULL_SECRET_FILE="$SCRIPT_DIR/image-pull-secret.yaml"
+PULL_SECRET_HELM_ARGS=()
+if [[ -f "$PULL_SECRET_FILE" ]]; then
+    PULL_SECRET_NAME=$(awk '/^  name:/{print $2; exit}' "$PULL_SECRET_FILE")
+    PULL_SECRET_HELM_ARGS=(--set "imagePullSecrets[0].name=$PULL_SECRET_NAME")
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 log() { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
@@ -101,11 +111,18 @@ setup_operator() {
     $KUBECTL create namespace "$NAMESPACE" --dry-run=client -o yaml | $KUBECTL apply -f -
     $KUBECTL create namespace "$NAMESPACE_TESTING" --dry-run=client -o yaml | $KUBECTL apply -f -
 
+    if [[ -f "$PULL_SECRET_FILE" ]]; then
+        log "Applying image pull secret to $NAMESPACE and $NAMESPACE_TESTING..."
+        $KUBECTL apply -n "$NAMESPACE" -f "$PULL_SECRET_FILE"
+        $KUBECTL apply -n "$NAMESPACE_TESTING" -f "$PULL_SECRET_FILE"
+    fi
+
     log "Installing operator (tag: $GIT_TAG)..."
     $HELM upgrade --install slaptain-operator "$PROJECT_ROOT/charts/operator" \
         --namespace "$NAMESPACE" --create-namespace \
         --set "image.repository=ghcr.io/chuck-chuck-chuck-net/slaptain/operator" \
         --set "image.tag=$GIT_TAG" \
+        "${PULL_SECRET_HELM_ARGS[@]}" \
         ${HELM_VALUES:-}
 
     log "Waiting for operator deployment..."
@@ -128,6 +145,7 @@ setup_cluster() {
         -f "$PROJECT_ROOT/tests/values.slapd.yaml" \
         --set "images.slapd.tag=$GIT_TAG" \
         --set "images.init.tag=$GIT_TAG" \
+        "${PULL_SECRET_HELM_ARGS[@]}" \
         ${HELM_VALUES_SLAPD_CLUSTER:-}
 
     log "Waiting for StatefulSet slapd..."
