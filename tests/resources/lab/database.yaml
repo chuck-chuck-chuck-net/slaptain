@@ -1,0 +1,101 @@
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdDatabase
+metadata:
+  name: slapd-db
+spec:
+  clusterRef: slapd
+  suffix: "dc=chuck-chuck-chuck,dc=net"
+
+  acls:
+    # Readpw service accounts can read userPassword in ou=Mail.
+    - >-
+      to dn.subtree="ou=Mail,dc=chuck-chuck-chuck,dc=net" attrs=userPassword
+      by self write
+      by dn.children="ou=Readpw,dc=chuck-chuck-chuck,dc=net" read
+      by anonymous auth
+      by * none
+    # userPassword hidden everywhere else.
+    - >-
+      to attrs=userPassword
+      by self write
+      by anonymous auth
+      by * none
+    # shadowLastChange: self-write, everyone else can read.
+    - >-
+      to attrs=shadowLastChange
+      by self write
+      by * read
+    # Everything else: readable by all.
+    - >-
+      to *
+      by * read
+
+  indices:
+    - "objectClass eq"
+    - "uid eq,sub"
+    - "cn eq,sub"
+    - "entryCSN eq"
+    - "entryUUID eq"
+
+  seed:
+    entries:
+      # Root entry.
+      - |
+        dn: dc=chuck-chuck-chuck,dc=net
+        objectClass: top
+        objectClass: dcObject
+        objectClass: organization
+        o: chuck-chuck-chuck
+        dc: chuck-chuck-chuck
+      # Organizational units.
+      - |
+        dn: ou=Readpw,dc=chuck-chuck-chuck,dc=net
+        objectClass: organizationalUnit
+        ou: Readpw
+      - |
+        dn: ou=People,dc=chuck-chuck-chuck,dc=net
+        objectClass: organizationalUnit
+        ou: People
+      - |
+        dn: ou=Mail,dc=chuck-chuck-chuck,dc=net
+        objectClass: organizationalUnit
+        ou: Mail
+      - |
+        dn: ou=SecondaryAccount,dc=chuck-chuck-chuck,dc=net
+        objectClass: organizationalUnit
+        ou: SecondaryAccount
+      # Readpw service accounts.
+      # SSHA hashes must match the plaintext passwords in readpw-secret.yaml.
+      # Generate with: slappasswd -h {SSHA} -s <password>
+      - |
+        dn: uid=appsuite,ou=Readpw,dc=chuck-chuck-chuck,dc=net
+        objectClass: account
+        objectClass: posixAccount
+        cn: appsuite
+        uid: appsuite
+        uidNumber: 65534
+        gidNumber: 65534
+        homeDirectory: /dev/null
+        userPassword: REPLACE_WITH_SSHA_HASH
+      - |
+        dn: uid=dovecot,ou=Readpw,dc=chuck-chuck-chuck,dc=net
+        objectClass: account
+        objectClass: posixAccount
+        cn: dovecot
+        uid: dovecot
+        uidNumber: 65534
+        gidNumber: 65534
+        homeDirectory: /dev/null
+        userPassword: REPLACE_WITH_SSHA_HASH
+      - |
+        dn: uid=keycloak,ou=Readpw,dc=chuck-chuck-chuck,dc=net
+        objectClass: account
+        objectClass: posixAccount
+        cn: keycloak
+        uid: keycloak
+        uidNumber: 65534
+        gidNumber: 65534
+        homeDirectory: /dev/null
+        userPassword: REPLACE_WITH_SSHA_HASH
+
+  cleanupPolicy: Retain

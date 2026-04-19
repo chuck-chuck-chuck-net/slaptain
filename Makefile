@@ -185,17 +185,19 @@ helm-deploy: deliver gencert helm-install ## Full pipeline: build images, delive
 helm-uninstall:
 	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
 
-ifeq ($(TOOLKIT_ONLY),true)
-  HELM_SET_SLAPD_TESTING = --set bootstrap.enabled=false
-endif
+## Test resources: SlapdSchema + SlapdDatabase + readpw Secret.
+## Set TEST_RESOURCES to "example" or "lab" (default: lab).
+TEST_RESOURCES ?= lab
 
-testing-helm-install:
-	$(HELM) upgrade --install slapd-test ./charts/slapd-test \
-		--namespace $(NAMESPACE_TESTING) --create-namespace \
-		$(HELM_VALUES_SLAPD_TESTING) $(HELM_SET_SLAPD_TESTING)
+testing-apply:
+	$(KUBECTL) apply -n $(NAMESPACE_TESTING) -f tests/resources/$(TEST_RESOURCES)/
 
-testing-helm-uninstall:
-	$(HELM) uninstall slapd-test --namespace $(NAMESPACE_TESTING)
+testing-delete:
+	$(KUBECTL) delete -n $(NAMESPACE_TESTING) -f tests/resources/$(TEST_RESOURCES)/ --ignore-not-found
+
+## Legacy aliases (deprecated — use testing-apply / testing-delete).
+testing-helm-install: testing-apply
+testing-helm-uninstall: testing-delete
 
 cluster-helm-install:
 	$(HELM) upgrade --install slapd ./charts/slapd-cluster \

@@ -67,16 +67,20 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		return statefulSetReady(k8sClient, namespace, "slapd")
 	}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue())
 
-	By("Waiting for bootstrap Job to complete")
+	// Wait for SlapdDatabase to reach Running phase (replaces old bootstrap Job wait).
+	dbCRName := envOrDefault("DB_CR_NAME", "slapd-db")
+	By("Waiting for SlapdDatabase " + dbCRName + " to be Running")
 	Eventually(ctx, func() bool {
-		return jobSucceeded(k8sClient, namespace, "slapd-test")
-	}).WithTimeout(5 * time.Minute).WithPolling(10 * time.Second).Should(BeTrue())
+		return slapdDatabaseRunning(crdClient, namespace, dbCRName)
+	}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue())
 
-	By("Reading admin password from slapd-passwords secret")
-	pwSecret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-passwords", metav1.GetOptions{})
+	// Read admin password from the database credentials secret.
+	dbCredSecret := envOrDefault("DB_CREDENTIALS_SECRET", dbCRName+"-credentials")
+	By("Reading admin password from " + dbCredSecret)
+	pwSecret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, dbCredSecret, metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred())
-	adminPW = string(pwSecret.Data["admin-password"])
-	Expect(adminPW).NotTo(BeEmpty(), "admin-password must not be empty in slapd-passwords")
+	adminPW = string(pwSecret.Data["root-password"])
+	Expect(adminPW).NotTo(BeEmpty(), "root-password must not be empty in "+dbCredSecret)
 
 	By("Reading root password from slapd-config-password secret")
 	cfgSecret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-config-password", metav1.GetOptions{})

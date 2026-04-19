@@ -77,17 +77,17 @@ var _ = Describe("slapd chart", func() {
 		})
 	})
 
-	Describe("Passwords secret", func() {
-		It("slapd-passwords contains admin-password and replication-password", func() {
-			secret, err := k8sClient.CoreV1().Secrets(namespace).Get(context.Background(), "slapd-passwords", metav1.GetOptions{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(secret.Data).To(HaveKey("admin-password"))
-			Expect(secret.Data).To(HaveKey("replication-password"))
-			Expect(string(secret.Data["admin-password"])).NotTo(BeEmpty())
-			Expect(string(secret.Data["replication-password"])).NotTo(BeEmpty())
-		})
-		It("slapd-config-password contains root-password", func() {
+	Describe("Secrets", func() {
+		It("cluster config password secret exists with root-password", func() {
 			secret, err := k8sClient.CoreV1().Secrets(namespace).Get(context.Background(), "slapd-config-password", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(secret.Data).To(HaveKey("root-password"))
+			Expect(string(secret.Data["root-password"])).NotTo(BeEmpty())
+		})
+		It("database credentials secret exists with root-password", func() {
+			dbCRName := envOrDefault("DB_CR_NAME", "slapd-db")
+			secretName := dbCRName + "-credentials"
+			secret, err := k8sClient.CoreV1().Secrets(namespace).Get(context.Background(), secretName, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(secret.Data).To(HaveKey("root-password"))
 			Expect(string(secret.Data["root-password"])).NotTo(BeEmpty())
@@ -95,15 +95,15 @@ var _ = Describe("slapd chart", func() {
 	})
 
 	Describe("PersistentVolumeClaims", func() {
-		// PVCs are created by StatefulSet volumeClaimTemplates: ldap-<type>-<name>-<ordinal>.
+		// PVCs are created by StatefulSet volumeClaimTemplates: <type>-<name>-<ordinal>.
 		for _, vol := range []string{"config", "data"} {
 			vol := vol
 			It("has a Bound PVC for "+vol+" on pod-0", func() {
 				pvc, err := k8sClient.CoreV1().PersistentVolumeClaims(namespace).Get(
-					context.Background(), "ldap-"+vol+"-slapd-0", metav1.GetOptions{})
+					context.Background(), vol+"-slapd-0", metav1.GetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(pvc.Status.Phase).To(Equal(corev1.ClaimBound),
-					"expected PVC ldap-%s-slapd-0 to be Bound", vol)
+					"expected PVC %s-slapd-0 to be Bound", vol)
 			})
 		}
 	})

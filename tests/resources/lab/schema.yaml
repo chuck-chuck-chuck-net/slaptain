@@ -1,0 +1,92 @@
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdSchema
+metadata:
+  name: app-schema
+spec:
+  clusterRef: slapd
+  priority: 100
+  attributeTypes:
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.1
+        NAME 'oxContextId'
+        DESC 'The numerical ID of a context'
+        EQUALITY integerMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.2
+        NAME 'oxUserId'
+        DESC 'The numerical ID of a user'
+        EQUALITY integerMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.3
+        NAME 'oxUserName'
+        DESC 'The symbolic name of a user'
+        EQUALITY caseIgnoreMatch
+        SUBSTR caseIgnoreSubstringsMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.4
+        NAME 'oxContextName'
+        DESC 'The symbolic name of a context'
+        EQUALITY caseIgnoreMatch
+        SUBSTR caseIgnoreSubstringsMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.5
+        NAME 'oxLoginInfo'
+        DESC 'A string carrying user and context info'
+        EQUALITY caseIgnoreMatch
+        SUBSTR caseIgnoreSubstringsMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.6
+        NAME 'euid'
+        DESC 'Temporary quirk workaround'
+        EQUALITY caseIgnoreMatch
+        SUBSTR caseIgnoreSubstringsMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.15
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.11
+        NAME 'oxMailQuota'
+        DESC 'Mail Quota'
+        EQUALITY integerMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.12
+        NAME 'oxDriveQuota'
+        DESC 'Drive Quota'
+        EQUALITY integerMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.1.13
+        NAME 'oxUnifiedQuota'
+        DESC 'Unified Quota'
+        EQUALITY integerMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+        SINGLE-VALUE )
+  objectClasses:
+    - >-
+      ( 1.3.6.1.4.1.23109.7.2.1
+        NAME 'ox'
+        DESC 'Class for oxUserId and oxContextId'
+        SUP top
+        AUXILIARY
+        MAY ( oxUserId $ oxContextId $ oxUserName $ oxContextName
+              $ oxLoginInfo $ euid $ oxMailQuota $ oxDriveQuota
+              $ oxUnifiedQuota ) )
+    - >-
+      ( 1.3.6.1.4.1.23109.7.2.10
+        NAME 'oxSecondaryAccount'
+        DESC 'Class for secondary account'
+        SUP top
+        STRUCTURAL
+        MUST ( cn $ uid ) )

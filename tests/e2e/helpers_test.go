@@ -88,6 +88,24 @@ func podReady(c *kubernetes.Clientset, ns, name string) bool {
 	return true
 }
 
+// slapdDatabaseRunning returns true when the named SlapdDatabase CR has phase=Running.
+func slapdDatabaseRunning(c client.Client, ns, name string) bool {
+	db := &ldapv1alpha1.SlapdDatabase{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: name, Namespace: ns}, db); err != nil {
+		return false
+	}
+	return db.Status.Phase == ldapv1alpha1.DatabasePhaseRunning
+}
+
+// slapdSchemaApplied returns true when the named SlapdSchema CR has applied=true.
+func slapdSchemaApplied(c client.Client, ns, name string) bool {
+	ss := &ldapv1alpha1.SlapdSchema{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: name, Namespace: ns}, ss); err != nil {
+		return false
+	}
+	return ss.Status.Applied
+}
+
 func jobSucceeded(c *kubernetes.Clientset, ns, name string) bool {
 	job, err := c.BatchV1().Jobs(ns).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {

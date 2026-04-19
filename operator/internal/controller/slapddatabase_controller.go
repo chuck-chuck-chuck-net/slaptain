@@ -170,13 +170,26 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// "Operator stops reconciling before all pods are configured").
 	pendingWork := len(failedPods) > 0
 
-	// 8. Seed initial data (once, on first RW pod that's reachable).
-	if !sd.Status.SeedApplied && sd.Spec.Seed != nil && len(sd.Spec.Seed.Entries) > 0 {
-		if err := r.applySeedData(ctx, sc, sd, rootPW); err != nil {
-			log.Info("seed data not yet applied (will retry)", "err", err)
-			pendingWork = true
-		} else {
-			sd.Status.SeedApplied = true
+	// 8. Seed initial data. Re-applied if the root entry is missing (e.g. after
+	//    a pod restart that wiped the data directory and re-ran the init container).
+	if sd.Spec.Seed != nil && len(sd.Spec.Seed.Entries) > 0 {
+		needsSeed := !sd.Status.SeedApplied
+		if sd.Status.SeedApplied {
+			// Verify the seed is still present — a StatefulSet rolling restart
+			// (triggered by DATABASE_DIRS update) re-runs the init container,
+			// which re-creates cn=config from scratch. The new pod gets the
+			// database re-created by reconcilePodDatabase above, but seed data
+			// is only in the old (now-gone) LMDB files.
+			needsSeed = !r.verifySeedExists(ctx, sc, sd, rootPW)
+		}
+		if needsSeed {
+			if err := r.applySeedData(ctx, sc, sd, rootPW); err != nil {
+				log.Info("seed data not yet applied (will retry)", "err", err)
+				pendingWork = true
+				sd.Status.SeedApplied = false
+			} else {
+				sd.Status.SeedApplied = true
+			}
 		}
 	}
 
@@ -531,6 +544,67 @@ func normalizeIndex(s string) string {
 }
 
 // ── Seed Data ────────────────────────────────────────────────────────────────
+
+// verifySeedExists checks whether the first seed entry (typically the root DN)
+// exists on any reachable RW pod. Returns false if the entry is missing, indicating
+// that seed data needs to be re-applied (e.g. after a StatefulSet rolling restart).
+func (r *SlapdDatabaseReconciler) verifySeedExists(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	sd *ldapv1alpha1.SlapdDatabase,
+	rootPW string,
+) bool {
+	if len(sd.Spec.Seed.Entries) == 0 {
+		return true
+	}
+
+	// Parse the DN of the first seed entry.
+	firstEntry := strings.TrimSpace(sd.Spec.Seed.Entries[0])
+	lines := strings.SplitN(firstEntry, "\n", 2)
+	if len(lines) == 0 || !strings.HasPrefix(strings.ToLower(lines[0]), "dn:") {
+		return true // Can't parse — assume exists to avoid infinite loop.
+	}
+	dn := strings.TrimSpace(lines[0][3:])
+
+	rootDN := sd.Spec.RootDN
+	if rootDN == "" {
+		rootDN = "cn=admin," + sd.Spec.Suffix
+	}
+
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	headlessSvc := sc.Name + "-headless"
+
+	for i := int32(0); i < replicas; i++ {
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
+			sc.Name, i, headlessSvc, sc.Namespace)
+		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
+
+		conn, err := ldap.DialURL("ldap://"+addr,
+			ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+		)
+		if err != nil {
+			continue
+		}
+		conn.SetTimeout(ldapRequestTimeout)
+
+		if err := conn.Bind(rootDN, rootPW); err != nil {
+			conn.Close()
+			continue
+		}
+
+		exists, err := ldapEntryExists(conn, dn)
+		conn.Close()
+		if err != nil {
+			continue
+		}
+		return exists
+	}
+
+	return false // No pod reachable — assume missing.
+}
 
 // applySeedData connects to the first reachable RW pod and applies seed entries.
 func (r *SlapdDatabaseReconciler) applySeedData(
