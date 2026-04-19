@@ -5,7 +5,7 @@
 
 A Kubernetes operator for deploying OpenLDAP (slapd) as a highly available, replicated directory service.
 
-Slaptain is built for workloads where LDAP is the source of truth for user identities across multiple applications — mail (Dovecot), identity (Keycloak), groupware (OX App Suite). It provides N-way multi-master replication with delta-syncrepl, operator-managed ACLs, and read-only consumer replicas: the class of problem where static Helm charts and bootstrap scripts reach their limits.
+Slaptain manages the full lifecycle of multi-master OpenLDAP clusters on Kubernetes: N-way delta-syncrepl replication, per-database ACLs and custom schemas, read-only consumer replicas, and cross-cluster peering. It provides the control plane that static Helm charts and bootstrap scripts cannot — self-healing configuration, declarative database management, and proper bootstrap sequencing.
 
 ## Quick Start
 
@@ -16,11 +16,11 @@ helm install slaptain-operator ./charts/operator \
   -n slaptain-system --create-namespace
 ```
 
-This installs the CRD, RBAC, and operator Deployment.
+This installs the CRDs (`SlapdCluster`, `SlapdDatabase`, `SlapdSchema`), RBAC, and operator Deployment.
 
 ### 2. Deploy a Cluster
 
-Create a TLS Secret and a `SlapdCluster` CR:
+Create a TLS Secret and a `SlapdCluster` CR (infrastructure only — no databases yet):
 
 ```bash
 # Generate a self-signed TLS cert (or use your own)
@@ -46,7 +46,6 @@ spec:
       repository: registry.example.com/slaptain/slapd-init
 
   ldap:
-    domain: "dc=example,dc=org"
     tls:
       enabled: true
       secretName: slapd-tls
@@ -54,8 +53,8 @@ spec:
   replicas: 3
   replication:
     enabled: true
+    keepalive: "300:10:60"
 
-  # Optional: read-only consumer replicas for scaling reads
   readReplicas: 1
 
   persistence:
@@ -66,140 +65,143 @@ spec:
       size: 5Gi
 ```
 
-### 3. Verify Health
+### 3. Add a Database
+
+Create a `SlapdDatabase` CR to add a data database to the cluster:
+
+```yaml
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdDatabase
+metadata:
+  name: myapp
+spec:
+  clusterRef: slapd
+  suffix: "dc=example,dc=org"
+
+  acls:
+    - 'to attrs=userPassword by self write by anonymous auth by * none'
+    - 'to * by * read'
+
+  indices:
+    - "objectClass eq"
+    - "uid eq,sub"
+    - "entryCSN eq"
+    - "entryUUID eq"
+
+  replication:
+    ridBase: 100
+    deltaSync: true
+    syncprovCheckpoint: "500 15"
+
+  seed:
+    entries:
+      - |
+        dn: dc=example,dc=org
+        objectClass: top
+        objectClass: dcObject
+        objectClass: organization
+        o: example
+        dc: example
+      - |
+        dn: ou=People,dc=example,dc=org
+        objectClass: organizationalUnit
+        ou: People
+```
+
+### 4. Add Custom Schemas (optional)
+
+```yaml
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdSchema
+metadata:
+  name: myapp-schema
+spec:
+  clusterRef: slapd
+  priority: 100
+  attributeTypes:
+    - >-
+      ( 1.3.6.1.4.1.99999.1.1.1 NAME 'myAppId'
+        EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+  objectClasses:
+    - >-
+      ( 1.3.6.1.4.1.99999.1.2.1 NAME 'myAppUser'
+        SUP inetOrgPerson STRUCTURAL MAY myAppId )
+```
+
+### 5. Verify Health
 
 ```bash
 kubectl get slapdcluster
 # NAME    PHASE     READY   REPLICAS   AGE
 # slapd   Running   3       3          2m
 
-# With -o wide to see read-only replica status
-kubectl get slapdcluster -o wide
+kubectl get slapddatabase
+# NAME    CLUSTER   SUFFIX              PHASE     AGE
+# myapp   slapd     dc=example,dc=org   Running   1m
+
+kubectl get slapdschema
+# NAME            CLUSTER   PRIORITY   APPLIED   AGE
+# myapp-schema    slapd     100        true      1m
 ```
 
 ## Key Features
 
-- **N-way multi-master replication**: all pods are symmetric read-write peers via delta-syncrepl. No permanent primary, no leader election — any pod can serve reads and writes. Pod failure is handled gracefully.
-- **Read-only consumer replicas**: scale read-heavy workloads (auth lookups, address book queries) without adding write complexity. RO pods consume from all RW masters for resilience.
-- **Operator-managed ACLs**: declare ACL rules once in `spec.ldap.acls`; the operator applies them to every pod's `cn=config` individually and self-heals after pod replacement.
-- **Operator-managed schemas**: declare custom LDAP schemas in `spec.ldap.schemas`; the operator adds them to every pod's `cn=schema,cn=config` idempotently.
-- **Automatic credential management**: the operator generates and manages admin, config admin, and replication passwords in Kubernetes Secrets — or reads them from a user-provided Secret.
+- **Multi-resource CRD architecture**: `SlapdCluster` manages infrastructure (StatefulSet, Services, TLS); `SlapdDatabase` manages per-database lifecycle (ACLs, indices, replication, seed data); `SlapdSchema` manages global schemas. Clean separation of concerns.
+- **N-way multi-master replication**: all pods are symmetric read-write peers via delta-syncrepl. No permanent primary, no leader election. Per-database replication with user-controlled RID assignment.
+- **Read-only consumer replicas**: scale read-heavy workloads without adding write complexity. RO pods consume from all RW masters for resilience.
+- **Declarative ACLs and schemas**: declare ACL rules on `SlapdDatabase`, schema elements on `SlapdSchema`; the operator applies them to every pod's `cn=config` individually and self-heals after pod replacement.
+- **Automatic credential management**: the operator generates per-database admin and replication passwords in Kubernetes Secrets — or reads them from user-provided Secrets.
+- **Multi-database support**: run multiple independent databases (each with its own suffix, credentials, ACLs, replication config) in one cluster.
 - **Security**: rootless execution (UID 1024), no privilege escalation, read-only root filesystem, distroless runtime images, TLS encryption.
-- **Persistent storage**: per-pod PVCs via StatefulSet `volumeClaimTemplates` for config, data, and accesslog volumes.
-- **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts, no accidental field overwrites.
+- **Database lifecycle**: cleanup policy (Retain/Delete) controls what happens when a `SlapdDatabase` CR is deleted. Default: Retain (database stays in slapd, becomes unmanaged).
+- **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts.
 
 ## Cross-Cluster Replication
 
-Slaptain supports cross-cluster replication via `spec.replication.externalPeers`. Each peer is an independent SlapdCluster running in a separate Kubernetes cluster. Replication is bidirectional (N-way multi-master) using simple bind over TLS.
-
-Each cluster's slapd TLS certificate is reused as the mTLS client certificate. The peer's CA is provided via `tlsSecretName` so each side can verify the other.
+Slaptain supports cross-cluster replication via `spec.replication.externalPeers` on the `SlapdCluster` CR. Each peer is an independent SlapdCluster running in a separate Kubernetes cluster. Replication is bidirectional (N-way multi-master) using simple bind over TLS.
 
 ```yaml
 replication:
   enabled: true
+  keepalive: "300:10:60"
   externalPeers:
     - name: site-b
       uri: "ldaps://ldap.site-b.example.com:636"
-      tlsSecretName: "site-b-ca"           # Secret with peer's ca.crt
+      tlsSecretName: "site-b-ca"
       bindDN: "cn=replication,dc=example,dc=org"
-      bindPasswordSecretName: "site-b-repl-pw"  # Secret with 'password' key
+      bindPasswordSecretName: "site-b-repl-pw"
 ```
 
-The operator manages all syncrepl stanzas (in-cluster + external) at runtime. Adding or removing external peers from the spec triggers a reconcile that updates `cn=config` on every pod — no pod restarts needed. External peer connectivity is reported in `.status.externalPeerStatuses`.
+RID scheme: each `SlapdDatabase` declares a `ridBase`. In-cluster peers use RIDs `ridBase+1..ridBase+49`, external peers use `ridBase+51..ridBase+99`. See [ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md).
 
-RID scheme: in-cluster peers use RIDs 1..99 (skip self), external peers use RIDs 101+. See [ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md) for the full design rationale.
+## Architecture
 
-## Configuration Reference
+Slaptain uses three Custom Resource Definitions:
 
-```yaml
-apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
-kind: SlapdCluster
-metadata:
-  name: slapd
-spec:
-  images:
-    slapd:
-      repository: registry.example.com/slaptain/slapd
-      tag: latest
-      pullPolicy: IfNotPresent
-    init:
-      repository: registry.example.com/slaptain/slapd-init
-      tag: latest
-      pullPolicy: IfNotPresent
+| CRD | Scope | Purpose |
+|---|---|---|
+| `SlapdCluster` | Infrastructure | StatefulSet, Services, PVCs, TLS, cn=config admin |
+| `SlapdDatabase` | Per-database | Suffix, credentials, ACLs, indices, replication, seed data |
+| `SlapdSchema` | Global schemas | attributeTypes, objectClasses applied to cn=schema,cn=config |
 
-  ldap:
-    domain: "dc=example,dc=org"
-    credentialsSecretName: ""     # Optional: supply your own passwords
-    forceRebootstrap: false       # Destructive: wipe and re-bootstrap
-    tls:
-      enabled: true
-      secretName: slapd-tls       # Must contain tls.crt, tls.key, ca.crt
-    acls:                         # Ordered "access to ..." rules; empty = defaults
-      - 'to attrs=userPassword by self write by anonymous auth by * none'
-      - 'to * by * read'
-    schemas: []                   # JSON-encoded schema entries for cn=schema,cn=config
+Each has its own controller. The `SlapdCluster` controller watches `SlapdDatabase` CRs to ensure data directories exist before databases are created. See [ADR-004](docs/adrs/adr-004-multi-resource-crd-architecture.md) for the full design rationale.
 
-  replicas: 3                     # RW replicas (replication.enabled=true for >1)
-  readReplicas: 0                 # RO consumer replicas (requires replication)
-  logLevel: 0                    # slapd -d debug level
-
-  replication:
-    enabled: true
-    # Cross-cluster peers (Phase 3)
-    externalPeers:
-      - name: site-b
-        uri: "ldaps://ldap.site-b.example.com:636"
-        tlsSecretName: "site-b-ca"
-        bindDN: "cn=replication,dc=example,dc=org"
-        bindPasswordSecretName: "site-b-replication-password"
-
-  persistence:
-    enabled: true
-    config:
-      size: 1Gi
-      storageClass: ""
-      accessMode: ReadWriteOnce
-    data:
-      size: 5Gi
-      storageClass: ""
-      accessMode: ReadWriteOnce
-    accesslog:                    # Only provisioned when replication is enabled
-      size: 1Gi
-      storageClass: ""
-      accessMode: ReadWriteOnce
-
-  service:
-    type: ClusterIP
-    ldapPort: 389
-    ldapsPort: 636
-
-  resources: {}
-  # resources:
-  #   requests: { cpu: 100m, memory: 128Mi }
-  #   limits: { memory: 512Mi }
-```
-
-Full CRD type definitions: [`operator/api/v1alpha1/slapdcluster_types.go`](operator/api/v1alpha1/slapdcluster_types.go).
+**Why three CRDs?** OpenLDAP natively supports multiple independent databases per process, each with its own suffix, credentials, and ACLs. Schemas are global (visible to all databases). The CRD model mirrors this — no impedance mismatch between the Kubernetes API and OpenLDAP's architecture.
 
 ## Why Slaptain?
 
-Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems that Helm charts and init scripts cannot solve on their own.
+Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems that Helm charts and init scripts cannot solve:
 
-**The problem:** OpenLDAP's `cn=config` (the runtime configuration database) is node-local — it is never replicated between pods. A pod replacement re-runs the init container, resetting ACLs and syncrepl stanzas to their generated defaults. Meanwhile, delta-syncrepl requires careful bootstrap sequencing: the accesslog overlay must capture every write from the start, or consumers get "provider has no state info" errors that require a full re-bootstrap.
-
-**The solution:** Slaptain treats these as control-plane responsibilities:
-
-1. **Bootstrap sequencing**: the operator waits for pod-0, seeds the initial directory entries via a live LDAP connection (so the accesslog captures them), and lets subsequent pods sync from it.
-2. **ACL convergence**: `spec.ldap.acls` is applied to every pod's `cn=config` on every reconcile loop — drift is detected and corrected automatically, including after pod replacement.
-3. **Read-only scaling**: a second StatefulSet of pure consumer pods pulls from all RW masters without running syncprov or mirrormode, so they never accept writes and cannot corrupt the replication topology.
-
-The core principle is **let slapd do what it does well** (LMDB storage, syncrepl protocol, ACL evaluation) and manage the Kubernetes-specific lifecycle around it.
+- **cn=config is node-local**: OpenLDAP's runtime configuration is never replicated between pods. A pod replacement resets ACLs, schemas, and syncrepl stanzas. The operator detects and corrects drift on every reconcile loop.
+- **Bootstrap sequencing matters**: delta-syncrepl requires the accesslog overlay to capture every write from the start. The operator seeds initial data via live LDAP connections (not `slapadd`) so the accesslog records it.
+- **Multi-database coordination**: adding a database to a running cluster requires creating the `olcDatabase` entry in cn=config, setting up overlays, creating the replication bind user, and configuring syncrepl stanzas — all per-pod. The operator handles this declaratively.
 
 ## Documentation
 
-- [Team Onboarding](docs/ONBOARDING.md) — LDAP concepts, OpenLDAP specifics, operator model, credential model
+- [Team Onboarding](docs/ONBOARDING.md) — LDAP concepts, OpenLDAP specifics, operator model
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
-- [Architecture Decision Records](docs/adrs/) — design rationale for double reconciliation, cn=config management
+- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-006
+- [Development Guide](docs/DEVELOPMENT.md) — local dev workflow, building, testing
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 
 ## Development
@@ -211,26 +213,23 @@ cd slaptain
 # Build all images
 make all
 
-# Build + push all images
-make push
-
 # Regenerate deepcopy and CRD after type changes
 make operator-generate operator-manifests
 
 # Deploy operator via Helm
 make operator-helm-install
 
-# Deploy a SlapdCluster + test harness
-make cluster-helm-install testing-helm-install
+# Deploy a SlapdCluster + test resources
+make cluster-helm-install testing-apply
 
-# Run e2e tests (44 specs: base + replication + resilience + read-only)
+# Run e2e tests
 make e2e-run
 
-# Run e2e tests in-cluster
-make e2e-in-cluster
+# Or: full setup/test/teardown via NodePort (single command)
+./tests/e2e-singlesite.sh all <kubectl-context>
 ```
 
-See [tests/README.md](tests/README.md) for the full test cycle.
+Full CRD type definitions: [`operator/api/v1alpha1/`](operator/api/v1alpha1/).
 
 ## License
 
