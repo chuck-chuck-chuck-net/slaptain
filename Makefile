@@ -4,6 +4,21 @@ NAMESPACE ?= slaptain
 NAMESPACE_TESTING ?= slaptain-testing
 CONTAINER_ENGINE ?= podman
 
+# Image tag: exact git tag if on one, otherwise short commit hash.
+# Appends -dirty when the working tree has uncommitted changes, so a rebuild
+# after local edits produces a distinct tag that won't match what's already
+# on the nodes — triggering a re-import.
+GIT_TAG := $(shell if [ -n "$$(git describe --tags --exact-match 2>/dev/null)" ]; then \
+                   git describe --tags --exact-match; \
+               else \
+                   hash=$$(git rev-parse --short HEAD); \
+                   if ! git diff --quiet HEAD 2>/dev/null; then \
+                       echo "$${hash}-dirty"; \
+                   else \
+                       echo "$$hash"; \
+                   fi; \
+               fi)
+
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= import
 
@@ -33,16 +48,14 @@ endif
 # Node IPs: auto-discover from kubectl, override with NODE_IPS="1.2.3.4 5.6.7.8"
 NODE_IPS ?= $(shell $(KUBECTL) get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
 
-INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:latest
-SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:latest
-TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:latest
-OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:latest
-E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:latest
+INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:$(GIT_TAG)
+SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:$(GIT_TAG)
+TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:$(GIT_TAG)
+OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:$(GIT_TAG)
+E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:$(GIT_TAG)
 
-# Stamp-file directory for incremental builds and imports.
-# Import stamps include the context name so switching clusters re-imports.
+# Stamp-file directory for incremental builds.
 STAMPS := .stamps
-_ICTX  := $(if $(CONTEXT),$(CONTEXT)-,)
 
 # Source file dependencies per image
 INIT_SRCS    := $(shell find images/slapd-init -type f)
@@ -51,25 +64,37 @@ TOOLKIT_SRCS := $(shell find images/slapd-toolkit -type f)
 OPERATOR_SRCS := $(shell find images/operator -type f) $(shell find operator -type f -name '*.go') operator/go.mod operator/go.sum
 E2E_SRCS     := $(shell find images/e2e-runner -type f) $(shell find tests/e2e -type f)
 
-# Import a container image to all k8s nodes via SSH
+# Import a container image to all k8s nodes via SSH (unconditional).
+# No leading @ — called from within import-if-needed which handles suppression.
 ifeq ($(CRI),crio)
-define import-image
-	@for node in $(NODE_IPS); do \
-		echo "Importing $(1) to $$node (cri-o)..."; \
-		$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node \
-			'cat > /tmp/_cri_import.tar && sudo skopeo copy docker-archive:/tmp/_cri_import.tar containers-storage:$(1) && rm -f /tmp/_cri_import.tar'; \
-	done
+define do-import
+for node in $(NODE_IPS); do \
+	echo "Importing $(1) to $$node (cri-o)..."; \
+	$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node \
+		'cat > /tmp/_cri_import.tar && sudo skopeo copy docker-archive:/tmp/_cri_import.tar containers-storage:$(1) && rm -f /tmp/_cri_import.tar'; \
+done
 endef
 else
-define import-image
-	@for node in $(NODE_IPS); do \
-		echo "Importing $(1) to $$node (containerd)..."; \
-		$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node sudo ctr -n k8s.io images import -; \
-	done
+define do-import
+for node in $(NODE_IPS); do \
+	echo "Importing $(1) to $$node (containerd)..."; \
+	$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node sudo ctr -n k8s.io images import -; \
+done
 endef
 endif
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-init import-slapd import-toolkit import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean clean-import
+# Import a container image only if the tag is not already present on all nodes.
+# Checks kubectl get nodes (CRI-agnostic, no SSH needed for the check).
+# With content-based tags (:GIT_TAG), matching the tag guarantees the version.
+define import-if-needed
+	@if $(KUBECTL) get nodes -o json 2>/dev/null | grep -Fq '"$(1)"'; then \
+		echo "$(1) already on nodes, skipping import"; \
+	else \
+		$(call do-import,$(1)); \
+	fi
+endef
+
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-init import-slapd import-toolkit import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean show-tag
 
 all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl
 
@@ -122,35 +147,26 @@ push: build-init build-slapd build-toolkit build-operator build-e2e-runner
 push-e2e-runner: build-e2e-runner
 	$(CONTAINER_ENGINE) push $(E2E_RUNNER_IMAGE)
 
-## Import images directly into k8s node CRI via SSH (incremental: only re-imports after rebuild)
+## Import images into k8s node CRI via SSH.
+## Checks kubectl node image list first — skips import if the tag is already present.
+## No per-context stamps needed: the content-based tag (:GIT_TAG) is the check.
 
-$(STAMPS)/import-$(_ICTX)init: $(STAMPS)/init | $(STAMPS)
-	$(call import-image,$(INIT_IMAGE))
-	@touch $@
+import-init: build-init
+	$(call import-if-needed,$(INIT_IMAGE))
 
-$(STAMPS)/import-$(_ICTX)slapd: $(STAMPS)/slapd | $(STAMPS)
-	$(call import-image,$(SLAPD_IMAGE))
-	@touch $@
+import-slapd: build-slapd
+	$(call import-if-needed,$(SLAPD_IMAGE))
 
-$(STAMPS)/import-$(_ICTX)toolkit: $(STAMPS)/toolkit | $(STAMPS)
-	$(call import-image,$(TOOLKIT_IMAGE))
-	@touch $@
+import-toolkit: build-toolkit
+	$(call import-if-needed,$(TOOLKIT_IMAGE))
 
-$(STAMPS)/import-$(_ICTX)operator: $(STAMPS)/operator | $(STAMPS)
-	$(call import-image,$(OPERATOR_IMAGE))
-	@touch $@
+import-operator: build-operator
+	$(call import-if-needed,$(OPERATOR_IMAGE))
 
-$(STAMPS)/import-$(_ICTX)e2e: $(STAMPS)/e2e | $(STAMPS)
-	$(call import-image,$(E2E_RUNNER_IMAGE))
-	@touch $@
+import-e2e-runner: build-e2e-runner
+	$(call import-if-needed,$(E2E_RUNNER_IMAGE))
 
-import: $(STAMPS)/import-$(_ICTX)init $(STAMPS)/import-$(_ICTX)slapd $(STAMPS)/import-$(_ICTX)toolkit $(STAMPS)/import-$(_ICTX)operator $(STAMPS)/import-$(_ICTX)e2e
-
-import-init: $(STAMPS)/import-$(_ICTX)init
-import-slapd: $(STAMPS)/import-$(_ICTX)slapd
-import-toolkit: $(STAMPS)/import-$(_ICTX)toolkit
-import-operator: $(STAMPS)/import-$(_ICTX)operator
-import-e2e-runner: $(STAMPS)/import-$(_ICTX)e2e
+import: import-init import-slapd import-toolkit import-operator import-e2e-runner
 
 ## Delivery: dispatch to push or import based on DELIVERY variable
 deliver: $(DELIVERY)
@@ -202,6 +218,8 @@ testing-helm-uninstall: testing-delete
 cluster-helm-install:
 	$(HELM) upgrade --install slapd ./charts/slapd-cluster \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
+		--set images.slapd.tag=$(GIT_TAG) \
+		--set images.init.tag=$(GIT_TAG) \
 		$(HELM_VALUES_SLAPD_CLUSTER)
 
 cluster-helm-uninstall:
@@ -211,6 +229,7 @@ operator-helm-install:
 	$(HELM) upgrade --install slaptain-operator ./charts/operator \
 		--namespace $(NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(PROJECT)/operator \
+		--set image.tag=$(GIT_TAG) \
 		$(HELM_VALUES)
 
 operator-helm-uninstall:
@@ -267,8 +286,8 @@ e2e-multisite-test:
 e2e-multisite-teardown:
 	./tests/e2e-multisite.sh teardown $(CONTEXTS)
 
+show-tag: ## Print the current GIT_TAG used for image tagging
+	@echo $(GIT_TAG)
+
 clean:
 	rm -rf .stamps bin/ *.tar
-
-clean-import:
-	rm -f .stamps/import-*
