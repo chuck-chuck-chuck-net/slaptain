@@ -38,7 +38,7 @@ import (
 // The siteA cluster uses the default kubeconfig (or KUBECONFIG env var).
 // See tests/README.md § "Cross-cluster replication tests" for full setup instructions.
 
-var _ = Describe("external replication", Label("external-replication"), func() {
+var _ = Describe("external replication", Label("external-replication"), Ordered, func() {
 
 	var (
 		remoteAddr    string
