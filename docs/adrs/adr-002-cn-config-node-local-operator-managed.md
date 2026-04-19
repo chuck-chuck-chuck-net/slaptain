@@ -137,10 +137,31 @@ Reconcile step 7 in `operator/internal/controller/slapdcluster_controller.go`:
 - Any developer adding a reconcile step that modifies `cn=config` must read ADR-001 (double
   reconciliation is harmless) and implement idempotency as described here.
 
+## Amendment (2026-04-19): Desired State Relocates to SlapdDatabase and SlapdSchema
+
+The core decision (cn=config is node-local; the operator manages it per-pod via headless DNS)
+is unchanged. What changes with ADR-004 is **where** the desired state is declared:
+
+| Before (single CRD) | After (multi-resource) |
+|---|---|
+| `SlapdCluster.spec.ldap.acls` | `SlapdDatabase.spec.acls` (per-database) |
+| `SlapdCluster.spec.ldap.schemas` | `SlapdSchema` CR (separate resource) |
+
+The per-pod application pattern remains identical: each controller connects to each pod
+individually via headless DNS, binds as `cn=admin,cn=config`, and applies the desired state.
+The only difference is that the desired state comes from multiple CRs instead of one.
+
+The `SlapdDatabase` controller applies ACLs to the specific `olcDatabase` entry matching its
+suffix (found via `findDataDBDN()`). The `SlapdSchema` controller applies schemas to
+`cn=schema,cn=config`. Both follow the idempotency pattern established in this ADR.
+
+See ADR-004 for the full architecture and ADR-006 for schema-specific lifecycle semantics.
+
 ## Related
 
 - ADR-001: Double reconciliation runs are harmless — explains why concurrent/repeated
   `reconcileACLs` calls are safe.
+- ADR-004: Multi-resource CRD architecture — relocates ACLs and schemas to dedicated CRDs.
+- ADR-006: Schema lifecycle — additive-only model for schema management.
 - `docs/ONBOARDING.md` — see "ACLs" section and "The Operator Model" section for the
   user-facing explanation.
-- `operator/config/samples/ldap_v1alpha1_slapdcluster.yaml` — example `spec.ldap.acls` block.

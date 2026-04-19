@@ -45,7 +45,10 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   └── adrs/
 │       ├── adr-001-double-reconcile-runs.md
 │       ├── adr-002-cn-config-node-local-operator-managed.md
-│       └── adr-003-operator-owns-syncrepl.md
+│       ├── adr-003-operator-owns-syncrepl.md
+│       ├── adr-004-multi-resource-crd-architecture.md
+│       ├── adr-005-slapddatabase-cleanup-policy.md
+│       └── adr-006-schema-lifecycle.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -286,6 +289,42 @@ kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
 ### Important Notes
 - **No kustomize.** All deployment is via Helm. The `operator/config/` tree is kubebuilder scaffolding only — used to generate code/CRDs, not applied directly to clusters.
 - **CRD sync:** `charts/operator/crds/` is populated from `operator/config/crd/bases/` by `make operator-manifests`. Always run `make operator-manifests` after changing types and commit both the generated CRD and the chart copy together.
+
+---
+
+### Architecture Decision Records (ADRs)
+
+ADRs in `docs/adrs/` record significant design decisions. They are a first-class artifact —
+treat them the same as code.
+
+**Before making a design decision:** Check existing ADRs. If a relevant ADR exists, follow it.
+If the current task conflicts with an ADR, discuss with the user before proceeding — do not
+silently violate an ADR.
+
+**When to create a new ADR:** Any decision that constrains future implementation choices,
+rejects a plausible alternative, or would be non-obvious to a new contributor. Examples:
+choosing between two architectural approaches, deciding on a data model, establishing a
+pattern that other code must follow.
+
+**When to amend an existing ADR:** When a decision's scope expands but the core principle
+holds. Add an "Amendment" section at the bottom with the date and rationale. Do not rewrite
+the original decision — the history of reasoning matters.
+
+**ADR format:**
+- Status (Proposed / Accepted / Superseded), Date
+- Context: what problem prompted the decision
+- Options considered (with reasons for rejection)
+- Decision: what was chosen and why
+- Consequences: what follows from the decision
+- Related: links to other ADRs
+
+**Current ADRs:**
+- ADR-001: Double reconciliation runs are harmless (idempotency requirement)
+- ADR-002: cn=config is node-local; the operator manages it per-pod
+- ADR-003: Operator owns all syncrepl configuration (RID scheme, single source of truth)
+- ADR-004: Multi-resource CRD architecture (SlapdCluster / SlapdSchema / SlapdDatabase)
+- ADR-005: SlapdDatabase cleanup policy (Retain default, Delete opt-in)
+- ADR-006: Schema lifecycle (additive-only, desired-minimum model)
 
 ---
 

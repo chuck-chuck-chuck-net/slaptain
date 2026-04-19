@@ -91,7 +91,52 @@ Comparison is RID-based and order-insensitive: parse RID from each stanza, compa
 - **Read-only replicas**: RO pods do not participate in external peering. The operator applies
   syncrepl to RO pods for in-cluster RW masters only (same as Phase 2).
 
+## Amendment (2026-04-19): Multi-Database RID Scheme
+
+With multiple `SlapdDatabase` CRs per cluster (ADR-004), each database needs its own set of
+syncrepl stanzas with non-colliding RIDs. The original RID scheme (1..N in-cluster, 101+
+external) assumed a single data database.
+
+### Updated RID Scheme
+
+Each `SlapdDatabase` declares a `spec.replication.ridBase` (integer). The operator computes
+per-stanza RIDs as:
+
+- **In-cluster peer `i`**: `ridBase + i + 1`
+- **External peer `j`**: `ridBase + 50 + j + 1`
+
+This provides 49 slots for in-cluster peers and 49 slots for external peers per database,
+with the `ridBase` providing namespace separation between databases.
+
+Example (3 databases, 3 pods, 2 external peers):
+
+| Database | ridBase | In-cluster RIDs | External RIDs |
+|---|---|---|---|
+| users | 100 | 101, 102, 103 | 151, 152 |
+| mgmt | 200 | 201, 202, 203 | 251, 252 |
+| signing | 300 | 301, 302, 303 | 351, 352 |
+
+The `ridBase` is user-provided, not auto-assigned. The operator validates that no two
+`SlapdDatabase` CRs in the same cluster have overlapping RID ranges.
+
+### Multi-Database reconcileReplication
+
+`reconcileReplication` changes from operating on a single database (found via `findDataDBDN()`)
+to iterating over all `SlapdDatabase` CRs referencing the cluster. For each database on each
+pod, it:
+
+1. Finds the `olcDatabase` entry matching the database's suffix.
+2. Computes desired syncrepl stanzas using the database's `ridBase`.
+3. Compares and replaces if different (same pattern as before).
+
+The global replication settings (keepalive, retry, externalPeers) still come from the
+`SlapdCluster` CR. Per-database settings (deltaSync, checkpoint, purge) come from the
+`SlapdDatabase` CR. The operator combines both when building stanzas.
+
 ## Related
 
 - ADR-001: Double reconciliation runs are harmless — `reconcileReplication` is idempotent.
 - ADR-002: cn=config is node-local; operator manages it — established the pattern.
+- ADR-004: Multi-resource CRD architecture — introduces `SlapdDatabase` with per-database
+  replication config.
+- ADR-005: SlapdDatabase cleanup policy — syncrepl stanzas are removed on CR deletion.
