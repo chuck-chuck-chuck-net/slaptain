@@ -37,11 +37,3 @@ Selector labels.
 app.kubernetes.io/name: {{ include "slapd-cluster.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
-
-{{/*
-Resolve the credentials Secret name.
-Returns the existingSecret if set; otherwise empty (operator auto-generates).
-*/}}
-{{- define "slapd-cluster.credentialsSecretName" -}}
-{{- .Values.credentials.existingSecret }}
-{{- end }}

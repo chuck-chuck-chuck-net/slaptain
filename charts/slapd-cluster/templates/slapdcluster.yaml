@@ -16,10 +16,9 @@ spec:
       pullPolicy: {{ .Values.images.init.pullPolicy }}
 
   ldap:
-    domain: {{ .Values.ldap.domain | quote }}
-    {{- $credSecret := include "slapd-cluster.credentialsSecretName" . }}
-    {{- if $credSecret }}
-    credentialsSecretName: {{ $credSecret | quote }}
+    {{- if .Values.ldap.cnConfigCredentials.secretName }}
+    cnConfigCredentials:
+      secretName: {{ .Values.ldap.cnConfigCredentials.secretName | quote }}
     {{- end }}
     forceRebootstrap: {{ .Values.ldap.forceRebootstrap }}
     tls:
@@ -27,14 +26,6 @@ spec:
       {{- if .Values.ldap.tls.enabled }}
       secretName: {{ .Values.ldap.tls.secretName | quote }}
       {{- end }}
-    {{- if .Values.ldap.acls }}
-    acls:
-      {{- toYaml .Values.ldap.acls | nindent 6 }}
-    {{- end }}
-    {{- if .Values.ldap.schemas }}
-    schemas:
-      {{- toYaml .Values.ldap.schemas | nindent 6 }}
-    {{- end }}
 
   replicas: {{ .Values.replicas }}
   {{- if gt (int .Values.readReplicas) 0 }}
@@ -72,6 +63,12 @@ spec:
 
   replication:
     enabled: {{ .Values.replication.enabled }}
+    {{- if .Values.replication.keepalive }}
+    keepalive: {{ .Values.replication.keepalive | quote }}
+    {{- end }}
+    {{- if .Values.replication.retry }}
+    retry: {{ .Values.replication.retry | quote }}
+    {{- end }}
     {{- if .Values.replication.externalPeers }}
     externalPeers:
       {{- toYaml .Values.replication.externalPeers | nindent 6 }}

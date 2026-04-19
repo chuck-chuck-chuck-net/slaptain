@@ -1,0 +1,301 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: slapddatabases.ldap.chuck-chuck-chuck.net
+spec:
+  group: ldap.chuck-chuck-chuck.net
+  names:
+    kind: SlapdDatabase
+    listKind: SlapdDatabaseList
+    plural: slapddatabases
+    shortNames:
+    - sd
+    singular: slapddatabase
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterRef
+      name: Cluster
+      type: string
+    - jsonPath: .spec.suffix
+      name: Suffix
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.cleanupPolicy
+      name: Cleanup
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SlapdDatabase is the Schema for the slapddatabases API.
+          Each instance represents one MDB backend database within a SlapdCluster.
+          The controller creates the database via ldapmodify on each pod's cn=config,
+          then manages ACLs, indices, replication, and seed data per-database.
+          See ADR-004 for the multi-resource architecture and ADR-005 for cleanup policy.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired database configuration.
+            properties:
+              acls:
+                description: |-
+                  acls is the list of OpenLDAP ACL rules (olcAccess entries) to apply to
+                  this database on every pod. Rules are in standard slapd.conf "access to ..."
+                  format, without the {N} index prefix. The operator numbers them and applies
+                  them per-pod (cn=config is node-local). When empty, the default ACLs from
+                  the init container are preserved.
+                items:
+                  type: string
+                type: array
+              cleanupPolicy:
+                default: Retain
+                description: |-
+                  cleanupPolicy controls what happens when this CR is deleted.
+                  Retain (default): database stays in slapd, becomes unmanaged.
+                  Delete: database definition is removed from cn=config (data files are NOT deleted).
+                  See ADR-005.
+                enum:
+                - Retain
+                - Delete
+                type: string
+              clusterRef:
+                description: |-
+                  clusterRef is the name of the SlapdCluster this database belongs to.
+                  Must be in the same namespace.
+                type: string
+              credentials:
+                description: credentials references the Secret containing the root
+                  password for this database.
+                properties:
+                  secretName:
+                    description: |-
+                      secretName is the name of the Secret containing passwords for this database.
+                      Required keys: "root-password" (plaintext rootDN password).
+                      Optional keys: "replication-password" (plaintext syncrepl bind password;
+                      auto-generated if missing and replication is enabled).
+                      When empty, the operator auto-generates a Secret named
+                      "<slapddatabase-name>-credentials".
+                    type: string
+                type: object
+              dataDirectory:
+                description: |-
+                  dataDirectory is the subdirectory under /ldap-data/ where this database's
+                  LMDB files are stored. Defaults to a sanitized form of the suffix
+                  (e.g. "o=myapp" → "myapp"). Must be unique within the cluster.
+                type: string
+              indices:
+                description: |-
+                  indices is the list of index directives for this database. Each string is
+                  an index specification in slapd.conf format, e.g. "objectClass eq" or
+                  "uid eq,sub". The operator applies these as olcDbIndex entries.
+                items:
+                  type: string
+                type: array
+              maxSize:
+                description: |-
+                  maxSize is the maximum database size (olcDbMaxSize) in bytes. Accepts
+                  standard Kubernetes quantity format (e.g. "1Gi", "32Gi").
+                type: string
+              noSync:
+                default: false
+                description: |-
+                  noSync disables fsync after each write (olcDbNoSync). Improves write
+                  performance at the cost of durability on unclean shutdown. Replicas
+                  provide redundancy. Default false (fsync enabled).
+                type: boolean
+              replication:
+                description: |-
+                  replication holds per-database replication settings. Required when the
+                  parent SlapdCluster has replication enabled.
+                properties:
+                  accesslogPurge:
+                    description: |-
+                      accesslogPurge sets the accesslog purge interval (only used when deltaSync=true).
+                      Format: "<maxage> <interval>", e.g. "2+00:00 1+00:00" means purge entries older
+                      than 2 days, checking every day. Empty means no purge (accesslog grows unbounded).
+                    type: string
+                  deltaSync:
+                    default: true
+                    description: |-
+                      deltaSync enables delta-syncrepl via the accesslog overlay for this database.
+                      When true, the accesslog overlay is added to this database and syncrepl stanzas
+                      use syncdata=accesslog. When false, plain syncrepl (full entry sync) is used.
+                    type: boolean
+                  ridBase:
+                    description: |-
+                      ridBase is the base Replica ID for this database's syncrepl stanzas.
+                      In-cluster peer i gets RID = ridBase + i + 1.
+                      External peer j gets RID = ridBase + 50 + j + 1.
+                      Must be unique across all SlapdDatabase CRs in the same cluster to avoid
+                      RID collisions. The operator validates this.
+                    format: int32
+                    maximum: 949
+                    minimum: 0
+                    type: integer
+                  syncprovCheckpoint:
+                    description: |-
+                      syncprovCheckpoint sets the syncprov overlay checkpoint interval.
+                      Format: "<ops> <minutes>", e.g. "500 15" means checkpoint every 500 operations
+                      or 15 minutes. Empty means no explicit checkpoint (OpenLDAP default).
+                    type: string
+                required:
+                - ridBase
+                type: object
+              rootDN:
+                description: |-
+                  rootDN is the administrative DN for this database. Defaults to
+                  "cn=admin,<suffix>" when empty.
+                type: string
+              seed:
+                description: |-
+                  seed defines initial data to populate in the database on first creation.
+                  Applied once and tracked in status.
+                properties:
+                  configMapRef:
+                    description: |-
+                      configMapRef references a ConfigMap containing LDIF data. The ConfigMap's
+                      data keys are processed in lexicographic order. Each value is parsed as
+                      one or more LDIF entries separated by blank lines.
+                    type: string
+                  entries:
+                    description: |-
+                      entries is a list of LDIF entries to add when the database is first created.
+                      Each string is a complete LDIF entry (dn: line, attributes, separated by
+                      blank lines). Applied once and tracked in status — not re-applied on
+                      subsequent reconciles.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              suffix:
+                description: |-
+                  suffix is the LDAP suffix (base DN) for this database, e.g. "o=myapp" or
+                  "dc=example,dc=org". Must be unique within the cluster.
+                type: string
+            required:
+            - clusterRef
+            - suffix
+            type: object
+          status:
+            description: status defines the observed state of the database.
+            properties:
+              appliedToPods:
+                description: |-
+                  appliedToPods lists pod names where the database has been created and
+                  is fully reconciled (ACLs, indices, replication all applied).
+                items:
+                  type: string
+                type: array
+              conditions:
+                description: conditions holds standard Kubernetes condition entries.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              failedPods:
+                description: failedPods lists pod names where database creation or
+                  reconciliation failed.
+                items:
+                  type: string
+                type: array
+              observedGeneration:
+                description: observedGeneration is the .metadata.generation the controller
+                  last reconciled.
+                format: int64
+                type: integer
+              phase:
+                description: phase summarises the current lifecycle state of the database.
+                type: string
+              seedApplied:
+                description: |-
+                  seedApplied indicates whether the seed data has been successfully applied.
+                  Once true, seed data is never re-applied.
+                type: boolean
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

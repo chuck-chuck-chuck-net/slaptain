@@ -1,0 +1,27 @@
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdSchema
+metadata:
+  name: example-schema
+spec:
+  clusterRef: slapd
+  priority: 100
+  attributeTypes:
+    - >-
+      ( 1.3.6.1.4.1.99999.1.1.1
+        NAME 'exampleContextId'
+        EQUALITY integerMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+        SINGLE-VALUE )
+    - >-
+      ( 1.3.6.1.4.1.99999.1.1.2
+        NAME 'exampleUserId'
+        EQUALITY integerMatch
+        SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+        SINGLE-VALUE )
+  objectClasses:
+    - >-
+      ( 1.3.6.1.4.1.99999.1.2.1
+        NAME 'exampleUser'
+        SUP inetOrgPerson
+        STRUCTURAL
+        MAY ( exampleContextId $ exampleUserId ) )

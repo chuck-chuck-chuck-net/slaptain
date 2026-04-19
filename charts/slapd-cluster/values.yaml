@@ -1,5 +1,7 @@
 # Default values for slapd-cluster.
-# Deploys a SlapdCluster CR; the slaptain operator must be installed first.
+# Deploys a SlapdCluster CR (infrastructure only); the slaptain operator must
+# be installed first. Data databases and schemas are created separately via
+# SlapdDatabase and SlapdSchema CRs. See ADR-004.
 
 # -- Override the resource name prefix.
 # With the default "slapd" and release name "slapd", fullname resolves to "slapd"
@@ -9,34 +11,15 @@ nameOverride: slapd
 
 # -- LDAP configuration.
 ldap:
-  domain: "dc=example,dc=org"
   forceRebootstrap: false
   tls:
     enabled: true
     secretName: "slapd-tls"
-  # -- ACL rules for the data database, applied by the operator to every pod's
-  # cn=config individually. Rules are in slapd.conf "access to ..." format (no {N} prefix).
-  # When empty, the init container's default ACLs are preserved (userPassword hidden,
-  # everything else readable by *).
-  acls: []
-  # -- Custom schema entries to add to cn=schema,cn=config on every pod.
-  # Each entry is a JSON string. See tests/values.slapd-test.yaml.with-custom-schemas
-  # for an OX schema example.
-  schemas: []
-
-# -- Credentials.
-# The operator auto-generates passwords when credentialsSecretName is not set,
-# storing them in <name>-passwords (admin-password + replication-password) and
-# <name>-config-password (root-password).
-#
-# To supply your own passwords, create a Secret with the required keys and reference
-# it here.  Required: admin-password, root-password.  Optional: replication-password.
-#   kubectl create secret generic my-ldap-credentials \
-#     --from-literal=admin-password=changeme \
-#     --from-literal=root-password=changeme \
-#     --from-literal=replication-password=changeme
-credentials:
-  existingSecret: ""
+  # -- cn=config admin credentials.
+  # The operator auto-generates a <name>-config-password Secret when not set.
+  # To supply your own, create a Secret with a "root-password" key.
+  cnConfigCredentials:
+    secretName: ""
 
 # -- Container images.
 images:
@@ -75,18 +58,22 @@ persistence:
     storageClass: ""
     accessMode: ReadWriteOnce
 
-# -- Replication (Phase 2+). N-way multi-master delta-syncrepl.
+# -- Replication. N-way multi-master delta-syncrepl.
 # Set enabled=true together with replicas>1 to activate.
-# The replication bind password is stored in <name>-passwords under the replication-password key.
+# Per-database replication settings (deltaSync, ridBase, etc.) are on SlapdDatabase CRs.
 replication:
   enabled: false
-  # -- Cross-cluster external peers (Phase 3).
+  # -- TCP keepalive for syncrepl connections. Format: "idle:probes:interval".
+  keepalive: ""
+  # -- Syncrepl retry interval. Format: "<interval> <count>" pairs.
+  retry: "10 +"
+  # -- Cross-cluster external peers.
   # Each peer requires a name, URI, and optionally TLS secret + bind credentials.
   externalPeers: []
   # - name: site-b
   #   uri: "ldaps://ldap.site-b.example.com:636"
   #   tlsSecretName: "site-b-ca"
-  #   bindDN: "cn=replication,dc=example,dc=org"
+  #   bindDN: "cn=replication,o=myapp"
   #   bindPasswordSecretName: "site-b-replication-password"
 
 # -- Service configuration.

@@ -297,41 +297,52 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 		write(fmt.Sprintf("rootdse-%s.txt", podName), formatLDAPEntry(rootDSE.Entries[0]))
 	}
 
+	// Discover data suffix from rootDSE namingContexts
+	var namingContexts []string
+	if rootDSE != nil && len(rootDSE.Entries) > 0 {
+		namingContexts = rootDSE.Entries[0].GetEqualFoldAttributeValues("namingContexts")
+	}
+	dataSuffix := dataSuffixFromNamingContexts(namingContexts)
+
 	// contextCSN
-	csnResult, err := conn.Search(ldap.NewSearchRequest(
-		sc.Spec.LDAP.Domain, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-		"(objectClass=*)", []string{"contextCSN"}, nil,
-	))
-	if err == nil && len(csnResult.Entries) > 0 {
-		write(fmt.Sprintf("contextcsn-%s.txt", podName), formatLDAPEntry(csnResult.Entries[0]))
+	if dataSuffix != "" {
+		csnResult, err := conn.Search(ldap.NewSearchRequest(
+			dataSuffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
+			"(objectClass=*)", []string{"contextCSN"}, nil,
+		))
+		if err == nil && len(csnResult.Entries) > 0 {
+			write(fmt.Sprintf("contextcsn-%s.txt", podName), formatLDAPEntry(csnResult.Entries[0]))
+		}
 	}
 	conn.Close()
 
 	// cn=config queries (config admin)
 	// The data DB index varies: {1}mdb without accesslog, {2}mdb with accesslog.
-	// Search by olcSuffix to find the right entry.
+	// Search for all olcMdbConfig entries to find data DBs.
 	if configPW != "" {
 		configConn, err := ldap.Dial("tcp", addr)
 		if err == nil {
 			if err := configConn.Bind("cn=admin,cn=config", configPW); err == nil {
-				dbFilter := fmt.Sprintf("(&(objectClass=olcMdbConfig)(olcSuffix=%s))", sc.Spec.LDAP.Domain)
-
-				// syncrepl + multiProvider
-				syncResult, err := configConn.Search(ldap.NewSearchRequest(
-					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 5, false,
-					dbFilter, []string{"olcSyncRepl", "olcMultiProvider"}, nil,
+				// Find all data DB entries (non-internal suffixes)
+				dbResult, err := configConn.Search(ldap.NewSearchRequest(
+					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 0, false,
+					"(objectClass=olcMdbConfig)", []string{"olcSuffix", "olcSyncRepl", "olcMultiProvider", "olcAccess"}, nil,
 				))
-				if err == nil && len(syncResult.Entries) > 0 {
-					write(fmt.Sprintf("syncrepl-%s.txt", podName), formatLDAPEntry(syncResult.Entries[0]))
-				}
-
-				// ACLs
-				aclResult, err := configConn.Search(ldap.NewSearchRequest(
-					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 5, false,
-					dbFilter, []string{"olcAccess"}, nil,
-				))
-				if err == nil && len(aclResult.Entries) > 0 {
-					write(fmt.Sprintf("acls-%s.txt", podName), formatLDAPEntry(aclResult.Entries[0]))
+				if err == nil {
+					for _, entry := range dbResult.Entries {
+						suffix := ""
+						if vals := entry.GetEqualFoldAttributeValues("olcSuffix"); len(vals) > 0 {
+							suffix = vals[0]
+						}
+						if strings.HasPrefix(suffix, "cn=") {
+							continue
+						}
+						// syncrepl + multiProvider
+						write(fmt.Sprintf("syncrepl-%s.txt", podName), formatLDAPEntry(entry))
+						// ACLs
+						write(fmt.Sprintf("acls-%s.txt", podName), formatLDAPEntry(entry))
+						break
+					}
 				}
 			}
 			configConn.Close()

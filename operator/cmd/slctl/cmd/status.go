@@ -21,10 +21,8 @@ type statusJSON struct {
 	ReadyReplicas         int32                     `json:"readyReplicas"`
 	ReadOnlyReplicas      int32                     `json:"readOnlyReplicas,omitempty"`
 	ReadOnlyReadyReplicas int32                     `json:"readOnlyReadyReplicas,omitempty"`
-	Domain                string                    `json:"domain"`
 	ReplicationEnabled    bool                      `json:"replicationEnabled"`
 	TLSEnabled            bool                      `json:"tlsEnabled"`
-	BootstrapComplete     bool                      `json:"bootstrapComplete"`
 	Age                   string                    `json:"age"`
 	ExternalPeers         []externalPeerStatusJSON  `json:"externalPeers,omitempty"`
 	Conditions            []conditionJSON           `json:"conditions,omitempty"`
@@ -103,10 +101,8 @@ func buildStatusJSON(sc *ldapv1alpha1.SlapdCluster) statusJSON {
 		ReadyReplicas:         sc.Status.ReadyReplicas,
 		ReadOnlyReplicas:      sc.Status.ReadOnlyReplicas,
 		ReadOnlyReadyReplicas: sc.Status.ReadOnlyReadyReplicas,
-		Domain:                sc.Spec.LDAP.Domain,
 		ReplicationEnabled:    sc.Spec.Replication.Enabled,
 		TLSEnabled:            sc.Spec.LDAP.TLS.Enabled,
-		BootstrapComplete:     sc.Status.BootstrapComplete,
 		Age:                   age(sc.CreationTimestamp),
 	}
 	for _, ep := range sc.Status.ExternalPeerStatuses {
@@ -132,12 +128,10 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 	printSeparator()
 	fmt.Printf("  Phase:              %s\n", sc.Status.Phase)
 	fmt.Printf("  Age:                %s\n", age(sc.CreationTimestamp))
-	fmt.Printf("  Domain:             %s\n", sc.Spec.LDAP.Domain)
 	fmt.Printf("  Replicas:           %d/%d ready\n", sc.Status.ReadyReplicas, sc.Status.Replicas)
 	if sc.Spec.ReadReplicas > 0 || sc.Status.ReadOnlyReplicas > 0 {
 		fmt.Printf("  Read-Only:          %d/%d ready\n", sc.Status.ReadOnlyReadyReplicas, sc.Status.ReadOnlyReplicas)
 	}
-	fmt.Printf("  Bootstrap:          %v\n", sc.Status.BootstrapComplete)
 	fmt.Printf("  TLS:                %v\n", sc.Spec.LDAP.TLS.Enabled)
 	fmt.Printf("  Replication:        %v\n", sc.Spec.Replication.Enabled)
 
@@ -169,12 +163,6 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 		}
 	}
 
-	if len(sc.Spec.LDAP.ACLs) > 0 {
-		fmt.Printf("  ACLs:               %d rules\n", len(sc.Spec.LDAP.ACLs))
-	}
-	if len(sc.Spec.LDAP.Schemas) > 0 {
-		fmt.Printf("  Custom Schemas:     %d entries\n", len(sc.Spec.LDAP.Schemas))
-	}
 }
 
 func age(t metav1.Time) string {

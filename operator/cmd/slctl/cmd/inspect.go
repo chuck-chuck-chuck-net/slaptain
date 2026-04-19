@@ -313,13 +313,18 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 		ps.namingContexts = rootDSE.Entries[0].GetEqualFoldAttributeValues("namingContexts")
 	}
 
-	// contextCSN (anonymous)
-	csnResult, err := conn.Search(ldap.NewSearchRequest(
-		sc.Spec.LDAP.Domain, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-		"(objectClass=*)", []string{"contextCSN"}, nil,
-	))
-	if err == nil && len(csnResult.Entries) > 0 {
-		ps.contextCSN = csnResult.Entries[0].GetEqualFoldAttributeValues("contextCSN")
+	// Discover data suffix from namingContexts (skip cn= internal DBs)
+	dataSuffix := dataSuffixFromNamingContexts(ps.namingContexts)
+
+	// contextCSN (anonymous) — only if we found a data suffix
+	if dataSuffix != "" {
+		csnResult, err := conn.Search(ldap.NewSearchRequest(
+			dataSuffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
+			"(objectClass=*)", []string{"contextCSN"}, nil,
+		))
+		if err == nil && len(csnResult.Entries) > 0 {
+			ps.contextCSN = csnResult.Entries[0].GetEqualFoldAttributeValues("contextCSN")
+		}
 	}
 
 	// cn=config (config admin bind)
@@ -336,20 +341,28 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 			if err := configConn.Bind("cn=admin,cn=config", configPW); err != nil {
 				ps.configError = fmt.Sprintf("cn=config bind failed: %v", err)
 			} else {
-				dbFilter := fmt.Sprintf("(&(objectClass=olcMdbConfig)(olcSuffix=%s))", sc.Spec.LDAP.Domain)
+				// Search for all olcMdbConfig entries to find syncRepl/multiProvider
 				dbResult, err := configConn.Search(ldap.NewSearchRequest(
-					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 5, false,
-					dbFilter, []string{"olcSyncRepl", "olcMultiProvider"}, nil,
+					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 0, false,
+					"(objectClass=olcMdbConfig)", []string{"olcSuffix", "olcSyncRepl", "olcMultiProvider"}, nil,
 				))
 				if err != nil {
 					ps.configError = fmt.Sprintf("cn=config search: %v", err)
-				} else if len(dbResult.Entries) == 0 {
-					ps.configError = fmt.Sprintf("no olcMdbConfig with olcSuffix=%s found", sc.Spec.LDAP.Domain)
 				} else {
-					entry := dbResult.Entries[0]
-					ps.syncRepl = entry.GetEqualFoldAttributeValues("olcSyncRepl")
-					if vals := entry.GetEqualFoldAttributeValues("olcMultiProvider"); len(vals) > 0 {
-						ps.multiProvider = vals[0]
+					// Find a data DB entry (skip cn=accesslog and other internal DBs)
+					for _, entry := range dbResult.Entries {
+						suffix := ""
+						if vals := entry.GetEqualFoldAttributeValues("olcSuffix"); len(vals) > 0 {
+							suffix = vals[0]
+						}
+						if strings.HasPrefix(suffix, "cn=") {
+							continue
+						}
+						ps.syncRepl = entry.GetEqualFoldAttributeValues("olcSyncRepl")
+						if vals := entry.GetEqualFoldAttributeValues("olcMultiProvider"); len(vals) > 0 {
+							ps.multiProvider = vals[0]
+						}
+						break
 					}
 				}
 			}
@@ -402,11 +415,11 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 		check("pod-readiness", "fail", fmt.Sprintf("not ready: %s", strings.Join(notReady, ", ")))
 	}
 
-	// ── Bootstrap ──
-	if sc.Status.BootstrapComplete {
-		check("bootstrap", "pass", "complete")
+	// ── Bootstrap (inferred from phase) ──
+	if sc.Status.Phase == ldapv1alpha1.PhaseRunning {
+		check("bootstrap", "pass", "cluster phase is Running")
 	} else {
-		check("bootstrap", "fail", "not complete")
+		check("bootstrap", "warn", fmt.Sprintf("cluster phase is %s", sc.Status.Phase))
 	}
 
 	// Remaining checks require replication
@@ -421,12 +434,13 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 		if ps.err != "" {
 			continue
 		}
-		hasAccesslog, hasData := false, false
+		hasAccesslog := false
+		hasData := false
 		for _, nc := range ps.namingContexts {
 			if nc == "cn=accesslog" {
 				hasAccesslog = true
 			}
-			if nc == sc.Spec.LDAP.Domain {
+			if !strings.HasPrefix(nc, "cn=") {
 				hasData = true
 			}
 		}
@@ -436,7 +450,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 		}
 		if !hasData {
 			ncOK = false
-			ncIssues = append(ncIssues, fmt.Sprintf("%s: missing %s", ps.name, sc.Spec.LDAP.Domain))
+			ncIssues = append(ncIssues, fmt.Sprintf("%s: missing data namingContext", ps.name))
 		}
 	}
 	for _, ps := range roPods {
@@ -848,6 +862,17 @@ func parseCSNTime(csn string) (time.Time, error) {
 	}
 	ts := strings.TrimSuffix(parts[0], "Z")
 	return time.Parse("20060102150405.000000", ts)
+}
+
+// dataSuffixFromNamingContexts returns the first non-internal (non cn=) naming
+// context, which is the data suffix. Returns "" if none found.
+func dataSuffixFromNamingContexts(contexts []string) string {
+	for _, nc := range contexts {
+		if !strings.HasPrefix(nc, "cn=") {
+			return nc
+		}
+	}
+	return ""
 }
 
 // formatDuration produces a human-friendly duration string.

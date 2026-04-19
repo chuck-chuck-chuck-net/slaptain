@@ -19,10 +19,8 @@ package controller
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha1"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
@@ -30,7 +28,6 @@ import (
 	"strings"
 	"time"
 
-	ldap "github.com/go-ldap/ldap/v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -41,7 +38,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -57,6 +54,9 @@ const (
 )
 
 // SlapdClusterReconciler reconciles a SlapdCluster object.
+// It manages infrastructure only: StatefulSet, Services, cn=config credentials.
+// Database, schema, and ACL management are handled by SlapdDatabase and
+// SlapdSchema controllers. See ADR-004.
 type SlapdClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -80,7 +80,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 2. Reconcile credential secrets (<name>-passwords plaintext + <name>-config-password).
+	// 2. Reconcile cn=config credential secret (<name>-config-password).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSecret: %w", err)
 	}
@@ -95,8 +95,15 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("reconcileClusterIPService: %w", err)
 	}
 
+	// Query SlapdDatabase CRs referencing this cluster. Their names are passed
+	// to the init container so it can create per-database data directories.
+	databaseNames, err := r.listDatabaseNames(ctx, sc)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("listDatabaseNames: %w", err)
+	}
+
 	// 5. Reconcile StatefulSet.
-	if err := r.reconcileStatefulSet(ctx, sc); err != nil {
+	if err := r.reconcileStatefulSet(ctx, sc, databaseNames); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
 	}
 
@@ -111,46 +118,13 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 5c. Reconcile read-only StatefulSet.
-	if err := r.reconcileReadOnlyStatefulSet(ctx, sc); err != nil {
+	if err := r.reconcileReadOnlyStatefulSet(ctx, sc, databaseNames); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileReadOnlyStatefulSet: %w", err)
 	}
 
-	// 6. Bootstrap initial directory entries via LDAP once pod-0 is ready.
-	//    Seeds root/admin/replication entries on pod-0, then verifies the root
-	//    entry has replicated to all other pods before setting BootstrapComplete.
-	//    Returns skipped=true while replication is still converging.
-	podsSkipped := false
-
-	if skipped, err := r.reconcileBootstrap(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileBootstrap: %w", err)
-	} else if skipped {
-		podsSkipped = true
-	}
-
-	// 7. Apply spec.ldap.acls to each pod's cn=config (idempotent; unreachable pods
-	//    are logged and skipped — the next reconcile will retry them).
-
-	if skipped, err := r.reconcileACLs(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileACLs: %w", err)
-	} else if skipped {
-		podsSkipped = true
-	}
-
-	// 7a. Apply spec.ldap.schemas to each pod's cn=schema,cn=config (idempotent;
-	//     DN existence check — existing schemas are skipped, unreachable pods retried).
-	if skipped, err := r.reconcileSchemas(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileSchemas: %w", err)
-	} else if skipped {
-		podsSkipped = true
-	}
-
-	// 7b. Apply syncrepl + mirrormode to each pod's cn=config data DB entry.
-	//     Operator owns all syncrepl configuration (in-cluster + external). See ADR-003.
-	if skipped, err := r.reconcileReplication(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
-	} else if skipped {
-		podsSkipped = true
-	}
+	// NOTE: Steps 6-7b (bootstrap, ACLs, schemas, replication) have been removed
+	// from SlapdCluster. They are now managed by SlapdDatabase and SlapdSchema
+	// controllers. See ADR-004.
 
 	// 8. Observe StatefulSet status → update SlapdCluster status.
 	sts := &appsv1.StatefulSet{}
@@ -185,19 +159,26 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		sc.Status.ReadOnlyReadyReplicas = 0
 	}
 
+	// External peer connectivity status.
+	sc.Status.ExternalPeerStatuses = nil
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		status := ldapv1alpha1.ExternalPeerStatus{
+			Name: ep.Name,
+		}
+		if err := testExternalPeerConnectivity(ep.URI); err != nil {
+			status.Connected = false
+			status.LastError = err.Error()
+		} else {
+			status.Connected = true
+		}
+		sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
+	}
+
 	switch {
 	case ready == 0:
 		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping
 	case ready < desired:
 		sc.Status.Phase = ldapv1alpha1.PhaseDegraded
-	case !sc.Status.BootstrapComplete:
-		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping
-	case podsSkipped:
-		// All replicas are ready and bootstrap is done, but some pods haven't
-		// been fully configured yet (ACLs, schemas, or syncrepl stanzas not
-		// applied). Stay in Bootstrapping until the next reconcile succeeds
-		// on all pods.
-		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping
 	default:
 		sc.Status.Phase = ldapv1alpha1.PhaseRunning
 	}
@@ -205,12 +186,9 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	readyStatus := metav1.ConditionFalse
 	readyReason := "NotReady"
 	readyMsg := fmt.Sprintf("%d/%d replicas ready", ready, desired)
-	if ready >= desired && sc.Status.BootstrapComplete && !podsSkipped {
+	if ready >= desired {
 		readyStatus = metav1.ConditionTrue
 		readyReason = "AllReplicasReady"
-	} else if podsSkipped {
-		readyReason = "PodsNotConfigured"
-		readyMsg = fmt.Sprintf("%d/%d replicas ready, some pods pending configuration", ready, desired)
 	}
 	setCondition(&sc.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
@@ -237,88 +215,39 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	// 8. Requeue until fully Running and all pods configured.
-	if sc.Status.Phase != ldapv1alpha1.PhaseRunning || podsSkipped {
+	// Requeue until fully Running.
+	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	return ctrl.Result{}, nil
 }
 
-// reconcileSecret creates two plaintext credential secrets (both create-only):
-//   - <name>-passwords       admin-password + replication-password
-//   - <name>-config-password root-password
+// reconcileSecret creates the cn=config admin credential secret (create-only):
+//   - <name>-config-password  root-password
 //
-// If spec.ldap.credentialsSecretName is set the passwords are read from the
-// user-provided secret (must contain admin-password and root-password; replication-password
-// is optional). Otherwise all passwords are auto-generated.
+// If spec.ldap.cnConfigCredentials.secretName is set, the operator uses that
+// secret directly. Otherwise, a password is auto-generated.
 func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
-	pwName := sc.Name + "-passwords"
 	cfgName := sc.Name + "-config-password"
 
-	// If <name>-passwords already exists, both secrets are already in order.
+	// If the user provided a cnConfigCredentials secret, nothing to create.
+	if sc.Spec.LDAP.CnConfigCredentials.SecretName != "" {
+		return nil
+	}
+
+	// If auto-generated secret already exists, nothing to do.
 	existing := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: pwName, Namespace: sc.Namespace}, existing); err == nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: cfgName, Namespace: sc.Namespace}, existing); err == nil {
 		return nil
 	} else if !errors.IsNotFound(err) {
 		return err
 	}
 
-	// Obtain plaintext passwords.
-	var adminPW, rootPW, replPW string
-
-	if sc.Spec.LDAP.CredentialsSecretName != "" {
-		creds := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKey{
-			Name:      sc.Spec.LDAP.CredentialsSecretName,
-			Namespace: sc.Namespace,
-		}, creds); err != nil {
-			return fmt.Errorf("read credentialsSecret %s: %w", sc.Spec.LDAP.CredentialsSecretName, err)
-		}
-		adminPW = string(creds.Data["admin-password"])
-		rootPW = string(creds.Data["root-password"])
-		if adminPW == "" || rootPW == "" {
-			return fmt.Errorf("secret %s must contain admin-password and root-password keys",
-				sc.Spec.LDAP.CredentialsSecretName)
-		}
-		// replication-password is optional in user-provided secret.
-		replPW = string(creds.Data["replication-password"])
-	} else {
-		var err error
-		adminPW, err = generatePassword(24)
-		if err != nil {
-			return fmt.Errorf("generate admin password: %w", err)
-		}
-		rootPW, err = generatePassword(24)
-		if err != nil {
-			return fmt.Errorf("generate root password: %w", err)
-		}
+	rootPW, err := generatePassword(24)
+	if err != nil {
+		return fmt.Errorf("generate root password: %w", err)
 	}
 
-	if replPW == "" {
-		var err error
-		replPW, err = generatePassword(32)
-		if err != nil {
-			return fmt.Errorf("generate replication password: %w", err)
-		}
-	}
-
-	// Create <name>-passwords (admin-password + replication-password).
-	pwSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: pwName, Namespace: sc.Namespace},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			"admin-password":       adminPW,
-			"replication-password": replPW,
-		},
-	}
-	if err := controllerutil.SetControllerReference(sc, pwSecret, r.Scheme); err != nil {
-		return err
-	}
-	if err := r.Create(ctx, pwSecret); err != nil {
-		return err
-	}
-
-	// Create <name>-config-password (root-password).
 	cfgSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: cfgName, Namespace: sc.Namespace},
 		Type:       corev1.SecretTypeOpaque,
@@ -413,14 +342,14 @@ func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, 
 }
 
 // reconcileStatefulSet applies the StatefulSet via SSA.
-func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, databaseNames []string) error {
 	sts := &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name,
 			Namespace: sc.Namespace,
 		},
-		Spec: r.buildStatefulSetSpec(sc),
+		Spec: r.buildStatefulSetSpec(sc, false, databaseNames),
 	}
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
@@ -517,7 +446,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyService(ctx context.Context, s
 
 // reconcileReadOnlyStatefulSet applies the read-only StatefulSet via SSA.
 // Skipped when spec.readReplicas == 0.
-func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, databaseNames []string) error {
 	if sc.Spec.ReadReplicas == 0 {
 		return nil
 	}
@@ -527,7 +456,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 			Name:      sc.Name + "-readonly",
 			Namespace: sc.Namespace,
 		},
-		Spec: r.buildReadOnlyStatefulSetSpec(sc),
+		Spec: r.buildStatefulSetSpec(sc, true, databaseNames),
 	}
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
@@ -535,416 +464,30 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 	return r.Patch(ctx, sts, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
-// buildReadOnlyStatefulSetSpec constructs the StatefulSet spec for read-only replicas.
-// Compared to the RW spec: no accesslog volume, LDAP_READONLY_REPLICA=true,
-// LDAP_REPLICAS = number of RW masters, no self-skip in syncrepl.
-func (r *SlapdClusterReconciler) buildReadOnlyStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster) appsv1.StatefulSetSpec {
-	labels := readOnlySelectorLabels(sc.Name)
-	replicas := sc.Spec.ReadReplicas
-	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
+// buildStatefulSetSpec constructs the StatefulSet spec for RW or RO replicas.
+// With the multi-resource architecture (ADR-004), the init container only sets up
+// cn=config infrastructure (modules, TLS). Data databases, schemas, ACLs, and
+// replication are managed by SlapdDatabase and SlapdSchema controllers.
+func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster, readOnly bool, databaseNames []string) appsv1.StatefulSetSpec {
+	var labels map[string]string
+	var replicas int32
+	var serviceName string
 
-	rwReplicas := sc.Spec.Replicas
-	if rwReplicas == 0 {
-		rwReplicas = 1
-	}
-
-	// Pod security context.
-	podSecCtx := sc.Spec.SecurityContext
-	if podSecCtx == nil {
-		uid := int64(1024)
-		gid := int64(1024)
-		podSecCtx = &corev1.PodSecurityContext{
-			RunAsUser:  &uid,
-			RunAsGroup: &gid,
-			FSGroup:    &gid,
-		}
-	}
-
-	// ── Volumes (non-PVC) — no accesslog for RO replicas ─────────────────────
-	volumes := []corev1.Volume{
-		{
-			Name:         "ldap-run",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-		},
-	}
-
-	var volumeClaimTemplates []corev1.PersistentVolumeClaim
-
-	if sc.Spec.Persistence.Enabled {
-		cfgSize := sc.Spec.Persistence.Config.Size
-		if cfgSize == "" {
-			cfgSize = "1Gi"
-		}
-		dataSize := sc.Spec.Persistence.Data.Size
-		if dataSize == "" {
-			dataSize = "5Gi"
-		}
-		cfgAM := sc.Spec.Persistence.Config.AccessMode
-		if cfgAM == "" {
-			cfgAM = corev1.ReadWriteOnce
-		}
-		dataAM := sc.Spec.Persistence.Data.AccessMode
-		if dataAM == "" {
-			dataAM = corev1.ReadWriteOnce
-		}
-		volumeClaimTemplates = []corev1.PersistentVolumeClaim{
-			pvcTemplate("ldap-config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
-			pvcTemplate("ldap-data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
-		}
-		// No accesslog PVC for read-only replicas.
+	if readOnly {
+		labels = readOnlySelectorLabels(sc.Name)
+		replicas = sc.Spec.ReadReplicas
+		serviceName = sc.Name + "-readonly-headless"
 	} else {
-		volumes = append(volumes,
-			corev1.Volume{
-				Name:         "ldap-config",
-				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-			},
-			corev1.Volume{
-				Name:         "ldap-data",
-				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-			},
-		)
-	}
-
-	if sc.Spec.LDAP.TLS.Enabled {
-		volumes = append(volumes, corev1.Volume{
-			Name: "ldap-tls",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: sc.Spec.LDAP.TLS.SecretName,
-				},
-			},
-		})
-	}
-
-	// ── Init container ────────────────────────────────────────────────────────
-	initEnv := []corev1.EnvVar{
-		{Name: "LDAP_DOMAIN_DC", Value: sc.Spec.LDAP.Domain},
-		{
-			Name: "LDAP_ADMIN_PW",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-passwords"},
-					Key:                  "admin-password",
-				},
-			},
-		},
-		{
-			Name: "LDAP_ROOT_PW",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-config-password"},
-					Key:                  "root-password",
-				},
-			},
-		},
-		{Name: "LDAP_TLS_ENABLED", Value: strconv.FormatBool(sc.Spec.LDAP.TLS.Enabled)},
-		{Name: "FORCE_REBOOTSTRAP", Value: strconv.FormatBool(sc.Spec.LDAP.ForceRebootstrap)},
-		{Name: "CONFIG_DIR", Value: "/ldap-config"},
-		{Name: "DATA_DIR", Value: "/ldap-data"},
-		{Name: "ACCESSLOG_DIR", Value: "/ldap-accesslog"},
-		// Read-only replica flags.
-		{Name: "LDAP_READONLY_REPLICA", Value: "true"},
-		{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
-		{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(rwReplicas))},
-		{Name: "LDAP_CLUSTER_NAME", Value: sc.Name},
-		{Name: "LDAP_CLUSTER_HEADLESS_SVC", Value: sc.Name + "-headless"},
-		{Name: "LDAP_NAMESPACE", Value: sc.Namespace},
-		{
-			Name: "LDAP_REPLICATION_PASSWORD",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-passwords"},
-					Key:                  "replication-password",
-				},
-			},
-		},
-	}
-
-	if sc.Spec.LDAP.TLS.Enabled {
-		initEnv = append(initEnv,
-			corev1.EnvVar{Name: "LDAP_TLS_CACERT_PATH", Value: "/etc/openldap/tls/ca.crt"},
-			corev1.EnvVar{Name: "LDAP_TLS_CERT_PATH", Value: "/etc/openldap/tls/tls.crt"},
-			corev1.EnvVar{Name: "LDAP_TLS_KEY_PATH", Value: "/etc/openldap/tls/tls.key"},
-		)
-	}
-
-	initMounts := []corev1.VolumeMount{
-		{Name: "ldap-config", MountPath: "/ldap-config"},
-		{Name: "ldap-data", MountPath: "/ldap-data"},
-	}
-	// No accesslog mount for read-only replicas.
-	if sc.Spec.LDAP.TLS.Enabled {
-		initMounts = append(initMounts, corev1.VolumeMount{
-			Name:      "ldap-tls",
-			MountPath: "/etc/openldap/tls",
-			ReadOnly:  true,
-		})
-	}
-
-	initImage := sc.Spec.Images.Init.Repository
-	if sc.Spec.Images.Init.Tag != "" {
-		initImage += ":" + sc.Spec.Images.Init.Tag
-	}
-
-	initContainer := corev1.Container{
-		Name:            "init",
-		Image:           initImage,
-		ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
-		Env:             initEnv,
-		VolumeMounts:    initMounts,
-	}
-
-	// ── Main container ────────────────────────────────────────────────────────
-	mainMounts := []corev1.VolumeMount{
-		{Name: "ldap-config", MountPath: "/ldap-config"},
-		{Name: "ldap-data", MountPath: "/ldap-data"},
-		{Name: "ldap-run", MountPath: "/run/openldap"},
-	}
-	// No accesslog mount for read-only replicas.
-	if sc.Spec.LDAP.TLS.Enabled {
-		mainMounts = append(mainMounts, corev1.VolumeMount{
-			Name:      "ldap-tls",
-			MountPath: "/etc/openldap/tls",
-			ReadOnly:  true,
-		})
-	}
-
-	falseVal := false
-	trueVal := true
-	mainSecCtx := &corev1.SecurityContext{
-		AllowPrivilegeEscalation: &falseVal,
-		ReadOnlyRootFilesystem:   &trueVal,
-	}
-
-	mainImage := sc.Spec.Images.Slapd.Repository
-	if sc.Spec.Images.Slapd.Tag != "" {
-		mainImage += ":" + sc.Spec.Images.Slapd.Tag
-	}
-
-	mainContainer := corev1.Container{
-		Name:            "slapd",
-		Image:           mainImage,
-		ImagePullPolicy: sc.Spec.Images.Slapd.PullPolicy,
-		Args: []string{
-			"-h", "ldap://:1024/ ldaps://:1025/ ldapi://%2frun%2fopenldap%2fslapd.ldapi",
-			"-d", logLevel,
-			"-F", "/ldap-config",
-		},
-		Ports: []corev1.ContainerPort{
-			{Name: "ldap", ContainerPort: ldapContainerPort, Protocol: corev1.ProtocolTCP},
-			{Name: "ldaps", ContainerPort: ldapsContainerPort, Protocol: corev1.ProtocolTCP},
-		},
-		VolumeMounts:    mainMounts,
-		SecurityContext: mainSecCtx,
-		Resources:       sc.Spec.Resources,
-	}
-
-	spec := appsv1.StatefulSetSpec{
-		ServiceName: sc.Name + "-readonly-headless",
-		Replicas:    &replicas,
-		Selector: &metav1.LabelSelector{
-			MatchLabels: labels,
-		},
-		Template: corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{
-				Labels: labels,
-			},
-			Spec: corev1.PodSpec{
-				SecurityContext: podSecCtx,
-				InitContainers:  []corev1.Container{initContainer},
-				Containers:      []corev1.Container{mainContainer},
-				Volumes:         volumes,
-			},
-		},
-		VolumeClaimTemplates: volumeClaimTemplates,
-	}
-
-	return spec
-}
-
-// reconcileBootstrap seeds the initial LDAP directory entries via a live LDAP connection
-// to pod-0 once it is ready, then verifies that the root entry has replicated to all
-// other pods before marking bootstrap complete.
-//
-// Returns (skipped bool, err error): skipped=true means some pods don't have the root
-// entry yet (replication still converging) — the caller should keep requeueing.
-// BootstrapComplete is only set once ALL pods confirm the root entry.
-//
-// Using a live connection (instead of slapadd) ensures that the accesslog overlay
-// records all initial writes, which is required for delta-syncrepl to work correctly.
-func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, error) {
-	if sc.Status.BootstrapComplete {
-		return false, nil
-	}
-
-	log := logf.FromContext(ctx)
-
-	// Wait until pod-0 is ready before attempting to connect.
-	pod0 := &corev1.Pod{}
-	if err := r.Get(ctx, client.ObjectKey{Name: sc.Name + "-0", Namespace: sc.Namespace}, pod0); err != nil {
-		if errors.IsNotFound(err) {
-			log.Info("pod-0 not yet created; deferring bootstrap")
-			return false, nil
+		labels = selectorLabels(sc.Name)
+		replicas = sc.Spec.Replicas
+		if replicas == 0 {
+			replicas = 1
 		}
-		return false, err
-	}
-	if !isPodReady(pod0) {
-		log.Info("pod-0 not yet ready; deferring bootstrap")
-		return false, nil
-	}
-	if pod0.Status.PodIP == "" {
-		log.Info("pod-0 has no IP yet; deferring bootstrap")
-		return false, nil
+		serviceName = sc.Name + "-headless"
 	}
 
-	// Connect directly to pod-0's IP on the container LDAP port.
-	// Using the pod IP avoids the cluster-domain-discovery problem and is
-	// more direct than routing through the ClusterIP service.
-	addr := pod0.Status.PodIP + ":" + strconv.Itoa(int(ldapContainerPort))
-	conn, err := ldap.DialURL("ldap://"+addr,
-		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
-	)
-	if err != nil {
-		log.Info("LDAP dial to pod-0 failed; deferring bootstrap", "addr", addr, "err", err)
-		return false, nil
-	}
-	defer conn.Close()
-	conn.SetTimeout(ldapRequestTimeout)
-
-	// Bind as the rootdn.  In OpenLDAP the rootdn+rootpw defined in slapd.conf
-	// allow authentication even before the LDAP entry for that DN exists.
-	adminDN := "cn=admin," + sc.Spec.LDAP.Domain
-	adminPW, err := r.getAdminPassword(ctx, sc)
-	if err != nil {
-		return false, err
-	}
-	if err := conn.Bind(adminDN, adminPW); err != nil {
-		log.Info("LDAP bind failed; deferring bootstrap", "dn", adminDN, "err", err)
-		return false, nil
-	}
-
-	// Idempotency: if the root entry already exists on pod-0, skip seeding
-	// and proceed to the convergence check below.
-	exists, err := ldapEntryExists(conn, sc.Spec.LDAP.Domain)
-	if err != nil {
-		return false, fmt.Errorf("check root entry: %w", err)
-	}
-
-	if !exists {
-		// Extract the first DC label from the domain (e.g. "dc=example,dc=org" → "example").
-		parts := strings.SplitN(sc.Spec.LDAP.Domain, ",", 2)
-		dc := strings.TrimPrefix(parts[0], "dc=")
-
-		// Add root entry.
-		addRoot := ldap.NewAddRequest(sc.Spec.LDAP.Domain, nil)
-		addRoot.Attribute("objectClass", []string{"top", "dcObject", "organization"})
-		addRoot.Attribute("o", []string{dc})
-		addRoot.Attribute("dc", []string{dc})
-		if err := conn.Add(addRoot); err != nil {
-			return false, fmt.Errorf("add root entry %s: %w", sc.Spec.LDAP.Domain, err)
-		}
-
-		// Add admin entry.  Hash the plaintext password we already have.
-		adminHash, err := generateSSHAHash(adminPW)
-		if err != nil {
-			return false, fmt.Errorf("hash admin password: %w", err)
-		}
-		addAdmin := ldap.NewAddRequest(adminDN, nil)
-		addAdmin.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
-		addAdmin.Attribute("cn", []string{"admin"})
-		addAdmin.Attribute("description", []string{"LDAP administrator"})
-		addAdmin.Attribute("userPassword", []string{adminHash})
-		if err := conn.Add(addAdmin); err != nil {
-			return false, fmt.Errorf("add admin entry: %w", err)
-		}
-
-		// Add replication user when replication is enabled.
-		if sc.Spec.Replication.Enabled {
-			pwSecret := &corev1.Secret{}
-			if err := r.Get(ctx, client.ObjectKey{
-				Name:      sc.Name + "-passwords",
-				Namespace: sc.Namespace,
-			}, pwSecret); err != nil {
-				return false, fmt.Errorf("read passwords secret: %w", err)
-			}
-			replPW := string(pwSecret.Data["replication-password"])
-			replHash, err := generateSSHAHash(replPW)
-			if err != nil {
-				return false, fmt.Errorf("hash replication password: %w", err)
-			}
-			replDN := "cn=replication," + sc.Spec.LDAP.Domain
-			addRepl := ldap.NewAddRequest(replDN, nil)
-			addRepl.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
-			addRepl.Attribute("cn", []string{"replication"})
-			addRepl.Attribute("description", []string{"Syncrepl bind account"})
-			addRepl.Attribute("userPassword", []string{replHash})
-			if err := conn.Add(addRepl); err != nil {
-				return false, fmt.Errorf("add replication entry: %w", err)
-			}
-		}
-		log.Info("bootstrap entries seeded on pod-0", "baseDN", sc.Spec.LDAP.Domain)
-	}
-
-	// ── Replication convergence check ────────────────────────────────────────
-	// For single-replica clusters, pod-0 having the root entry is sufficient.
-	// For multi-replica clusters, verify the root entry has replicated to all
-	// other pods via headless DNS before marking bootstrap complete.  This
-	// eliminates the race where PhaseRunning is set before data is visible on
-	// all pods — downstream consumers (slapd-test Job, future CRDs) can rely
-	// on the Ready condition.
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-	if replicas > 1 {
-		headlessSvc := sc.Name + "-headless"
-		for i := int32(1); i < replicas; i++ {
-			host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local:%d",
-				sc.Name, i, headlessSvc, sc.Namespace, ldapContainerPort)
-			peerConn, err := ldap.DialURL("ldap://"+host,
-				ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
-			)
-			if err != nil {
-				log.Info("bootstrap convergence: peer not reachable yet (will retry)",
-					"ordinal", i, "host", host, "err", err)
-				return true, nil
-			}
-			peerConn.SetTimeout(ldapRequestTimeout)
-			if err := peerConn.Bind(adminDN, adminPW); err != nil {
-				peerConn.Close()
-				log.Info("bootstrap convergence: bind failed on peer (will retry)",
-					"ordinal", i, "host", host, "err", err)
-				return true, nil
-			}
-			peerExists, err := ldapEntryExists(peerConn, sc.Spec.LDAP.Domain)
-			peerConn.Close()
-			if err != nil {
-				log.Info("bootstrap convergence: search failed on peer (will retry)",
-					"ordinal", i, "host", host, "err", err)
-				return true, nil
-			}
-			if !peerExists {
-				log.Info("bootstrap convergence: root entry not yet replicated to peer (will retry)",
-					"ordinal", i, "host", host)
-				return true, nil
-			}
-		}
-	}
-
-	log.Info("bootstrap complete — root entry confirmed on all pods", "baseDN", sc.Spec.LDAP.Domain)
-	sc.Status.BootstrapComplete = true
-	return false, nil
-}
-
-// buildStatefulSetSpec constructs the StatefulSet spec.
-func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster) appsv1.StatefulSetSpec {
-	labels := selectorLabels(sc.Name)
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
-	replicationEnabled := sc.Spec.Replication.Enabled && replicas > 1
+	replicationEnabled := sc.Spec.Replication.Enabled && sc.Spec.Replicas > 1
 
 	// Pod security context.
 	podSecCtx := sc.Spec.SecurityContext
@@ -961,7 +504,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// ── Volumes (non-PVC) ─────────────────────────────────────────────────────
 	volumes := []corev1.Volume{
 		{
-			Name:         "ldap-run",
+			Name:         "run",
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 	}
@@ -977,10 +520,6 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		if dataSize == "" {
 			dataSize = "5Gi"
 		}
-		accesslogSize := sc.Spec.Persistence.Accesslog.Size
-		if accesslogSize == "" {
-			accesslogSize = "1Gi"
-		}
 		cfgAM := sc.Spec.Persistence.Config.AccessMode
 		if cfgAM == "" {
 			cfgAM = corev1.ReadWriteOnce
@@ -989,34 +528,38 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		if dataAM == "" {
 			dataAM = corev1.ReadWriteOnce
 		}
-		accesslogAM := sc.Spec.Persistence.Accesslog.AccessMode
-		if accesslogAM == "" {
-			accesslogAM = corev1.ReadWriteOnce
-		}
-
 		volumeClaimTemplates = []corev1.PersistentVolumeClaim{
-			pvcTemplate("ldap-config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
-			pvcTemplate("ldap-data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
+			pvcTemplate("config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
+			pvcTemplate("data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
 		}
-		if replicationEnabled {
+		// Accesslog PVC only for RW replicas with replication enabled.
+		if replicationEnabled && !readOnly {
+			accesslogSize := sc.Spec.Persistence.Accesslog.Size
+			if accesslogSize == "" {
+				accesslogSize = "1Gi"
+			}
+			accesslogAM := sc.Spec.Persistence.Accesslog.AccessMode
+			if accesslogAM == "" {
+				accesslogAM = corev1.ReadWriteOnce
+			}
 			volumeClaimTemplates = append(volumeClaimTemplates,
-				pvcTemplate("ldap-accesslog", accesslogSize, sc.Spec.Persistence.Accesslog.StorageClass, accesslogAM),
+				pvcTemplate("accesslog", accesslogSize, sc.Spec.Persistence.Accesslog.StorageClass, accesslogAM),
 			)
 		}
 	} else {
 		volumes = append(volumes,
 			corev1.Volume{
-				Name:         "ldap-config",
+				Name:         "config",
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			},
 			corev1.Volume{
-				Name:         "ldap-data",
+				Name:         "data",
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			},
 		)
-		if replicationEnabled {
+		if replicationEnabled && !readOnly {
 			volumes = append(volumes, corev1.Volume{
-				Name:         "ldap-accesslog",
+				Name:         "accesslog",
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			})
 		}
@@ -1024,7 +567,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 
 	if sc.Spec.LDAP.TLS.Enabled {
 		volumes = append(volumes, corev1.Volume{
-			Name: "ldap-tls",
+			Name: "tls",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: sc.Spec.LDAP.TLS.SecretName,
@@ -1033,47 +576,48 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		})
 	}
 
-	// External peer TLS CA cert volumes (Phase 3).
-	for _, peer := range sc.Spec.Replication.ExternalPeers {
-		if peer.TLSSecretName == "" {
-			continue
-		}
-		volumes = append(volumes, corev1.Volume{
-			Name: "peer-tls-" + peer.Name,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: peer.TLSSecretName,
+	// External peer TLS CA cert volumes.
+	if !readOnly {
+		for _, peer := range sc.Spec.Replication.ExternalPeers {
+			if peer.TLSSecretName == "" {
+				continue
+			}
+			volumes = append(volumes, corev1.Volume{
+				Name: "peer-tls-" + peer.Name,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: peer.TLSSecretName,
+					},
 				},
-			},
-		})
+			})
+		}
+	}
+
+	// ── Resolve config password secret name ──────────────────────────────────
+	configSecretName := sc.Name + "-config-password"
+	if sc.Spec.LDAP.CnConfigCredentials.SecretName != "" {
+		configSecretName = sc.Spec.LDAP.CnConfigCredentials.SecretName
 	}
 
 	// ── Init container ────────────────────────────────────────────────────────
+	// The init container sets up cn=config infrastructure only (modules, TLS).
+	// Data databases are created by the SlapdDatabase controller at runtime.
 	initEnv := []corev1.EnvVar{
-		{Name: "LDAP_DOMAIN_DC", Value: sc.Spec.LDAP.Domain},
-		{
-			Name: "LDAP_ADMIN_PW",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-passwords"},
-					Key:                  "admin-password",
-				},
-			},
-		},
 		{
 			Name: "LDAP_ROOT_PW",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-config-password"},
+					LocalObjectReference: corev1.LocalObjectReference{Name: configSecretName},
 					Key:                  "root-password",
 				},
 			},
 		},
 		{Name: "LDAP_TLS_ENABLED", Value: strconv.FormatBool(sc.Spec.LDAP.TLS.Enabled)},
 		{Name: "FORCE_REBOOTSTRAP", Value: strconv.FormatBool(sc.Spec.LDAP.ForceRebootstrap)},
-		{Name: "CONFIG_DIR", Value: "/ldap-config"},
-		{Name: "DATA_DIR", Value: "/ldap-data"},
-		{Name: "ACCESSLOG_DIR", Value: "/ldap-accesslog"},
+		{Name: "CONFIG_DIR", Value: "/config"},
+		{Name: "DATA_DIR", Value: "/data"},
+		{Name: "ACCESSLOG_DIR", Value: "/accesslog"},
+		{Name: "DATABASE_DIRS", Value: strings.Join(databaseNames, ",")},
 	}
 
 	if sc.Spec.LDAP.TLS.Enabled {
@@ -1084,38 +628,30 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		)
 	}
 
-	if replicationEnabled {
+	if readOnly {
+		initEnv = append(initEnv,
+			corev1.EnvVar{Name: "LDAP_READONLY_REPLICA", Value: "true"},
+			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
+		)
+	} else if replicationEnabled {
 		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
-			corev1.EnvVar{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(replicas))},
-			corev1.EnvVar{Name: "LDAP_CLUSTER_NAME", Value: sc.Name},
-			corev1.EnvVar{Name: "LDAP_CLUSTER_HEADLESS_SVC", Value: sc.Name + "-headless"},
-			corev1.EnvVar{Name: "LDAP_NAMESPACE", Value: sc.Namespace},
-			corev1.EnvVar{
-				Name: "LDAP_REPLICATION_PASSWORD",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: sc.Name + "-passwords"},
-						Key:                  "replication-password",
-					},
-				},
-			},
 		)
 	}
 
 	initMounts := []corev1.VolumeMount{
-		{Name: "ldap-config", MountPath: "/ldap-config"},
-		{Name: "ldap-data", MountPath: "/ldap-data"},
+		{Name: "config", MountPath: "/config"},
+		{Name: "data", MountPath: "/data"},
 	}
-	if replicationEnabled {
+	if replicationEnabled && !readOnly {
 		initMounts = append(initMounts, corev1.VolumeMount{
-			Name:      "ldap-accesslog",
-			MountPath: "/ldap-accesslog",
+			Name:      "accesslog",
+			MountPath: "/accesslog",
 		})
 	}
 	if sc.Spec.LDAP.TLS.Enabled {
 		initMounts = append(initMounts, corev1.VolumeMount{
-			Name:      "ldap-tls",
+			Name:      "tls",
 			MountPath: "/etc/openldap/tls",
 			ReadOnly:  true,
 		})
@@ -1136,34 +672,36 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 
 	// ── Main container ────────────────────────────────────────────────────────
 	mainMounts := []corev1.VolumeMount{
-		{Name: "ldap-config", MountPath: "/ldap-config"},
-		{Name: "ldap-data", MountPath: "/ldap-data"},
-		{Name: "ldap-run", MountPath: "/run/openldap"},
+		{Name: "config", MountPath: "/config"},
+		{Name: "data", MountPath: "/data"},
+		{Name: "run", MountPath: "/run/openldap"},
 	}
-	if replicationEnabled {
+	if replicationEnabled && !readOnly {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
-			Name:      "ldap-accesslog",
-			MountPath: "/ldap-accesslog",
+			Name:      "accesslog",
+			MountPath: "/accesslog",
 		})
 	}
 	if sc.Spec.LDAP.TLS.Enabled {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
-			Name:      "ldap-tls",
+			Name:      "tls",
 			MountPath: "/etc/openldap/tls",
 			ReadOnly:  true,
 		})
 	}
 
-	// External peer TLS CA cert volume mounts (Phase 3).
-	for _, peer := range sc.Spec.Replication.ExternalPeers {
-		if peer.TLSSecretName == "" {
-			continue
+	// External peer TLS CA cert volume mounts.
+	if !readOnly {
+		for _, peer := range sc.Spec.Replication.ExternalPeers {
+			if peer.TLSSecretName == "" {
+				continue
+			}
+			mainMounts = append(mainMounts, corev1.VolumeMount{
+				Name:      "peer-tls-" + peer.Name,
+				MountPath: "/etc/openldap/tls/peers/" + peer.Name,
+				ReadOnly:  true,
+			})
 		}
-		mainMounts = append(mainMounts, corev1.VolumeMount{
-			Name:      "peer-tls-" + peer.Name,
-			MountPath: "/etc/openldap/tls/peers/" + peer.Name,
-			ReadOnly:  true,
-		})
 	}
 
 	falseVal := false
@@ -1185,7 +723,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		Args: []string{
 			"-h", "ldap://:1024/ ldaps://:1025/ ldapi://%2frun%2fopenldap%2fslapd.ldapi",
 			"-d", logLevel,
-			"-F", "/ldap-config",
+			"-F", "/config",
 		},
 		Ports: []corev1.ContainerPort{
 			{Name: "ldap", ContainerPort: ldapContainerPort, Protocol: corev1.ProtocolTCP},
@@ -1197,7 +735,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	spec := appsv1.StatefulSetSpec{
-		ServiceName: sc.Name + "-headless",
+		ServiceName: serviceName,
 		Replicas:    &replicas,
 		Selector: &metav1.LabelSelector{
 			MatchLabels: labels,
@@ -1219,860 +757,66 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	return spec
 }
 
-// reconcileACLs applies spec.ldap.acls to every pod's data database cn=config entry.
-// Because cn=config is node-local (never replicated), each pod must be updated
-// individually via its headless-service DNS address.
-// Pods that cannot be reached (not yet ready) are logged and skipped; the next
-// reconcile loop will retry.  A non-nil error is returned only for hard failures
-// such as a missing credential secret.
-func (r *SlapdClusterReconciler) reconcileACLs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, error) {
-	if len(sc.Spec.LDAP.ACLs) == 0 {
-		return false, nil
-	}
-
-	rootPW, err := r.getConfigPassword(ctx, sc)
-	if err != nil {
-		return false, err
-	}
-
-	// Build effective ACL list. When replication is enabled, prepend a rule
-	// granting the replication bind DN read access to all attributes. Without
-	// this, user-specified ACLs that deny attribute reads (e.g. userPassword)
-	// would prevent the syncrepl consumer from receiving those attributes,
-	// causing silent data loss on replicas.
-	acls := sc.Spec.LDAP.ACLs
-	replicationEnabled := sc.Spec.Replication.Enabled && sc.Spec.Replicas > 1
-	if replicationEnabled || len(sc.Spec.Replication.ExternalPeers) > 0 {
-		replACL := fmt.Sprintf(
-			`to * by dn.exact="cn=replication,%s" read by * break`,
-			sc.Spec.LDAP.Domain)
-		acls = append([]string{replACL}, acls...)
-	}
-
-	log := logf.FromContext(ctx)
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-	headlessSvc := sc.Name + "-headless"
-	skipped := false
-
-	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
-			sc.Name, i, headlessSvc, sc.Namespace)
-		if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, acls); err != nil {
-			log.Info("ACL reconcile skipped for pod (will retry on next reconcile)",
-				"ordinal", i, "host", host, "err", err)
-			skipped = true
-		}
-	}
-
-	// Apply ACLs to read-only pods too (cn=config is node-local).
-	if sc.Spec.ReadReplicas > 0 {
-		roHeadless := sc.Name + "-readonly-headless"
-		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
-			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.cluster.local",
-				sc.Name, i, roHeadless, sc.Namespace)
-			if err := r.applyACLsToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, acls); err != nil {
-				log.Info("ACL reconcile skipped for read-only pod (will retry on next reconcile)",
-					"ordinal", i, "host", host, "err", err)
-				skipped = true
-			}
-		}
-	}
-
-	return skipped, nil
-}
-
-// applyACLsToPod applies the desired ACL rules to one slapd pod's cn=config data DB entry.
-// It is a no-op when the pod's current olcAccess already matches desired.
-func (r *SlapdClusterReconciler) applyACLsToPod(
-	ctx context.Context,
-	host, rootPW, domain string,
-	desired []string,
-) error {
-	log := logf.FromContext(ctx)
-
-	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
-	conn, err := ldap.DialURL("ldap://"+addr,
-		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
-	)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
-	}
-	defer conn.Close()
-	conn.SetTimeout(ldapRequestTimeout)
-
-	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
-		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
-	}
-
-	// Locate the data database entry in cn=config.
-	dataDN, err := findDataDBDN(conn, domain)
-	if err != nil {
-		return err
-	}
-
-	// Read current olcAccess values.
-	sr, err := conn.Search(ldap.NewSearchRequest(
-		dataDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-		1, 0, false, "(objectClass=*)", []string{"olcAccess"}, nil,
-	))
-	if err != nil {
-		return fmt.Errorf("read olcAccess on %s at %s: %w", dataDN, host, err)
-	}
-	if len(sr.Entries) == 0 {
-		return fmt.Errorf("no entry at %s on %s", dataDN, host)
-	}
-
-	current := sr.Entries[0].GetEqualFoldAttributeValues("olcAccess")
-	if aclsMatch(current, desired) {
-		log.V(1).Info("ACLs already up-to-date", "host", host)
-		return nil
-	}
-
-	log.Info("replacing ACL rules", "host", host, "rules", len(desired))
-	modReq := ldap.NewModifyRequest(dataDN, nil)
-	modReq.Replace("olcAccess", desired)
-	if err := conn.Modify(modReq); err != nil {
-		return fmt.Errorf("replace olcAccess on %s at %s: %w", dataDN, host, err)
-	}
-	return nil
-}
-
-// findDataDBDN searches cn=config one level deep for the MDB database entry whose
-// olcSuffix matches the given domain and returns its DN.
-func findDataDBDN(conn *ldap.Conn, domain string) (string, error) {
-	sr, err := conn.Search(ldap.NewSearchRequest(
-		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		0, 0, false,
-		fmt.Sprintf("(olcSuffix=%s)", domain),
-		[]string{"dn"}, nil,
-	))
-	if err != nil {
-		return "", fmt.Errorf("search cn=config for olcSuffix=%s: %w", domain, err)
-	}
-	if len(sr.Entries) == 0 {
-		return "", fmt.Errorf("no database entry with olcSuffix=%s in cn=config", domain)
-	}
-	return sr.Entries[0].DN, nil
-}
-
-// aclsMatch returns true when the stored olcAccess values (which carry {N} index
-// prefixes, e.g. "{0}to * by * read") match the desired rules (without prefixes).
-func aclsMatch(current, desired []string) bool {
-	if len(current) != len(desired) {
-		return false
-	}
-	for i, c := range current {
-		bare := c
-		if len(c) > 0 && c[0] == '{' {
-			if idx := strings.Index(c, "}"); idx >= 0 {
-				bare = c[idx+1:]
-			}
-		}
-		if bare != desired[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// ── Schema reconciliation ─────────────────────────────────────────────────────
-
-// schemaEntry is a parsed representation of a JSON-encoded schema to be added
-// to cn=schema,cn=config.
-type schemaEntry struct {
-	DN          string
-	ObjectClass []string
-	Attributes  map[string][]string
-}
-
-// parseSchemaJSON parses a JSON string into a schemaEntry.
-// The JSON format matches slapd-test's customSchemaJson: objectClass may be a
-// string or []string, and attribute values may be a string or []string.
-func parseSchemaJSON(raw string) (schemaEntry, error) {
-	var m map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		return schemaEntry{}, fmt.Errorf("unmarshal schema JSON: %w", err)
-	}
-
-	dn, _ := m["dn"].(string)
-	if dn == "" {
-		return schemaEntry{}, fmt.Errorf("schema JSON missing required 'dn' field")
-	}
-
-	var objectClass []string
-	switch v := m["objectClass"].(type) {
-	case string:
-		objectClass = []string{v}
-	case []interface{}:
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				objectClass = append(objectClass, s)
-			}
-		}
-	}
-
-	attrs := make(map[string][]string)
-	if attrMap, ok := m["attributes"].(map[string]interface{}); ok {
-		for k, v := range attrMap {
-			switch val := v.(type) {
-			case string:
-				attrs[k] = []string{val}
-			case []interface{}:
-				for _, item := range val {
-					if s, ok := item.(string); ok {
-						attrs[k] = append(attrs[k], s)
-					}
-				}
-			}
-		}
-	}
-
-	return schemaEntry{
-		DN:          dn,
-		ObjectClass: objectClass,
-		Attributes:  attrs,
-	}, nil
-}
-
-// reconcileSchemas applies spec.ldap.schemas to every pod's cn=schema,cn=config.
-// Like reconcileACLs, each pod is contacted individually via headless DNS because
-// cn=config is node-local. Missing schemas are added; existing ones are skipped.
-// Unreachable pods are logged and retried on the next reconcile.
-func (r *SlapdClusterReconciler) reconcileSchemas(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, error) {
-	if len(sc.Spec.LDAP.Schemas) == 0 {
-		return false, nil
-	}
-
-	// Parse all schema entries up front so we fail fast on bad JSON.
-	schemas := make([]schemaEntry, 0, len(sc.Spec.LDAP.Schemas))
-	for i, raw := range sc.Spec.LDAP.Schemas {
-		entry, err := parseSchemaJSON(raw)
-		if err != nil {
-			return false, fmt.Errorf("spec.ldap.schemas[%d]: %w", i, err)
-		}
-		schemas = append(schemas, entry)
-	}
-
-	rootPW, err := r.getConfigPassword(ctx, sc)
-	if err != nil {
-		return false, err
-	}
-
-	log := logf.FromContext(ctx)
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-	headlessSvc := sc.Name + "-headless"
-	skipped := false
-
-	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
-			sc.Name, i, headlessSvc, sc.Namespace)
-		if err := r.applySchemaToPod(ctx, host, rootPW, schemas); err != nil {
-			log.Info("Schema reconcile skipped for pod (will retry on next reconcile)",
-				"ordinal", i, "host", host, "err", err)
-			skipped = true
-		}
-	}
-
-	// Apply schemas to read-only pods too (cn=config is node-local).
-	if sc.Spec.ReadReplicas > 0 {
-		roHeadless := sc.Name + "-readonly-headless"
-		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
-			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.cluster.local",
-				sc.Name, i, roHeadless, sc.Namespace)
-			if err := r.applySchemaToPod(ctx, host, rootPW, schemas); err != nil {
-				log.Info("Schema reconcile skipped for read-only pod (will retry on next reconcile)",
-					"ordinal", i, "host", host, "err", err)
-				skipped = true
-			}
-		}
-	}
-
-	return skipped, nil
-}
-
-// applySchemaToPod adds schema entries to one slapd pod's cn=schema,cn=config.
-//
-// Existence check: OpenLDAP auto-numbers schema entries (cn=ox becomes cn={4}ox).
-// The {N} prefix is NOT stripped during filter evaluation in OpenLDAP 2.6.x, so
-// a search for (cn=ox) will never find cn={4}ox. Instead, we list all schema
-// entries once and strip the {N} prefix ourselves to build a set of existing
-// schema names. Only schemas not in this set are ADDed.
-//
-// This existence check is critical — not just an optimisation. A duplicate ADD
-// of an already-existing schema while syncrepl threads are active deadlocks slapd
-// (all threads block on internal mutexes, the process becomes permanently
-// unresponsive). The ADD error handlers below are defence in depth for edge cases
-// but must not be relied upon as the primary idempotency mechanism, because slapd
-// may deadlock before returning an error.
-func (r *SlapdClusterReconciler) applySchemaToPod(
-	ctx context.Context,
-	host, rootPW string,
-	schemas []schemaEntry,
-) error {
-	log := logf.FromContext(ctx)
-
-	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
-	conn, err := ldap.DialURL("ldap://"+addr,
-		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
-	)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
-	}
-	defer conn.Close()
-	conn.SetTimeout(ldapRequestTimeout)
-
-	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
-		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
-	}
-
-	// Build a set of existing schema cn values by listing all entries under
-	// cn=schema,cn=config and stripping the {N} ordering prefix.
-	existing, err := listSchemaCNs(conn)
-	if err != nil {
-		return fmt.Errorf("list existing schemas at %s: %w", host, err)
-	}
-
-	for _, s := range schemas {
-		cn := schemaCNFromDN(s.DN)
-		if existing[cn] {
-			log.V(1).Info("Schema already exists, skipping", "host", host, "dn", s.DN)
-			continue
-		}
-
-		log.Info("Adding schema", "host", host, "dn", s.DN)
-		addReq := ldap.NewAddRequest(s.DN, nil)
-		if len(s.ObjectClass) > 0 {
-			addReq.Attribute("objectClass", s.ObjectClass)
-		}
-		for attr, vals := range s.Attributes {
-			addReq.Attribute(attr, vals)
-		}
-		if err := conn.Add(addReq); err != nil {
-			// Defence in depth: handle "already exists" errors in case the
-			// existence check has a gap (e.g. concurrent schema addition).
-			// Note: slapd may deadlock on duplicate ADDs with active syncrepl
-			// threads before returning these errors — the check above is the
-			// primary guard; the timeout on the connection is the safety net.
-			if ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-				log.V(1).Info("Schema already exists (ADD returned 68), skipping", "host", host, "dn", s.DN)
-				continue
-			}
-			if ldap.IsErrorWithCode(err, ldap.LDAPResultOther) && strings.Contains(err.Error(), "Duplicate") {
-				log.V(1).Info("Schema attributes already registered, skipping", "host", host, "dn", s.DN)
-				continue
-			}
-			return fmt.Errorf("add schema %s at %s: %w", s.DN, host, err)
-		}
-	}
-
-	return nil
-}
-
-// schemaCNFromDN extracts the cn value from a schema DN.
-// e.g. "cn=ox,cn=schema,cn=config" → "ox".
-func schemaCNFromDN(dn string) string {
-	parts := strings.SplitN(dn, ",", 2)
-	if len(parts) == 0 {
-		return ""
-	}
-	kv := strings.SplitN(parts[0], "=", 2)
-	if len(kv) != 2 {
-		return ""
-	}
-	return kv[1]
-}
-
-// stripOrderingPrefix removes the {N} ordering prefix from an OpenLDAP cn value.
-// e.g. "{4}ox" → "ox", "{0}core" → "core", "plain" → "plain".
-func stripOrderingPrefix(cn string) string {
-	if len(cn) > 0 && cn[0] == '{' {
-		if idx := strings.IndexByte(cn, '}'); idx >= 0 {
-			return cn[idx+1:]
-		}
-	}
-	return cn
-}
-
-// listSchemaCNs returns a set of schema cn values (with {N} prefix stripped)
-// that exist under cn=schema,cn=config.
-func listSchemaCNs(conn *ldap.Conn) (map[string]bool, error) {
-	sr, err := conn.Search(ldap.NewSearchRequest(
-		"cn=schema,cn=config",
-		ldap.ScopeSingleLevel,
-		ldap.NeverDerefAliases,
-		0, 0, false,
-		"(objectClass=*)",
-		[]string{"cn"},
-		nil,
-	))
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[string]bool, len(sr.Entries))
-	for _, entry := range sr.Entries {
-		for _, cn := range entry.GetAttributeValues("cn") {
-			result[stripOrderingPrefix(cn)] = true
-		}
-	}
-	return result, nil
-}
-
-// ── Replication reconciliation (Phase 3, ADR-003) ─────────────────────────────
-
-// parsedExternalPeer holds a resolved external peer with its bind password.
-type parsedExternalPeer struct {
-	Name     string
-	URI      string
-	BindDN   string
-	Password string
-	// TLS CA cert path inside the container (empty if no TLS secret).
-	TLSCACertPath string
-}
-
-// reconcileReplication applies syncrepl + mirrormode to each RW pod's cn=config
-// data DB entry. The operator is the sole owner of olcSyncRepl and olcMirrorMode
-// (see ADR-003). RO replicas also get syncrepl stanzas pointing to RW masters.
-func (r *SlapdClusterReconciler) reconcileReplication(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, error) {
-	log := logf.FromContext(ctx)
-
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-
-	hasExternalPeers := len(sc.Spec.Replication.ExternalPeers) > 0
-	replicationEnabled := sc.Spec.Replication.Enabled && replicas > 1
-
-	// Nothing to do if replication is disabled and there are no external peers.
-	if !replicationEnabled && !hasExternalPeers {
-		// Clear external peer statuses if previously set.
-		sc.Status.ExternalPeerStatuses = nil
-		return false, nil
-	}
-
-	rootPW, err := r.getConfigPassword(ctx, sc)
-	if err != nil {
-		return false, err
-	}
-
-	// Read in-cluster replication password.
-	var replPassword string
-	if replicationEnabled {
-		pwSecret := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKey{
-			Name:      sc.Name + "-passwords",
-			Namespace: sc.Namespace,
-		}, pwSecret); err != nil {
-			return false, fmt.Errorf("read passwords secret for replication: %w", err)
-		}
-		replPassword = string(pwSecret.Data["replication-password"])
-	}
-
-	// Resolve external peers: read bind passwords from their secrets.
-	var externalPeers []parsedExternalPeer
-	for _, ep := range sc.Spec.Replication.ExternalPeers {
-		parsed := parsedExternalPeer{
-			Name:   ep.Name,
-			URI:    ep.URI,
-			BindDN: ep.BindDN,
-		}
-		if ep.TLSSecretName != "" {
-			parsed.TLSCACertPath = "/etc/openldap/tls/peers/" + ep.Name + "/ca.crt"
-		}
-		if ep.BindPasswordSecretName != "" {
-			secret := &corev1.Secret{}
-			if err := r.Get(ctx, client.ObjectKey{
-				Name:      ep.BindPasswordSecretName,
-				Namespace: sc.Namespace,
-			}, secret); err != nil {
-				log.Info("skipping external peer: cannot read bind password secret",
-					"peer", ep.Name, "secret", ep.BindPasswordSecretName, "err", err)
-				continue
-			}
-			parsed.Password = string(secret.Data["password"])
-			if parsed.Password == "" {
-				// Try replication-password key as fallback.
-				parsed.Password = string(secret.Data["replication-password"])
-			}
-		}
-		externalPeers = append(externalPeers, parsed)
-	}
-
-	headlessSvc := sc.Name + "-headless"
-	tlsEnabled := sc.Spec.LDAP.TLS.Enabled
-	tlsCACertPath := "/etc/openldap/tls/ca.crt"
-	skipped := false
-
-	// Apply syncrepl to RW pods.
-	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
-			sc.Name, i, headlessSvc, sc.Namespace)
-
-		desired := buildDesiredSyncRepl(
-			sc.Name, headlessSvc, sc.Namespace, sc.Spec.LDAP.Domain,
-			replicas, i, replPassword,
-			tlsEnabled, tlsCACertPath,
-			externalPeers,
-		)
-		desiredMirrorMode := "TRUE"
-
-		if err := r.applySyncreplToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, desired, desiredMirrorMode); err != nil {
-			log.Info("Replication reconcile skipped for pod (will retry on next reconcile)",
-				"ordinal", i, "host", host, "err", err)
-			skipped = true
-		}
-	}
-
-	// Apply syncrepl to RO pods (in-cluster RW masters only, no external peers, no mirrormode).
-	if sc.Spec.ReadReplicas > 0 {
-		roHeadless := sc.Name + "-readonly-headless"
-		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
-			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.cluster.local",
-				sc.Name, i, roHeadless, sc.Namespace)
-
-			// RO replicas get stanzas for ALL RW masters (no self-skip).
-			desired := buildDesiredSyncReplRO(
-				sc.Name, headlessSvc, sc.Namespace, sc.Spec.LDAP.Domain,
-				replicas, replPassword,
-				tlsEnabled, tlsCACertPath,
-			)
-
-			if err := r.applySyncreplToPod(ctx, host, rootPW, sc.Spec.LDAP.Domain, desired, ""); err != nil {
-				log.Info("Replication reconcile skipped for read-only pod (will retry on next reconcile)",
-					"ordinal", i, "host", host, "err", err)
-				skipped = true
-			}
-		}
-	}
-
-	// External peer status reporting.
-	sc.Status.ExternalPeerStatuses = nil
-	for _, ep := range sc.Spec.Replication.ExternalPeers {
-		status := ldapv1alpha1.ExternalPeerStatus{
-			Name: ep.Name,
-		}
-		if err := testExternalPeerConnectivity(ep.URI); err != nil {
-			status.Connected = false
-			status.LastError = err.Error()
-		} else {
-			status.Connected = true
-		}
-		sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
-	}
-
-	return skipped, nil
-}
-
-// applySyncreplToPod applies the desired olcSyncRepl and olcMultiProvider values to one pod.
-// mirrorMode should be "TRUE" for RW pods; empty string means do not set olcMultiProvider.
-// Note: olcMultiProvider is the OpenLDAP 2.6+ name for the former olcMirrorMode attribute.
-func (r *SlapdClusterReconciler) applySyncreplToPod(
-	ctx context.Context,
-	host, rootPW, domain string,
-	desired []string,
-	mirrorMode string,
-) error {
-	log := logf.FromContext(ctx)
-
-	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
-	conn, err := ldap.DialURL("ldap://"+addr,
-		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
-	)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
-	}
-	defer conn.Close()
-	conn.SetTimeout(ldapRequestTimeout)
-
-	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
-		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
-	}
-
-	dataDN, err := findDataDBDN(conn, domain)
-	if err != nil {
-		return err
-	}
-
-	// Read current olcSyncRepl and olcMultiProvider (formerly olcMirrorMode in OpenLDAP <2.6).
-	sr, err := conn.Search(ldap.NewSearchRequest(
-		dataDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-		1, 0, false, "(objectClass=*)", []string{"olcSyncRepl", "olcMultiProvider"}, nil,
-	))
-	if err != nil {
-		return fmt.Errorf("read olcSyncRepl on %s at %s: %w", dataDN, host, err)
-	}
-	if len(sr.Entries) == 0 {
-		return fmt.Errorf("no entry at %s on %s", dataDN, host)
-	}
-
-	currentSyncRepl := sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
-	currentMirrorMode := ""
-	if vals := sr.Entries[0].GetEqualFoldAttributeValues("olcMultiProvider"); len(vals) > 0 {
-		currentMirrorMode = vals[0]
-	}
-
-	syncreplChanged := !syncreplMatch(currentSyncRepl, desired)
-	mirrorModeChanged := mirrorMode != "" && !strings.EqualFold(currentMirrorMode, mirrorMode)
-
-	if !syncreplChanged && !mirrorModeChanged {
-		log.V(1).Info("syncrepl already up-to-date", "host", host)
-		return nil
-	}
-
-	log.Info("replacing syncrepl stanzas", "host", host, "stanzas", len(desired),
-		"syncreplChanged", syncreplChanged, "mirrorModeChanged", mirrorModeChanged)
-
-	modReq := ldap.NewModifyRequest(dataDN, nil)
-	if syncreplChanged {
-		modReq.Replace("olcSyncRepl", desired)
-	}
-	if mirrorModeChanged {
-		modReq.Replace("olcMultiProvider", []string{mirrorMode})
-	}
-	if err := conn.Modify(modReq); err != nil {
-		return fmt.Errorf("replace olcSyncRepl/olcMultiProvider on %s at %s: %w", dataDN, host, err)
-	}
-	return nil
-}
-
-// buildDesiredSyncRepl computes the desired olcSyncRepl stanzas for one RW pod.
-// In-cluster peers get RIDs 1..N (skip self), external peers get RIDs 101..100+M.
-func buildDesiredSyncRepl(
-	clusterName, headlessSvc, namespace, domain string,
-	replicas, ordinal int32,
-	replPassword string,
-	tlsEnabled bool, tlsCACertPath string,
-	externalPeers []parsedExternalPeer,
-) []string {
-	var stanzas []string
-
-	// Peer URL scheme and port depend on TLS.
-	peerScheme := "ldap"
-	peerPort := int32(1024)
-	syncreplTLSOpt := ""
-	if tlsEnabled {
-		peerScheme = "ldaps"
-		peerPort = 1025
-		syncreplTLSOpt = fmt.Sprintf(" tls_cacert=%s", tlsCACertPath)
-	}
-
-	// In-cluster stanzas: one per RW peer, skip self.
-	for i := int32(0); i < replicas; i++ {
-		if i == ordinal {
-			continue
-		}
-		rid := fmt.Sprintf("%03d", i+1)
-		peerHost := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", clusterName, i, headlessSvc, namespace)
-		providerURI := fmt.Sprintf("%s://%s:%d", peerScheme, peerHost, peerPort)
-
-		stanza := fmt.Sprintf("rid=%s provider=%s"+
-			" type=refreshAndPersist"+
-			" searchbase=\"%s\""+
-			" scope=sub"+
-			" schemachecking=off"+
-			" bindmethod=simple"+
-			" binddn=\"cn=replication,%s\""+
-			" credentials=%s"+
-			" logbase=\"cn=accesslog\""+
-			" logfilter=\"(&(objectClass=auditWriteObject)(reqResult=0))\""+
-			" syncdata=accesslog"+
-			"%s"+
-			" retry=\"5 +\"",
-			rid, providerURI, domain, domain, replPassword, syncreplTLSOpt)
-		stanzas = append(stanzas, stanza)
-	}
-
-	// External peer stanzas: RID 101..100+M.
-	for idx, ep := range externalPeers {
-		rid := fmt.Sprintf("%03d", 101+idx)
-		tlsOpts := ""
-		if ep.TLSCACertPath != "" {
-			tlsOpts = fmt.Sprintf(" tls_cacert=%s", ep.TLSCACertPath)
-			if tlsEnabled {
-				tlsOpts += " tls_cert=/etc/openldap/tls/tls.crt tls_key=/etc/openldap/tls/tls.key"
-			}
-		}
-
-		stanza := fmt.Sprintf("rid=%s provider=%s"+
-			" type=refreshAndPersist"+
-			" searchbase=\"%s\""+
-			" scope=sub"+
-			" schemachecking=off"+
-			" bindmethod=simple"+
-			" binddn=\"%s\""+
-			" credentials=%s"+
-			" logbase=\"cn=accesslog\""+
-			" logfilter=\"(&(objectClass=auditWriteObject)(reqResult=0))\""+
-			" syncdata=accesslog"+
-			"%s"+
-			" retry=\"5 +\"",
-			rid, ep.URI, domain, ep.BindDN, ep.Password, tlsOpts)
-		stanzas = append(stanzas, stanza)
-	}
-
-	return stanzas
-}
-
-// buildDesiredSyncReplRO computes syncrepl stanzas for a read-only replica.
-// RO replicas get stanzas for ALL RW masters (no self-skip, no external peers, no mirrormode).
-func buildDesiredSyncReplRO(
-	clusterName, headlessSvc, namespace, domain string,
-	rwReplicas int32,
-	replPassword string,
-	tlsEnabled bool, tlsCACertPath string,
-) []string {
-	var stanzas []string
-
-	peerScheme := "ldap"
-	peerPort := int32(1024)
-	syncreplTLSOpt := ""
-	if tlsEnabled {
-		peerScheme = "ldaps"
-		peerPort = 1025
-		syncreplTLSOpt = fmt.Sprintf(" tls_cacert=%s", tlsCACertPath)
-	}
-
-	for i := int32(0); i < rwReplicas; i++ {
-		rid := fmt.Sprintf("%03d", i+1)
-		peerHost := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", clusterName, i, headlessSvc, namespace)
-		providerURI := fmt.Sprintf("%s://%s:%d", peerScheme, peerHost, peerPort)
-
-		stanza := fmt.Sprintf("rid=%s provider=%s"+
-			" type=refreshAndPersist"+
-			" searchbase=\"%s\""+
-			" scope=sub"+
-			" schemachecking=off"+
-			" bindmethod=simple"+
-			" binddn=\"cn=replication,%s\""+
-			" credentials=%s"+
-			" logbase=\"cn=accesslog\""+
-			" logfilter=\"(&(objectClass=auditWriteObject)(reqResult=0))\""+
-			" syncdata=accesslog"+
-			"%s"+
-			" retry=\"5 +\"",
-			rid, providerURI, domain, domain, replPassword, syncreplTLSOpt)
-		stanzas = append(stanzas, stanza)
-	}
-
-	return stanzas
-}
-
-// syncreplMatch compares current olcSyncRepl values (with {N} prefixes) against desired.
-// Comparison is RID-based and order-insensitive.
-func syncreplMatch(current, desired []string) bool {
-	if len(current) != len(desired) {
-		return false
-	}
-	// Build maps keyed by RID.
-	currentByRID := parseSyncreplByRID(current)
-	desiredByRID := parseSyncreplByRID(desired)
-	if len(currentByRID) != len(desiredByRID) {
-		return false
-	}
-	for rid, dStanza := range desiredByRID {
-		cStanza, ok := currentByRID[rid]
-		if !ok {
-			return false
-		}
-		if normalizeStanza(cStanza) != normalizeStanza(dStanza) {
-			return false
-		}
-	}
-	return true
-}
-
-// parseSyncreplByRID extracts RID → stanza body (without {N} prefix) from olcSyncRepl values.
-func parseSyncreplByRID(stanzas []string) map[string]string {
-	result := make(map[string]string, len(stanzas))
-	for _, s := range stanzas {
-		bare := s
-		// Strip {N} prefix if present.
-		if len(s) > 0 && s[0] == '{' {
-			if idx := strings.Index(s, "}"); idx >= 0 {
-				bare = s[idx+1:]
-			}
-		}
-		// Extract RID from "rid=NNN ..."
-		bare = strings.TrimSpace(bare)
-		if strings.HasPrefix(bare, "rid=") {
-			parts := strings.SplitN(bare, " ", 2)
-			rid := strings.TrimPrefix(parts[0], "rid=")
-			result[rid] = bare
-		}
-	}
-	return result
-}
-
-// normalizeStanza normalizes whitespace in a syncrepl stanza for comparison.
-func normalizeStanza(s string) string {
-	fields := strings.Fields(s)
-	sort.Strings(fields)
-	return strings.Join(fields, " ")
-}
-
-// testExternalPeerConnectivity attempts a TLS/TCP connection to the external peer URI
-// to check basic network reachability. Returns nil on success.
-func testExternalPeerConnectivity(uri string) error {
-	// Parse URI: ldaps://host:port or ldap://host:port
-	addr := uri
-	useTLS := false
-	if strings.HasPrefix(uri, "ldaps://") {
-		addr = strings.TrimPrefix(uri, "ldaps://")
-		useTLS = true
-	} else if strings.HasPrefix(uri, "ldap://") {
-		addr = strings.TrimPrefix(uri, "ldap://")
-	}
-	// Strip trailing slash if any.
-	addr = strings.TrimRight(addr, "/")
-
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	if useTLS {
-		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // connectivity check only
-		})
-		if err != nil {
-			return err
-		}
-		conn.Close()
-		return nil
-	}
-	conn, err := dialer.Dial("tcp", addr)
-	if err != nil {
-		return err
-	}
-	conn.Close()
-	return nil
-}
-
-// getConfigPassword reads the plaintext root (cn=config admin) password from
-// <name>-config-password.
+// getConfigPassword reads the plaintext root (cn=config admin) password.
 func (r *SlapdClusterReconciler) getConfigPassword(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
+	secretName := sc.Name + "-config-password"
+	if sc.Spec.LDAP.CnConfigCredentials.SecretName != "" {
+		secretName = sc.Spec.LDAP.CnConfigCredentials.SecretName
+	}
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{
-		Name: sc.Name + "-config-password", Namespace: sc.Namespace,
+		Name: secretName, Namespace: sc.Namespace,
 	}, secret); err != nil {
-		return "", fmt.Errorf("read %s-config-password: %w", sc.Name, err)
+		return "", fmt.Errorf("read config password secret %s: %w", secretName, err)
 	}
 	pw := string(secret.Data["root-password"])
 	if pw == "" {
-		return "", fmt.Errorf("secret %s-config-password is missing root-password key", sc.Name)
+		return "", fmt.Errorf("secret %s is missing root-password key", secretName)
 	}
 	return pw, nil
 }
 
+// listDatabaseNames returns the names of all SlapdDatabase CRs that reference
+// this cluster. These names become data subdirectories under /data/.
+func (r *SlapdClusterReconciler) listDatabaseNames(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) ([]string, error) {
+	var dbList ldapv1alpha1.SlapdDatabaseList
+	if err := r.List(ctx, &dbList, client.InNamespace(sc.Namespace)); err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, db := range dbList.Items {
+		if db.Spec.ClusterRef == sc.Name {
+			names = append(names, db.Name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
+// Watches SlapdDatabase CRs to trigger reconciliation when databases are
+// added or removed — the StatefulSet's init container env (DATABASE_DIRS)
+// must be updated so the init container creates per-database data directories.
 func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ldapv1alpha1.SlapdCluster{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
+		Watches(&ldapv1alpha1.SlapdDatabase{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrl.Request {
+				db, ok := obj.(*ldapv1alpha1.SlapdDatabase)
+				if !ok {
+					return nil
+				}
+				return []ctrl.Request{{
+					NamespacedName: client.ObjectKey{
+						Name:      db.Spec.ClusterRef,
+						Namespace: db.Namespace,
+					},
+				}}
+			},
+		)).
 		Named("slapdcluster").
 		Complete(r)
 }
@@ -2135,33 +879,6 @@ func generatePassword(n int) (string, error) {
 	return base64.URLEncoding.EncodeToString(b), nil
 }
 
-// generateSSHAHash returns an OpenLDAP-compatible {SSHA} password hash.
-func generateSSHAHash(password string) (string, error) {
-	salt := make([]byte, 8)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("generate salt: %w", err)
-	}
-	h := sha1.New()
-	h.Write([]byte(password))
-	h.Write(salt)
-	digest := h.Sum(nil)
-	combined := append(digest, salt...)
-	return "{SSHA}" + base64.StdEncoding.EncodeToString(combined), nil
-}
-
-// getAdminPassword reads the plaintext admin password from <name>-passwords.
-func (r *SlapdClusterReconciler) getAdminPassword(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: sc.Name + "-passwords", Namespace: sc.Namespace}, secret); err != nil {
-		return "", fmt.Errorf("read passwords secret %s-passwords: %w", sc.Name, err)
-	}
-	pw := string(secret.Data["admin-password"])
-	if pw == "" {
-		return "", fmt.Errorf("secret %s-passwords is missing admin-password key", sc.Name)
-	}
-	return pw, nil
-}
-
 // isPodReady returns true when all containers in the pod report Ready.
 func isPodReady(pod *corev1.Pod) bool {
 	for _, cond := range pod.Status.Conditions {
@@ -2172,18 +889,34 @@ func isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// ldapEntryExists returns true when the given DN exists in the directory.
-func ldapEntryExists(conn *ldap.Conn, dn string) (bool, error) {
-	req := ldap.NewSearchRequest(
-		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-		1, 0, false, "(objectClass=*)", []string{"dn"}, nil,
-	)
-	result, err := conn.Search(req)
-	if err != nil {
-		if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
-			return false, nil
-		}
-		return false, err
+// testExternalPeerConnectivity attempts a TLS/TCP connection to the external peer URI
+// to check basic network reachability. Returns nil on success.
+func testExternalPeerConnectivity(uri string) error {
+	addr := uri
+	useTLS := false
+	if strings.HasPrefix(uri, "ldaps://") {
+		addr = strings.TrimPrefix(uri, "ldaps://")
+		useTLS = true
+	} else if strings.HasPrefix(uri, "ldap://") {
+		addr = strings.TrimPrefix(uri, "ldap://")
 	}
-	return len(result.Entries) > 0, nil
+	addr = strings.TrimRight(addr, "/")
+
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	if useTLS {
+		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // connectivity check only
+		})
+		if err != nil {
+			return err
+		}
+		conn.Close()
+		return nil
+	}
+	conn, err := dialer.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	conn.Close()
+	return nil
 }

@@ -1,58 +1,17 @@
+## Test values for the slapd-cluster chart.
+## Deploys a 3-replica RW + 1 RO cluster with replication enabled.
+## Databases and schemas are deployed separately via SlapdDatabase / SlapdSchema CRs.
+
 ldap:
-  # domain: "dc=as8,dc=lab,dc=test"
-  domain: "dc=chuck-chuck-chuck,dc=net"
-  # existingSecret: "my-ldap-secrets"
   tls:
     enabled: true
     secretName: "slapd-tls"
-  # ACL rules applied by the operator to every pod's cn=config.
-  # The readpw-specific rules below extend the default ACLs:
-  #   {0} restrict userPassword in ou=Mail to self-write + readpw-read + anon-auth
-  #   {1} hide userPassword everywhere else (anon may auth but not read)
-  #   {2} allow self-write on shadowLastChange
-  #   {3} allow all other reads to everyone
-  acls:
-    - 'to dn.subtree="ou=Mail,dc=chuck-chuck-chuck,dc=net" attrs=userPassword by self write by dn.children="ou=Readpw,dc=chuck-chuck-chuck,dc=net" read by anonymous auth by * none'
-    - 'to attrs=userPassword by self write by anonymous auth by * none'
-    - 'to attrs=shadowLastChange by self write by * read'
-    - 'to * by * read'
-  # OX LDAP schema: attribute types and object classes for oxContextId, oxUserId,
-  # oxContextName, oxLoginInfo, oxMailQuota, etc., plus the oxSecondaryAccount
-  # structural class.
-  schemas:
-    - |
-      {
-        "changetype": "add",
-        "dn": "cn=ox,cn=schema,cn=config",
-        "objectClass": "olcSchemaConfig",
-        "attributes": {
-          "cn": "ox",
-          "olcAttributeTypes": [
-            "{0}( 1.3.6.1.4.1.23109.7.1.1 NAME ( 'oxContextId' ) DESC 'The numerical ID of a context' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE)",
-            "{1}( 1.3.6.1.4.1.23109.7.1.2 NAME ( 'oxUserId' ) DESC 'The numerical ID of a user' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE)",
-            "{2}( 1.3.6.1.4.1.23109.7.1.3 NAME ( 'oxUserName' ) DESC 'The symbolic name of a user' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )",
-            "{3}( 1.3.6.1.4.1.23109.7.1.4 NAME ( 'oxContextName' ) DESC 'The symbolic name of a context' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )",
-            "{4}( 1.3.6.1.4.1.23109.7.1.5 NAME ( 'oxLoginInfo' ) DESC 'A string carrying user and context info' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )",
-            "{5}( 1.3.6.1.4.1.23109.7.1.6 NAME ( 'euid' ) DESC 'Temporary quirk workaround' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )",
-            "{6}( 1.3.6.1.4.1.23109.7.1.11 NAME ( 'oxMailQuota' ) DESC 'Mail Quota' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE)",
-            "{7}( 1.3.6.1.4.1.23109.7.1.12 NAME ( 'oxDriveQuota' ) DESC 'Drive Quota' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE)",
-            "{8}( 1.3.6.1.4.1.23109.7.1.13 NAME ( 'oxUnifiedQuota' ) DESC 'Unified Quota' EQUALITY integerMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE)"
-          ],
-          "olcObjectClasses": [
-            "{0}( 1.3.6.1.4.1.23109.7.2.1 NAME 'ox' DESC 'Class for oxUserId and oxContextId' SUP top AUXILIARY MAY ( oxUserId $ oxContextId $ oxUserName $ oxContextName $ oxLoginInfo $ euid $ oxMailQuota $ oxDriveQuota $ oxUnifiedQuota ))",
-            "{1}( 1.3.6.1.4.1.23109.7.2.10 NAME 'oxSecondaryAccount' DESC 'Class for OX Secondary Account' SUP top STRUCTURAL MUST ( cn $ uid ))"
-          ]
-        }
-      }
 
-# passwords:
-#   adminPassword: "..."  # plaintext; slappasswd hash is computed at runtime by init container
-#   rootPassword: "..."
-
-# slapd -d log level. 0 = no debug output. See slapd(8) for levels.
 logLevel: 256
 
 replicas: 3
 readReplicas: 1
 replication:
   enabled: true
+  keepalive: "300:10:60"
+  retry: "10 +"

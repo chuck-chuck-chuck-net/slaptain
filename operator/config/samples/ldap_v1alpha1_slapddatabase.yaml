@@ -1,0 +1,50 @@
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdDatabase
+metadata:
+  name: example-db
+spec:
+  clusterRef: slapd
+  suffix: "dc=example,dc=org"
+  # rootDN defaults to "cn=admin,dc=example,dc=org"
+
+  # credentials:
+  #   secretName: "example-db-credentials"  # optional; auto-generated if omitted
+
+  # dataDirectory defaults to "example" (sanitized suffix)
+
+  acls:
+    - 'to attrs=userPassword by self write by anonymous auth by * none'
+    - 'to * by * read'
+
+  indices:
+    - "objectClass eq"
+    - "uid eq,sub"
+    - "cn eq,sub"
+    - "entryCSN eq"
+    - "entryUUID eq"
+
+  # replication:
+  #   ridBase: 100
+  #   deltaSync: true
+  #   syncprovCheckpoint: "500 15"
+  #   accesslogPurge: "2+00:00 1+00:00"
+
+  seed:
+    entries:
+      - |
+        dn: dc=example,dc=org
+        objectClass: top
+        objectClass: dcObject
+        objectClass: organization
+        o: example
+        dc: example
+      - |
+        dn: ou=People,dc=example,dc=org
+        objectClass: organizationalUnit
+        ou: People
+      - |
+        dn: ou=Groups,dc=example,dc=org
+        objectClass: organizationalUnit
+        ou: Groups
+
+  cleanupPolicy: Retain

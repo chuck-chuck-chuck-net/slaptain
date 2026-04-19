@@ -1,0 +1,190 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: slapdschemas.ldap.chuck-chuck-chuck.net
+spec:
+  group: ldap.chuck-chuck-chuck.net
+  names:
+    kind: SlapdSchema
+    listKind: SlapdSchemaList
+    plural: slapdschemas
+    shortNames:
+    - ss
+    singular: slapdschema
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterRef
+      name: Cluster
+      type: string
+    - jsonPath: .spec.priority
+      name: Priority
+      type: integer
+    - jsonPath: .status.applied
+      name: Applied
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SlapdSchema is the Schema for the slapdschemas API.
+          It declares attributeTypes and objectClasses that must exist in
+          cn=schema,cn=config on every pod of the referenced SlapdCluster.
+          Schemas are global — visible to all databases on the slapd process.
+          See ADR-006 for lifecycle semantics (additive-only, desired-minimum model).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired schema elements.
+            properties:
+              attributeTypes:
+                description: |-
+                  attributeTypes is a list of attributeType definitions in RFC 4512 syntax.
+                  Each string is a complete attributeType definition including the
+                  surrounding parentheses.
+                  Example: "( 1.3.6.1.4.1.99999.1.1.1 NAME 'myAttr' EQUALITY caseIgnoreMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )"
+                items:
+                  type: string
+                type: array
+              clusterRef:
+                description: |-
+                  clusterRef is the name of the SlapdCluster this schema belongs to.
+                  Must be in the same namespace.
+                type: string
+              objectClasses:
+                description: |-
+                  objectClasses is a list of objectClass definitions in RFC 4512 syntax.
+                  Each string is a complete objectClass definition including the
+                  surrounding parentheses. Referenced attributeTypes must exist (either
+                  built-in or declared in this or a lower-priority SlapdSchema).
+                  Example: "( 1.3.6.1.4.1.99999.1.2.1 NAME 'myClass' SUP top STRUCTURAL MUST cn MAY myAttr )"
+                items:
+                  type: string
+                type: array
+              priority:
+                default: 100
+                description: |-
+                  priority controls the order in which schemas are applied. Lower values
+                  are applied first. Built-in schemas (core, cosine, nis, inetorgperson)
+                  are loaded by the init container at priority 0-30. Custom schemas
+                  should use values >= 100.
+                format: int32
+                minimum: 0
+                type: integer
+            required:
+            - clusterRef
+            type: object
+          status:
+            description: status defines the observed state of the schema.
+            properties:
+              applied:
+                description: |-
+                  applied indicates whether all declared schema elements exist on all
+                  reachable pods in the referenced cluster.
+                type: boolean
+              appliedToPods:
+                description: appliedToPods lists pod names where all schema elements
+                  are present.
+                items:
+                  type: string
+                type: array
+              conditions:
+                description: conditions holds standard Kubernetes condition entries.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              failedPods:
+                description: failedPods lists pod names where schema application failed.
+                items:
+                  type: string
+                type: array
+              observedGeneration:
+                description: observedGeneration is the .metadata.generation the controller
+                  last reconciled.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

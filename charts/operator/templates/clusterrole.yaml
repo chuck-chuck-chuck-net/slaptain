@@ -49,6 +49,8 @@ rules:
       - ldap.chuck-chuck-chuck.net
     resources:
       - slapdclusters
+      - slapddatabases
+      - slapdschemas
     verbs:
       - create
       - delete
@@ -61,12 +63,16 @@ rules:
       - ldap.chuck-chuck-chuck.net
     resources:
       - slapdclusters/finalizers
+      - slapddatabases/finalizers
+      - slapdschemas/finalizers
     verbs:
       - update
   - apiGroups:
       - ldap.chuck-chuck-chuck.net
     resources:
       - slapdclusters/status
+      - slapddatabases/status
+      - slapdschemas/status
     verbs:
       - get
       - patch

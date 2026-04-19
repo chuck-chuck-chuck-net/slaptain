@@ -218,3 +218,21 @@ Job is deployed immediately after the CR.
 **Lesson:** `bootstrapComplete` must mean "bootstrap is complete on the **cluster**, not
 on one pod." Any status flag that downstream consumers depend on must reflect the state
 of the entire system, not just the first node that was touched.
+
+---
+
+## ADR-004 Refactor: Audit of Fix Preservation (2026-04-19)
+
+The multi-resource CRD refactor (ADR-004) split the single SlapdCluster controller into
+three controllers: SlapdCluster (infrastructure), SlapdSchema, and SlapdDatabase. This
+section documents how each previously fixed bug is preserved in the new architecture.
+
+| Fix | New Controller | How Preserved |
+|---|---|---|
+| **go-ldap case sensitivity** | SlapdDatabase, SlapdSchema | All attribute reads use `GetEqualFoldAttributeValues()`. All syncrepl/mirrormode references use `olcMultiProvider` (not `olcMirrorMode`). |
+| **Skipped pods suppress requeue** | SlapdDatabase | `pendingWork` flag tracks any incomplete step (failed pods, seed not applied, replication skipped). Phase stays Degraded until all work completes, forcing requeue. |
+| **Skipped pods suppress requeue** | SlapdSchema | `allApplied` flag — requeues after 10s when any pod failed. |
+| **Replication ACL prepend** | SlapdDatabase | `applyACLs` prepends `cn=replication` read ACL when replication or external peers are enabled, identical to the original fix. |
+| **No LDAP request timeout** | All three | Every `ldap.DialURL` is followed by `conn.SetTimeout(ldapRequestTimeout)`. |
+| **Schema deadlock on duplicate ADD** | SlapdSchema | Uses `Modify` (LDAP_MOD_ADD on existing `cn=schema,cn=config`) instead of `Add` (create new sub-entry). This avoids the deadlock entirely — no new schema entry is ever created, only attributes are added to the existing entry. Existence check reads all `olcAttributeTypes`/`olcObjectClasses` values and matches by NAME (case-insensitive, `{N}` prefix stripped). |
+| **PhaseRunning before convergence** | SlapdDatabase | `seedApplied` is set after successful seed on one pod. Replication convergence to other pods is handled by syncrepl (not polled). The database phase gates on all per-pod operations completing, not just seed. |
