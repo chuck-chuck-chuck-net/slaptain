@@ -20,7 +20,7 @@ GIT_TAG := $(shell if [ -n "$$(git describe --tags --exact-match 2>/dev/null)" ]
                fi)
 
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
-DELIVERY ?= import
+DELIVERY ?= push
 
 # Kubecontext: pass CONTEXT=<name> to target a specific cluster.
 # Threads --context / --kube-context through all kubectl and helm calls.
