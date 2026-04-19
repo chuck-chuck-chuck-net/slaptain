@@ -125,7 +125,8 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		Eventually(ctx, func() bool {
 			return ldapExists(remoteConn, dn)
 		}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).Should(BeTrue(),
-			"entry %s should replicate from siteA to siteB within 60 s", dn)
+			"entry %s should replicate from siteA to siteB within 60 s\n%s", dn,
+			dumpReplDiagnostics(remoteAddr, remoteAdminPW))
 	}, NodeTimeout(3*time.Minute))
 
 	// ── 3. Write on siteB propagates to siteA ────────────────────────────────
@@ -142,7 +143,8 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		Eventually(ctx, func() bool {
 			return ldapExists(ldapConn, dn)
 		}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).Should(BeTrue(),
-			"entry %s should replicate from siteB to siteA within 60 s", dn)
+			"entry %s should replicate from siteB to siteA within 60 s\n%s", dn,
+			dumpReplDiagnostics(localLDAPAddr, adminPW))
 	}, NodeTimeout(3*time.Minute))
 
 	// ── 4. Removing external peer removes stanza ─────────────────────────────
@@ -250,4 +252,65 @@ func containsRID(stanza, rid string) bool {
 	s = strings.TrimSpace(s)
 	prefix := "rid=" + rid
 	return strings.HasPrefix(s, prefix) && (len(s) == len(prefix) || s[len(prefix)] == ' ')
+}
+
+// dumpReplDiagnostics connects to a site's LDAP and returns a diagnostic string
+// with contextCSN and syncrepl stanzas. Called in assertion messages on failure
+// so the output appears in the test log.
+func dumpReplDiagnostics(addr, adminPassword string) string {
+	var b strings.Builder
+	b.WriteString("--- replication diagnostics for " + addr + " ---\n")
+
+	conn, err := ldap.DialURL("ldap://" + addr)
+	if err != nil {
+		fmt.Fprintf(&b, "dial error: %v\n", err)
+		return b.String()
+	}
+	defer conn.Close()
+
+	// contextCSN from the data DB (anonymous read of rootDSE-like operational attrs).
+	if err := conn.Bind(fmt.Sprintf("cn=admin,%s", baseDN), adminPassword); err != nil {
+		fmt.Fprintf(&b, "bind error: %v\n", err)
+		return b.String()
+	}
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		baseDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=*)",
+		[]string{"contextCSN"}, nil))
+	if err != nil {
+		fmt.Fprintf(&b, "contextCSN search error: %v\n", err)
+	} else if len(sr.Entries) > 0 {
+		csns := sr.Entries[0].GetEqualFoldAttributeValues("contextCSN")
+		fmt.Fprintf(&b, "contextCSN: %v\n", csns)
+	}
+
+	// syncrepl stanzas from cn=config (need config admin).
+	cfgConn, err := ldap.DialURL("ldap://" + addr)
+	if err != nil {
+		fmt.Fprintf(&b, "config dial error: %v\n", err)
+		return b.String()
+	}
+	defer cfgConn.Close()
+
+	if err := cfgConn.Bind("cn=admin,cn=config", rootPW); err != nil {
+		fmt.Fprintf(&b, "config bind error: %v\n", err)
+		return b.String()
+	}
+
+	sr, err = cfgConn.Search(ldap.NewSearchRequest(
+		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
+		[]string{"olcSyncRepl"}, nil))
+	if err != nil {
+		fmt.Fprintf(&b, "syncrepl search error: %v\n", err)
+	} else if len(sr.Entries) > 0 {
+		for _, v := range sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl") {
+			fmt.Fprintf(&b, "olcSyncRepl: %s\n", v)
+		}
+	} else {
+		b.WriteString("no data DB entry found in cn=config\n")
+	}
+
+	return b.String()
 }
