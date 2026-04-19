@@ -78,3 +78,8 @@ spec:
   resources:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

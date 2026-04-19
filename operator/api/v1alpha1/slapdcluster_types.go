@@ -208,6 +208,9 @@ type SlapdClusterSpec struct {
 	// replication configures N-way multi-master delta-syncrepl replication (Phase 2+).
 	// +optional
 	Replication SlapdReplicationConfig `json:"replication,omitempty"`
+	// imagePullSecrets is a list of references to secrets for pulling container images.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
 // ExternalPeerStatus reports the observed replication state of one external peer.

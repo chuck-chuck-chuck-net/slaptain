@@ -60,6 +60,10 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
       serviceAccountName: {{ include "operator.serviceAccountName" . }}
       terminationGracePeriodSeconds: 10
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

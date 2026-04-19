@@ -3,6 +3,10 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# -- List of image pull secrets for private registries.
+imagePullSecrets: []
+# - name: ghcr-pull-secret
+
 replicas: 1
 
 resources:

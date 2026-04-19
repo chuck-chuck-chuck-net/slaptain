@@ -89,3 +89,7 @@ resources: {}
 #    memory: 128Mi
 #  limits:
 #    memory: 512Mi
+
+# -- List of image pull secrets for private registries.
+imagePullSecrets: []
+# - name: ghcr-pull-secret
