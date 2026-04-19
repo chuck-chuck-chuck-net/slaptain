@@ -36,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
@@ -58,6 +59,7 @@ type SlapdDatabaseReconciler struct {
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases/finalizers,verbs=update
+// +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 
 func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -1477,9 +1479,38 @@ func (r *SlapdDatabaseReconciler) setStatus(
 }
 
 // SetupWithManager sets up the controller with the Manager.
+// Watches SlapdCluster CRs so that changes to externalPeers (which live on
+// the SlapdCluster spec) trigger reconciliation of all SlapdDatabases that
+// reference that cluster. Without this, removing or adding external peers
+// would not update syncrepl stanzas until the SlapdDatabase itself changed.
 func (r *SlapdDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ldapv1alpha1.SlapdDatabase{}).
+		Watches(&ldapv1alpha1.SlapdCluster{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrl.Request {
+				sc, ok := obj.(*ldapv1alpha1.SlapdCluster)
+				if !ok {
+					return nil
+				}
+				// Find all SlapdDatabases that reference this cluster.
+				var dbList ldapv1alpha1.SlapdDatabaseList
+				if err := r.List(ctx, &dbList, client.InNamespace(sc.Namespace)); err != nil {
+					return nil
+				}
+				var reqs []ctrl.Request
+				for _, db := range dbList.Items {
+					if db.Spec.ClusterRef == sc.Name {
+						reqs = append(reqs, ctrl.Request{
+							NamespacedName: client.ObjectKey{
+								Name:      db.Name,
+								Namespace: db.Namespace,
+							},
+						})
+					}
+				}
+				return reqs
+			},
+		)).
 		Named("slapddatabase").
 		Complete(r)
 }
