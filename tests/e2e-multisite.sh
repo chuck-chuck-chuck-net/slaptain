@@ -1,7 +1,8 @@
 #!/bin/bash
 # Multi-site e2e test orchestration.
-# Deploys the slaptain operator + SlapdCluster + slapd-test across N Kubernetes
-# clusters, configures cross-cluster delta-syncrepl, and runs the full e2e suite.
+# Deploys the slaptain operator + SlapdCluster + SlapdSchema + SlapdDatabase
+# across N Kubernetes clusters, configures cross-cluster delta-syncrepl, and
+# runs the full e2e suite (including external replication tests).
 #
 # Usage:
 #   ./tests/e2e-multisite.sh setup   ctx1 ctx2 [ctx3 ...]
@@ -17,16 +18,30 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-slaptain}"
 NAMESPACE_TESTING="${NAMESPACE_TESTING:-slaptain-testing}"
-LDAP_DOMAIN="${LDAP_DOMAIN:-dc=chuck-chuck-chuck,dc=net}"
 NODEPORT_LDAP="${NODEPORT_LDAP:-30389}"
 NODEPORT_LDAPS="${NODEPORT_LDAPS:-30636}"
 NODEPORT_POD_BASE="${NODEPORT_POD_BASE:-30400}"
 NODEPORT_RO_POD_BASE="${NODEPORT_RO_POD_BASE:-30410}"
 REGISTRY="${REGISTRY:-ghcr.io/chuck-chuck-chuck-net}"
 PROJECT="${PROJECT:-slaptain}"
+TEST_RESOURCES="${TEST_RESOURCES:-example}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Image tag: git tag or short commit hash (with -dirty suffix for uncommitted changes).
+if [[ -z "${GIT_TAG:-}" ]]; then
+    if exact=$(git -C "$PROJECT_ROOT" describe --tags --exact-match 2>/dev/null) && [[ -n "$exact" ]]; then
+        GIT_TAG="$exact"
+    else
+        hash=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)
+        if ! git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null; then
+            GIT_TAG="${hash}-dirty"
+        else
+            GIT_TAG="$hash"
+        fi
+    fi
+fi
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -49,7 +64,7 @@ usage() {
 Usage: $0 <setup|test|teardown|all> ctx1 ctx2 [ctx3 ...]
 
 Subcommands:
-  setup     Deploy operator, SlapdCluster, slapd-test on all clusters
+  setup     Deploy operator, SlapdCluster, test resources on all clusters
   test      Run e2e tests (including external replication)
   teardown  Remove everything created by setup
   all       setup + test + teardown
@@ -57,14 +72,13 @@ Subcommands:
 Environment variables (with defaults):
   NAMESPACE            = $NAMESPACE
   NAMESPACE_TESTING    = $NAMESPACE_TESTING
-  LDAP_DOMAIN          = $LDAP_DOMAIN
   NODEPORT_LDAP        = $NODEPORT_LDAP
   NODEPORT_LDAPS       = $NODEPORT_LDAPS
   REGISTRY             = $REGISTRY
   PROJECT              = $PROJECT
+  TEST_RESOURCES       = $TEST_RESOURCES  (example or lab)
   HELM_VALUES          = operator chart values (use absolute paths)
   HELM_VALUES_SLAPD_CLUSTER = slapd-cluster chart values (use absolute paths)
-  HELM_VALUES_SLAPD_TESTING = slapd-test chart values (use absolute paths)
 EOF
     exit 1
 }
@@ -83,13 +97,34 @@ discover_node_ips() {
     done
 }
 
+# ── CR name resolution from test resources ───────────────────────────────────
+
+resolve_cr_names() {
+    local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
+    [[ -d "$resource_dir" ]] || die "Test resources not found: $resource_dir"
+
+    DB_CR_NAME=$(awk '/^kind: SlapdDatabase/{found=1} found && /^  name:/{print $2; exit}' \
+        "$resource_dir/database.yaml")
+    SCHEMA_CR_NAME=$(awk '/^kind: SlapdSchema/{found=1} found && /^  name:/{print $2; exit}' \
+        "$resource_dir/schema.yaml")
+    DB_SUFFIX=$(awk '/^  suffix:/{gsub(/"/, "", $2); print $2; exit}' \
+        "$resource_dir/database.yaml")
+
+    [[ -z "$DB_CR_NAME" ]] && die "Could not extract SlapdDatabase name from $resource_dir/database.yaml"
+    [[ -z "$SCHEMA_CR_NAME" ]] && die "Could not extract SlapdSchema name from $resource_dir/schema.yaml"
+    [[ -z "$DB_SUFFIX" ]] && die "Could not extract suffix from $resource_dir/database.yaml"
+
+    DB_CREDENTIALS_SECRET="${DB_CR_NAME}-credentials"
+    log "Database CR: $DB_CR_NAME (suffix: $DB_SUFFIX), Schema CR: $SCHEMA_CR_NAME"
+    log "Credentials secret: $DB_CREDENTIALS_SECRET"
+}
+
 # ── Setup phases ─────────────────────────────────────────────────────────────
 
-generate_passwords() {
-    log "Generating shared credentials..."
-    ADMIN_PW=$(openssl rand -base64 18)
-    ROOT_PW=$(openssl rand -base64 18)
-    REPL_PW=$(openssl rand -base64 24)
+generate_shared_credentials() {
+    log "Generating shared database credentials..."
+    SHARED_ROOT_PW=$(openssl rand -base64 18)
+    SHARED_REPL_PW=$(openssl rand -base64 24)
 }
 
 setup_foundation() {
@@ -100,12 +135,11 @@ setup_foundation() {
         kctl "$ctx" create namespace "$NAMESPACE_TESTING" --dry-run=client -o yaml \
             | kctl "$ctx" apply -f -
 
-        log "[$ctx] Creating shared credentials secret..."
-        kctl "$ctx" create secret generic slapd-credentials \
+        log "[$ctx] Pre-creating shared database credentials ($DB_CREDENTIALS_SECRET)..."
+        kctl "$ctx" create secret generic "$DB_CREDENTIALS_SECRET" \
             -n "$NAMESPACE_TESTING" \
-            --from-literal=admin-password="$ADMIN_PW" \
-            --from-literal=root-password="$ROOT_PW" \
-            --from-literal=replication-password="$REPL_PW" \
+            --from-literal=root-password="$SHARED_ROOT_PW" \
+            --from-literal=replication-password="$SHARED_REPL_PW" \
             --dry-run=client -o yaml \
             | kctl "$ctx" apply -f -
 
@@ -122,10 +156,11 @@ setup_foundation() {
                 slapd-tls
         )
 
-        log "[$ctx] Installing operator..."
+        log "[$ctx] Installing operator (tag: $GIT_TAG)..."
         hctl "$ctx" upgrade --install slaptain-operator "$PROJECT_ROOT/charts/operator" \
             --namespace "$NAMESPACE" --create-namespace \
             --set "image.repository=$REGISTRY/$PROJECT/operator" \
+            --set "image.tag=$GIT_TAG" \
             ${HELM_VALUES:-}
     done
 }
@@ -157,8 +192,8 @@ setup_cross_trust() {
 setup_slapd_clusters() {
     # Helm --set treats commas as value separators. Escape them with \, for
     # values that contain literal commas (LDAP DNs like dc=example,dc=org).
-    local helm_domain="${LDAP_DOMAIN//,/\\,}"
-    local helm_bind_dn="cn=replication\\,${helm_domain}"
+    local helm_suffix="${DB_SUFFIX//,/\\,}"
+    local helm_bind_dn="cn=replication\\,${helm_suffix}"
 
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Installing SlapdCluster..."
@@ -173,16 +208,16 @@ setup_slapd_clusters() {
                 --set "replication.externalPeers[$peer_idx].uri=ldaps://${NODE_IPS[$other]}:${NODEPORT_LDAPS}"
                 --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
                 --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
-                --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=slapd-credentials"
+                --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
             )
             ((peer_idx++)) || true
         done
 
         hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-cluster" \
             --namespace "$NAMESPACE_TESTING" --create-namespace \
-            --set "credentials.existingSecret=slapd-credentials" \
-            --set "replication.enabled=true" \
-            --set "ldap.domain=${helm_domain}" \
+            -f "$PROJECT_ROOT/tests/values.slapd.yaml" \
+            --set "images.slapd.tag=$GIT_TAG" \
+            --set "images.init.tag=$GIT_TAG" \
             "${peer_sets[@]}" \
             ${HELM_VALUES_SLAPD_CLUSTER:-}
     done
@@ -213,8 +248,7 @@ spec:
       nodePort: $NODEPORT_LDAPS
 EOF
 
-        # Per-pod NodePort services for direct pod access (replaces kubectl port-forward).
-        # Uses statefulset.kubernetes.io/pod-name label to target individual pods.
+        # Per-pod NodePort services for direct pod access.
         log "[$ctx] Creating per-pod NodePort services..."
         local replicas
         replicas=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get statefulset/slapd \
@@ -298,19 +332,38 @@ wait_for_clusters_ready() {
     done
 }
 
-setup_slapd_test() {
-    local ctx="${CONTEXTS[0]}"
-    log "[$ctx] Installing slapd-test (first site only)..."
-    hctl "$ctx" upgrade --install slapd-test "$PROJECT_ROOT/charts/slapd-test" \
-        --namespace "$NAMESPACE_TESTING" --create-namespace \
-        ${HELM_VALUES_SLAPD_TESTING:-}
-}
+setup_test_resources() {
+    local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
 
-wait_for_slapd_test() {
-    local ctx="${CONTEXTS[0]}"
-    log "[$ctx] Waiting for slapd-test bootstrap job to complete..."
-    kctl "$ctx" -n "$NAMESPACE_TESTING" wait job/slapd-test \
-        --for=condition=complete --timeout=300s
+    for ctx in "${CONTEXTS[@]}"; do
+        log "[$ctx] Applying test resources from $resource_dir..."
+        kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$resource_dir/"
+
+        log "[$ctx] Waiting for SlapdDatabase $DB_CR_NAME to reach Running..."
+        local attempts=0
+        while true; do
+            local phase
+            phase=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net "$DB_CR_NAME" \
+                -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+            [[ "$phase" == "Running" ]] && break
+            ((attempts++)) || true
+            [[ $attempts -ge 180 ]] && die "[$ctx] SlapdDatabase did not reach Running within 180s (current: $phase)"
+            sleep 1
+        done
+
+        log "[$ctx] Waiting for SlapdSchema $SCHEMA_CR_NAME to be applied..."
+        attempts=0
+        while true; do
+            local applied
+            applied=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapdschemas.ldap.chuck-chuck-chuck.net "$SCHEMA_CR_NAME" \
+                -o jsonpath='{.status.applied}' 2>/dev/null || echo "")
+            [[ "$applied" == "true" ]] && break
+            ((attempts++)) || true
+            [[ $attempts -ge 120 ]] && die "[$ctx] SlapdSchema was not applied within 120s"
+            sleep 1
+        done
+        log "[$ctx] Test resources ready."
+    done
 
     log "Waiting 30s for cross-cluster replication convergence..."
     sleep 30
@@ -324,8 +377,8 @@ run_tests() {
 
     log "Reading admin password from $ctx0..."
     local admin_pw
-    admin_pw=$(kctl "$ctx0" -n "$NAMESPACE_TESTING" get secret slapd-credentials \
-        -o jsonpath='{.data.admin-password}' | base64 -d)
+    admin_pw=$(kctl "$ctx0" -n "$NAMESPACE_TESTING" get secret "$DB_CREDENTIALS_SECRET" \
+        -o jsonpath='{.data.root-password}' | base64 -d)
 
     local local_ip="${NODE_IPS[$ctx0]}"
     local remote_ip="${NODE_IPS[$ctx1]}"
@@ -350,6 +403,10 @@ run_tests() {
         E2E_EXTERNAL_REPL=1 \
         E2E_REMOTE_LDAP_ADDR="${remote_ip}:${NODEPORT_LDAP}" \
         E2E_REMOTE_ADMIN_PW="$admin_pw" \
+        DB_CR_NAME="$DB_CR_NAME" \
+        DB_CREDENTIALS_SECRET="$DB_CREDENTIALS_SECRET" \
+        SCHEMA_CR_NAME="$SCHEMA_CR_NAME" \
+        READPW_OU="${READPW_OU:-ServiceAccounts}" \
         go test -v ./... --ginkgo.v --ginkgo.timeout=15m
     )
 }
@@ -359,45 +416,51 @@ run_tests() {
 teardown_all() {
     log "Tearing down multi-site deployment..."
 
+    local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
+
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Removing resources..."
 
-        # slapd-test (first context only)
-        if [[ "$ctx" == "${CONTEXTS[0]}" ]]; then
-            hctl "$ctx" uninstall slapd-test -n "$NAMESPACE_TESTING" 2>/dev/null || true
+        # Test resources (SlapdDatabase, SlapdSchema, readpw secret).
+        if [[ -d "$resource_dir" ]]; then
+            kctl "$ctx" delete -n "$NAMESPACE_TESTING" -f "$resource_dir/" \
+                --ignore-not-found 2>/dev/null || true
         fi
 
-        # SlapdCluster
+        # SlapdCluster.
         hctl "$ctx" uninstall slapd -n "$NAMESPACE_TESTING" 2>/dev/null || true
 
-        # NodePort services (main + per-pod)
-        kctl "$ctx" delete svc -n "$NAMESPACE_TESTING" -l '!app.kubernetes.io/managed-by' \
-            --field-selector metadata.name!=kubernetes --ignore-not-found 2>/dev/null || true
-        kctl "$ctx" delete svc slapd-external -n "$NAMESPACE_TESTING" --ignore-not-found || true
+        # NodePort services (main + per-pod).
+        kctl "$ctx" delete svc slapd-external -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
         for i in 0 1 2 3 4 5 6 7; do
             kctl "$ctx" delete svc "slapd-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
             kctl "$ctx" delete svc "slapd-readonly-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
         done
 
-        # Cross-trust secrets
+        # Cross-trust secrets.
         for other in "${CONTEXTS[@]}"; do
             [[ "$other" == "$ctx" ]] && continue
             kctl "$ctx" delete secret "site-${other}-ca" -n "$NAMESPACE_TESTING" --ignore-not-found || true
         done
 
-        # Operator
+        # Database credentials secret.
+        kctl "$ctx" delete secret "$DB_CREDENTIALS_SECRET" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+
+        # Operator.
         hctl "$ctx" uninstall slaptain-operator -n "$NAMESPACE" 2>/dev/null || true
 
-        # Credentials secret
-        kctl "$ctx" delete secret slapd-credentials -n "$NAMESPACE_TESTING" --ignore-not-found || true
+        # CSR (cluster-scoped).
+        kctl "$ctx" delete csr "slapd-${NAMESPACE_TESTING}-csr" --ignore-not-found 2>/dev/null || true
 
-        # CSR (cluster-scoped)
-        kctl "$ctx" delete csr "slapd-${NAMESPACE_TESTING}-csr" --ignore-not-found || true
+        # CRDs (cluster-scoped, left behind by helm).
+        kctl "$ctx" delete crd slapdclusters.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
+        kctl "$ctx" delete crd slapddatabases.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
+        kctl "$ctx" delete crd slapdschemas.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
 
-        # CRD (cluster-scoped, left behind by helm)
-        kctl "$ctx" delete crd slapdclusters.ldap.chuck-chuck-chuck.net --ignore-not-found || true
+        # PVCs.
+        kctl "$ctx" delete pvc --all -n "$NAMESPACE_TESTING" 2>/dev/null || true
 
-        # Namespaces
+        # Namespaces.
         kctl "$ctx" delete namespace "$NAMESPACE_TESTING" --ignore-not-found || true
         kctl "$ctx" delete namespace "$NAMESPACE" --ignore-not-found || true
     done
@@ -421,33 +484,35 @@ declare -A NODE_IPS
 case "$subcommand" in
     setup)
         discover_node_ips
-        generate_passwords
+        resolve_cr_names
+        generate_shared_credentials
         setup_foundation
         setup_cross_trust
         setup_slapd_clusters
+        wait_for_clusters_ready
         setup_nodeport_services
-        wait_for_clusters_ready   # StatefulSets + CR phase=Running (operator bootstrap done)
-        setup_slapd_test          # safe to run: root entry exists
-        wait_for_slapd_test       # bootstrap job + convergence
+        setup_test_resources
         log "Setup complete. Clusters: ${CONTEXTS[*]}"
         ;;
     test)
         discover_node_ips
+        resolve_cr_names
         run_tests
         ;;
     teardown)
+        resolve_cr_names
         teardown_all
         ;;
     all)
         discover_node_ips
-        generate_passwords
+        resolve_cr_names
+        generate_shared_credentials
         setup_foundation
         setup_cross_trust
         setup_slapd_clusters
-        setup_nodeport_services
         wait_for_clusters_ready
-        setup_slapd_test
-        wait_for_slapd_test
+        setup_nodeport_services
+        setup_test_resources
         run_tests
         teardown_all
         ;;

@@ -218,7 +218,7 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 
 		By("verifying all bootstrap entries survive the warm restart")
 		Expect(ldapExists(ldapConn, baseDN)).To(BeTrue())
-		for _, ou := range []string{"People", "Mail", "Readpw"} {
+		for _, ou := range []string{"People", "Mail", readpwOU} {
 			Expect(ldapExists(ldapConn, fmt.Sprintf("ou=%s,%s", ou, baseDN))).To(BeTrue(),
 				"ou=%s should survive warm restart", ou)
 		}

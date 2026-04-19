@@ -22,7 +22,7 @@ import (
 // Prerequisites — both clusters must be fully deployed BEFORE running tests:
 //   - Operator installed on both siteA and siteB
 //   - SlapdCluster deployed on both with externalPeers pointing at each other
-//   - slapd-test deployed on siteA (data replicates to siteB automatically)
+//   - SlapdDatabase + SlapdSchema deployed on both (data replicates automatically)
 //   - Both sites' LDAP services reachable from the test machine
 //
 // Required env vars:
@@ -44,6 +44,7 @@ var _ = Describe("external replication", Label("external-replication"), func() {
 		remoteAddr    string
 		remoteAdminPW string
 		replicas      int32
+		extPeerRID    string // expected RID for the first external peer (ridBase + 51)
 	)
 
 	BeforeEach(func(ctx SpecContext) {
@@ -69,6 +70,12 @@ var _ = Describe("external replication", Label("external-replication"), func() {
 		if sts.Spec.Replicas != nil {
 			replicas = *sts.Spec.Replicas
 		}
+
+		// Read ridBase from SlapdDatabase CR to compute expected external peer RID.
+		// External peer j → RID = ridBase + 50 + j + 1 (first peer: ridBase + 51).
+		sd := &ldapv1alpha1.SlapdDatabase{}
+		Expect(crdClient.Get(ctx, types.NamespacedName{Name: dbCRName, Namespace: namespace}, sd)).To(Succeed())
+		extPeerRID = fmt.Sprintf("%d", sd.Spec.Replication.RIDBase+51)
 	}, NodeTimeout(30*time.Second))
 
 	// ── 1. Syncrepl stanzas applied ──────────────────────────────────────────
@@ -94,13 +101,13 @@ var _ = Describe("external replication", Label("external-replication"), func() {
 			syncreplVals := sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
 			hasExternal := false
 			for _, v := range syncreplVals {
-				if containsRID(v, "101") {
+				if containsRID(v, extPeerRID) {
 					hasExternal = true
 					break
 				}
 			}
 			Expect(hasExternal).To(BeTrue(),
-				"pod %s should have external peer syncrepl stanza (rid=101), got: %v", podName, syncreplVals)
+				"pod %s should have external peer syncrepl stanza (rid=%s), got: %v", podName, extPeerRID, syncreplVals)
 		}
 	}, NodeTimeout(3*time.Minute))
 
@@ -174,14 +181,14 @@ var _ = Describe("external replication", Label("external-replication"), func() {
 				}
 				syncreplVals := sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
 				for _, v := range syncreplVals {
-					if containsRID(v, "101") {
+					if containsRID(v, extPeerRID) {
 						return false // stanza still present
 					}
 				}
 			}
 			return true
 		}).WithTimeout(60 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
-			"external peer syncrepl stanza (rid=101) should be removed from all RW pods")
+			"external peer syncrepl stanza (rid=%s) should be removed from all RW pods", extPeerRID)
 
 		// Restore original peers.
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
@@ -204,13 +211,13 @@ var _ = Describe("external replication", Label("external-replication"), func() {
 				return false
 			}
 			for _, v := range sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl") {
-				if containsRID(v, "101") {
+				if containsRID(v, extPeerRID) {
 					return true
 				}
 			}
 			return false
 		}).WithTimeout(60 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
-			"external peer syncrepl stanza (rid=101) should be restored after re-adding peer")
+			"external peer syncrepl stanza (rid=%s) should be restored after re-adding peer", extPeerRID)
 	}, NodeTimeout(3*time.Minute))
 
 	// ── 5. External peer status reported in CR ───────────────────────────────

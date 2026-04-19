@@ -25,6 +25,20 @@ TEST_RESOURCES="${TEST_RESOURCES:-example}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Image tag: git tag or short commit hash (with -dirty suffix for uncommitted changes).
+if [[ -z "${GIT_TAG:-}" ]]; then
+    if exact=$(git -C "$PROJECT_ROOT" describe --tags --exact-match 2>/dev/null) && [[ -n "$exact" ]]; then
+        GIT_TAG="$exact"
+    else
+        hash=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)
+        if ! git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null; then
+            GIT_TAG="${hash}-dirty"
+        else
+            GIT_TAG="$hash"
+        fi
+    fi
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 log() { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
@@ -87,10 +101,11 @@ setup_operator() {
     $KUBECTL create namespace "$NAMESPACE" --dry-run=client -o yaml | $KUBECTL apply -f -
     $KUBECTL create namespace "$NAMESPACE_TESTING" --dry-run=client -o yaml | $KUBECTL apply -f -
 
-    log "Installing operator..."
+    log "Installing operator (tag: $GIT_TAG)..."
     $HELM upgrade --install slaptain-operator "$PROJECT_ROOT/charts/operator" \
         --namespace "$NAMESPACE" --create-namespace \
         --set "image.repository=ghcr.io/chuck-chuck-chuck-net/slaptain/operator" \
+        --set "image.tag=$GIT_TAG" \
         ${HELM_VALUES:-}
 
     log "Waiting for operator deployment..."
@@ -107,10 +122,12 @@ setup_tls() {
 }
 
 setup_cluster() {
-    log "Installing SlapdCluster..."
+    log "Installing SlapdCluster (tag: $GIT_TAG)..."
     $HELM upgrade --install slapd "$PROJECT_ROOT/charts/slapd-cluster" \
         --namespace "$NAMESPACE_TESTING" --create-namespace \
         -f "$PROJECT_ROOT/tests/values.slapd.yaml" \
+        --set "images.slapd.tag=$GIT_TAG" \
+        --set "images.init.tag=$GIT_TAG" \
         ${HELM_VALUES_SLAPD_CLUSTER:-}
 
     log "Waiting for StatefulSet slapd..."

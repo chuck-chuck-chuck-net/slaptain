@@ -49,6 +49,9 @@ var (
 
 	// READPW_OU — OU name for read-only service accounts (readpw users).
 	readpwOU = envOrDefault("READPW_OU", "ServiceAccounts")
+
+	// DB_CR_NAME — SlapdDatabase CR name. Used to read ridBase for RID assertions.
+	dbCRName = envOrDefault("DB_CR_NAME", "slapd-db")
 )
 
 // ── Ginkgo bootstrap ──────────────────────────────────────────────────────────
@@ -71,7 +74,6 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue())
 
 	// Wait for SlapdDatabase to reach Running phase (replaces old bootstrap Job wait).
-	dbCRName := envOrDefault("DB_CR_NAME", "slapd-db")
 	By("Waiting for SlapdDatabase " + dbCRName + " to be Running")
 	Eventually(ctx, func() bool {
 		return slapdDatabaseRunning(crdClient, namespace, dbCRName)
