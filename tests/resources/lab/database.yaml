@@ -11,7 +11,7 @@ spec:
     - >-
       to dn.subtree="ou=Mail,dc=chuck-chuck-chuck,dc=net" attrs=userPassword
       by self write
-      by dn.children="ou=Readpw,dc=chuck-chuck-chuck,dc=net" read
+      by dn.children="ou=ServiceAccounts,dc=chuck-chuck-chuck,dc=net" read
       by anonymous auth
       by * none
     # userPassword hidden everywhere else.
@@ -49,7 +49,7 @@ spec:
         dc: chuck-chuck-chuck
       # Organizational units.
       - |
-        dn: ou=Readpw,dc=chuck-chuck-chuck,dc=net
+        dn: ou=ServiceAccounts,dc=chuck-chuck-chuck,dc=net
         objectClass: organizationalUnit
         ou: Readpw
       - |
@@ -68,7 +68,7 @@ spec:
       # SSHA hashes must match the plaintext passwords in readpw-secret.yaml.
       # Generate with: slappasswd -h {SSHA} -s <password>
       - |
-        dn: uid=appsuite,ou=Readpw,dc=chuck-chuck-chuck,dc=net
+        dn: uid=appsuite,ou=ServiceAccounts,dc=chuck-chuck-chuck,dc=net
         objectClass: account
         objectClass: posixAccount
         cn: appsuite
@@ -78,7 +78,7 @@ spec:
         homeDirectory: /dev/null
         userPassword: REPLACE_WITH_SSHA_HASH
       - |
-        dn: uid=dovecot,ou=Readpw,dc=chuck-chuck-chuck,dc=net
+        dn: uid=dovecot,ou=ServiceAccounts,dc=chuck-chuck-chuck,dc=net
         objectClass: account
         objectClass: posixAccount
         cn: dovecot
@@ -88,7 +88,7 @@ spec:
         homeDirectory: /dev/null
         userPassword: REPLACE_WITH_SSHA_HASH
       - |
-        dn: uid=keycloak,ou=Readpw,dc=chuck-chuck-chuck,dc=net
+        dn: uid=keycloak,ou=ServiceAccounts,dc=chuck-chuck-chuck,dc=net
         objectClass: account
         objectClass: posixAccount
         cn: keycloak

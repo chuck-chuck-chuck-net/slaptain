@@ -138,7 +138,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
 		host := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
 			podName, headlessSvc, sc.Namespace)
-		if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc); err != nil {
+		if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false); err != nil {
 			log.Info("database reconcile skipped for pod (will retry)",
 				"pod", podName, "err", err)
 			failedPods = append(failedPods, podName)
@@ -154,7 +154,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			podName := fmt.Sprintf("%s-readonly-%d", sc.Name, i)
 			host := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
 				podName, roHeadless, sc.Namespace)
-			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc); err != nil {
+			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true); err != nil {
 				log.Info("database reconcile skipped for read-only pod (will retry)",
 					"pod", podName, "err", err)
 				failedPods = append(failedPods, podName)
@@ -193,7 +193,17 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
-	// 9. Configure replication stanzas if replication is enabled.
+	// 9. Create replication bind user if replication is enabled.
+	//    The user cn=replication,<suffix> must exist in the data tree before
+	//    syncrepl stanzas can authenticate. Created idempotently on pod-0.
+	if sc.Spec.Replication.Enabled && sd.Spec.Replication != nil {
+		if err := r.ensureReplicationUser(ctx, sc, sd, rootPW); err != nil {
+			log.Info("replication user not yet created (will retry)", "err", err)
+			pendingWork = true
+		}
+	}
+
+	// 10. Configure replication stanzas if replication is enabled.
 	if sc.Spec.Replication.Enabled && sd.Spec.Replication != nil {
 		skipped, err := r.reconcileReplication(ctx, sc, sd, configPW)
 		if err != nil {
@@ -323,6 +333,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	host, configPW, rootPW string,
 	sd *ldapv1alpha1.SlapdDatabase,
 	sc *ldapv1alpha1.SlapdCluster,
+	readOnly bool,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -362,6 +373,15 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	if len(sd.Spec.Indices) > 0 {
 		if err := r.applyIndices(ctx, conn, host, dataDN, sd.Spec.Indices); err != nil {
 			return fmt.Errorf("apply indices at %s: %w", host, err)
+		}
+	}
+
+	// Apply replication overlays (accesslog + syncprov on data DB) when delta-sync
+	// is enabled. These are cn=config overlays on the data database entry, separate
+	// from the accesslog DB itself (which is set up by the init container).
+	if sd.Spec.Replication != nil && sd.Spec.Replication.DeltaSync && !readOnly {
+		if err := r.ensureReplicationOverlays(ctx, conn, host, dataDN, sd); err != nil {
+			return fmt.Errorf("ensure replication overlays at %s: %w", host, err)
 		}
 	}
 
@@ -544,6 +564,171 @@ func normalizeIndex(s string) string {
 }
 
 // ── Seed Data ────────────────────────────────────────────────────────────────
+
+// ensureReplicationOverlays adds the accesslog and syncprov overlays to a data
+// database's cn=config entry. These overlays are required for delta-syncrepl:
+// - overlay accesslog: logs all writes to the accesslog DB (cn=accesslog)
+// - overlay syncprov: makes the database available as a syncrepl provider
+// Idempotent: checks for existing overlays before adding.
+func (r *SlapdDatabaseReconciler) ensureReplicationOverlays(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	sd *ldapv1alpha1.SlapdDatabase,
+) error {
+	log := logf.FromContext(ctx)
+
+	// Check if overlays already exist under the data database DN.
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcOverlayConfig)", []string{"olcOverlay"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search overlays under %s: %w", dataDN, err)
+	}
+
+	hasAccesslog := false
+	hasSyncprov := false
+	for _, entry := range sr.Entries {
+		for _, ov := range entry.GetEqualFoldAttributeValues("olcOverlay") {
+			stripped := stripOrderingPrefix(ov)
+			if stripped == "accesslog" {
+				hasAccesslog = true
+			}
+			if stripped == "syncprov" {
+				hasSyncprov = true
+			}
+		}
+	}
+
+	// Add accesslog overlay if missing.
+	if !hasAccesslog {
+		log.Info("adding accesslog overlay to data database", "host", host, "dataDN", dataDN)
+		accesslogDN := "olcOverlay=accesslog," + dataDN
+		addReq := ldap.NewAddRequest(accesslogDN, nil)
+		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcAccessLogConfig"})
+		addReq.Attribute("olcOverlay", []string{"accesslog"})
+		addReq.Attribute("olcAccessLogDB", []string{"cn=accesslog"})
+		addReq.Attribute("olcAccessLogOps", []string{"writes"})
+		addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
+		if sd.Spec.Replication.AccesslogPurge != "" {
+			addReq.Attribute("olcAccessLogPurge", []string{sd.Spec.Replication.AccesslogPurge})
+		}
+		if err := conn.Add(addReq); err != nil {
+			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+				return fmt.Errorf("add accesslog overlay: %w", err)
+			}
+		}
+	}
+
+	// Add syncprov overlay if missing.
+	if !hasSyncprov {
+		log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
+		syncprovDN := "olcOverlay=syncprov," + dataDN
+		addReq := ldap.NewAddRequest(syncprovDN, nil)
+		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
+		addReq.Attribute("olcOverlay", []string{"syncprov"})
+		if sd.Spec.Replication.SyncprovCheckpoint != "" {
+			addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
+		}
+		if err := conn.Add(addReq); err != nil {
+			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+				return fmt.Errorf("add syncprov overlay: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// ensureReplicationUser creates the cn=replication,<suffix> bind user in the data
+// tree on any reachable RW pod. This user is referenced by syncrepl stanzas.
+// Idempotent: skips if the entry already exists.
+func (r *SlapdDatabaseReconciler) ensureReplicationUser(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	sd *ldapv1alpha1.SlapdDatabase,
+	rootPW string,
+) error {
+	log := logf.FromContext(ctx)
+
+	replPassword, err := r.getDatabaseReplPassword(ctx, sd)
+	if err != nil {
+		return err
+	}
+	if replPassword == "" {
+		return nil // No replication password configured.
+	}
+
+	rootDN := sd.Spec.RootDN
+	if rootDN == "" {
+		rootDN = "cn=admin," + sd.Spec.Suffix
+	}
+	replDN := "cn=replication," + sd.Spec.Suffix
+
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	headlessSvc := sc.Name + "-headless"
+
+	// Try each RW pod.
+	for i := int32(0); i < replicas; i++ {
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
+			sc.Name, i, headlessSvc, sc.Namespace)
+		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
+
+		conn, err := ldap.DialURL("ldap://"+addr,
+			ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+		)
+		if err != nil {
+			continue
+		}
+		conn.SetTimeout(ldapRequestTimeout)
+
+		if err := conn.Bind(rootDN, rootPW); err != nil {
+			conn.Close()
+			continue
+		}
+
+		exists, err := ldapEntryExists(conn, replDN)
+		if err != nil {
+			conn.Close()
+			continue
+		}
+		if exists {
+			conn.Close()
+			log.V(1).Info("replication user already exists", "dn", replDN)
+			return nil
+		}
+
+		// Create the replication bind user.
+		replHash, err := generateSSHAHash(replPassword)
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("hash replication password: %w", err)
+		}
+
+		addReq := ldap.NewAddRequest(replDN, nil)
+		addReq.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
+		addReq.Attribute("cn", []string{"replication"})
+		addReq.Attribute("description", []string{"Syncrepl bind account"})
+		addReq.Attribute("userPassword", []string{replHash})
+		if err := conn.Add(addReq); err != nil {
+			conn.Close()
+			if ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+				return nil
+			}
+			return fmt.Errorf("add replication user %s: %w", replDN, err)
+		}
+
+		conn.Close()
+		log.Info("created replication user", "dn", replDN)
+		return nil
+	}
+
+	return fmt.Errorf("no reachable RW pod for replication user creation")
+}
 
 // verifySeedExists checks whether the first seed entry (typically the root DN)
 // exists on any reachable RW pod. Returns false if the entry is missing, indicating

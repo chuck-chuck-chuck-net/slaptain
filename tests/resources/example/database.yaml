@@ -7,7 +7,7 @@ spec:
   suffix: "dc=example,dc=org"
 
   acls:
-    # Readpw service accounts can read userPassword in ou=Mail (for mail auth lookups).
+    # ServiceAccounts service accounts can read userPassword in ou=Mail (for mail auth lookups).
     - >-
       to dn.subtree="ou=Mail,dc=example,dc=org" attrs=userPassword
       by self write
@@ -82,6 +82,6 @@ spec:
         uidNumber: 65534
         gidNumber: 65534
         homeDirectory: /dev/null
-        userPassword: {SSHA}W2YnDMJkELsiP62sKDpEPaN1FHvSj/Fm
+        userPassword: {SSHA}2j4WPNfd7ak7xflOtFbCVKLHTO10Klay
 
   cleanupPolicy: Retain

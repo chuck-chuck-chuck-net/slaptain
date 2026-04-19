@@ -262,6 +262,7 @@ run_tests() {
         DB_CR_NAME="$DB_CR_NAME" \
         DB_CREDENTIALS_SECRET="$DB_CREDENTIALS_SECRET" \
         SCHEMA_CR_NAME="$SCHEMA_CR_NAME" \
+        READPW_OU="${READPW_OU:-ServiceAccounts}" \
         go test -v ./... --ginkgo.v --ginkgo.timeout=10m
     )
 }

@@ -46,6 +46,9 @@ var (
 
 	// LDAP_READONLY_HEADLESS_SVC — headless service for read-only replica pods.
 	ldapReadOnlyHeadlessSvc = envOrDefault("LDAP_READONLY_HEADLESS_SVC", "slapd-readonly-headless")
+
+	// READPW_OU — OU name for read-only service accounts (readpw users).
+	readpwOU = envOrDefault("READPW_OU", "ServiceAccounts")
 )
 
 // ── Ginkgo bootstrap ──────────────────────────────────────────────────────────

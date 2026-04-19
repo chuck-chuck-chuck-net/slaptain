@@ -64,7 +64,7 @@ var _ = Describe("config access", func() {
 
 		// ldapConn is bound as cn=admin,<baseDN> which is the data rootDN and
 		// therefore bypasses ACLs — it can read userPassword from any entry.
-		readpwBase := fmt.Sprintf("ou=Readpw,%s", baseDN)
+		readpwBase := fmt.Sprintf("ou=%s,%s", readpwOU, baseDN)
 		entries := ldapSearch(ldapConn, readpwBase, "(objectClass=posixAccount)", "uid", "userPassword")
 
 		byUID := make(map[string]*ldap.Entry, len(entries))
@@ -161,7 +161,7 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 	It("each readpw user can bind", func(ctx SpecContext) {
 		for user, pw := range readpwPWs {
 			user, pw := user, pw // capture for closure
-			dn := fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN)
+			dn := fmt.Sprintf("uid=%s,ou=%s,%s", user, readpwOU, baseDN)
 			Eventually(ctx, func() error {
 				conn, err := ldap.Dial("tcp", localLDAPAddr)
 				if err != nil {
@@ -176,7 +176,7 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 
 	It("a readpw user can read userPassword from ou=Mail", func(ctx SpecContext) {
 		// ACL rule {0}: to dn.subtree="ou=Mail,..." attrs=userPassword
-		//   … by dn.children="ou=Readpw,..." read …
+		//   … by dn.children="ou=<readpwOU>,..." read …
 		//
 		// Use Eventually: the operator applies spec.ldap.acls to each pod
 		// individually via headless service DNS on every reconcile loop.  By the
@@ -195,7 +195,7 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer conn.Close()
 
-			g.Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN), pw)).To(Succeed())
+			g.Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=%s,%s", user, readpwOU, baseDN), pw)).To(Succeed())
 
 			req := ldap.NewSearchRequest(mailUserDN,
 				ldap.ScopeBaseObject, ldap.NeverDerefAliases,
@@ -222,7 +222,7 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer conn.Close()
 
-		Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=Readpw,%s", user, baseDN), pw)).To(Succeed())
+		Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=%s,%s", user, readpwOU, baseDN), pw)).To(Succeed())
 
 		req := ldap.NewSearchRequest(fmt.Sprintf("uid=alice,ou=People,%s", baseDN),
 			ldap.ScopeBaseObject, ldap.NeverDerefAliases,

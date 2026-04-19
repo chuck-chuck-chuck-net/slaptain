@@ -21,7 +21,7 @@ var _ = Describe("LDAP directory", func() {
 		})
 
 		It("has all OUs created by bootstrap", func() {
-			for _, ou := range []string{"People", "Mail", "Readpw"} {
+			for _, ou := range []string{"People", "Mail", readpwOU} {
 				dn := fmt.Sprintf("ou=%s,%s", ou, baseDN)
 				Expect(ldapExists(ldapConn, dn)).To(BeTrue(), "OU %s is missing", dn)
 			}
