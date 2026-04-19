@@ -198,28 +198,42 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		sc.Spec.Replication.ExternalPeers = originalPeers
 		Expect(crdClient.Patch(ctx, sc, patch)).To(Succeed())
 
-		// Wait for the stanza to reappear.
+		// Wait for the stanza to reappear on ALL RW pods. Checking only one pod
+		// is insufficient: the controller reconciles pods sequentially, and pods
+		// still being updated have their replication engine restarting — subsequent
+		// tests that open new connections through the ClusterIP service can hit
+		// those unsettled pods and get transient auth failures.
 		Eventually(ctx, func() bool {
-			conn, cancel := dialPodLDAP(namespace, "slapd-0", "14000")
-			defer cancel()
-			defer conn.Close()
-			Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed())
-			sr, err := conn.Search(ldap.NewSearchRequest(
-				"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-				0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
-				[]string{"olcSyncRepl"}, nil))
-			Expect(err).NotTo(HaveOccurred())
-			if len(sr.Entries) == 0 {
-				return false
-			}
-			for _, v := range sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl") {
-				if containsRID(v, extPeerRID) {
-					return true
+			for i := int32(0); i < replicas; i++ {
+				podName := fmt.Sprintf("slapd-%d", i)
+				localPort := fmt.Sprintf("%d", 14000+i)
+				conn, cancel := dialPodLDAP(namespace, podName, localPort)
+				defer cancel()
+				defer conn.Close()
+
+				Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed())
+				sr, err := conn.Search(ldap.NewSearchRequest(
+					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+					0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
+					[]string{"olcSyncRepl"}, nil))
+				Expect(err).NotTo(HaveOccurred())
+				if len(sr.Entries) == 0 {
+					return false
+				}
+				found := false
+				for _, v := range sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl") {
+					if containsRID(v, extPeerRID) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
 				}
 			}
-			return false
+			return true
 		}).WithTimeout(60 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
-			"external peer syncrepl stanza (rid=%s) should be restored after re-adding peer", extPeerRID)
+			"external peer syncrepl stanza (rid=%s) should be restored on all RW pods after re-adding peer", extPeerRID)
 	}, NodeTimeout(3*time.Minute))
 
 	// ── 5. External peer status reported in CR ───────────────────────────────
