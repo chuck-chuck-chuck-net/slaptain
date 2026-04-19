@@ -116,15 +116,19 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 6. Bootstrap initial directory entries via LDAP once pod-0 is ready.
-	//    Sets sc.Status.BootstrapComplete = true on success; status persisted below.
-	if err := r.reconcileBootstrap(ctx, sc); err != nil {
+	//    Seeds root/admin/replication entries on pod-0, then verifies the root
+	//    entry has replicated to all other pods before setting BootstrapComplete.
+	//    Returns skipped=true while replication is still converging.
+	podsSkipped := false
+
+	if skipped, err := r.reconcileBootstrap(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileBootstrap: %w", err)
+	} else if skipped {
+		podsSkipped = true
 	}
 
 	// 7. Apply spec.ldap.acls to each pod's cn=config (idempotent; unreachable pods
 	//    are logged and skipped — the next reconcile will retry them).
-	//    Track whether any pod was skipped so we keep requeueing.
-	podsSkipped := false
 
 	if skipped, err := r.reconcileACLs(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileACLs: %w", err)
@@ -759,14 +763,18 @@ func (r *SlapdClusterReconciler) buildReadOnlyStatefulSetSpec(sc *ldapv1alpha1.S
 }
 
 // reconcileBootstrap seeds the initial LDAP directory entries via a live LDAP connection
-// to pod-0 once it is ready.  It is idempotent: if the root entry already exists the
-// function returns immediately after marking BootstrapComplete.
+// to pod-0 once it is ready, then verifies that the root entry has replicated to all
+// other pods before marking bootstrap complete.
+//
+// Returns (skipped bool, err error): skipped=true means some pods don't have the root
+// entry yet (replication still converging) — the caller should keep requeueing.
+// BootstrapComplete is only set once ALL pods confirm the root entry.
 //
 // Using a live connection (instead of slapadd) ensures that the accesslog overlay
 // records all initial writes, which is required for delta-syncrepl to work correctly.
-func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, error) {
 	if sc.Status.BootstrapComplete {
-		return nil
+		return false, nil
 	}
 
 	log := logf.FromContext(ctx)
@@ -776,17 +784,17 @@ func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *lda
 	if err := r.Get(ctx, client.ObjectKey{Name: sc.Name + "-0", Namespace: sc.Namespace}, pod0); err != nil {
 		if errors.IsNotFound(err) {
 			log.Info("pod-0 not yet created; deferring bootstrap")
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if !isPodReady(pod0) {
 		log.Info("pod-0 not yet ready; deferring bootstrap")
-		return nil
+		return false, nil
 	}
 	if pod0.Status.PodIP == "" {
 		log.Info("pod-0 has no IP yet; deferring bootstrap")
-		return nil
+		return false, nil
 	}
 
 	// Connect directly to pod-0's IP on the container LDAP port.
@@ -798,7 +806,7 @@ func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *lda
 	)
 	if err != nil {
 		log.Info("LDAP dial to pod-0 failed; deferring bootstrap", "addr", addr, "err", err)
-		return nil
+		return false, nil
 	}
 	defer conn.Close()
 	conn.SetTimeout(ldapRequestTimeout)
@@ -808,79 +816,124 @@ func (r *SlapdClusterReconciler) reconcileBootstrap(ctx context.Context, sc *lda
 	adminDN := "cn=admin," + sc.Spec.LDAP.Domain
 	adminPW, err := r.getAdminPassword(ctx, sc)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := conn.Bind(adminDN, adminPW); err != nil {
 		log.Info("LDAP bind failed; deferring bootstrap", "dn", adminDN, "err", err)
-		return nil
+		return false, nil
 	}
 
-	// Idempotency: if the root entry already exists we're done.
+	// Idempotency: if the root entry already exists on pod-0, skip seeding
+	// and proceed to the convergence check below.
 	exists, err := ldapEntryExists(conn, sc.Spec.LDAP.Domain)
 	if err != nil {
-		return fmt.Errorf("check root entry: %w", err)
-	}
-	if exists {
-		log.Info("root entry already exists; marking bootstrap complete")
-		sc.Status.BootstrapComplete = true
-		return nil
+		return false, fmt.Errorf("check root entry: %w", err)
 	}
 
-	// Extract the first DC label from the domain (e.g. "dc=example,dc=org" → "example").
-	parts := strings.SplitN(sc.Spec.LDAP.Domain, ",", 2)
-	dc := strings.TrimPrefix(parts[0], "dc=")
+	if !exists {
+		// Extract the first DC label from the domain (e.g. "dc=example,dc=org" → "example").
+		parts := strings.SplitN(sc.Spec.LDAP.Domain, ",", 2)
+		dc := strings.TrimPrefix(parts[0], "dc=")
 
-	// Add root entry.
-	addRoot := ldap.NewAddRequest(sc.Spec.LDAP.Domain, nil)
-	addRoot.Attribute("objectClass", []string{"top", "dcObject", "organization"})
-	addRoot.Attribute("o", []string{dc})
-	addRoot.Attribute("dc", []string{dc})
-	if err := conn.Add(addRoot); err != nil {
-		return fmt.Errorf("add root entry %s: %w", sc.Spec.LDAP.Domain, err)
-	}
-
-	// Add admin entry.  Hash the plaintext password we already have.
-	adminHash, err := generateSSHAHash(adminPW)
-	if err != nil {
-		return fmt.Errorf("hash admin password: %w", err)
-	}
-	addAdmin := ldap.NewAddRequest(adminDN, nil)
-	addAdmin.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
-	addAdmin.Attribute("cn", []string{"admin"})
-	addAdmin.Attribute("description", []string{"LDAP administrator"})
-	addAdmin.Attribute("userPassword", []string{adminHash})
-	if err := conn.Add(addAdmin); err != nil {
-		return fmt.Errorf("add admin entry: %w", err)
-	}
-
-	// Add replication user when replication is enabled.
-	if sc.Spec.Replication.Enabled {
-		pwSecret := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKey{
-			Name:      sc.Name + "-passwords",
-			Namespace: sc.Namespace,
-		}, pwSecret); err != nil {
-			return fmt.Errorf("read passwords secret: %w", err)
+		// Add root entry.
+		addRoot := ldap.NewAddRequest(sc.Spec.LDAP.Domain, nil)
+		addRoot.Attribute("objectClass", []string{"top", "dcObject", "organization"})
+		addRoot.Attribute("o", []string{dc})
+		addRoot.Attribute("dc", []string{dc})
+		if err := conn.Add(addRoot); err != nil {
+			return false, fmt.Errorf("add root entry %s: %w", sc.Spec.LDAP.Domain, err)
 		}
-		replPW := string(pwSecret.Data["replication-password"])
-		replHash, err := generateSSHAHash(replPW)
+
+		// Add admin entry.  Hash the plaintext password we already have.
+		adminHash, err := generateSSHAHash(adminPW)
 		if err != nil {
-			return fmt.Errorf("hash replication password: %w", err)
+			return false, fmt.Errorf("hash admin password: %w", err)
 		}
-		replDN := "cn=replication," + sc.Spec.LDAP.Domain
-		addRepl := ldap.NewAddRequest(replDN, nil)
-		addRepl.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
-		addRepl.Attribute("cn", []string{"replication"})
-		addRepl.Attribute("description", []string{"Syncrepl bind account"})
-		addRepl.Attribute("userPassword", []string{replHash})
-		if err := conn.Add(addRepl); err != nil {
-			return fmt.Errorf("add replication entry: %w", err)
+		addAdmin := ldap.NewAddRequest(adminDN, nil)
+		addAdmin.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
+		addAdmin.Attribute("cn", []string{"admin"})
+		addAdmin.Attribute("description", []string{"LDAP administrator"})
+		addAdmin.Attribute("userPassword", []string{adminHash})
+		if err := conn.Add(addAdmin); err != nil {
+			return false, fmt.Errorf("add admin entry: %w", err)
+		}
+
+		// Add replication user when replication is enabled.
+		if sc.Spec.Replication.Enabled {
+			pwSecret := &corev1.Secret{}
+			if err := r.Get(ctx, client.ObjectKey{
+				Name:      sc.Name + "-passwords",
+				Namespace: sc.Namespace,
+			}, pwSecret); err != nil {
+				return false, fmt.Errorf("read passwords secret: %w", err)
+			}
+			replPW := string(pwSecret.Data["replication-password"])
+			replHash, err := generateSSHAHash(replPW)
+			if err != nil {
+				return false, fmt.Errorf("hash replication password: %w", err)
+			}
+			replDN := "cn=replication," + sc.Spec.LDAP.Domain
+			addRepl := ldap.NewAddRequest(replDN, nil)
+			addRepl.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
+			addRepl.Attribute("cn", []string{"replication"})
+			addRepl.Attribute("description", []string{"Syncrepl bind account"})
+			addRepl.Attribute("userPassword", []string{replHash})
+			if err := conn.Add(addRepl); err != nil {
+				return false, fmt.Errorf("add replication entry: %w", err)
+			}
+		}
+		log.Info("bootstrap entries seeded on pod-0", "baseDN", sc.Spec.LDAP.Domain)
+	}
+
+	// ── Replication convergence check ────────────────────────────────────────
+	// For single-replica clusters, pod-0 having the root entry is sufficient.
+	// For multi-replica clusters, verify the root entry has replicated to all
+	// other pods via headless DNS before marking bootstrap complete.  This
+	// eliminates the race where PhaseRunning is set before data is visible on
+	// all pods — downstream consumers (slapd-test Job, future CRDs) can rely
+	// on the Ready condition.
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	if replicas > 1 {
+		headlessSvc := sc.Name + "-headless"
+		for i := int32(1); i < replicas; i++ {
+			host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local:%d",
+				sc.Name, i, headlessSvc, sc.Namespace, ldapContainerPort)
+			peerConn, err := ldap.DialURL("ldap://"+host,
+				ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+			)
+			if err != nil {
+				log.Info("bootstrap convergence: peer not reachable yet (will retry)",
+					"ordinal", i, "host", host, "err", err)
+				return true, nil
+			}
+			peerConn.SetTimeout(ldapRequestTimeout)
+			if err := peerConn.Bind(adminDN, adminPW); err != nil {
+				peerConn.Close()
+				log.Info("bootstrap convergence: bind failed on peer (will retry)",
+					"ordinal", i, "host", host, "err", err)
+				return true, nil
+			}
+			peerExists, err := ldapEntryExists(peerConn, sc.Spec.LDAP.Domain)
+			peerConn.Close()
+			if err != nil {
+				log.Info("bootstrap convergence: search failed on peer (will retry)",
+					"ordinal", i, "host", host, "err", err)
+				return true, nil
+			}
+			if !peerExists {
+				log.Info("bootstrap convergence: root entry not yet replicated to peer (will retry)",
+					"ordinal", i, "host", host)
+				return true, nil
+			}
 		}
 	}
 
-	log.Info("bootstrap complete", "baseDN", sc.Spec.LDAP.Domain)
+	log.Info("bootstrap complete — root entry confirmed on all pods", "baseDN", sc.Spec.LDAP.Domain)
 	sc.Status.BootstrapComplete = true
-	return nil
+	return false, nil
 }
 
 // buildStatefulSetSpec constructs the StatefulSet spec.

@@ -172,3 +172,49 @@ deadlocks slapd. The existence check prevents the duplicate ADD from ever being 
 **Lesson:** When a server-side bug causes a hang (not an error), error handling cannot be the
 primary defence. You must avoid triggering the bug in the first place. Error handling and
 timeouts are defence in depth, not substitutes for correct pre-conditions.
+
+---
+
+## 2026-04-19: PhaseRunning set before root entry replicated to all pods
+
+**Symptom:** The slapd-test bootstrap Job starts after the CR reaches `PhaseRunning` /
+`Ready=True`, but hits a pod that doesn't have the root entry yet. The Job fails with
+"No such object" because the ClusterIP service routes to a pod where replication hasn't
+converged. Workaround: an `until` poll loop in `charts/slapd-test/files/bootstrap.sh`
+that waits for the root entry before proceeding.
+
+**Root cause:** `reconcileBootstrap` set `bootstrapComplete = true` as soon as it
+successfully seeded the root entry on **pod-0 only**. For multi-replica clusters, the
+root entry still needed to replicate to pods 1..N-1 via delta-syncrepl. The phase/Ready
+logic gated on `bootstrapComplete` and `podsSkipped`, but the bootstrap step itself
+never reported "skipped" — it returned a plain `error`, not `(bool, error)`. So even
+though pods 1..N-1 didn't have the root entry yet, `bootstrapComplete` was already true,
+and if ACLs/schemas/replication were also done, the CR went straight to `PhaseRunning`.
+
+In operator logs this was ~14 seconds of convergence time (3 replicas + 1 read-only),
+during which the CR was already advertising readiness.
+
+**Fix:** Changed `reconcileBootstrap` signature from `error` to `(bool, error)`. After
+seeding (or confirming) the root entry on pod-0, the function now queries each peer pod
+(1..N-1) via headless DNS for the root entry. If any peer is unreachable or doesn't have
+it yet, returns `(true, nil)` — feeding into `podsSkipped`, keeping the CR in
+`PhaseBootstrapping` with `Ready=False`. Once all pods confirm the root entry,
+`bootstrapComplete` is set and the function short-circuits on all future reconciles.
+
+For single-replica clusters the convergence check is skipped entirely (pod-0 having the
+entry is sufficient). Pod-0 seeding still uses the pod IP (already available from the
+k8s API, avoids depending on DNS at a point where it may not have converged yet). The
+convergence check uses headless DNS — consistent with how all other per-pod reconcile
+steps (ACLs, schemas, replication) address pods.
+
+Removed the `until` poll loop from `charts/slapd-test/files/bootstrap.sh`. Downstream
+consumers can now `kubectl wait --for=condition=Ready` on the CR.
+
+**Why it was hard to spot:** The race window was ~14 seconds on a 3-replica cluster.
+In production (long-lived clusters) this only matters once at initial deployment. It
+manifested reliably in CI/e2e where teardown/setup cycles are frequent and the bootstrap
+Job is deployed immediately after the CR.
+
+**Lesson:** `bootstrapComplete` must mean "bootstrap is complete on the **cluster**, not
+on one pod." Any status flag that downstream consumers depend on must reflect the state
+of the entire system, not just the first node that was touched.
