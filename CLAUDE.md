@@ -55,7 +55,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   │   └── templates/              # deployment, RBAC, serviceaccount, metrics, networkpolicy
 │   ├── slapd/                      # Standalone Helm chart (baseline / comparison / testing vehicle)
 │   ├── slapd-cluster/              # Helm chart deploying a SlapdCluster CR (operator required)
-│   └── slapd-test/                 # Test chart: bootstrap job + toolkit pod
+│   └── slapd-test/                 # DEPRECATED — replaced by SlapdDatabase/SlapdSchema CRs in tests/resources/
 ├── images/
 │   ├── slapd/Containerfile         # slapd runtime image
 │   ├── slapd-init/Containerfile    # Bootstrap init container image
@@ -78,15 +78,17 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 └── tests/
     ├── gencert.sh                  # TLS cert generation helper
     ├── values.slapd.yaml           # Non-secret values for slapd / slapd-cluster charts
-    ├── values.slapd-test.yaml      # Non-secret deployment-specific overrides for slapd-test
-    ├── values.slapd-test.secret.yaml.sample   # Template: passwords + readpw hashes/plaintexts
+    ├── e2e-singlesite.sh           # All-in-one single-site e2e: setup, run, teardown
+    ├── resources/
+    │   ├── example/                # Open-source test fixtures (SlapdDatabase, SlapdSchema, Secrets)
+    │   └── lab/                    # Internal lab configuration (SOPS-encrypted secrets)
     ├── README.md                   # Test suite documentation (quick-start cycle at top)
     ├── SOPS.md                     # SOPS/age secret management guide
     └── e2e/                        # Ginkgo e2e tests (go-ldap, client-go)
         ├── suite_test.go           # BeforeSuite: port-forward, rootDSE baseDN discovery, admin connect
         ├── helpers_test.go         # k8s/LDAP helpers (ldapSearch, ldapAdd, portForward, …)
         ├── slapd_test.go           # StatefulSet, Service, PVC, passwords Secret checks
-        ├── bootstrap_test.go       # bootstrap Job and toolkit Deployment checks
+        ├── bootstrap_test.go       # SlapdDatabase Running checks
         ├── ldap_test.go            # Directory content: base structure, user/group CRUD, ACL basics
         ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
         ├── readonly_test.go        # Read-only replica tests: data sync, write rejection
@@ -103,10 +105,10 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532. Builder stage uses `golang:1.25`.
 - **User (slapd):** `openldap` (UID/GID 1024). Debian's slapd package creates this user; we `groupmod`/`usermod` to 1024.
 - **Ports:** 1024 (ldap), 1025 (ldaps) — non-privileged. Service maps 389→1024 and 636→1025.
-- **Mount Points:** `/ldap-config` (slapd.d config dir, PVC), `/ldap-data` (LMDB data, PVC), `/run/openldap` (socket, emptyDir), `/etc/openldap/tls` (TLS secret, optional).
+- **Mount Points:** `/config` (slapd.d config dir, PVC), `/data` (LMDB data, PVC), `/accesslog` (delta-syncrepl change journal, PVC), `/run/openldap` (socket, emptyDir), `/etc/openldap/tls` (TLS secret, optional).
 - **Module path:** `/usr/lib/ldap` (Debian path). Modules loaded dynamically; plan to compile in statically later.
 - **Schema path:** `/etc/ldap/schema/` (Debian path).
-- **Init Container:** Generates `slapd.conf`, runs `slaptest` to produce `slapd.d` format, populates initial LDIFs.
+- **Init Container:** Sets up `cn=config` (admin credentials, modules, TLS). Creates per-database data directories from `DATABASE_DIRS` env var. Does NOT create data databases, schemas, or ACLs.
 
 ---
 
@@ -120,15 +122,12 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - Version: `v1alpha1`
 - Scope: Namespaced
 
-**CRD spec fields** (all phases baked in from day 1 — no breaking changes needed later):
+**CRD spec fields** (SlapdCluster manages infrastructure; database-level config lives on SlapdDatabase/SlapdSchema CRs — see ADR-004):
 
 | Field | Type | Notes |
 |---|---|---|
 | `spec.images.{slapd,init}.{repository,tag,pullPolicy}` | `SlapdImages` | Image config for both containers |
-| `spec.ldap.domain` | string | LDAP domain in DC notation, e.g. `dc=example,dc=org` |
-| `spec.ldap.credentialsSecretName` | string | Optional: reference an existing plaintext credentials Secret (`admin-password` + `root-password` keys); suppresses auto-generation of `<name>-credentials` |
-| `spec.ldap.acls` | `[]string` | Ordered list of slapd.conf `access to ...` rules applied to every pod's `cn=config` by the operator; empty = preserve init-container defaults |
-| `spec.ldap.schemas` | `[]string` | JSON-encoded schema entries to add to `cn=schema,cn=config` on every pod; idempotent via DN existence check; empty = no custom schemas |
+| `spec.ldap.cnConfigCredentials.secretName` | string | Optional: reference an existing Secret with `root-password` key for cn=config admin; suppresses auto-generation of `<name>-config-password` |
 | `spec.ldap.forceRebootstrap` | bool | Force init container to re-bootstrap (destructive) |
 | `spec.ldap.tls.{enabled,secretName}` | `SlapdTLSConfig` | TLS Secret must contain `tls.crt`, `tls.key`, `ca.crt` |
 | `spec.replicas` | int32 | Default 1; replication is only active when `replicas > 1` AND `replication.enabled=true` |
@@ -138,25 +137,27 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.service.{type,ldapPort,ldapsPort}` | `SlapdServiceConfig` | ClusterIP service config, defaults 389/636 |
 | `spec.resources` | `corev1.ResourceRequirements` | Container resource requests/limits |
 | `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
-| `spec.replication.{enabled,role,mode,peers,externalPeers,accessLogEnabled}` | `SlapdReplicationConfig` | N-way multi-master delta-syncrepl; active when `enabled=true` and `replicas > 1` |
+| `spec.replication.{enabled,externalPeers}` | `SlapdReplicationConfig` | N-way multi-master delta-syncrepl; active when `enabled=true` and `replicas > 1` |
+| `spec.replication.keepalive` | string | TCP keepalive for syncrepl connections (e.g. `idle:probes:interval`) |
+| `spec.replication.retry` | string | Retry interval for syncrepl connections (e.g. `60 +`) |
 
-**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `bootstrapComplete`, `externalPeerStatuses` (per-peer connectivity), `conditions`.
+Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs.
 
-**Reconcile order:**
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `externalPeerStatuses` (per-peer connectivity), `conditions`.
+
+**Reconcile order (SlapdCluster controller):**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
-2. `reconcileSecret` — create `<name>-passwords` (plaintext `admin-password` + `replication-password`, create-only) + `<name>-config-password` (plaintext `root-password`, create-only); or read from `spec.ldap.credentialsSecretName`
+2. `reconcileSecret` — create `<name>-config-password` (plaintext `root-password`, create-only); or read from `spec.ldap.cnConfigCredentials.secretName`
 3. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (SSA patch)
 4. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (SSA patch)
-5. `reconcileStatefulSet` — `serviceName: <name>-headless`; uses `volumeClaimTemplates` when persistence enabled (SSA patch)
+5. `reconcileStatefulSet` — `serviceName: <name>-headless`; queries SlapdDatabase CRs to compute `DATABASE_DIRS` env var for init container; uses `volumeClaimTemplates` when persistence enabled (SSA patch)
 5a. `reconcileReadOnlyHeadlessService` — `<name>-readonly-headless`, `clusterIP: None` (skipped when `readReplicas=0`)
 5b. `reconcileReadOnlyService` — `<name>-readonly`, ClusterIP (skipped when `readReplicas=0`)
 5c. `reconcileReadOnlyStatefulSet` — second StatefulSet for RO consumers: no accesslog, `LDAP_READONLY_REPLICA=true` (skipped when `readReplicas=0`)
-6. `reconcileBootstrap` — connect to pod-0 via pod IP on port 1024, bind as data rootdn, add root + admin + (optionally) replication entries; sets `status.bootstrapComplete=true`; no-op when already complete (see `docs/BOOTSTRAP.md`)
-7. `reconcileACLs` — for each pod ordinal 0..replicas-1: dial `<name>-<N>.<name>-headless.<ns>.svc.cluster.local:1024`, bind as `cn=admin,cn=config` (from `<name>-config-password`), compare current `olcAccess` values against `spec.ldap.acls` (stripping `{N}` prefixes), replace if different; also applies to read-only pods (`<name>-readonly-<N>.<name>-readonly-headless`); logs warning and skips pods not yet reachable (retries on next reconcile)
-7a. `reconcileSchemas` — for each RW pod + RO pod: dial via headless DNS, bind as `cn=admin,cn=config`, for each JSON schema entry in `spec.ldap.schemas`: check DN existence → add if missing, skip if present; unreachable pods logged and retried on next reconcile
-7b. `reconcileReplication` — operator owns all syncrepl config (ADR-003). For each RW pod: dial via headless DNS, bind as `cn=admin,cn=config`, compute desired `olcSyncRepl` stanzas via `buildDesiredSyncRepl()` (in-cluster RID 1..N skip-self + external peers RID 101+), compare current values (RID-based, order-insensitive), `Replace olcSyncRepl` + `Replace olcMirrorMode` if different. For RO pods: stanzas for all RW masters (no self-skip, no external peers, no mirrormode). Also reports external peer connectivity status. Unreachable pods logged and retried.
-8. Observe StatefulSet → update `status.phase`, `readyReplicas`, `bootstrapComplete`, `externalPeerStatuses`, conditions (SSA patch on status subresource)
-9. Not Running → `RequeueAfter: 10s`
+6. Observe StatefulSet → update `status.phase`, `readyReplicas`, `externalPeerStatuses`, conditions (SSA patch on status subresource)
+7. Not Running → `RequeueAfter: 10s`
+
+**Note:** Bootstrap, ACL management, schema management, and replication configuration have moved to the `SlapdDatabase` and `SlapdSchema` controllers (see ADR-004).
 
 **Service naming (Bitnami convention):**
 - Headless: `<name>-headless` — used by StatefulSet for pod DNS (`<name>-0.<name>-headless.ns.svc`)
@@ -170,55 +171,40 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 
 ---
 
-### slapd-test Chart (`charts/slapd-test`)
+### Test Resources (`tests/resources/`)
 
-Test harness chart with two components: a bootstrap `Job` and an optional toolkit `Deployment`.
-Configuration lives entirely in values — no files are embedded in the chart image.
+**The `slapd-test` Helm chart (`charts/slapd-test`) is deprecated.** Test fixtures are now
+plain Kubernetes manifests (SlapdDatabase, SlapdSchema, Secret) applied via `kubectl apply`.
 
-Key values structure:
+- `tests/resources/example/` — open-source test fixtures suitable for CI and getting started.
+- `tests/resources/lab/` — internal lab configuration (SOPS-encrypted secrets, additional schemas).
 
-| Value | Purpose |
-|---|---|
-| `slapd.domain` | LDAP base DN (e.g. `dc=chuck-chuck-chuck,dc=net`) |
-| `slapd.adminPassword` / `rootPassword` | Plaintext passwords → stored in `slapd-test-passwords` Secret |
-| `bootstrap.readpwOU` | OU name for read-only service accounts (default `Readpw`) |
-| `bootstrap.customSchemaJson` | Optional JSON schema entry for `cn=config`; empty = no custom schema |
-| `bootstrap.ousJson` | JSON array of OUs to create; supports Helm `tpl` expressions (domain/readpwOU substituted at render) |
-| `bootstrap.readpwUsers` | `username → {SSHA}hash` — stored in LDAP entries |
-| `bootstrap.readpwPasswords` | `username → plaintext` — stored in `slapd-test-passwords` Secret as `readpw-<user>` keys; used by e2e tests to bind as readpw users |
-
-The `ousJson` / `customSchemaJson` values may contain `{{ }}` Helm template expressions.
-Values files are plain YAML (no rendering); expressions are only evaluated when the configmap
-template calls `tpl .Values.bootstrap.ousJson .`. This means `-f override.yaml` files can
-contain template expressions and they work identically to chart default values.
-
-**Note:** ACL management was removed from the slapd-test chart. ACLs are now declared in
-`spec.ldap.acls` on the `SlapdCluster` CR and applied to every pod by the operator.
-See ADR-002.
-
-Deployment-specific overrides (e.g. OX schema, extra OUs) go in `tests/values.slapd-test.yaml`.
-Secrets (passwords, SSHA hashes) go in `tests/values.slapd-test.secret.yaml` (SOPS-encrypted).
-See `tests/values.slapd-test.secret.yaml.sample` for the expected structure.
+Deploy with `make testing-apply`, remove with `make testing-delete`.
+Or use `./tests/e2e-singlesite.sh all <context>` for an all-in-one cycle.
 
 ### e2e Test Suite (`tests/e2e/`)
 
-**Typical cycle** (operator path; use `helm-install`/`helm-uninstall` for standalone):
+**Typical cycle:**
 ```bash
-make cluster-helm-install testing-helm-install
+make cluster-helm-install testing-apply
 make e2e-run
-make testing-helm-uninstall cluster-helm-uninstall
+make testing-delete cluster-helm-uninstall
 ```
+
+Or all-in-one: `./tests/e2e-singlesite.sh all <context>`
 
 **Suite setup** (`suite_test.go` `BeforeSuite`):
 1. Build k8s client
 2. Wait for `slapd` StatefulSet ready
-3. Wait for `slapd-test` bootstrap Job succeeded
-4. Read `adminPW` from `slapd-passwords` Secret (`admin-password` key)
+3. Wait for SlapdDatabase to reach `Running` phase
+4. Read `adminPW` from `<dbname>-credentials` Secret (`root-password` key)
 5. Read `rootPW` from `slapd-config-password` Secret (`root-password` key)
 6. Read `readpwPWs` from `slapd-test-passwords` Secret — `map[string]string` built from all `readpw-*` keys
 7. Start `kubectl port-forward svc/slapd 13891:389` (local mode only; skipped when `LDAP_ADDR` is set)
 8. Query LDAP rootDSE (anonymous, `namingContexts`) → set `baseDN` (auto-discovered, no env var)
 9. Connect `ldapConn` as `cn=admin,<baseDN>` (data rootDN, bypasses ACLs)
+
+**readpwOU** is configurable via `READPW_OU` env var (default: `ServiceAccounts`).
 
 **Readpw ACL tests** (`readpw_test.go`) skip gracefully when `readpwPWs` is empty, so the suite
 runs without readpw configuration but skips those test cases.
@@ -243,9 +229,10 @@ runs without readpw configuration but skips those test cases.
 | `make helm-uninstall` | Uninstall the slapd Helm release |
 | `make cluster-helm-install` | `helm upgrade --install slapd ./charts/slapd-cluster` |
 | `make cluster-helm-uninstall` | Uninstall the slapd-cluster Helm release |
-| `make testing-helm-install` | `helm upgrade --install slapd-test ./charts/slapd-test` |
-| `make testing-helm-uninstall` | Uninstall the slapd-test Helm release |
+| `make testing-apply` | `kubectl apply` test resources (SlapdDatabase, SlapdSchema, Secrets) |
+| `make testing-delete` | `kubectl delete` test resources |
 | `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` |
+| `make e2e-singlesite` | All-in-one single-site e2e cycle via `tests/e2e-singlesite.sh` |
 | `make e2e-external-replication` | Run cross-cluster external replication tests (E2E_EXTERNAL_REPL=1) |
 
 ### Makefile Targets (operator/)
@@ -386,26 +373,24 @@ change ACLs to open it up).
 
 | Consumer | What it needs | Format | Phase |
 |---|---|---|---|
-| slapd-init (init container) | Data admin + config admin passwords | Plaintext (hashed at runtime by `slappasswd`) | 1+ |
-| Operator: bootstrap | Data admin password | Plaintext | 2 (implemented) |
-| Operator: ACL management (`reconcileACLs`) | Config admin password | Plaintext | 2 (implemented) |
-| Operator: Schema management (`reconcileSchemas`) | Config admin password | Plaintext | 2 (implemented) |
-| Operator: topology reconfiguration | Config admin password | Plaintext | 3 |
-| Operator: CSN lag monitoring | Read-only access to `contextCSN` / `cn=monitor` | Plaintext (monitoring DN) or anonymous | 3 |
-| Consumer init: syncrepl bind | Replication bind password | Plaintext | 2 (implemented) |
-| Bootstrap job (slapd-test) | Data admin + (optionally) config admin passwords | Plaintext | Testing only |
+| slapd-init (init container) | Config admin password | Plaintext (hashed at runtime by `slappasswd`) | 1+ |
+| SlapdDatabase controller: bootstrap | Data admin password | Plaintext | Implemented |
+| SlapdDatabase controller: ACL management | Config admin password | Plaintext | Implemented |
+| SlapdSchema controller: schema management | Config admin password | Plaintext | Implemented |
+| SlapdDatabase controller: replication | Config admin password | Plaintext | Implemented |
+| Operator: CSN lag monitoring | Read-only access to `contextCSN` / `cn=monitor` | Plaintext (monitoring DN) or anonymous | Future |
+| Consumer init: syncrepl bind | Replication bind password | Plaintext | Implemented |
 
 **Secrets layout:**
 
 | Secret | Contents | Created by | Scope |
 |---|---|---|---|
-| `<name>-passwords` | `admin-password` + `replication-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA + init container; LDAP bind during bootstrap and syncrepl |
-| `<name>-config-password` | `root-password` (plaintext) | Operator (auto-generated) or user (`spec.ldap.credentialsSecretName`) | Operator SA: ACL reconciliation (`reconcileACLs`) and Phase 3 topology management |
-| `slapd-test-passwords` | `readpw-<user>` (plaintext, one key per readpw account) | slapd-test chart | Testing only; e2e tests bind as readpw users to verify ACLs |
+| `<name>-config-password` | `root-password` (plaintext, cn=config admin) | SlapdCluster controller (auto-generated) or user (`spec.ldap.cnConfigCredentials.secretName`) | Operator SA: schema, ACL, replication, and topology management on cn=config |
+| `<dbname>-credentials` | `root-password` + `replication-password` (plaintext, per-database) | SlapdDatabase controller (auto-generated) | Init container + operator: data DB bootstrap, syncrepl bind |
+| `slapd-test-passwords` | `readpw-<user>` (plaintext, one key per readpw account) | Standalone Secret in `tests/resources/` | Testing only; e2e tests bind as readpw users to verify ACLs |
 
 **Production scope:** The operator provides a correctly configured, healthy LDAP endpoint.
-Directory content (schemas, OUs, users) is the user's responsibility. The slapd-test bootstrap
-job is a testing tool, not part of production deployment.
+Directory content (OUs, users) beyond what SlapdDatabase seeds is the user's responsibility.
 
 **OpenLDAP replication vs Redis — why the operator is simpler:**
 - Delta-syncrepl is pull-based: consumers connect to the provider, provider has no consumer registry.
@@ -441,8 +426,8 @@ Each pod has three databases and two overlays:
 
 | Component | Path | Purpose |
 |---|---|---|
-| Data DB (`olcDatabase={1}mdb`) | `/ldap-data` (existing) | LDAP data; unchanged from Phase 1 |
-| Accesslog DB (`olcDatabase={2}mdb`) | `/ldap-accesslog` (**new PVC**) | Delta-syncrepl change journal |
+| Data DB (`olcDatabase={1}mdb`) | `/data` (existing) | LDAP data; unchanged from Phase 1 |
+| Accesslog DB (`olcDatabase={2}mdb`) | `/accesslog` (**new PVC**) | Delta-syncrepl change journal |
 | `overlay accesslog` on data DB | — | Writes every change to accesslog DB |
 | `overlay syncprov` on accesslog DB | — | Exposes change journal to peers |
 | `overlay syncprov` on data DB | — | Required for initial full sync |
@@ -470,26 +455,26 @@ Phase 2 switches to **StatefulSet `volumeClaimTemplates`** for per-pod PVCs:
 
 | Template name | Resulting PVC for pod N | Path |
 |---|---|---|
-| `ldap-config` | `ldap-config-<name>-<N>` | `/ldap-config` |
-| `ldap-data` | `ldap-data-<name>-<N>` | `/ldap-data` |
-| `ldap-accesslog` | `ldap-accesslog-<name>-<N>` | `/ldap-accesslog` (**new**) |
+| `config` | `config-<name>-<N>` | `/config` |
+| `data` | `data-<name>-<N>` | `/data` |
+| `accesslog` | `accesslog-<name>-<N>` | `/accesslog` (**new**) |
 
 The `reconcilePVCs` controller step is **removed**; PVC lifecycle is managed entirely by the
 StatefulSet. Breaking change for Phase 1 deployments (PVC names change). Acceptable at v1alpha1.
 
 #### Replication Credentials
 
-The replication bind password is stored in the `<name>-passwords` Secret alongside the admin
-password (not in a separate Secret):
+The replication bind password is stored in the `<dbname>-credentials` Secret alongside the
+data admin password (per-database):
 
 | Secret | Key | Used by |
 |---|---|---|
-| `<name>-passwords` | `replication-password` | Init container: syncrepl bind password; operator: adds `cn=replication` LDAP entry |
+| `<dbname>-credentials` | `replication-password` | Init container: syncrepl bind password; SlapdDatabase controller: adds `cn=replication` LDAP entry |
 
-The operator generates a random `replication-password` when creating `<name>-passwords`. Users
-may pre-populate it via `spec.ldap.credentialsSecretName`. Never updated after creation.
+The SlapdDatabase controller generates a random `replication-password` when creating
+`<dbname>-credentials`. Never updated after creation.
 
-Replication bind DN: `cn=replication,<domain>`. The operator adds this entry via live LDAP
+Replication bind DN: `cn=replication,<suffix>`. The controller adds this entry via live LDAP
 during bootstrap and the init container grants it read access to the accesslog and data databases.
 
 #### Operator Changes for Phase 2
@@ -497,11 +482,11 @@ during bootstrap and the init container grants it read access to the accesslog a
 1. **Remove `replicas > 1` guard** (controller step 2 in Phase 1).
 2. **Remove `reconcilePVCs`**: replaced by StatefulSet `volumeClaimTemplates`.
 3. **Update `buildStatefulSetSpec`**:
-   - Add `ldap-accesslog` volume mount to init and main containers.
+   - Add `accesslog` volume mount to init and main containers.
    - Move config/data/accesslog to `volumeClaimTemplates`.
    - Pass to init container: `LDAP_REPLICATION_ENABLED`, `LDAP_REPLICAS`,
-     `LDAP_CLUSTER_HEADLESS_SVC` (`<name>-headless`), and `LDAP_REPLICATION_PASSWORD`
-     (from `<name>-passwords` / `replication-password`).
+     `LDAP_CLUSTER_HEADLESS_SVC` (`<name>-headless`), `DATABASE_DIRS`, and `LDAP_REPLICATION_PASSWORD`
+     (from `<dbname>-credentials` / `replication-password`).
 
 #### slapd-init Changes for Phase 2
 
@@ -523,11 +508,11 @@ Pod ordinal is read from the hostname: `${HOSTNAME##*-}` (last segment of Statef
 |---|---|
 | Replicas > 1 with N-way multi-master | Changing replicas after cluster creation (scale-out) |
 | Graceful pod failure and restart | CSN lag monitoring and alerting |
-| Replication credentials Secret | |
+| Per-database replication credentials Secret | |
 | Per-pod accesslog PVC | |
 | Cross-cluster replication (ExternalPeers, Phase 3) | |
-| Operator-managed cn=config ACLs (`spec.ldap.acls`) | |
-| Operator-managed custom schemas (`spec.ldap.schemas`) | |
+| ACLs on SlapdDatabase CRs (applied per-pod by SlapdDatabase controller) | |
+| Schemas on SlapdSchema CRs (applied per-pod by SlapdSchema controller) | |
 | Read-only consumer replicas (`spec.readReplicas`) | |
 
 #### Read-Only Replicas
@@ -539,7 +524,7 @@ second StatefulSet `<name>-readonly` with pure consumer pods. These pods:
 - Do **not** run `accesslog`, `syncprov`, or `mirrormode` — they never accept writes.
 - Have their own headless service (`<name>-readonly-headless`) and ClusterIP service (`<name>-readonly`).
 - Use label `app.kubernetes.io/instance: <name>-readonly` to separate from RW pods.
-- Have no accesslog volume or PVC (only `ldap-config` + `ldap-data`).
+- Have no accesslog volume or PVC (only `config` + `data`).
 - The init container receives `LDAP_READONLY_REPLICA=true`; `LDAP_REPLICAS` and `LDAP_CLUSTER_HEADLESS_SVC` point to the **RW** headless service.
 - ACLs are applied to RO pods the same way as RW pods (cn=config is node-local).
 - Status fields: `readOnlyReadyReplicas`, `readOnlyReplicas` (informational; do not affect phase).
@@ -549,15 +534,15 @@ second StatefulSet `<name>-readonly` with pure consumer pods. These pods:
 ### cn=config Architecture Note
 
 `cn=config` is **node-local** — it is never replicated between pods. Each pod has its own
-independent copy stored in the `/ldap-config` PVC. This affects anything that lives in
+independent copy stored in the `/config` PVC. This affects anything that lives in
 `cn=config`: ACLs (`olcAccess`), schemas, overlays, and syncrepl stanzas.
 
 The operator manages cn=config state by connecting to each pod individually via the headless
-service DNS (`<name>-<N>.<name>-headless.<ns>.svc.cluster.local`). The `reconcileACLs` step
-(reconcile step 7) applies `spec.ldap.acls` to every pod on every reconcile loop and is
-idempotent (compares current `olcAccess` values before issuing a modify). The `reconcileSchemas`
-step (7a) applies `spec.ldap.schemas` to every pod using the same per-pod pattern — checking DN
-existence and adding missing schemas idempotently. See ADR-002.
+service DNS (`<name>-<N>.<name>-headless.<ns>.svc.cluster.local`). ACLs are declared on
+`SlapdDatabase` CRs and applied to every pod by the SlapdDatabase controller. Schemas are
+declared on `SlapdSchema` CRs and applied by the SlapdSchema controller. Both use the same
+per-pod pattern: connect via headless DNS, compare current state, modify if different. See
+ADR-002 and ADR-004.
 
 ---
 
@@ -568,9 +553,3 @@ existence and adding missing schemas idempotently. See ADR-002.
   These point at values files like `tests/values.slapd.yaml`. Investigate whether the script can
   default to the test values files automatically (e.g. detect and use `tests/values.slapd.yaml`
   when present), so running `./e2e-multisite.sh setup s1 s2` works without any env vars set.
-
-- ~~**CR status should reflect full bootstrap readiness.**~~ **Done.** `reconcileBootstrap`
-  now verifies the root entry has replicated to all pods (via headless DNS) before setting
-  `bootstrapComplete`. The `Ready` condition and `PhaseRunning` are only set once all pods
-  confirm the root entry. The temporary `until` loop in `charts/slapd-test/files/bootstrap.sh`
-  has been removed. Downstream consumers can `kubectl wait --for=condition=Ready`.
