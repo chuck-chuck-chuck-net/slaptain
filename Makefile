@@ -103,23 +103,32 @@ all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-
 $(STAMPS):
 	mkdir -p $(STAMPS)
 
-$(STAMPS)/init: $(INIT_SRCS) | $(STAMPS)
+# Track the current GIT_TAG so builds re-trigger when the tag changes
+# (e.g. new commit, dirty→clean transition). The file is only touched
+# when its content actually changes.
+$(STAMPS)/tag: FORCE | $(STAMPS)
+	@if [ "$$(cat $@ 2>/dev/null)" != "$(GIT_TAG)" ]; then \
+		echo "$(GIT_TAG)" > $@; \
+	fi
+.PHONY: FORCE
+
+$(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -t $(INIT_IMAGE) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd: $(SLAPD_SRCS) | $(STAMPS)
+$(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -t $(SLAPD_IMAGE) images/slapd/
 	@touch $@
 
-$(STAMPS)/toolkit: $(TOOLKIT_SRCS) | $(STAMPS)
+$(STAMPS)/toolkit: $(TOOLKIT_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -t $(TOOLKIT_IMAGE) images/slapd-toolkit/
 	@touch $@
 
-$(STAMPS)/operator: $(OPERATOR_SRCS) | $(STAMPS)
+$(STAMPS)/operator: $(OPERATOR_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/operator/Containerfile -t $(OPERATOR_IMAGE) .
 	@touch $@
 
-$(STAMPS)/e2e: $(E2E_SRCS) | $(STAMPS)
+$(STAMPS)/e2e: $(E2E_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/e2e-runner/Containerfile -t $(E2E_RUNNER_IMAGE) .
 	@touch $@
 
