@@ -566,6 +566,14 @@ ADR-002 and ADR-004.
 
 ### Backlog
 
+- **Cross-site syncrepl fan-out control (`ExternalPeer.replicasPerPeer`).** Currently each local
+  pod creates a syncrepl stanza for every remote pod in `podAddresses` (full N×M mesh). This
+  wastes connections — the remote cluster's internal mesh already ensures all remote pods have
+  the same data. Add `replicasPerPeer` (default 1) to `ExternalPeer`: each local pod connects
+  to that many remote pods using diagonal-first assignment: local pod `i`, connection `k` →
+  remote pod `(i + k) % len(podAddresses)`. At `replicasPerPeer=1`, this gives the 1:1 diagonal
+  (same connection count as the old NodePort model). Each additional connection shifts by one,
+  spreading load evenly. At `replicasPerPeer == len(podAddresses)`, it degrades to full mesh.
 - **Reduce env var dependency for e2e multisite setup.** Currently `e2e-multisite.sh` relies on
   `HELM_VALUES_SLAPD_CLUSTER` and `HELM_VALUES_SLAPD_TESTING` being set in the shell environment.
   These point at values files like `tests/values.slapd.yaml`. Investigate whether the script can
