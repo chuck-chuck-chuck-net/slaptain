@@ -38,11 +38,12 @@ type inspectJSON struct {
 }
 
 type externalPeerInfo struct {
-	Name      string `json:"name"`
-	URI       string `json:"uri"`
-	Connected *bool  `json:"connected,omitempty"` // nil = not tested (Multus)
-	LastError string `json:"lastError,omitempty"`
-	Multus    bool   `json:"multus,omitempty"` // true = podAddresses peer
+	Name         string   `json:"name"`
+	URI          string   `json:"uri"`
+	PodAddresses []string `json:"podAddresses,omitempty"`
+	Connected    *bool    `json:"connected,omitempty"` // nil = not tested (Multus)
+	LastError    string   `json:"lastError,omitempty"`
+	Multus       bool     `json:"multus,omitempty"` // true = podAddresses peer
 }
 
 type podJSON struct {
@@ -200,6 +201,7 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 		epi := externalPeerInfo{Name: ep.Name}
 		if len(ep.PodAddresses) > 0 {
 			epi.Multus = true
+			epi.PodAddresses = ep.PodAddresses
 			epi.URI = fmt.Sprintf("%d pod(s) via Multus", len(ep.PodAddresses))
 		} else {
 			epi.URI = ep.URI
@@ -695,7 +697,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 			}
 		} else {
 			check("external-peers", "pass",
-				fmt.Sprintf("%d Multus peers (connectivity verified by CSN convergence, not TCP dial)", len(sc.Spec.Replication.ExternalPeers)))
+				fmt.Sprintf("%d Multus peers (not reachable from operator, see syncrepl stanzas)", len(sc.Spec.Replication.ExternalPeers)))
 		}
 
 		// ── External peer syncrepl stanzas present on each RW pod ──
@@ -777,22 +779,34 @@ func printInspectResult(result inspectJSON) {
 			}
 
 			if len(pod.SyncRepl) > 0 {
-				// Classify stanzas into in-cluster and external
-				var inCluster, external []string
+				// Classify stanzas into in-cluster and cross-site.
+				// Match against URI (NodePort) or podAddresses (Multus).
+				var inCluster, crossSite []string
 				for _, sr := range pod.SyncRepl {
-					isExternal := false
+					matched := false
 					for _, ep := range result.ExternalPeers {
-						if strings.Contains(sr, ep.URI) {
-							label := fmt.Sprintf("[%s] ", ep.Name)
-							if len(sr) > 100 {
-								sr = sr[:100] + "..."
+						var needles []string
+						if ep.Multus {
+							needles = ep.PodAddresses
+						} else {
+							needles = []string{ep.URI}
+						}
+						for _, needle := range needles {
+							if needle != "" && strings.Contains(sr, needle) {
+								label := fmt.Sprintf("[%s] ", ep.Name)
+								if len(sr) > 100 {
+									sr = sr[:100] + "..."
+								}
+								crossSite = append(crossSite, label+sr)
+								matched = true
+								break
 							}
-							external = append(external, label+sr)
-							isExternal = true
+						}
+						if matched {
 							break
 						}
 					}
-					if !isExternal {
+					if !matched {
 						if len(sr) > 120 {
 							sr = sr[:120] + "..."
 						}
@@ -805,9 +819,9 @@ func printInspectResult(result inspectJSON) {
 						fmt.Printf("      %s\n", sr)
 					}
 				}
-				if len(external) > 0 {
-					fmt.Println("    syncRepl (external):")
-					for _, sr := range external {
+				if len(crossSite) > 0 {
+					fmt.Println("    syncRepl (cross-site):")
+					for _, sr := range crossSite {
 						fmt.Printf("      %s\n", sr)
 					}
 				}
@@ -826,7 +840,7 @@ func printInspectResult(result inspectJSON) {
 			for _, ep := range result.ExternalPeers {
 				var status string
 				if ep.Connected == nil {
-					status = "Multus (health via CSN convergence)"
+					status = "Multus (not reachable from operator)"
 				} else if *ep.Connected {
 					status = "connected"
 				} else {
