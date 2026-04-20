@@ -566,6 +566,16 @@ ADR-002 and ADR-004.
 
 ### Backlog
 
+- **Cross-site operator peering for CSN convergence monitoring.** Each single-site operator
+  instance can only see its own pods' CSNs. Cross-site replication health (the question SREs
+  actually ask: "is the LDAP cluster synced?") requires comparing CSNs across sites. Proposal:
+  give the operator pod a Multus interface on the replication network, expose a lightweight
+  endpoint (gRPC or HTTP) that serves the local site's per-pod CSNs, and have each operator
+  query its peers' endpoints. This gives two signals from one query: (1) replication network
+  reachability (the peer operator responded), (2) CSN convergence (local vs remote CSNs match).
+  Report both in `SlapdCluster.status`. This replaces the current `ExternalPeerStatus.Connected`
+  field (which is a shallow TCP dial from the operator — meaningless on Multus, and only
+  marginally useful on NodePort) with a genuine cross-site health assessment.
 - **Cross-site syncrepl fan-out control (`ExternalPeer.replicasPerPeer`).** Currently each local
   pod creates a syncrepl stanza for every remote pod in `podAddresses` (full N×M mesh). This
   wastes connections — the remote cluster's internal mesh already ensures all remote pods have

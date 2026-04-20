@@ -183,11 +183,11 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Name: ep.Name,
 		}
 		if len(ep.PodAddresses) > 0 {
-			// podAddresses peers use a Multus replication network that the
-			// operator pod cannot reach. Skip connectivity testing — actual
-			// replication health is observable via CSN convergence.
-			status.Connected = true
-			status.LastError = ""
+			// podAddresses peers use a Multus replication network — the operator
+			// pod cannot reach it. Omit from status rather than reporting a
+			// misleading result. Cross-site health will be verified via operator
+			// peering and CSN convergence (see backlog).
+			continue
 		} else if ep.URI != "" {
 			if err := testExternalPeerConnectivity(ep.URI); err != nil {
 				status.Connected = false

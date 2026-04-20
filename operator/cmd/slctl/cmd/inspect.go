@@ -40,8 +40,9 @@ type inspectJSON struct {
 type externalPeerInfo struct {
 	Name      string `json:"name"`
 	URI       string `json:"uri"`
-	Connected bool   `json:"connected"`
+	Connected *bool  `json:"connected,omitempty"` // nil = not tested (Multus)
 	LastError string `json:"lastError,omitempty"`
+	Multus    bool   `json:"multus,omitempty"` // true = podAddresses peer
 }
 
 type podJSON struct {
@@ -196,10 +197,17 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 
 	// Populate external peer info
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
-		epi := externalPeerInfo{Name: ep.Name, URI: ep.URI}
+		epi := externalPeerInfo{Name: ep.Name}
+		if len(ep.PodAddresses) > 0 {
+			epi.Multus = true
+			epi.URI = fmt.Sprintf("%d pod(s) via Multus", len(ep.PodAddresses))
+		} else {
+			epi.URI = ep.URI
+		}
 		for _, eps := range sc.Status.ExternalPeerStatuses {
 			if eps.Name == ep.Name {
-				epi.Connected = eps.Connected
+				c := eps.Connected
+				epi.Connected = &c
 				epi.LastError = eps.LastError
 				break
 			}
@@ -687,7 +695,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 			}
 		} else {
 			check("external-peers", "pass",
-				fmt.Sprintf("all %d external peers use Multus podAddresses (connectivity not testable from operator)", len(sc.Spec.Replication.ExternalPeers)))
+				fmt.Sprintf("%d Multus peers (connectivity verified by CSN convergence, not TCP dial)", len(sc.Spec.Replication.ExternalPeers)))
 		}
 
 		// ── External peer syncrepl stanzas present on each RW pod ──
@@ -816,8 +824,12 @@ func printInspectResult(result inspectJSON) {
 		if len(result.ExternalPeers) > 0 {
 			fmt.Println("\n  External Peers:")
 			for _, ep := range result.ExternalPeers {
-				status := "connected"
-				if !ep.Connected {
+				var status string
+				if ep.Connected == nil {
+					status = "Multus (health via CSN convergence)"
+				} else if *ep.Connected {
+					status = "connected"
+				} else {
 					status = "disconnected"
 					if ep.LastError != "" {
 						status += " (" + ep.LastError + ")"

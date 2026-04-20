@@ -242,13 +242,30 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		sc := &ldapv1alpha1.SlapdCluster{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
 
-		Expect(sc.Status.ExternalPeerStatuses).NotTo(BeEmpty(),
-			"status.externalPeerStatuses should be populated")
+		// podAddresses peers (Multus) are omitted from ExternalPeerStatuses because
+		// the operator can't reach the replication network. Only URI-based peers
+		// appear in the status. If all peers use podAddresses, the list is empty.
+		hasURIPeers := false
+		for _, ep := range sc.Spec.Replication.ExternalPeers {
+			if ep.URI != "" {
+				hasURIPeers = true
+				break
+			}
+		}
 
-		for _, ps := range sc.Status.ExternalPeerStatuses {
-			Expect(ps.Name).NotTo(BeEmpty(), "peer status should have a name")
-			Expect(ps.Connected).To(BeTrue(),
-				"external peer %q should be connected (got lastError: %s)", ps.Name, ps.LastError)
+		if hasURIPeers {
+			Expect(sc.Status.ExternalPeerStatuses).NotTo(BeEmpty(),
+				"status.externalPeerStatuses should be populated for URI-based peers")
+			for _, ps := range sc.Status.ExternalPeerStatuses {
+				Expect(ps.Name).NotTo(BeEmpty(), "peer status should have a name")
+				Expect(ps.Connected).To(BeTrue(),
+					"external peer %q should be connected (got lastError: %s)", ps.Name, ps.LastError)
+			}
+		} else {
+			// All peers use Multus podAddresses — status is intentionally empty.
+			// Cross-site health is verified by CSN convergence in tests 2 & 3.
+			Expect(sc.Status.ExternalPeerStatuses).To(BeEmpty(),
+				"podAddresses peers should not appear in externalPeerStatuses")
 		}
 	}, NodeTimeout(30*time.Second))
 })
