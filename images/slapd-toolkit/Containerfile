@@ -1,7 +1,7 @@
 FROM python:3.14-trixie
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ldap-utils strace procps \
+ && apt-get install -y --no-install-recommends ldap-utils strace procps iputils-ping iproute2 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir pyyaml ldap3

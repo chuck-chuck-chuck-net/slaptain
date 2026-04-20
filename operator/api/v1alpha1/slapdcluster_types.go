@@ -132,13 +132,25 @@ type SlapdServiceConfig struct {
 }
 
 // ExternalPeer defines a cross-cluster peer for multi-site replication.
+// Either uri (single-endpoint) or podAddresses (per-pod Multus) must be set, not both.
 type ExternalPeer struct {
 	// name is a human-readable identifier for this peer.
 	// +required
 	Name string `json:"name"`
 	// uri is the LDAP URI of the remote peer, e.g. "ldaps://ldap.remote-site.example.com:636".
-	// +required
-	URI string `json:"uri"`
+	// Mutually exclusive with podAddresses.
+	// +optional
+	URI string `json:"uri,omitempty"`
+	// podAddresses lists the replication-network IPs of individual remote pods.
+	// Each address becomes a separate syncrepl stanza with its own RID.
+	// Mutually exclusive with uri.
+	// +optional
+	PodAddresses []string `json:"podAddresses,omitempty"`
+	// port is the remote slapd port when using podAddresses. Defaults to 1025 (LDAPS container port).
+	// Ignored when uri is set.
+	// +kubebuilder:default=1025
+	// +optional
+	Port int32 `json:"port,omitempty"`
 	// tlsSecretName is the name of the Secret containing the CA cert for verifying the peer.
 	// +optional
 	TLSSecretName string `json:"tlsSecretName,omitempty"`
@@ -148,6 +160,21 @@ type ExternalPeer struct {
 	// bindPasswordSecretName is the name of the Secret containing the bind password.
 	// +optional
 	BindPasswordSecretName string `json:"bindPasswordSecretName,omitempty"`
+}
+
+// ReplicationNetworkConfig configures a dedicated replication network via Multus CNI.
+// See ADR-007.
+type ReplicationNetworkConfig struct {
+	// multusNetwork is the NetworkAttachmentDefinition reference.
+	// Supports cross-namespace format "namespace/name" (recommended) or plain "name"
+	// (same namespace as SlapdCluster). The NAD must already exist.
+	// +required
+	MultusNetwork string `json:"multusNetwork"`
+	// useForInCluster controls whether in-cluster syncrepl uses discovered Multus IPs
+	// instead of headless DNS. Default false — cross-site always uses Multus when configured.
+	// +kubebuilder:default=false
+	// +optional
+	UseForInCluster bool `json:"useForInCluster,omitempty"`
 }
 
 // SlapdReplicationConfig holds cluster-level replication configuration.
@@ -161,6 +188,11 @@ type SlapdReplicationConfig struct {
 	// externalPeers lists cross-cluster peers for multi-site replication.
 	// +optional
 	ExternalPeers []ExternalPeer `json:"externalPeers,omitempty"`
+	// network configures a dedicated replication network via Multus. When set,
+	// the operator adds Multus annotations to slapd pods and discovers assigned IPs
+	// from pod network-status annotations. See ADR-007.
+	// +optional
+	Network *ReplicationNetworkConfig `json:"network,omitempty"`
 	// keepalive sets the TCP keepalive parameters for syncrepl connections.
 	// Format: "idle:probes:interval" (seconds), e.g. "300:10:60".
 	// +optional
@@ -244,6 +276,10 @@ type SlapdClusterStatus struct {
 	// observedGeneration is the .metadata.generation the controller last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// replicationNetworkIPs reports discovered Multus IPs per pod on the replication network.
+	// Key: pod name, Value: IP address. Only populated when spec.replication.network is set.
+	// +optional
+	ReplicationNetworkIPs map[string]string `json:"replicationNetworkIPs,omitempty"`
 	// externalPeerStatuses reports per-peer replication connectivity.
 	// +optional
 	ExternalPeerStatuses []ExternalPeerStatus `json:"externalPeerStatuses,omitempty"`

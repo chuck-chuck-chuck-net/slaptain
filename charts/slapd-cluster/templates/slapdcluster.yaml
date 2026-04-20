@@ -69,6 +69,13 @@ spec:
     {{- if .Values.replication.retry }}
     retry: {{ .Values.replication.retry | quote }}
     {{- end }}
+    {{- with .Values.replication.network }}
+    network:
+      multusNetwork: {{ .multusNetwork | quote }}
+      {{- if .useForInCluster }}
+      useForInCluster: {{ .useForInCluster }}
+      {{- end }}
+    {{- end }}
     {{- if .Values.replication.externalPeers }}
     externalPeers:
       {{- toYaml .Values.replication.externalPeers | nindent 6 }}

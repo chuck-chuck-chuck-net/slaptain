@@ -949,17 +949,16 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		return false, err
 	}
 
-	// Resolve external peers.
+	// Resolve external peers. PodAddresses-mode peers expand to one resolvedExternalPeer
+	// per address; URI-mode peers resolve to a single entry (backward-compatible).
 	var externalPeers []resolvedExternalPeer
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
-		resolved := resolvedExternalPeer{
-			Name:   ep.Name,
-			URI:    ep.URI,
-			BindDN: ep.BindDN,
-		}
+		tlsCACertPath := ""
 		if ep.TLSSecretName != "" {
-			resolved.TLSCACertPath = "/etc/openldap/tls/peers/" + ep.Name + "/ca.crt"
+			tlsCACertPath = "/etc/openldap/tls/peers/" + ep.Name + "/ca.crt"
 		}
+
+		password := ""
 		if ep.BindPasswordSecretName != "" {
 			secret := &corev1.Secret{}
 			if err := r.Get(ctx, client.ObjectKey{
@@ -969,12 +968,43 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 					"peer", ep.Name, "err", err)
 				continue
 			}
-			resolved.Password = string(secret.Data["password"])
-			if resolved.Password == "" {
-				resolved.Password = string(secret.Data["replication-password"])
+			password = string(secret.Data["password"])
+			if password == "" {
+				password = string(secret.Data["replication-password"])
 			}
 		}
-		externalPeers = append(externalPeers, resolved)
+
+		if len(ep.PodAddresses) > 0 {
+			// Per-pod addressing: one resolvedExternalPeer per address.
+			port := ep.Port
+			if port == 0 {
+				port = 1025
+			}
+			scheme := "ldaps"
+			if !tlsEnabled {
+				scheme = "ldap"
+				if port == 1025 {
+					port = 1024
+				}
+			}
+			for _, addr := range ep.PodAddresses {
+				externalPeers = append(externalPeers, resolvedExternalPeer{
+					Name:          ep.Name,
+					URI:           fmt.Sprintf("%s://%s:%d", scheme, addr, port),
+					BindDN:        ep.BindDN,
+					Password:      password,
+					TLSCACertPath: tlsCACertPath,
+				})
+			}
+		} else {
+			externalPeers = append(externalPeers, resolvedExternalPeer{
+				Name:          ep.Name,
+				URI:           ep.URI,
+				BindDN:        ep.BindDN,
+				Password:      password,
+				TLSCACertPath: tlsCACertPath,
+			})
+		}
 	}
 
 	skipped := false
@@ -991,6 +1021,13 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 
 	useDeltaSync := sd.Spec.Replication != nil && sd.Spec.Replication.DeltaSync
 
+	// Resolve replication network IPs for in-cluster peers (Multus, ADR-007).
+	// Only used when useForInCluster is true.
+	var replNetIPs map[string]string
+	if sc.Spec.Replication.Network != nil && sc.Spec.Replication.Network.UseForInCluster {
+		replNetIPs = sc.Status.ReplicationNetworkIPs
+	}
+
 	// Apply to RW pods.
 	for i := int32(0); i < replicas; i++ {
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
@@ -1003,6 +1040,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			retryInterval, keepalive,
 			useDeltaSync,
 			externalPeers,
+			replNetIPs,
 		)
 
 		if err := r.applySyncreplToPod(ctx, host, configPW, sd.Spec.Suffix, desired, "TRUE"); err != nil {
@@ -1025,6 +1063,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				tlsEnabled, ridBase,
 				retryInterval, keepalive,
 				useDeltaSync,
+				replNetIPs,
 			)
 
 			if err := r.applySyncreplToPod(ctx, host, configPW, sd.Spec.Suffix, desired, ""); err != nil {
@@ -1048,6 +1087,8 @@ type resolvedExternalPeer struct {
 
 // buildDatabaseSyncRepl computes syncrepl stanzas for one RW pod using per-database
 // ridBase. In-cluster peer i → RID = ridBase + i + 1, external peer j → ridBase + 50 + j + 1.
+// When replNetIPs is non-nil and contains an IP for a peer pod, that IP is used instead of
+// the headless DNS name (Multus replication network mode, see ADR-007).
 func buildDatabaseSyncRepl(
 	clusterName, headlessSvc, namespace, suffix string,
 	replicas, ordinal int32,
@@ -1057,6 +1098,7 @@ func buildDatabaseSyncRepl(
 	retryInterval, keepalive string,
 	deltaSync bool,
 	externalPeers []resolvedExternalPeer,
+	replNetIPs map[string]string,
 ) []string {
 	var stanzas []string
 
@@ -1087,7 +1129,18 @@ func buildDatabaseSyncRepl(
 			continue
 		}
 		rid := fmt.Sprintf("%03d", ridBase+i+1)
-		peerHost := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", clusterName, i, headlessSvc, namespace)
+		peerPodName := fmt.Sprintf("%s-%d", clusterName, i)
+		peerHost := fmt.Sprintf("%s.%s.%s.svc.cluster.local", peerPodName, headlessSvc, namespace)
+		peerTLSOpt := tlsOpt
+		// Use Multus replication network IP when available (ADR-007).
+		// IP-based provider URIs won't match DNS SANs in the TLS cert, so
+		// relax hostname verification to CA-only (tls_reqcert=allow).
+		if ip, ok := replNetIPs[peerPodName]; ok {
+			peerHost = ip
+			if tlsEnabled {
+				peerTLSOpt += " tls_reqcert=allow"
+			}
+		}
 		providerURI := fmt.Sprintf("%s://%s:%d", peerScheme, peerHost, peerPort)
 
 		stanza := fmt.Sprintf("rid=%s provider=%s"+
@@ -1101,7 +1154,7 @@ func buildDatabaseSyncRepl(
 			"%s%s%s"+
 			" retry=\"%s\"",
 			rid, providerURI, suffix, suffix, replPassword,
-			deltaSyncOpts, tlsOpt, keepaliveOpt, retryInterval)
+			deltaSyncOpts, peerTLSOpt, keepaliveOpt, retryInterval)
 		stanzas = append(stanzas, stanza)
 	}
 
@@ -1114,6 +1167,10 @@ func buildDatabaseSyncRepl(
 			if tlsEnabled {
 				epTLSOpt += " tls_cert=/etc/openldap/tls/tls.crt tls_key=/etc/openldap/tls/tls.key"
 			}
+		}
+		// podAddresses-based peers use IP URIs → relax hostname verification (ADR-007).
+		if net.ParseIP(strings.Split(strings.TrimPrefix(strings.TrimPrefix(ep.URI, "ldaps://"), "ldap://"), ":")[0]) != nil {
+			epTLSOpt += " tls_reqcert=allow"
 		}
 
 		stanza := fmt.Sprintf("rid=%s provider=%s"+
@@ -1135,6 +1192,7 @@ func buildDatabaseSyncRepl(
 }
 
 // buildDatabaseSyncReplRO computes syncrepl stanzas for a read-only replica.
+// When replNetIPs is non-nil, uses Multus IPs for RW peer addresses.
 func buildDatabaseSyncReplRO(
 	clusterName, headlessSvc, namespace, suffix string,
 	rwReplicas int32,
@@ -1143,6 +1201,7 @@ func buildDatabaseSyncReplRO(
 	ridBase int32,
 	retryInterval, keepalive string,
 	deltaSync bool,
+	replNetIPs map[string]string,
 ) []string {
 	var stanzas []string
 
@@ -1169,7 +1228,15 @@ func buildDatabaseSyncReplRO(
 
 	for i := int32(0); i < rwReplicas; i++ {
 		rid := fmt.Sprintf("%03d", ridBase+i+1)
-		peerHost := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", clusterName, i, headlessSvc, namespace)
+		peerPodName := fmt.Sprintf("%s-%d", clusterName, i)
+		peerHost := fmt.Sprintf("%s.%s.%s.svc.cluster.local", peerPodName, headlessSvc, namespace)
+		peerTLSOpt := tlsOpt
+		if ip, ok := replNetIPs[peerPodName]; ok {
+			peerHost = ip
+			if tlsEnabled {
+				peerTLSOpt += " tls_reqcert=allow"
+			}
+		}
 		providerURI := fmt.Sprintf("%s://%s:%d", peerScheme, peerHost, peerPort)
 
 		stanza := fmt.Sprintf("rid=%s provider=%s"+
@@ -1183,7 +1250,7 @@ func buildDatabaseSyncReplRO(
 			"%s%s%s"+
 			" retry=\"%s\"",
 			rid, providerURI, suffix, suffix, replPassword,
-			deltaSyncOpts, tlsOpt, keepaliveOpt, retryInterval)
+			deltaSyncOpts, peerTLSOpt, keepaliveOpt, retryInterval)
 		stanzas = append(stanzas, stanza)
 	}
 

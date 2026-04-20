@@ -50,3 +50,20 @@ spec:
   #   enabled: true
   #   keepalive: "300:10:60"
   #   retry: "10 +"
+  #
+  # Example with Multus replication network (ADR-007):
+  # replicas: 2
+  # replication:
+  #   enabled: true
+  #   network:
+  #     multusNetwork: "infra/replication-net"  # NAD reference (namespace/name)
+  #     useForInCluster: false                  # optional: use Multus for in-cluster too
+  #   externalPeers:
+  #     - name: site-b
+  #       podAddresses:                         # per-pod Multus IPs
+  #         - "192.168.99.128"
+  #         - "192.168.99.129"
+  #       port: 1025
+  #       tlsSecretName: "site-b-ca"
+  #       bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
+  #       bindPasswordSecretName: "shared-repl-creds"

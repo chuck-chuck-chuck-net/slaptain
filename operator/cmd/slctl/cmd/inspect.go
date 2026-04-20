@@ -532,8 +532,16 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 	}
 
 	// ── syncRepl stanza count ──
-	externalPeerCount := len(sc.Spec.Replication.ExternalPeers)
-	expectedRW := int(sc.Spec.Replicas-1) + externalPeerCount
+	// Each ExternalPeer contributes 1 stanza (URI mode) or len(podAddresses) stanzas.
+	externalStanzaCount := 0
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		if len(ep.PodAddresses) > 0 {
+			externalStanzaCount += len(ep.PodAddresses)
+		} else {
+			externalStanzaCount++
+		}
+	}
+	expectedRW := int(sc.Spec.Replicas-1) + externalStanzaCount
 	expectedRO := int(sc.Spec.Replicas)
 
 	stanzaOK := true
@@ -648,44 +656,74 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 
 	// ── External peer connectivity ──
 	if len(sc.Spec.Replication.ExternalPeers) > 0 {
-		epOK := true
-		var epIssues []string
-		for _, ep := range sc.Status.ExternalPeerStatuses {
-			if !ep.Connected {
-				epOK = false
-				detail := ep.Name + ": disconnected"
-				if ep.LastError != "" {
-					detail += " (" + ep.LastError + ")"
-				}
-				epIssues = append(epIssues, detail)
+		// Peers using podAddresses are on a Multus replication network that the
+		// operator (and slctl) cannot reach. Only check URI-based peers.
+		hasURIPeers := false
+		for _, ep := range sc.Spec.Replication.ExternalPeers {
+			if ep.URI != "" {
+				hasURIPeers = true
+				break
 			}
 		}
-		if epOK {
-			check("external-peers", "pass",
-				fmt.Sprintf("all %d external peers connected", len(sc.Spec.Replication.ExternalPeers)))
+
+		if hasURIPeers {
+			epOK := true
+			var epIssues []string
+			for _, ep := range sc.Status.ExternalPeerStatuses {
+				if !ep.Connected {
+					epOK = false
+					detail := ep.Name + ": disconnected"
+					if ep.LastError != "" {
+						detail += " (" + ep.LastError + ")"
+					}
+					epIssues = append(epIssues, detail)
+				}
+			}
+			if epOK {
+				check("external-peers", "pass",
+					fmt.Sprintf("all %d external peers connected", len(sc.Spec.Replication.ExternalPeers)))
+			} else {
+				check("external-peers", "fail", strings.Join(epIssues, "; "))
+			}
 		} else {
-			check("external-peers", "fail", strings.Join(epIssues, "; "))
+			check("external-peers", "pass",
+				fmt.Sprintf("all %d external peers use Multus podAddresses (connectivity not testable from operator)", len(sc.Spec.Replication.ExternalPeers)))
 		}
 
 		// ── External peer syncrepl stanzas present on each RW pod ──
+		// For each ExternalPeer, check that at least one stanza references its
+		// URI (single-endpoint mode) or any of its podAddresses (Multus mode).
 		epStanzaOK := true
 		var epStanzaIssues []string
 		for _, ep := range sc.Spec.Replication.ExternalPeers {
+			// Build the set of strings to search for in syncrepl stanzas.
+			var needles []string
+			if len(ep.PodAddresses) > 0 {
+				needles = ep.PodAddresses
+			} else if ep.URI != "" {
+				needles = []string{ep.URI}
+			}
+
 			for _, ps := range rwPods {
 				if ps.err != "" {
 					continue
 				}
 				found := false
 				for _, sr := range ps.syncRepl {
-					if strings.Contains(sr, ep.URI) {
-						found = true
+					for _, needle := range needles {
+						if strings.Contains(sr, needle) {
+							found = true
+							break
+						}
+					}
+					if found {
 						break
 					}
 				}
 				if !found {
 					epStanzaOK = false
 					epStanzaIssues = append(epStanzaIssues,
-						fmt.Sprintf("%s: missing stanza for %s (%s)", ps.name, ep.Name, ep.URI))
+						fmt.Sprintf("%s: missing stanza for %s", ps.name, ep.Name))
 				}
 			}
 		}

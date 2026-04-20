@@ -138,12 +138,14 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.resources` | `corev1.ResourceRequirements` | Container resource requests/limits |
 | `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
 | `spec.replication.{enabled,externalPeers}` | `SlapdReplicationConfig` | N-way multi-master delta-syncrepl; active when `enabled=true` and `replicas > 1` |
+| `spec.replication.network.multusNetwork` | string | NAD reference for dedicated replication network (e.g. `infra/replication-net`). See ADR-007 |
+| `spec.replication.network.useForInCluster` | bool | Use Multus IPs for in-cluster syncrepl too (default false) |
 | `spec.replication.keepalive` | string | TCP keepalive for syncrepl connections (e.g. `idle:probes:interval`) |
 | `spec.replication.retry` | string | Retry interval for syncrepl connections (e.g. `60 +`) |
 
 Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs.
 
-**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `externalPeerStatuses` (per-peer connectivity), `conditions`.
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `replicationNetworkIPs` (discovered Multus IPs per pod), `externalPeerStatuses` (per-peer connectivity), `conditions`.
 
 **Reconcile order (SlapdCluster controller):**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
@@ -312,6 +314,7 @@ the original decision — the history of reasoning matters.
 - ADR-004: Multi-resource CRD architecture (SlapdCluster / SlapdSchema / SlapdDatabase)
 - ADR-005: SlapdDatabase cleanup policy (Retain default, Delete opt-in)
 - ADR-006: Schema lifecycle (additive-only, desired-minimum model)
+- ADR-007: Multus-based dedicated replication network for cross-site traffic
 
 ---
 

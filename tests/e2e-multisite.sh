@@ -26,6 +26,19 @@ REGISTRY="${REGISTRY:-ghcr.io/chuck-chuck-chuck-net}"
 PROJECT="${PROJECT:-slaptain}"
 TEST_RESOURCES="${TEST_RESOURCES:-example}"
 
+# Multus replication network (ADR-007). When MULTUS_NETWORK is set, cross-site
+# replication uses a dedicated Multus network instead of NodePort services.
+# NodePort services are still created for test runner connectivity.
+#
+# The script deploys SlapdClusters without externalPeers first, waits for pods
+# to get Multus IPs (discovered from pod annotations), then patches the CRs
+# to add externalPeers with the discovered podAddresses. No IPs need to be
+# known in advance — the operator sets tls_reqcert=allow on syncrepl stanzas
+# for IP-based providers, so TLS certs don't need Multus IP SANs.
+#
+# MULTUS_NETWORK: NAD reference, e.g. "infra/replication-net" or "replication-net"
+MULTUS_NETWORK="${MULTUS_NETWORK:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -87,8 +100,102 @@ Environment variables (with defaults):
   TEST_RESOURCES       = $TEST_RESOURCES  (example or lab)
   HELM_VALUES          = operator chart values (use absolute paths)
   HELM_VALUES_SLAPD_CLUSTER = slapd-cluster chart values (use absolute paths)
+
+Multus replication network (ADR-007):
+  MULTUS_NETWORK       = NAD reference (e.g. "infra/replication-net")
+                         When set, cross-site replication uses Multus pod-to-pod.
+                         IPs are discovered from running pods after deployment —
+                         no IPs need to be known in advance.
 EOF
     exit 1
+}
+
+# ── Multus helpers ───────────────────────────────────────────────────────────
+
+# Associative array: context → comma-separated Multus pod IPs.
+# Populated by discover_multus_ips after pods are running.
+declare -A MULTUS_IPS
+
+# Discover Multus IPs from running pods on all clusters.
+# Reads the k8s.v1.cni.cncf.io/network-status annotation from each slapd pod
+# and extracts the non-default interface IP. Populates MULTUS_IPS.
+discover_multus_ips() {
+    [[ -z "$MULTUS_NETWORK" ]] && return
+
+    log "Discovering Multus pod IPs from running pods..."
+    for ctx in "${CONTEXTS[@]}"; do
+        local ips=()
+        local replicas
+        replicas=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get statefulset/slapd \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 1)
+
+        for i in $(seq 0 $((replicas - 1))); do
+            local pod="slapd-$i"
+            local ip
+            ip=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get pod "$pod" \
+                -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' 2>/dev/null \
+                | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for net in data:
+    if not net.get('default', False) and net.get('ips'):
+        print(net['ips'][0])
+        break
+" 2>/dev/null || echo "")
+            [[ -z "$ip" ]] && die "[$ctx] $pod: no Multus IP found in network-status annotation"
+            ips+=("$ip")
+            log "  [$ctx] $pod -> $ip"
+        done
+
+        MULTUS_IPS[$ctx]=$(IFS=','; echo "${ips[*]}")
+    done
+}
+
+# Patch SlapdCluster CRs on each cluster to add externalPeers with discovered
+# Multus podAddresses. Called after discover_multus_ips.
+configure_multus_external_peers() {
+    [[ -z "$MULTUS_NETWORK" ]] && return
+
+    # Helm --set treats commas as value separators — escape for LDAP DNs.
+    local helm_suffix="${DB_SUFFIX//,/\\,}"
+    local helm_bind_dn="cn=replication\\,${helm_suffix}"
+
+    for ctx in "${CONTEXTS[@]}"; do
+        log "[$ctx] Configuring externalPeers with Multus podAddresses..."
+
+        local peer_sets=()
+        local peer_idx=0
+        for other in "${CONTEXTS[@]}"; do
+            [[ "$other" == "$ctx" ]] && continue
+            IFS=',' read -ra other_ips <<< "${MULTUS_IPS[$other]}"
+            peer_sets+=(
+                --set "replication.externalPeers[$peer_idx].name=site-${other}"
+                --set "replication.externalPeers[$peer_idx].port=1025"
+                --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
+                --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
+                --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
+            )
+            for addr_idx in "${!other_ips[@]}"; do
+                peer_sets+=(
+                    --set "replication.externalPeers[$peer_idx].podAddresses[$addr_idx]=${other_ips[$addr_idx]}"
+                )
+            done
+            ((peer_idx++)) || true
+        done
+
+        # Helm upgrade with the same values + externalPeers added.
+        hctl "$ctx" upgrade slapd "$PROJECT_ROOT/charts/slapd-cluster" \
+            --namespace "$NAMESPACE_TESTING" \
+            -f "$PROJECT_ROOT/tests/values.slapd.yaml" \
+            --set "images.slapd.repository=$REGISTRY/$PROJECT/slapd" \
+            --set "images.slapd.tag=$GIT_TAG" \
+            --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
+            --set "images.init.tag=$GIT_TAG" \
+            --set "replication.network.multusNetwork=$MULTUS_NETWORK" \
+            "${PULL_SECRET_HELM_ARGS[@]}" \
+            "${peer_sets[@]}" \
+            ${HELM_VALUES_SLAPD_CLUSTER:-}
+    done
 }
 
 # ── Discovery ────────────────────────────────────────────────────────────────
@@ -157,6 +264,9 @@ setup_foundation() {
             --dry-run=client -o yaml \
             | kctl "$ctx" apply -f -
 
+        # TLS certificate: node IP for NodePort test access. Multus IPs are NOT
+        # needed as SANs — the operator sets tls_reqcert=allow on syncrepl stanzas
+        # for IP-based providers, so CA verification suffices (ADR-007).
         log "[$ctx] Generating TLS certificate (IP SAN: ${NODE_IPS[$ctx]})..."
         (
             cd "$SCRIPT_DIR"
@@ -213,20 +323,29 @@ setup_slapd_clusters() {
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Installing SlapdCluster..."
 
-        # Build --set args for externalPeers (all OTHER contexts).
+        # In Multus mode, deploy WITHOUT externalPeers. The pods need to come
+        # up first so we can discover their Multus IPs. externalPeers are added
+        # later via configure_multus_external_peers.
         local peer_sets=()
-        local peer_idx=0
-        for other in "${CONTEXTS[@]}"; do
-            [[ "$other" == "$ctx" ]] && continue
-            peer_sets+=(
-                --set "replication.externalPeers[$peer_idx].name=site-${other}"
-                --set "replication.externalPeers[$peer_idx].uri=ldaps://${NODE_IPS[$other]}:${NODEPORT_LDAPS}"
-                --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
-                --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
-                --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
-            )
-            ((peer_idx++)) || true
-        done
+        if [[ -z "$MULTUS_NETWORK" ]]; then
+            local peer_idx=0
+            for other in "${CONTEXTS[@]}"; do
+                [[ "$other" == "$ctx" ]] && continue
+                peer_sets+=(
+                    --set "replication.externalPeers[$peer_idx].name=site-${other}"
+                    --set "replication.externalPeers[$peer_idx].uri=ldaps://${NODE_IPS[$other]}:${NODEPORT_LDAPS}"
+                    --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
+                    --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
+                    --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
+                )
+                ((peer_idx++)) || true
+            done
+        fi
+
+        local multus_sets=()
+        if [[ -n "$MULTUS_NETWORK" ]]; then
+            multus_sets=(--set "replication.network.multusNetwork=$MULTUS_NETWORK")
+        fi
 
         hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-cluster" \
             --namespace "$NAMESPACE_TESTING" --create-namespace \
@@ -237,6 +356,7 @@ setup_slapd_clusters() {
             --set "images.init.tag=$GIT_TAG" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \
+            "${multus_sets[@]}" \
             ${HELM_VALUES_SLAPD_CLUSTER:-}
     done
 }
@@ -508,9 +628,12 @@ case "$subcommand" in
         setup_cross_trust
         setup_slapd_clusters
         wait_for_clusters_ready
+        discover_multus_ips
+        configure_multus_external_peers
         setup_nodeport_services
         setup_test_resources
         log "Setup complete. Clusters: ${CONTEXTS[*]}"
+        [[ -n "$MULTUS_NETWORK" ]] && log "Replication network: $MULTUS_NETWORK (Multus)"
         ;;
     test)
         discover_node_ips
@@ -529,6 +652,8 @@ case "$subcommand" in
         setup_cross_trust
         setup_slapd_clusters
         wait_for_clusters_ready
+        discover_multus_ips
+        configure_multus_external_peers
         setup_nodeport_services
         setup_test_resources
         run_tests

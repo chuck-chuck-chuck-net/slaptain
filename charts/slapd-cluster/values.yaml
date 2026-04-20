@@ -67,11 +67,28 @@ replication:
   keepalive: ""
   # -- Syncrepl retry interval. Format: "<interval> <count>" pairs.
   retry: "10 +"
+  # -- Dedicated replication network via Multus (ADR-007).
+  # When set, slapd pods get a secondary network interface for replication traffic.
+  # network:
+  #   multusNetwork: "infra/replication-net"  # NAD reference (namespace/name recommended)
+  #   useForInCluster: false                  # Use Multus IPs for in-cluster syncrepl too
+
   # -- Cross-cluster external peers.
-  # Each peer requires a name, URI, and optionally TLS secret + bind credentials.
+  # Each peer requires a name and either uri (single-endpoint) or podAddresses (per-pod Multus).
   externalPeers: []
+  # Single-endpoint mode (NodePort / LoadBalancer):
   # - name: site-b
   #   uri: "ldaps://ldap.site-b.example.com:636"
+  #   tlsSecretName: "site-b-ca"
+  #   bindDN: "cn=replication,o=myapp"
+  #   bindPasswordSecretName: "site-b-replication-password"
+  #
+  # Per-pod Multus mode (replication network, ADR-007):
+  # - name: site-b
+  #   podAddresses:
+  #     - "192.168.99.128"   # site-b slapd-0
+  #     - "192.168.99.129"   # site-b slapd-1
+  #   port: 1025
   #   tlsSecretName: "site-b-ca"
   #   bindDN: "cn=replication,o=myapp"
   #   bindPasswordSecretName: "site-b-replication-password"

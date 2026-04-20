@@ -251,8 +251,9 @@ spec:
                     description: externalPeers lists cross-cluster peers for multi-site
                       replication.
                     items:
-                      description: ExternalPeer defines a cross-cluster peer for multi-site
-                        replication.
+                      description: |-
+                        ExternalPeer defines a cross-cluster peer for multi-site replication.
+                        Either uri (single-endpoint) or podAddresses (per-pod Multus) must be set, not both.
                       properties:
                         bindDN:
                           description: bindDN is the DN used to authenticate to the
@@ -266,17 +267,32 @@ spec:
                           description: name is a human-readable identifier for this
                             peer.
                           type: string
+                        podAddresses:
+                          description: |-
+                            podAddresses lists the replication-network IPs of individual remote pods.
+                            Each address becomes a separate syncrepl stanza with its own RID.
+                            Mutually exclusive with uri.
+                          items:
+                            type: string
+                          type: array
+                        port:
+                          default: 1025
+                          description: |-
+                            port is the remote slapd port when using podAddresses. Defaults to 1025 (LDAPS container port).
+                            Ignored when uri is set.
+                          format: int32
+                          type: integer
                         tlsSecretName:
                           description: tlsSecretName is the name of the Secret containing
                             the CA cert for verifying the peer.
                           type: string
                         uri:
-                          description: uri is the LDAP URI of the remote peer, e.g.
-                            "ldaps://ldap.remote-site.example.com:636".
+                          description: |-
+                            uri is the LDAP URI of the remote peer, e.g. "ldaps://ldap.remote-site.example.com:636".
+                            Mutually exclusive with podAddresses.
                           type: string
                       required:
                       - name
-                      - uri
                       type: object
                     type: array
                   keepalive:
@@ -284,6 +300,27 @@ spec:
                       keepalive sets the TCP keepalive parameters for syncrepl connections.
                       Format: "idle:probes:interval" (seconds), e.g. "300:10:60".
                     type: string
+                  network:
+                    description: |-
+                      network configures a dedicated replication network via Multus. When set,
+                      the operator adds Multus annotations to slapd pods and discovers assigned IPs
+                      from pod network-status annotations. See ADR-007.
+                    properties:
+                      multusNetwork:
+                        description: |-
+                          multusNetwork is the NetworkAttachmentDefinition reference.
+                          Supports cross-namespace format "namespace/name" (recommended) or plain "name"
+                          (same namespace as SlapdCluster). The NAD must already exist.
+                        type: string
+                      useForInCluster:
+                        default: false
+                        description: |-
+                          useForInCluster controls whether in-cluster syncrepl uses discovered Multus IPs
+                          instead of headless DNS. Default false — cross-site always uses Multus when configured.
+                        type: boolean
+                    required:
+                    - multusNetwork
+                    type: object
                   retry:
                     default: 10 +
                     description: |-
@@ -716,6 +753,13 @@ spec:
                 description: replicas is the total number of pods (ready or not).
                 format: int32
                 type: integer
+              replicationNetworkIPs:
+                additionalProperties:
+                  type: string
+                description: |-
+                  replicationNetworkIPs reports discovered Multus IPs per pod on the replication network.
+                  Key: pod name, Value: IP address. Only populated when spec.replication.network is set.
+                type: object
             type: object
         required:
         - spec

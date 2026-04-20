@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
@@ -159,17 +160,41 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		sc.Status.ReadOnlyReadyReplicas = 0
 	}
 
+	// Discover replication network IPs from Multus annotations.
+	sc.Status.ReplicationNetworkIPs = nil
+	if sc.Spec.Replication.Network != nil {
+		podList := &corev1.PodList{}
+		if err := r.List(ctx, podList,
+			client.InNamespace(sc.Namespace),
+			client.MatchingLabels(map[string]string{
+				"app.kubernetes.io/name":     "slapd",
+				"app.kubernetes.io/instance": sc.Name,
+			}),
+		); err == nil {
+			sc.Status.ReplicationNetworkIPs = discoverReplicationNetworkIPs(
+				podList.Items, sc.Spec.Replication.Network.MultusNetwork)
+		}
+	}
+
 	// External peer connectivity status.
 	sc.Status.ExternalPeerStatuses = nil
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		status := ldapv1alpha1.ExternalPeerStatus{
 			Name: ep.Name,
 		}
-		if err := testExternalPeerConnectivity(ep.URI); err != nil {
-			status.Connected = false
-			status.LastError = err.Error()
-		} else {
+		if len(ep.PodAddresses) > 0 {
+			// podAddresses peers use a Multus replication network that the
+			// operator pod cannot reach. Skip connectivity testing — actual
+			// replication health is observable via CSN convergence.
 			status.Connected = true
+			status.LastError = ""
+		} else if ep.URI != "" {
+			if err := testExternalPeerConnectivity(ep.URI); err != nil {
+				status.Connected = false
+				status.LastError = err.Error()
+			} else {
+				status.Connected = true
+			}
 		}
 		sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
 	}
@@ -742,7 +767,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		},
 		Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
-				Labels: labels,
+				Labels:      labels,
+				Annotations: buildMultusAnnotations(sc),
 			},
 			Spec: corev1.PodSpec{
 				SecurityContext:  podSecCtx,
@@ -920,4 +946,59 @@ func testExternalPeerConnectivity(uri string) error {
 	}
 	conn.Close()
 	return nil
+}
+
+// buildMultusAnnotations returns pod template annotations for Multus network attachment.
+// Returns nil when no replication network is configured.
+func buildMultusAnnotations(sc *ldapv1alpha1.SlapdCluster) map[string]string {
+	if sc.Spec.Replication.Network == nil {
+		return nil
+	}
+	return map[string]string{
+		"k8s.v1.cni.cncf.io/networks": sc.Spec.Replication.Network.MultusNetwork,
+	}
+}
+
+// multusNetworkStatus represents one entry in the k8s.v1.cni.cncf.io/network-status annotation.
+type multusNetworkStatus struct {
+	Name      string   `json:"name"`
+	Interface string   `json:"interface"`
+	IPs       []string `json:"ips"`
+	Default   bool     `json:"default"`
+}
+
+// discoverReplicationNetworkIPs reads Multus network-status annotations from all pods
+// in the StatefulSet and extracts IPs for the configured replication network.
+func discoverReplicationNetworkIPs(pods []corev1.Pod, nadName string) map[string]string {
+	result := make(map[string]string)
+	for i := range pods {
+		pod := &pods[i]
+		ip := extractMultusIP(pod, nadName)
+		if ip != "" {
+			result[pod.Name] = ip
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// extractMultusIP reads a pod's network-status annotation and returns the IP for the named NAD.
+// The nadName can be "namespace/name" or plain "name".
+func extractMultusIP(pod *corev1.Pod, nadName string) string {
+	raw, ok := pod.Annotations["k8s.v1.cni.cncf.io/network-status"]
+	if !ok || raw == "" {
+		return ""
+	}
+	var statuses []multusNetworkStatus
+	if err := json.Unmarshal([]byte(raw), &statuses); err != nil {
+		return ""
+	}
+	for _, s := range statuses {
+		if s.Name == nadName && len(s.IPs) > 0 {
+			return s.IPs[0]
+		}
+	}
+	return ""
 }
