@@ -132,22 +132,28 @@ type SlapdServiceConfig struct {
 }
 
 // ExternalPeer defines a cross-cluster peer for multi-site replication.
-// Either uri (single-endpoint) or podAddresses (per-pod Multus) must be set, not both.
+// Exactly one of uri, podAddresses, or discovery must be set.
 type ExternalPeer struct {
 	// name is a human-readable identifier for this peer.
 	// +required
 	Name string `json:"name"`
 	// uri is the LDAP URI of the remote peer, e.g. "ldaps://ldap.remote-site.example.com:636".
-	// Mutually exclusive with podAddresses.
+	// Mutually exclusive with podAddresses and discovery.
 	// +optional
 	URI string `json:"uri,omitempty"`
 	// podAddresses lists the replication-network IPs of individual remote pods.
 	// Each address becomes a separate syncrepl stanza with its own RID.
-	// Mutually exclusive with uri.
+	// Mutually exclusive with uri and discovery.
 	// +optional
 	PodAddresses []string `json:"podAddresses,omitempty"`
-	// port is the remote slapd port when using podAddresses. Defaults to 1025 (LDAPS container port).
-	// Ignored when uri is set.
+	// discovery configures dynamic peer discovery via a remote cluster's Kubernetes API.
+	// The operator reads the remote cluster's pod annotations to discover Multus IPs.
+	// Requires spec.replication.network to be configured. See ADR-007 amendment.
+	// Mutually exclusive with uri and podAddresses.
+	// +optional
+	Discovery *ExternalPeerDiscovery `json:"discovery,omitempty"`
+	// port is the remote slapd port when using podAddresses or discovery.
+	// Defaults to 1025 (LDAPS container port). Ignored when uri is set.
 	// +kubebuilder:default=1025
 	// +optional
 	Port int32 `json:"port,omitempty"`
@@ -160,6 +166,35 @@ type ExternalPeer struct {
 	// bindPasswordSecretName is the name of the Secret containing the bind password.
 	// +optional
 	BindPasswordSecretName string `json:"bindPasswordSecretName,omitempty"`
+}
+
+// ExternalPeerDiscovery configures dynamic peer discovery via a remote cluster's Kubernetes API.
+// The operator queries the remote cluster (over the replication network) and extracts
+// Multus IPs from pod network-status annotations. See ADR-007 amendment.
+type ExternalPeerDiscovery struct {
+	// kubeconfigSecret references a Secret containing a kubeconfig for the remote cluster.
+	// The API server address in the kubeconfig should use the remote node's replication-network IP.
+	// +required
+	KubeconfigSecret KubeconfigSecretRef `json:"kubeconfigSecret"`
+	// namespace is the namespace of the remote SlapdCluster. Defaults to the local
+	// SlapdCluster's namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// clusterName is the name of the remote SlapdCluster CR. Defaults to the local
+	// SlapdCluster's name.
+	// +optional
+	ClusterName string `json:"clusterName,omitempty"`
+}
+
+// KubeconfigSecretRef references a Secret containing a kubeconfig file.
+type KubeconfigSecretRef struct {
+	// name is the Secret name (must be in the same namespace as the SlapdCluster).
+	// +required
+	Name string `json:"name"`
+	// key is the data key containing the kubeconfig YAML.
+	// +kubebuilder:default="kubeconfig"
+	// +optional
+	Key string `json:"key,omitempty"`
 }
 
 // ReplicationNetworkConfig configures a dedicated replication network via Multus CNI.
@@ -249,11 +284,16 @@ type SlapdClusterSpec struct {
 type ExternalPeerStatus struct {
 	// name matches ExternalPeer.Name.
 	Name string `json:"name"`
-	// connected indicates whether the operator can reach this peer.
+	// connected indicates whether the operator can reach this peer (URI mode only).
 	Connected bool `json:"connected"`
-	// lastError is the last connection error, if any.
+	// lastError is the last connection or discovery error, if any.
 	// +optional
 	LastError string `json:"lastError,omitempty"`
+	// discoveredAddresses lists Multus IPs discovered from the remote cluster's pods.
+	// Only populated for peers using discovery mode. The SlapdDatabase controller
+	// consumes these the same way as static podAddresses.
+	// +optional
+	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
 }
 
 // SlapdClusterStatus defines the observed state of SlapdCluster.

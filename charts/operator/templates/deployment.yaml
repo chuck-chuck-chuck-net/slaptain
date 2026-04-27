@@ -15,6 +15,9 @@ spec:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: manager
+        {{- if .Values.multus.network }}
+        k8s.v1.cni.cncf.io/networks: {{ .Values.multus.network }}
+        {{- end }}
       labels:
         {{- include "operator.selectorLabels" . | nindent 8 }}
         control-plane: controller-manager

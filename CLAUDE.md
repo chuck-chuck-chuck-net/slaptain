@@ -48,7 +48,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-003-operator-owns-syncrepl.md
 │       ├── adr-004-multi-resource-crd-architecture.md
 │       ├── adr-005-slapddatabase-cleanup-policy.md
-│       └── adr-006-schema-lifecycle.md
+│       ├── adr-006-schema-lifecycle.md
+│       └── adr-007-multus-replication-network.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -61,6 +62,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── slapd-init/Containerfile    # Bootstrap init container image
 │   ├── slapd-toolkit/Containerfile # Toolkit image (ldap-utils, python3, pyyaml, ldap3)
 │   └── operator/Containerfile      # Operator image (multi-stage, distroless/static)
+├── scripts/
+│   └── create-remote-kubeconfig.sh # Cross-site RBAC + kubeconfig Secret provisioning (ADR-007)
 ├── operator/                       # kubebuilder v4 Go operator (own Go module)
 │   ├── api/v1alpha1/
 │   │   ├── slapdcluster_types.go   # Full CRD type definitions (all phases)
@@ -142,10 +145,14 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.replication.network.useForInCluster` | bool | Use Multus IPs for in-cluster syncrepl too (default false) |
 | `spec.replication.keepalive` | string | TCP keepalive for syncrepl connections (e.g. `idle:probes:interval`) |
 | `spec.replication.retry` | string | Retry interval for syncrepl connections (e.g. `60 +`) |
+| `externalPeers[].discovery` | `*ExternalPeerDiscovery` | Dynamic peer discovery via remote k8s API (ADR-007 amendment). Mutually exclusive with `uri` and `podAddresses` |
+| `externalPeers[].discovery.kubeconfigSecret.{name,key}` | `KubeconfigSecretRef` | Secret containing kubeconfig for remote cluster (key default: `kubeconfig`) |
+| `externalPeers[].discovery.namespace` | string | Remote SlapdCluster namespace (default: local namespace) |
+| `externalPeers[].discovery.clusterName` | string | Remote SlapdCluster name (default: local name) |
 
 Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs.
 
-**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `replicationNetworkIPs` (discovered Multus IPs per pod), `externalPeerStatuses` (per-peer connectivity), `conditions`.
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `replicationNetworkIPs` (discovered Multus IPs per pod), `externalPeerStatuses` (per-peer connectivity and `discoveredAddresses` for discovery-mode peers), `conditions`.
 
 **Reconcile order (SlapdCluster controller):**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
@@ -314,7 +321,7 @@ the original decision — the history of reasoning matters.
 - ADR-004: Multi-resource CRD architecture (SlapdCluster / SlapdSchema / SlapdDatabase)
 - ADR-005: SlapdDatabase cleanup policy (Retain default, Delete opt-in)
 - ADR-006: Schema lifecycle (additive-only, desired-minimum model)
-- ADR-007: Multus-based dedicated replication network for cross-site traffic
+- ADR-007: Multus-based dedicated replication network for cross-site traffic (amended: dynamic peer discovery via remote kubeconfig)
 
 ---
 

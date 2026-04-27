@@ -137,15 +137,33 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 
 	if len(sc.Spec.Replication.ExternalPeers) > 0 {
 		fmt.Println("  External Peers:")
-		for _, ep := range sc.Status.ExternalPeerStatuses {
-			status := "connected"
-			if !ep.Connected {
-				status = "disconnected"
-				if ep.LastError != "" {
-					status += " (" + ep.LastError + ")"
+		for _, ep := range sc.Spec.Replication.ExternalPeers {
+			// Find status entry for this peer.
+			var statusStr string
+			for _, eps := range sc.Status.ExternalPeerStatuses {
+				if eps.Name != ep.Name {
+					continue
+				}
+				if len(eps.DiscoveredAddresses) > 0 {
+					statusStr = fmt.Sprintf("discovery (%d pod(s))", len(eps.DiscoveredAddresses))
+				} else if eps.Connected {
+					statusStr = "connected"
+				} else {
+					statusStr = "disconnected"
+					if eps.LastError != "" {
+						statusStr += " (" + eps.LastError + ")"
+					}
+				}
+				break
+			}
+			if statusStr == "" {
+				if len(ep.PodAddresses) > 0 {
+					statusStr = fmt.Sprintf("Multus (%d pod(s))", len(ep.PodAddresses))
+				} else if ep.Discovery != nil {
+					statusStr = "discovery (pending)"
 				}
 			}
-			fmt.Printf("    %-20s %s\n", ep.Name, status)
+			fmt.Printf("    %-20s %s\n", ep.Name, statusStr)
 		}
 	}
 

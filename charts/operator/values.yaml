@@ -42,6 +42,14 @@ metrics:
     scrapeTimeout: "10s"
     labels: {}
 
+multus:
+  # Attach the operator pod to a Multus replication network. Required for
+  # ExternalPeer discovery mode (ADR-007 amendment). The operator queries remote
+  # cluster APIs over this network to discover peer Multus IPs.
+  # Format: "namespace/name" (cross-namespace) or "name" (same namespace).
+  # Example: "infra/replication-net"
+  network: ""
+
 networkPolicy:
   # Create a NetworkPolicy restricting metrics port access to labeled namespaces.
   # Requires metrics.enabled=true.

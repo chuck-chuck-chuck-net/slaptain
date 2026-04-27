@@ -34,12 +34,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -72,6 +76,9 @@ type SlapdClusterReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	_ = log // used in discovery status reporting
+
 	// 1. Fetch the SlapdCluster resource.
 	sc := &ldapv1alpha1.SlapdCluster{}
 	if err := r.Get(ctx, req.NamespacedName, sc); err != nil {
@@ -176,13 +183,23 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// External peer connectivity status.
+	// External peer connectivity status and discovery.
 	sc.Status.ExternalPeerStatuses = nil
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		status := ldapv1alpha1.ExternalPeerStatus{
 			Name: ep.Name,
 		}
-		if len(ep.PodAddresses) > 0 {
+		if ep.Discovery != nil {
+			// Dynamic discovery mode: query remote k8s API for pod Multus IPs.
+			addrs, err := r.discoverRemotePeerAddresses(ctx, sc, &ep)
+			if err != nil {
+				status.LastError = err.Error()
+				log.Info("remote peer discovery failed", "peer", ep.Name, "err", err)
+			} else {
+				status.DiscoveredAddresses = addrs
+			}
+			sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
+		} else if len(ep.PodAddresses) > 0 {
 			// podAddresses peers use a Multus replication network — the operator
 			// pod cannot reach it. Omit from status rather than reporting a
 			// misleading result. Cross-site health will be verified via operator
@@ -195,8 +212,8 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			} else {
 				status.Connected = true
 			}
+			sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
 		}
-		sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
 	}
 
 	switch {
@@ -1001,4 +1018,91 @@ func extractMultusIP(pod *corev1.Pod, nadName string) string {
 		}
 	}
 	return ""
+}
+
+// discoverRemotePeerAddresses queries a remote Kubernetes cluster's API to discover
+// Multus replication-network IPs of pods belonging to a remote SlapdCluster.
+// This implements the dynamic peer discovery described in ADR-007 amendment.
+func (r *SlapdClusterReconciler) discoverRemotePeerAddresses(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	ep *ldapv1alpha1.ExternalPeer,
+) ([]string, error) {
+	if sc.Spec.Replication.Network == nil {
+		return nil, fmt.Errorf("discovery requires spec.replication.network to be configured")
+	}
+
+	disc := ep.Discovery
+
+	// Read the kubeconfig Secret.
+	kubeconfigSecret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{
+		Name:      disc.KubeconfigSecret.Name,
+		Namespace: sc.Namespace,
+	}, kubeconfigSecret); err != nil {
+		return nil, fmt.Errorf("read kubeconfig secret %q: %w", disc.KubeconfigSecret.Name, err)
+	}
+
+	key := disc.KubeconfigSecret.Key
+	if key == "" {
+		key = "kubeconfig"
+	}
+	kubeconfigData, ok := kubeconfigSecret.Data[key]
+	if !ok {
+		return nil, fmt.Errorf("kubeconfig secret %q has no key %q", disc.KubeconfigSecret.Name, key)
+	}
+
+	// Build a client-go REST config from the kubeconfig.
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
+	if err != nil {
+		return nil, fmt.Errorf("parse kubeconfig: %w", err)
+	}
+	restConfig.Timeout = 10 * time.Second
+
+	// Build a typed clientset for the remote cluster.
+	remoteClient, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("build remote client: %w", err)
+	}
+
+	// Determine remote namespace and cluster name (defaults to local values).
+	remoteNS := disc.Namespace
+	if remoteNS == "" {
+		remoteNS = sc.Namespace
+	}
+	remoteCluster := disc.ClusterName
+	if remoteCluster == "" {
+		remoteCluster = sc.Name
+	}
+
+	// List pods on the remote cluster matching the remote SlapdCluster's labels.
+	labelSelector := labels.SelectorFromSet(map[string]string{
+		"app.kubernetes.io/name":     "slapd",
+		"app.kubernetes.io/instance": remoteCluster,
+	}).String()
+
+	podList, err := remoteClient.CoreV1().Pods(remoteNS).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list remote pods (ns=%s, labels=%s): %w", remoteNS, labelSelector, err)
+	}
+
+	// Extract Multus IPs from remote pods' network-status annotations.
+	nadName := sc.Spec.Replication.Network.MultusNetwork
+	var addresses []string
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		// Skip pods that aren't running.
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		ip := extractMultusIP(pod, nadName)
+		if ip != "" {
+			addresses = append(addresses, ip)
+		}
+	}
+
+	sort.Strings(addresses)
+	return addresses, nil
 }

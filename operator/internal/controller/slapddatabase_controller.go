@@ -949,8 +949,8 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		return false, err
 	}
 
-	// Resolve external peers. PodAddresses-mode peers expand to one resolvedExternalPeer
-	// per address; URI-mode peers resolve to a single entry (backward-compatible).
+	// Resolve external peers. PodAddresses-mode and discovery-mode peers expand to
+	// one resolvedExternalPeer per address; URI-mode peers resolve to a single entry.
 	var externalPeers []resolvedExternalPeer
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		tlsCACertPath := ""
@@ -974,7 +974,29 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			}
 		}
 
-		if len(ep.PodAddresses) > 0 {
+		// Determine the list of addresses to expand into per-pod stanzas.
+		// Discovery mode: use DiscoveredAddresses from SlapdCluster status.
+		// PodAddresses mode: use the static list from the spec.
+		// URI mode: single endpoint, no expansion.
+		var podAddrs []string
+		if ep.Discovery != nil {
+			// Look up discovered addresses from status.
+			for _, ps := range sc.Status.ExternalPeerStatuses {
+				if ps.Name == ep.Name {
+					podAddrs = ps.DiscoveredAddresses
+					break
+				}
+			}
+			if len(podAddrs) == 0 {
+				log.Info("skipping discovery peer: no addresses discovered yet",
+					"peer", ep.Name)
+				continue
+			}
+		} else if len(ep.PodAddresses) > 0 {
+			podAddrs = ep.PodAddresses
+		}
+
+		if len(podAddrs) > 0 {
 			// Per-pod addressing: one resolvedExternalPeer per address.
 			port := ep.Port
 			if port == 0 {
@@ -987,7 +1009,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 					port = 1024
 				}
 			}
-			for _, addr := range ep.PodAddresses {
+			for _, addr := range podAddrs {
 				externalPeers = append(externalPeers, resolvedExternalPeer{
 					Name:          ep.Name,
 					URI:           fmt.Sprintf("%s://%s:%d", scheme, addr, port),

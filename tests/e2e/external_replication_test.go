@@ -242,14 +242,15 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		sc := &ldapv1alpha1.SlapdCluster{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
 
-		// podAddresses peers (Multus) are omitted from ExternalPeerStatuses because
-		// the operator can't reach the replication network. Only URI-based peers
-		// appear in the status. If all peers use podAddresses, the list is empty.
-		hasURIPeers := false
+		// Classify peers by mode.
+		var hasURIPeers, hasDiscoveryPeers, hasPodAddrPeers bool
 		for _, ep := range sc.Spec.Replication.ExternalPeers {
-			if ep.URI != "" {
+			if ep.Discovery != nil {
+				hasDiscoveryPeers = true
+			} else if len(ep.PodAddresses) > 0 {
+				hasPodAddrPeers = true
+			} else if ep.URI != "" {
 				hasURIPeers = true
-				break
 			}
 		}
 
@@ -261,9 +262,18 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 				Expect(ps.Connected).To(BeTrue(),
 					"external peer %q should be connected (got lastError: %s)", ps.Name, ps.LastError)
 			}
-		} else {
-			// All peers use Multus podAddresses — status is intentionally empty.
-			// Cross-site health is verified by CSN convergence in tests 2 & 3.
+		} else if hasDiscoveryPeers {
+			// Discovery peers appear in ExternalPeerStatuses with DiscoveredAddresses.
+			Expect(sc.Status.ExternalPeerStatuses).NotTo(BeEmpty(),
+				"status.externalPeerStatuses should be populated for discovery-mode peers")
+			for _, ps := range sc.Status.ExternalPeerStatuses {
+				Expect(ps.Name).NotTo(BeEmpty(), "peer status should have a name")
+				Expect(ps.DiscoveredAddresses).NotTo(BeEmpty(),
+					"discovery peer %q should have discovered addresses", ps.Name)
+			}
+		} else if hasPodAddrPeers {
+			// Static podAddresses peers are omitted from ExternalPeerStatuses —
+			// the operator can't reach the replication network.
 			Expect(sc.Status.ExternalPeerStatuses).To(BeEmpty(),
 				"podAddresses peers should not appear in externalPeerStatuses")
 		}

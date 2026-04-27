@@ -253,7 +253,7 @@ spec:
                     items:
                       description: |-
                         ExternalPeer defines a cross-cluster peer for multi-site replication.
-                        Either uri (single-endpoint) or podAddresses (per-pod Multus) must be set, not both.
+                        Exactly one of uri, podAddresses, or discovery must be set.
                       properties:
                         bindDN:
                           description: bindDN is the DN used to authenticate to the
@@ -263,6 +263,43 @@ spec:
                           description: bindPasswordSecretName is the name of the Secret
                             containing the bind password.
                           type: string
+                        discovery:
+                          description: |-
+                            discovery configures dynamic peer discovery via a remote cluster's Kubernetes API.
+                            The operator reads the remote cluster's pod annotations to discover Multus IPs.
+                            Requires spec.replication.network to be configured. See ADR-007 amendment.
+                            Mutually exclusive with uri and podAddresses.
+                          properties:
+                            clusterName:
+                              description: |-
+                                clusterName is the name of the remote SlapdCluster CR. Defaults to the local
+                                SlapdCluster's name.
+                              type: string
+                            kubeconfigSecret:
+                              description: |-
+                                kubeconfigSecret references a Secret containing a kubeconfig for the remote cluster.
+                                The API server address in the kubeconfig should use the remote node's replication-network IP.
+                              properties:
+                                key:
+                                  default: kubeconfig
+                                  description: key is the data key containing the
+                                    kubeconfig YAML.
+                                  type: string
+                                name:
+                                  description: name is the Secret name (must be in
+                                    the same namespace as the SlapdCluster).
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            namespace:
+                              description: |-
+                                namespace is the namespace of the remote SlapdCluster. Defaults to the local
+                                SlapdCluster's namespace.
+                              type: string
+                          required:
+                          - kubeconfigSecret
+                          type: object
                         name:
                           description: name is a human-readable identifier for this
                             peer.
@@ -271,15 +308,15 @@ spec:
                           description: |-
                             podAddresses lists the replication-network IPs of individual remote pods.
                             Each address becomes a separate syncrepl stanza with its own RID.
-                            Mutually exclusive with uri.
+                            Mutually exclusive with uri and discovery.
                           items:
                             type: string
                           type: array
                         port:
                           default: 1025
                           description: |-
-                            port is the remote slapd port when using podAddresses. Defaults to 1025 (LDAPS container port).
-                            Ignored when uri is set.
+                            port is the remote slapd port when using podAddresses or discovery.
+                            Defaults to 1025 (LDAPS container port). Ignored when uri is set.
                           format: int32
                           type: integer
                         tlsSecretName:
@@ -289,7 +326,7 @@ spec:
                         uri:
                           description: |-
                             uri is the LDAP URI of the remote peer, e.g. "ldaps://ldap.remote-site.example.com:636".
-                            Mutually exclusive with podAddresses.
+                            Mutually exclusive with podAddresses and discovery.
                           type: string
                       required:
                       - name
@@ -714,10 +751,19 @@ spec:
                   properties:
                     connected:
                       description: connected indicates whether the operator can reach
-                        this peer.
+                        this peer (URI mode only).
                       type: boolean
+                    discoveredAddresses:
+                      description: |-
+                        discoveredAddresses lists Multus IPs discovered from the remote cluster's pods.
+                        Only populated for peers using discovery mode. The SlapdDatabase controller
+                        consumes these the same way as static podAddresses.
+                      items:
+                        type: string
+                      type: array
                     lastError:
-                      description: lastError is the last connection error, if any.
+                      description: lastError is the last connection or discovery error,
+                        if any.
                       type: string
                     name:
                       description: name matches ExternalPeer.Name.

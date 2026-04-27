@@ -182,14 +182,16 @@ running in **separate Kubernetes clusters** (siteA and siteB). They are gated by
 ┌─────────────────────────────┐         ┌─────────────────────────────┐
 │  siteA (local cluster)      │         │  siteB (remote cluster)     │
 │                             │         │                             │
-│  operator                   │         │  operator                   │
+│  operator (+ Multus)        │         │  operator (+ Multus)        │
 │  SlapdCluster "slapd"       │ ◄─────► │  SlapdCluster "slapd"       │
 │    replicas: 3              │ syncrepl│    replicas: 3              │
 │    externalPeers:           │         │    externalPeers:           │
 │      - name: site-b         │         │      - name: site-a         │
-│        uri: ldaps://siteB   │         │        uri: ldaps://siteA   │
+│        discovery:           │  Multus │        discovery:           │
+│          kubeconfigSecret:  │ ◄─────► │          kubeconfigSecret:  │
+│            name: siteB-kc   │  or URI │            name: siteA-kc   │
 │                             │         │                             │
-│  slapd-test (bootstrap+OUs) │         │  (no slapd-test needed)     │
+│  test resources             │         │  (data replicates in)       │
 └─────────────────────────────┘         └─────────────────────────────┘
          ▲                                         ▲
          │                                         │
@@ -199,6 +201,14 @@ running in **separate Kubernetes clusters** (siteA and siteB). They are gated by
 The test runner runs on your workstation (or in siteA). It connects to siteA via
 `kubectl port-forward` (or direct if `LDAP_ADDR` is set) and to siteB via
 `E2E_REMOTE_LDAP_ADDR` (a routable address — NodePort, LoadBalancer, or VPN).
+
+Three cross-site connectivity modes are supported:
+
+| Mode | ExternalPeer config | When to use |
+|---|---|---|
+| **Dynamic discovery** | `discovery.kubeconfigSecret` | Default with Multus. Operator queries remote k8s API over replication network |
+| **Static podAddresses** | `podAddresses: [IPs]` | Multus without remote API access. Manual IP management |
+| **URI (NodePort/LB)** | `uri: ldaps://host:port` | No Multus. Single endpoint per site |
 
 ### Prerequisites
 
@@ -294,6 +304,44 @@ replication:
 Note: `bindPasswordSecretName` points to a Secret containing a `password` or
 `replication-password` key. If you use the shared `slapd-credentials` Secret, the
 operator reads the `replication-password` key from it.
+
+**Alternative: Dynamic discovery with Multus (recommended)**
+
+Instead of manually specifying `uri` or `podAddresses`, configure the operator to discover
+remote pod IPs automatically over the replication network:
+
+```yaml
+# siteA values: discover siteB pods via remote k8s API
+replication:
+  enabled: true
+  network:
+    multusNetwork: infra/replication-net
+  externalPeers:
+    - name: site-b
+      discovery:
+        kubeconfigSecret:
+          name: siteB-kubeconfig     # Created by scripts/create-remote-kubeconfig.sh
+      tlsSecretName: "site-b-ca"
+      bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
+      bindPasswordSecretName: "slapd-credentials"
+```
+
+Provision the kubeconfig Secrets:
+
+```bash
+./scripts/create-remote-kubeconfig.sh \
+  -n slaptain-testing \
+  siteA=https://192.168.99.1:6443 \
+  siteB=https://192.168.99.2:6443
+```
+
+The operator pod also needs a Multus interface to reach remote APIs. Set `multus.network`
+in the operator Helm values:
+
+```bash
+helm upgrade --install slaptain-operator charts/operator \
+  --set multus.network=infra/replication-net
+```
 
 #### 4. Install operator + SlapdCluster on both sites
 
@@ -396,27 +444,50 @@ Note: the distroless slapd image has no shell. Use the toolkit pod for more adva
 ## Automated multi-site testing
 
 The `e2e-multisite.sh` script automates the entire cross-cluster workflow: it deploys the
-operator, SlapdClusters with mutual `externalPeers`, slapd-test, and runs the full e2e suite
-(including external replication tests) — all from a single command.
+operator, SlapdClusters with mutual `externalPeers`, test resources, and runs the full e2e
+suite (including external replication tests) — all from a single command.
 
 ### Prerequisites
 
 - N Kubernetes clusters (minimum 2) reachable via kubectl contexts
 - Container images pushed to a registry accessible from all clusters
 - Helm 3 and Go installed on the workstation
-- The usual `HELM_VALUES_SLAPD_CLUSTER` and `HELM_VALUES_SLAPD_TESTING` env vars set
-  (see [Environment variables](#environment-variables))
 
 ### Quick start
 
-```bash
-# Full cycle: setup → test → teardown
-make e2e-multisite CONTEXTS="s1 s2 s3"
+**NodePort mode** (no Multus — uses NodePort services for cross-cluster replication):
 
-# Or step by step:
-make e2e-multisite-setup    CONTEXTS="s1 s2 s3"
-make e2e-multisite-test     CONTEXTS="s1 s2 s3"
-make e2e-multisite-teardown CONTEXTS="s1 s2 s3"
+```bash
+make e2e-multisite CONTEXTS="s1 s2"
+```
+
+**Multus dynamic discovery** (default when `MULTUS_NETWORK` is set — recommended):
+
+```bash
+MULTUS_NETWORK=infra/replication-net make e2e-multisite CONTEXTS="s1 s2"
+```
+
+The operator queries each remote cluster's k8s API over the replication network to discover
+pod Multus IPs automatically. No IPs need to be known in advance. The script provisions
+cross-site RBAC and kubeconfig Secrets via `scripts/create-remote-kubeconfig.sh`, then
+configures `ExternalPeer.Discovery` on the SlapdCluster CRs.
+
+**Multus static podAddresses** (legacy — explicit IP injection):
+
+```bash
+MULTUS_NETWORK=infra/replication-net STATIC_PODADDRESSES=1 make e2e-multisite CONTEXTS="s1 s2"
+```
+
+The script waits for pods to come up, reads their Multus IPs from annotations, and patches
+the SlapdCluster CRs with static `podAddresses`. Use this if the operator pod does not have
+a Multus interface or the remote k8s API is not reachable over the replication network.
+
+**Step-by-step:**
+
+```bash
+make e2e-multisite-setup    CONTEXTS="s1 s2"
+make e2e-multisite-test     CONTEXTS="s1 s2"
+make e2e-multisite-teardown CONTEXTS="s1 s2"
 ```
 
 ### What setup does
@@ -425,13 +496,13 @@ make e2e-multisite-teardown CONTEXTS="s1 s2 s3"
 ┌──────────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
 │ s1 (context[0])      │   │ s2 (context[1])      │   │ s3 (context[2])      │
 │                      │   │                      │   │                      │
-│ operator             │   │ operator             │   │ operator             │
+│ operator (+ Multus)  │   │ operator (+ Multus)  │   │ operator (+ Multus)  │
 │ SlapdCluster "slapd" │◄─►│ SlapdCluster "slapd" │◄─►│ SlapdCluster "slapd" │
 │   replicas: 3        │   │   replicas: 3        │   │   replicas: 3        │
 │   externalPeers:     │   │   externalPeers:     │   │   externalPeers:     │
 │     site-s2, site-s3 │   │     site-s1, site-s3 │   │     site-s1, site-s2 │
 │                      │   │                      │   │                      │
-│ slapd-test (data)    │   │ (data replicates in) │   │ (data replicates in) │
+│ test resources       │   │ (data replicates in) │   │ (data replicates in) │
 │ slapd-external (NP)  │   │ slapd-external (NP)  │   │ slapd-external (NP)  │
 └──────────────────────┘   └──────────────────────┘   └──────────────────────┘
         ▲                           ▲
@@ -442,12 +513,19 @@ make e2e-multisite-teardown CONTEXTS="s1 s2 s3"
 1. Discovers each cluster's node IP
 2. Generates random shared credentials (admin, root, replication passwords)
 3. Per cluster: creates namespace, credentials Secret, TLS cert (with node IP SAN), operator
+   (with Multus annotation in dynamic discovery mode)
 4. Extracts each cluster's CA, creates cross-trust Secrets on every other cluster
-5. Deploys SlapdCluster on each cluster with `externalPeers` pointing at all others via
-   `ldaps://<nodeIP>:30636` (NodePort)
-6. Creates `slapd-external` NodePort service on each cluster (ldap + ldaps)
-7. Installs `slapd-test` on context[0] only (bootstrap data replicates to all others)
-8. Waits for StatefulSets + bootstrap convergence
+5. **(Dynamic discovery only)** Runs `scripts/create-remote-kubeconfig.sh` to create RBAC and
+   kubeconfig Secrets for cross-site API access over the replication network
+6. Deploys SlapdCluster on each cluster **without** externalPeers (Multus) or **with**
+   NodePort-based externalPeers (no Multus)
+7. Waits for StatefulSets and SlapdCluster to reach Running
+8. Configures externalPeers:
+   - **Dynamic**: Helm upgrade with `discovery.kubeconfigSecret` references
+   - **Static**: Discovers Multus IPs from pod annotations, Helm upgrade with `podAddresses`
+   - **NodePort**: Already configured in step 6
+9. Creates `slapd-external` NodePort services (always — needed for test runner access)
+10. Applies test resources, waits for convergence
 
 ### Configuration
 
@@ -456,11 +534,11 @@ make e2e-multisite-teardown CONTEXTS="s1 s2 s3"
 | `CONTEXTS` | *(required)* | Space-separated kubectl context names |
 | `NAMESPACE` | `slaptain` | Operator namespace |
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
-| `LDAP_DOMAIN` | `dc=chuck-chuck-chuck,dc=net` | LDAP base DN |
 | `NODEPORT_LDAP` | `30389` | NodePort for plain LDAP (test runner access) |
-| `NODEPORT_LDAPS` | `30636` | NodePort for LDAPS (cross-cluster syncrepl) |
+| `NODEPORT_LDAPS` | `30636` | NodePort for LDAPS (cross-cluster syncrepl in NodePort mode) |
+| `MULTUS_NETWORK` | *(unset)* | NAD reference (e.g. `infra/replication-net`). Enables Multus mode |
+| `STATIC_PODADDRESSES` | *(unset)* | Set to `1` for legacy static podAddresses instead of dynamic discovery |
 | `HELM_VALUES_SLAPD_CLUSTER` | *(unset)* | Extra values for slapd-cluster chart |
-| `HELM_VALUES_SLAPD_TESTING` | *(unset)* | Extra values for slapd-test chart |
 | `HELM_VALUES` | *(unset)* | Extra values for operator chart |
 
 ---

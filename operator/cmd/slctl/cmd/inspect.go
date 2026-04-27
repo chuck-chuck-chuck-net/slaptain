@@ -38,12 +38,13 @@ type inspectJSON struct {
 }
 
 type externalPeerInfo struct {
-	Name         string   `json:"name"`
-	URI          string   `json:"uri"`
-	PodAddresses []string `json:"podAddresses,omitempty"`
-	Connected    *bool    `json:"connected,omitempty"` // nil = not tested (Multus)
-	LastError    string   `json:"lastError,omitempty"`
-	Multus       bool     `json:"multus,omitempty"` // true = podAddresses peer
+	Name                string   `json:"name"`
+	URI                 string   `json:"uri"`
+	PodAddresses        []string `json:"podAddresses,omitempty"`
+	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
+	Connected           *bool    `json:"connected,omitempty"` // nil = not tested (Multus/discovery)
+	LastError           string   `json:"lastError,omitempty"`
+	Multus              bool     `json:"multus,omitempty"` // true = podAddresses or discovery peer
 }
 
 type podJSON struct {
@@ -199,19 +200,37 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 	// Populate external peer info
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		epi := externalPeerInfo{Name: ep.Name}
-		if len(ep.PodAddresses) > 0 {
+		if ep.Discovery != nil {
+			epi.Multus = true
+			// Discovery mode: get resolved addresses from status.
+			for _, eps := range sc.Status.ExternalPeerStatuses {
+				if eps.Name == ep.Name {
+					epi.DiscoveredAddresses = eps.DiscoveredAddresses
+					epi.LastError = eps.LastError
+					break
+				}
+			}
+			if len(epi.DiscoveredAddresses) > 0 {
+				epi.URI = fmt.Sprintf("%d pod(s) via discovery", len(epi.DiscoveredAddresses))
+			} else {
+				epi.URI = "discovery (no addresses yet)"
+			}
+		} else if len(ep.PodAddresses) > 0 {
 			epi.Multus = true
 			epi.PodAddresses = ep.PodAddresses
 			epi.URI = fmt.Sprintf("%d pod(s) via Multus", len(ep.PodAddresses))
 		} else {
 			epi.URI = ep.URI
 		}
-		for _, eps := range sc.Status.ExternalPeerStatuses {
-			if eps.Name == ep.Name {
-				c := eps.Connected
-				epi.Connected = &c
-				epi.LastError = eps.LastError
-				break
+		// Look up status for non-discovery peers (discovery peers handled above).
+		if ep.Discovery == nil {
+			for _, eps := range sc.Status.ExternalPeerStatuses {
+				if eps.Name == ep.Name {
+					c := eps.Connected
+					epi.Connected = &c
+					epi.LastError = eps.LastError
+					break
+				}
 			}
 		}
 		result.ExternalPeers = append(result.ExternalPeers, epi)
@@ -542,10 +561,19 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 	}
 
 	// ── syncRepl stanza count ──
-	// Each ExternalPeer contributes 1 stanza (URI mode) or len(podAddresses) stanzas.
+	// Each ExternalPeer contributes 1 stanza (URI mode), len(podAddresses) stanzas
+	// (static Multus), or len(DiscoveredAddresses) stanzas (discovery mode).
 	externalStanzaCount := 0
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
-		if len(ep.PodAddresses) > 0 {
+		if ep.Discovery != nil {
+			// Discovery mode: count from status DiscoveredAddresses.
+			for _, eps := range sc.Status.ExternalPeerStatuses {
+				if eps.Name == ep.Name {
+					externalStanzaCount += len(eps.DiscoveredAddresses)
+					break
+				}
+			}
+		} else if len(ep.PodAddresses) > 0 {
 			externalStanzaCount += len(ep.PodAddresses)
 		} else {
 			externalStanzaCount++
@@ -666,20 +694,27 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 
 	// ── External peer connectivity ──
 	if len(sc.Spec.Replication.ExternalPeers) > 0 {
-		// Peers using podAddresses are on a Multus replication network that the
-		// operator (and slctl) cannot reach. Only check URI-based peers.
-		hasURIPeers := false
+		// Peers using podAddresses or discovery are on a Multus replication
+		// network that the operator (and slctl) cannot reach directly.
+		// Only check URI-based peers for connectivity.
+		var uriPeerCount, multusPeerCount, discoveryPeerCount int
 		for _, ep := range sc.Spec.Replication.ExternalPeers {
-			if ep.URI != "" {
-				hasURIPeers = true
-				break
+			if ep.Discovery != nil {
+				discoveryPeerCount++
+			} else if len(ep.PodAddresses) > 0 {
+				multusPeerCount++
+			} else if ep.URI != "" {
+				uriPeerCount++
 			}
 		}
 
-		if hasURIPeers {
+		if uriPeerCount > 0 {
 			epOK := true
 			var epIssues []string
 			for _, ep := range sc.Status.ExternalPeerStatuses {
+				if len(ep.DiscoveredAddresses) > 0 {
+					continue // discovery peer — skip connectivity check
+				}
 				if !ep.Connected {
 					epOK = false
 					detail := ep.Name + ": disconnected"
@@ -691,24 +726,59 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 			}
 			if epOK {
 				check("external-peers", "pass",
-					fmt.Sprintf("all %d external peers connected", len(sc.Spec.Replication.ExternalPeers)))
+					fmt.Sprintf("all %d URI peers connected", uriPeerCount))
 			} else {
 				check("external-peers", "fail", strings.Join(epIssues, "; "))
 			}
-		} else {
+		}
+		if discoveryPeerCount > 0 {
+			// Report discovery peer status: count discovered addresses.
+			var details []string
+			for _, ep := range sc.Spec.Replication.ExternalPeers {
+				if ep.Discovery == nil {
+					continue
+				}
+				for _, eps := range sc.Status.ExternalPeerStatuses {
+					if eps.Name == ep.Name {
+						if len(eps.DiscoveredAddresses) > 0 {
+							details = append(details, fmt.Sprintf("%s: %d pod(s) discovered",
+								ep.Name, len(eps.DiscoveredAddresses)))
+						} else {
+							details = append(details, fmt.Sprintf("%s: no addresses discovered",
+								ep.Name))
+						}
+						break
+					}
+				}
+			}
 			check("external-peers", "pass",
-				fmt.Sprintf("%d Multus peers (not reachable from operator, see syncrepl stanzas)", len(sc.Spec.Replication.ExternalPeers)))
+				fmt.Sprintf("all %d discovery peers use Multus (%s)",
+					discoveryPeerCount, strings.Join(details, ", ")))
+		}
+		if multusPeerCount > 0 && uriPeerCount == 0 && discoveryPeerCount == 0 {
+			check("external-peers", "pass",
+				fmt.Sprintf("all %d external peers use Multus podAddresses (connectivity not testable from operator)",
+					multusPeerCount))
 		}
 
 		// ── External peer syncrepl stanzas present on each RW pod ──
 		// For each ExternalPeer, check that at least one stanza references its
-		// URI (single-endpoint mode) or any of its podAddresses (Multus mode).
+		// URI (single-endpoint), podAddresses (static Multus), or
+		// DiscoveredAddresses (discovery mode).
 		epStanzaOK := true
 		var epStanzaIssues []string
 		for _, ep := range sc.Spec.Replication.ExternalPeers {
 			// Build the set of strings to search for in syncrepl stanzas.
 			var needles []string
-			if len(ep.PodAddresses) > 0 {
+			if ep.Discovery != nil {
+				// Discovery mode: use resolved addresses from status.
+				for _, eps := range sc.Status.ExternalPeerStatuses {
+					if eps.Name == ep.Name {
+						needles = eps.DiscoveredAddresses
+						break
+					}
+				}
+			} else if len(ep.PodAddresses) > 0 {
 				needles = ep.PodAddresses
 			} else if ep.URI != "" {
 				needles = []string{ep.URI}
@@ -780,13 +850,16 @@ func printInspectResult(result inspectJSON) {
 
 			if len(pod.SyncRepl) > 0 {
 				// Classify stanzas into in-cluster and cross-site.
-				// Match against URI (NodePort) or podAddresses (Multus).
+				// Match against URI (NodePort), podAddresses (static Multus),
+				// or DiscoveredAddresses (discovery mode).
 				var inCluster, crossSite []string
 				for _, sr := range pod.SyncRepl {
 					matched := false
 					for _, ep := range result.ExternalPeers {
 						var needles []string
-						if ep.Multus {
+						if len(ep.DiscoveredAddresses) > 0 {
+							needles = ep.DiscoveredAddresses
+						} else if ep.Multus {
 							needles = ep.PodAddresses
 						} else {
 							needles = []string{ep.URI}
@@ -839,7 +912,9 @@ func printInspectResult(result inspectJSON) {
 			fmt.Println("\n  External Peers:")
 			for _, ep := range result.ExternalPeers {
 				var status string
-				if ep.Connected == nil {
+				if len(ep.DiscoveredAddresses) > 0 {
+					status = fmt.Sprintf("discovery (%d pod(s))", len(ep.DiscoveredAddresses))
+				} else if ep.Connected == nil {
 					status = "Multus (not reachable from operator)"
 				} else if *ep.Connected {
 					status = "connected"

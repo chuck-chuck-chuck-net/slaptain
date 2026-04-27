@@ -427,6 +427,223 @@ HA survives a replication network outage.
 - (-) In-cluster Multus usage (`useForInCluster`) requires stable IPAM; if IPs change,
   there's a brief replication interruption while the operator rewrites stanzas.
 
+## Amendment: Dynamic Cross-Site Peer Discovery via Remote Kubeconfig (2026-04-27)
+
+### Motivation
+
+The original ADR requires `ExternalPeer.podAddresses` to be statically configured. In
+practice this means: deploy pods on site B → wait for Multus IPs → read annotations →
+copy IPs into site A's SlapdCluster CR → and vice versa. The `e2e-multisite.sh` script
+automates this, but it's a manual, out-of-band step that must be repeated whenever a pod
+reschedules and gets a new IP.
+
+We can solve this by having pods discover remote peers at startup via `kubectl --kubeconfig
+<remote>` over the replication network. The k8s API server is reachable at the node's
+replication-network IP (it binds `0.0.0.0`), so cross-site API queries flow over the same
+dedicated network as replication traffic — no management VPN or shared control plane needed.
+
+For slaptain, the discovery should run in the **operator**, not the pods. OpenLDAP syncrepl
+is reconfigurable at runtime via `cn=config`; the operator already connects to each pod and
+writes syncrepl stanzas. Moving discovery into the operator keeps the slapd image unchanged
+and centralises cross-site logic.
+
+### Decision
+
+#### 8. Operator Discovers Remote Peers via Cross-Site Kubernetes API
+
+A new `ExternalPeer` mode replaces static `podAddresses` with dynamic discovery:
+
+```yaml
+externalPeers:
+  - name: site-b
+    discovery:
+      kubeconfigSecret:
+        name: site-b-kubeconfig   # Secret in same namespace as SlapdCluster
+        key: kubeconfig            # default key name
+      namespace: slaptain          # namespace of the remote SlapdCluster (defaults to local ns)
+      clusterName: slapd           # SlapdCluster name on the remote site (defaults to local name)
+    port: 1025
+    tlsSecretName: site-b-ca
+    bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
+    bindPasswordSecretName: shared-repl-creds
+```
+
+Three `ExternalPeer` modes are now available — exactly one must be set:
+
+| Mode | Field | Use case |
+|---|---|---|
+| Single URI | `uri` | NodePort/LoadBalancer (original) |
+| Static per-pod | `podAddresses` | Manual Multus IPs (ADR-007 §4) |
+| Dynamic discovery | `discovery` | Automated Multus IP discovery (this amendment) |
+
+#### 9. Discovery Mechanics
+
+During each reconcile, for each `ExternalPeer` with a `discovery` block, the SlapdCluster
+controller:
+
+1. Reads the kubeconfig Secret and builds a `*rest.Config` targeting the remote k8s API.
+   The API server address in the kubeconfig uses the remote node's replication-network IP
+   (e.g., `https://192.168.99.2:6443`), so the query travels over the Multus network.
+
+2. Lists pods on the remote cluster matching the remote SlapdCluster's labels:
+   ```
+   app.kubernetes.io/name=slapd
+   app.kubernetes.io/instance=<discovery.clusterName>
+   ```
+
+3. Extracts each pod's Multus IP from `k8s.v1.cni.cncf.io/network-status`, matching by the
+   **local** SlapdCluster's `spec.replication.network.multusNetwork` NAD name (both sites
+   share the same physical network and NAD naming convention).
+
+4. Stores the discovered IPs in a new status field:
+   ```go
+   ExternalPeerStatuses[].DiscoveredAddresses []string  // Multus IPs of remote pods
+   ```
+
+5. The SlapdDatabase controller consumes `DiscoveredAddresses` the same way it consumes
+   static `podAddresses` — one syncrepl stanza per address.
+
+#### 10. Operator Pod Requires a Multus Interface
+
+For the operator to reach remote k8s APIs over the replication network, the **operator pod
+itself** must have a `net1` interface on the replication network. This is configured in the
+operator's Helm chart deployment template:
+
+```yaml
+# charts/operator/templates/deployment.yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        k8s.v1.cni.cncf.io/networks: {{ .Values.multus.network }}
+```
+
+This is the same annotation used on slapd pods. The operator Deployment is not a
+StatefulSet, so the IP may change on rescheduling — this is fine because the operator is a
+client, not a server. (This also enables the backlog item "cross-site operator peering for
+CSN convergence monitoring.")
+
+When no `multus.network` is configured on the operator chart, the annotation is omitted and
+discovery mode is unavailable (validation rejects `discovery` blocks without it).
+
+#### 11. RBAC on Remote Clusters
+
+Each remote cluster needs a ServiceAccount that the local operator can authenticate as.
+Required permissions (Role, not ClusterRole — scoped to the remote SlapdCluster's namespace):
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+```
+
+Read-only. The operator never modifies remote resources. Slaptain's operator only reads pod
+annotations for IP discovery.
+
+A helper script `scripts/create-remote-kubeconfig.sh` automates the cross-site RBAC setup:
+
+1. Creates `slaptain-remote-reader` ServiceAccount + Role + RoleBinding on the remote cluster.
+2. Creates a long-lived token Secret (not projected — the operator needs it without token
+   refresh infrastructure).
+3. Builds a kubeconfig pointing at the remote node's replication-network IP.
+4. Creates a Secret on the local cluster containing the kubeconfig.
+
+Usage:
+```bash
+./scripts/create-remote-kubeconfig.sh \
+  --local-context t3e \
+  --remote-context bento \
+  --remote-api-addr 192.168.99.2:6443 \
+  --namespace slaptain
+```
+
+#### 12. TLS for Cross-Site API Access
+
+The kubeconfig uses `insecure-skip-tls-verify: true` for the remote API server connection.
+Rationale: the API server's TLS cert is issued for the primary network IP and DNS name, not
+the replication-network IP. Adding a SAN for the replication IP is possible but requires
+re-issuing the API server cert on every cluster — an infrastructure burden not justified by
+the threat model (the replication network is a physically isolated dark-fiber link).
+
+The token-based authentication is the trust anchor, not the TLS server certificate's SAN.
+
+### CRD Changes
+
+```go
+type ExternalPeer struct {
+    Name                   string                `json:"name"`
+    URI                    string                `json:"uri,omitempty"`
+    PodAddresses           []string              `json:"podAddresses,omitempty"`
+    Discovery              *ExternalPeerDiscovery `json:"discovery,omitempty"` // NEW
+    Port                   int32                 `json:"port,omitempty"`
+    TLSSecretName          string                `json:"tlsSecretName,omitempty"`
+    BindDN                 string                `json:"bindDN,omitempty"`
+    BindPasswordSecretName string                `json:"bindPasswordSecretName,omitempty"`
+}
+
+// ExternalPeerDiscovery configures dynamic peer discovery via a remote cluster's k8s API.
+type ExternalPeerDiscovery struct {
+    // kubeconfigSecret references a Secret containing a kubeconfig for the remote cluster.
+    // The API server address in the kubeconfig should be on the replication network.
+    KubeconfigSecret KubeconfigSecretRef `json:"kubeconfigSecret"`
+    // namespace is the namespace of the remote SlapdCluster. Defaults to the local
+    // SlapdCluster's namespace.
+    Namespace string `json:"namespace,omitempty"`
+    // clusterName is the name of the remote SlapdCluster CR. Defaults to the local
+    // SlapdCluster's name.
+    ClusterName string `json:"clusterName,omitempty"`
+}
+
+type KubeconfigSecretRef struct {
+    // name is the Secret name in the same namespace as the SlapdCluster.
+    Name string `json:"name"`
+    // key is the data key containing the kubeconfig YAML. Default: "kubeconfig".
+    // +kubebuilder:default="kubeconfig"
+    Key string `json:"key,omitempty"`
+}
+
+type ExternalPeerStatus struct {
+    Name                string   `json:"name"`
+    Connected           bool     `json:"connected,omitempty"`           // existing (URI mode only)
+    Error               string   `json:"error,omitempty"`               // existing
+    DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"` // NEW
+}
+```
+
+### Validation
+
+- `uri`, `podAddresses`, and `discovery` are mutually exclusive on each ExternalPeer.
+- `discovery` requires `spec.replication.network.multusNetwork` to be set (both on the
+  SlapdCluster and on the operator's Helm chart).
+- `kubeconfigSecret.name` must reference an existing Secret.
+
+### Consequences (incremental to original ADR-007)
+
+- (+) `podAddresses` no longer needs manual maintenance — discovery is automatic and
+  continuous (every reconcile loop).
+- (+) Pod rescheduling with new Multus IPs is handled transparently — the operator discovers
+  the new IP, updates syncrepl stanzas, no human intervention.
+- (+) Operator's Multus interface enables future CSN convergence monitoring (backlog item).
+- (-) Operator pod needs a Multus interface — adds a deployment dependency (NAD must exist
+  before operator install).
+- (-) Remote kubeconfig Secret must be provisioned out of band (scripted, but still a
+  manual setup step per site pair).
+- (-) `insecure-skip-tls-verify` on remote API connections — acceptable on an isolated
+  physical network, but noted as a security trade-off.
+- (-) Long-lived ServiceAccount tokens on remote clusters — should be rotated periodically.
+  Token rotation is an operational procedure, not an operator feature.
+
+### Migration Path
+
+Existing `podAddresses` configurations continue to work. To migrate to discovery mode:
+
+1. Run `scripts/create-remote-kubeconfig.sh` to set up cross-site RBAC and Secrets.
+2. Enable Multus on the operator Deployment (set `multus.network` in operator Helm values).
+3. Replace `podAddresses` with `discovery` blocks on each `ExternalPeer`.
+4. The operator discovers the same IPs that were previously static — no replication
+   interruption if the IPs haven't changed.
+
 ## Related
 
 - ADR-003: Operator owns all syncrepl configuration (mechanism for writing stanzas)

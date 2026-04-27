@@ -30,14 +30,21 @@ TEST_RESOURCES="${TEST_RESOURCES:-example}"
 # replication uses a dedicated Multus network instead of NodePort services.
 # NodePort services are still created for test runner connectivity.
 #
-# The script deploys SlapdClusters without externalPeers first, waits for pods
-# to get Multus IPs (discovered from pod annotations), then patches the CRs
-# to add externalPeers with the discovered podAddresses. No IPs need to be
-# known in advance — the operator sets tls_reqcert=allow on syncrepl stanzas
-# for IP-based providers, so TLS certs don't need Multus IP SANs.
+# Two Multus peer discovery modes (ADR-007 amendment):
+#
+#   Dynamic (default):  The operator discovers remote pod Multus IPs by querying
+#                       the remote cluster's k8s API over the replication network.
+#                       ExternalPeers use discovery.kubeconfigSecret. The script
+#                       provisions cross-site RBAC and kubeconfig Secrets via
+#                       scripts/create-remote-kubeconfig.sh.
+#
+#   Static:             The script discovers Multus IPs from pod annotations and
+#                       patches the CRs with static podAddresses. Set
+#                       STATIC_PODADDRESSES=1 to use this legacy mode.
 #
 # MULTUS_NETWORK: NAD reference, e.g. "infra/replication-net" or "replication-net"
 MULTUS_NETWORK="${MULTUS_NETWORK:-}"
+STATIC_PODADDRESSES="${STATIC_PODADDRESSES:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -104,8 +111,8 @@ Environment variables (with defaults):
 Multus replication network (ADR-007):
   MULTUS_NETWORK       = NAD reference (e.g. "infra/replication-net")
                          When set, cross-site replication uses Multus pod-to-pod.
-                         IPs are discovered from running pods after deployment —
-                         no IPs need to be known in advance.
+  STATIC_PODADDRESSES  = Set to 1 for legacy static podAddresses mode.
+                         Default (unset): dynamic discovery via remote kubeconfig.
 EOF
     exit 1
 }
@@ -153,7 +160,8 @@ for net in data:
 
 # Patch SlapdCluster CRs on each cluster to add externalPeers with discovered
 # Multus podAddresses. Called after discover_multus_ips.
-configure_multus_external_peers() {
+# Used in legacy STATIC_PODADDRESSES mode only.
+configure_multus_external_peers_static() {
     [[ -z "$MULTUS_NETWORK" ]] && return
 
     # Helm --set treats commas as value separators — escape for LDAP DNs.
@@ -161,7 +169,7 @@ configure_multus_external_peers() {
     local helm_bind_dn="cn=replication\\,${helm_suffix}"
 
     for ctx in "${CONTEXTS[@]}"; do
-        log "[$ctx] Configuring externalPeers with Multus podAddresses..."
+        log "[$ctx] Configuring externalPeers with static Multus podAddresses..."
 
         local peer_sets=()
         local peer_idx=0
@@ -196,6 +204,53 @@ configure_multus_external_peers() {
             "${peer_sets[@]}" \
             ${HELM_VALUES_SLAPD_CLUSTER:-}
     done
+}
+
+# ── Dynamic discovery helpers (ADR-007 amendment) ───────────────────────────
+
+# Set up cross-site kubeconfig Secrets for operator-driven dynamic peer discovery.
+# Uses scripts/create-remote-kubeconfig.sh to create RBAC + kubeconfig Secrets.
+setup_remote_kubeconfigs() {
+    [[ -z "$MULTUS_NETWORK" ]] && return
+    [[ -n "$STATIC_PODADDRESSES" ]] && return
+
+    log "Setting up cross-site kubeconfig Secrets for dynamic discovery..."
+
+    # Build context=API pairs. The API server address uses the node's replication
+    # network IP — discovered from the Multus network-status on the first running
+    # pod, or falling back to the node's InternalIP (which works when the API
+    # server binds 0.0.0.0 and the replication network is routable).
+    local pairs=()
+    for ctx in "${CONTEXTS[@]}"; do
+        # Use node IP as the API server address on the replication network.
+        # The k8s API is reachable at the
+        # node's replication-network IP because it binds 0.0.0.0.
+        local api_ip="${NODE_IPS[$ctx]}"
+        local api_server api_port
+        api_server=$(kctl "$ctx" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+        # Extract port from https://host:port — default 6443 if no port specified.
+        if [[ "$api_server" =~ :([0-9]+)$ ]]; then
+            api_port="${BASH_REMATCH[1]}"
+        else
+            api_port="6443"
+        fi
+        pairs+=("${ctx}=https://${api_ip}:${api_port}")
+    done
+
+    "$PROJECT_ROOT/scripts/create-remote-kubeconfig.sh" \
+        -n "$NAMESPACE_TESTING" \
+        "${pairs[@]}"
+}
+
+# Unified entry point: configure Multus external peers post-deploy.
+# Only needed for static podAddresses mode — dynamic discovery peers are
+# configured in the initial helm install (setup_slapd_clusters).
+configure_multus_external_peers() {
+    [[ -z "$MULTUS_NETWORK" ]] && return
+    [[ -z "$STATIC_PODADDRESSES" ]] && return
+
+    discover_multus_ips
+    configure_multus_external_peers_static
 }
 
 # ── Discovery ────────────────────────────────────────────────────────────────
@@ -281,11 +336,16 @@ setup_foundation() {
         )
 
         log "[$ctx] Installing operator (tag: $GIT_TAG)..."
+        local operator_multus_sets=()
+        if [[ -n "$MULTUS_NETWORK" && -z "$STATIC_PODADDRESSES" ]]; then
+            operator_multus_sets=(--set "multus.network=$MULTUS_NETWORK")
+        fi
         hctl "$ctx" upgrade --install slaptain-operator "$PROJECT_ROOT/charts/operator" \
             --namespace "$NAMESPACE" --create-namespace \
             --set "image.repository=$REGISTRY/$PROJECT/operator" \
             --set "image.tag=$GIT_TAG" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
+            "${operator_multus_sets[@]}" \
             ${HELM_VALUES:-}
     done
 }
@@ -323,14 +383,26 @@ setup_slapd_clusters() {
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Installing SlapdCluster..."
 
-        # In Multus mode, deploy WITHOUT externalPeers. The pods need to come
-        # up first so we can discover their Multus IPs. externalPeers are added
-        # later via configure_multus_external_peers.
         local peer_sets=()
-        if [[ -z "$MULTUS_NETWORK" ]]; then
-            local peer_idx=0
-            for other in "${CONTEXTS[@]}"; do
-                [[ "$other" == "$ctx" ]] && continue
+        local peer_idx=0
+        for other in "${CONTEXTS[@]}"; do
+            [[ "$other" == "$ctx" ]] && continue
+
+            if [[ -n "$MULTUS_NETWORK" && -z "$STATIC_PODADDRESSES" ]]; then
+                # Dynamic discovery: configure externalPeers with kubeconfigSecret
+                # in the initial install. Cross-trust secrets and kubeconfig secrets
+                # are already created, so the pod template gets the CA volumes right
+                # away — no second Helm upgrade needed.
+                peer_sets+=(
+                    --set "replication.externalPeers[$peer_idx].name=site-${other}"
+                    --set "replication.externalPeers[$peer_idx].port=1025"
+                    --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
+                    --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
+                    --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
+                    --set "replication.externalPeers[$peer_idx].discovery.kubeconfigSecret.name=${other}-kubeconfig"
+                )
+            elif [[ -z "$MULTUS_NETWORK" ]]; then
+                # NodePort mode: configure externalPeers with URIs.
                 peer_sets+=(
                     --set "replication.externalPeers[$peer_idx].name=site-${other}"
                     --set "replication.externalPeers[$peer_idx].uri=ldaps://${NODE_IPS[$other]}:${NODEPORT_LDAPS}"
@@ -338,9 +410,11 @@ setup_slapd_clusters() {
                     --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
                     --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
                 )
-                ((peer_idx++)) || true
-            done
-        fi
+            fi
+            # Static podAddresses mode: no peers yet — added after pods are
+            # running via configure_multus_external_peers.
+            ((peer_idx++)) || true
+        done
 
         local multus_sets=()
         if [[ -n "$MULTUS_NETWORK" ]]; then
@@ -575,11 +649,18 @@ teardown_all() {
             kctl "$ctx" delete svc "slapd-readonly-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
         done
 
-        # Cross-trust secrets.
+        # Cross-trust and kubeconfig secrets.
         for other in "${CONTEXTS[@]}"; do
             [[ "$other" == "$ctx" ]] && continue
             kctl "$ctx" delete secret "site-${other}-ca" -n "$NAMESPACE_TESTING" --ignore-not-found || true
+            kctl "$ctx" delete secret "${other}-kubeconfig" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
         done
+
+        # Remote reader RBAC (created by create-remote-kubeconfig.sh).
+        kctl "$ctx" delete rolebinding slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        kctl "$ctx" delete role slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        kctl "$ctx" delete secret slaptain-remote-reader-token -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        kctl "$ctx" delete sa slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
 
         # Database credentials secret.
         kctl "$ctx" delete secret "$DB_CREDENTIALS_SECRET" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
@@ -626,14 +707,20 @@ case "$subcommand" in
         generate_shared_credentials
         setup_foundation
         setup_cross_trust
+        setup_remote_kubeconfigs
         setup_slapd_clusters
         wait_for_clusters_ready
-        discover_multus_ips
         configure_multus_external_peers
         setup_nodeport_services
         setup_test_resources
         log "Setup complete. Clusters: ${CONTEXTS[*]}"
-        [[ -n "$MULTUS_NETWORK" ]] && log "Replication network: $MULTUS_NETWORK (Multus)"
+        if [[ -n "$MULTUS_NETWORK" ]]; then
+            if [[ -n "$STATIC_PODADDRESSES" ]]; then
+                log "Replication network: $MULTUS_NETWORK (Multus, static podAddresses)"
+            else
+                log "Replication network: $MULTUS_NETWORK (Multus, dynamic discovery)"
+            fi
+        fi
         ;;
     test)
         discover_node_ips
@@ -650,9 +737,9 @@ case "$subcommand" in
         generate_shared_credentials
         setup_foundation
         setup_cross_trust
+        setup_remote_kubeconfigs
         setup_slapd_clusters
         wait_for_clusters_ready
-        discover_multus_ips
         configure_multus_external_peers
         setup_nodeport_services
         setup_test_resources
