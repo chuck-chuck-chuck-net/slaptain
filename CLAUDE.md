@@ -576,11 +576,11 @@ ADR-002 and ADR-004.
 ### Backlog
 
 - ~~**Cross-site operator peering for CSN convergence monitoring.**~~ **Done.** The operator
-  queries contextCSN directly on remote slapd pods via anonymous LDAP over the replication
-  network (no separate peering endpoint needed). Reports `ReplicationState`
+  queries contextCSN directly on remote slapd pods, binding as `cn=replication,<suffix>`
+  with the replication password (ADR-008). Reports `ReplicationState`
   (Synced/Lagging/Unreachable) and `lagSeconds` per external peer. Local intra-site
-  convergence is reported via a `ReplicationConverged` condition. See `ExternalPeerStatus`
-  fields and `csn.go`.
+  convergence is reported via a `ReplicationConverged` condition. Periodic requeue (60s)
+  keeps status fresh. See `ExternalPeerStatus` fields and `csn.go`. e2e: 48/48 green.
 - **Cross-site syncrepl fan-out control (`ExternalPeer.replicasPerPeer`).** Currently each local
   pod creates a syncrepl stanza for every remote pod in `podAddresses` (full N×M mesh). This
   wastes connections — the remote cluster's internal mesh already ensures all remote pods have
