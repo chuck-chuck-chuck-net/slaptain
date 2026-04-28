@@ -1,0 +1,141 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"crypto/tls"
+	"fmt"
+	"net"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/go-ldap/ldap/v3"
+)
+
+// queryContextCSN connects to an LDAP server and reads the contextCSN attribute
+// from the data suffix root entry. When bindDN and bindPW are non-empty, binds
+// first (required when ACLs deny anonymous access to the suffix). Otherwise
+// uses an anonymous connection.
+// Returns the raw CSN strings (one per serverID that has written to this replica).
+func queryContextCSN(host string, port int32, tlsEnabled bool, suffix, bindDN, bindPW string) ([]string, error) {
+	scheme := "ldap"
+	if tlsEnabled {
+		scheme = "ldaps"
+	}
+	uri := fmt.Sprintf("%s://%s:%d", scheme, host, port)
+	return doCSNQuery(uri, tlsEnabled, suffix, bindDN, bindPW)
+}
+
+// queryContextCSNFromURI connects to an LDAP URI (ldap:// or ldaps://) and reads contextCSN.
+// Used for URI-mode external peers where the full URI is already available.
+func queryContextCSNFromURI(uri, suffix, bindDN, bindPW string) ([]string, error) {
+	useTLS := strings.HasPrefix(uri, "ldaps://")
+	return doCSNQuery(uri, useTLS, suffix, bindDN, bindPW)
+}
+
+// doCSNQuery is the shared implementation for contextCSN queries.
+func doCSNQuery(uri string, useTLS bool, suffix, bindDN, bindPW string) ([]string, error) {
+	dialOpts := []ldap.DialOpt{
+		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+	}
+	if useTLS {
+		dialOpts = append(dialOpts, ldap.DialWithTLSConfig(&tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // IP-based Multus addresses, CA trust only (ADR-007 §7)
+		}))
+	}
+
+	conn, err := ldap.DialURL(uri, dialOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s: %w", uri, err)
+	}
+	defer conn.Close()
+	conn.SetTimeout(ldapRequestTimeout)
+
+	if bindDN != "" && bindPW != "" {
+		if err := conn.Bind(bindDN, bindPW); err != nil {
+			return nil, fmt.Errorf("bind %s on %s: %w", bindDN, uri, err)
+		}
+	}
+
+	result, err := conn.Search(ldap.NewSearchRequest(
+		suffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
+		"(objectClass=*)", []string{"contextCSN"}, nil,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("search contextCSN on %s: %w", uri, err)
+	}
+	if len(result.Entries) == 0 {
+		return nil, nil
+	}
+	return result.Entries[0].GetEqualFoldAttributeValues("contextCSN"), nil
+}
+
+// parseCSNTime extracts the timestamp from a contextCSN value.
+// Format: YYYYMMDDHHMMSS.µsZ#count#serverID#modcount
+func parseCSNTime(csn string) (time.Time, error) {
+	parts := strings.SplitN(csn, "#", 2)
+	if len(parts) == 0 {
+		return time.Time{}, fmt.Errorf("invalid CSN: %s", csn)
+	}
+	ts := strings.TrimSuffix(parts[0], "Z")
+	return time.Parse("20060102150405.000000", ts)
+}
+
+// newestCSN finds the CSN with the latest timestamp from a list of CSN strings.
+// Returns the parsed time and the raw CSN string. Returns zero time if the list is empty.
+func newestCSN(csns []string) (time.Time, string, error) {
+	var newest time.Time
+	var newestRaw string
+	for _, csn := range csns {
+		t, err := parseCSNTime(csn)
+		if err != nil {
+			continue
+		}
+		if t.After(newest) {
+			newest = t
+			newestRaw = csn
+		}
+	}
+	if newestRaw == "" && len(csns) > 0 {
+		return time.Time{}, "", fmt.Errorf("no parseable CSN in %v", csns)
+	}
+	return newest, newestRaw, nil
+}
+
+// csnConverged checks if all CSN sets are identical (same CSN vectors).
+// Returns true when all sets match or when fewer than 2 sets are provided.
+func csnConverged(csnSets [][]string) bool {
+	if len(csnSets) < 2 {
+		return true
+	}
+	ref := normalizeCSNSet(csnSets[0])
+	for _, set := range csnSets[1:] {
+		if normalizeCSNSet(set) != ref {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeCSNSet sorts and joins CSN strings for comparison.
+func normalizeCSNSet(csns []string) string {
+	sorted := make([]string, len(csns))
+	copy(sorted, csns)
+	sort.Strings(sorted)
+	return strings.Join(sorted, "|")
+}

@@ -56,6 +56,11 @@ const (
 	// ldapRequestTimeout caps every LDAP operation (Bind, Search, Add, Modify)
 	// so that a hung or deadlocked slapd cannot block the reconcile loop forever.
 	ldapRequestTimeout = 10 * time.Second
+
+	// csnCheckInterval is the periodic reconcile interval for CSN convergence
+	// monitoring when the cluster is Running with replication enabled. Without
+	// this, CSN checks only run on resource changes and go stale.
+	csnCheckInterval = 60 * time.Second
 )
 
 // SlapdClusterReconciler reconciles a SlapdCluster object.
@@ -183,7 +188,15 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// External peer connectivity status and discovery.
+	// Local CSN convergence check + gather local newest CSN for cross-site comparison.
+	// Uses the replication bind DN/password since ACLs may deny anonymous access.
+	dbInfos := r.listDatabaseInfo(ctx, sc)
+	var localNewestTime time.Time
+	if sc.Spec.Replication.Enabled && ready >= 2 && len(dbInfos) > 0 {
+		localNewestTime = r.checkLocalCSNConvergence(ctx, sc, dbInfos)
+	}
+
+	// External peer status: discovery, connectivity, and CSN convergence.
 	sc.Status.ExternalPeerStatuses = nil
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		status := ldapv1alpha1.ExternalPeerStatus{
@@ -198,22 +211,23 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			} else {
 				status.DiscoveredAddresses = addrs
 			}
-			sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
 		} else if len(ep.PodAddresses) > 0 {
-			// podAddresses peers use a Multus replication network — the operator
-			// pod cannot reach it. Omit from status rather than reporting a
-			// misleading result. Cross-site health will be verified via operator
-			// peering and CSN convergence (see backlog).
-			continue
+			// Static podAddresses: addresses are in the spec directly.
 		} else if ep.URI != "" {
 			if err := testExternalPeerConnectivity(ep.URI); err != nil {
-				status.Connected = false
 				status.LastError = err.Error()
-			} else {
-				status.Connected = true
 			}
-			sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
 		}
+
+		// CSN convergence check against this peer.
+		if len(dbInfos) > 0 && !localNewestTime.IsZero() {
+			r.checkPeerCSNConvergence(ctx, sc, &ep, &status, dbInfos, localNewestTime)
+		}
+
+		// Derive Connected from ReplicationState (backward compat).
+		status.Connected = status.ReplicationState != "" && status.ReplicationState != ldapv1alpha1.ReplicationUnreachable
+
+		sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
 	}
 
 	switch {
@@ -261,6 +275,14 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
+
+	// Periodic requeue for CSN convergence monitoring when replication is active.
+	// Without this, CSN checks only run on resource changes and go stale once
+	// the cluster stabilises.
+	if sc.Spec.Replication.Enabled {
+		return ctrl.Result{RequeueAfter: csnCheckInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -837,6 +859,244 @@ func (r *SlapdClusterReconciler) listDatabaseNames(ctx context.Context, sc *ldap
 	return names, nil
 }
 
+// databaseCSNInfo holds the suffix and replication credentials for CSN queries.
+type databaseCSNInfo struct {
+	suffix string
+	bindDN string // cn=replication,<suffix> — has read access via replication ACL
+	bindPW string
+}
+
+// listDatabaseInfo returns suffix and replication bind credentials for all
+// SlapdDatabase CRs referencing this cluster. The replication bind DN
+// (cn=replication,<suffix>) has read access granted by the replication ACL,
+// so CSN queries work even when anonymous access is denied.
+func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) []databaseCSNInfo {
+	log := logf.FromContext(ctx)
+	var dbList ldapv1alpha1.SlapdDatabaseList
+	if err := r.List(ctx, &dbList, client.InNamespace(sc.Namespace)); err != nil {
+		return nil
+	}
+	var infos []databaseCSNInfo
+	for _, db := range dbList.Items {
+		if db.Spec.ClusterRef != sc.Name || db.Spec.Suffix == "" {
+			continue
+		}
+		info := databaseCSNInfo{
+			suffix: db.Spec.Suffix,
+			bindDN: fmt.Sprintf("cn=replication,%s", db.Spec.Suffix),
+		}
+		// Read replication password from the database credentials secret.
+		secretName := db.Name + "-credentials"
+		if db.Spec.Credentials.SecretName != "" {
+			secretName = db.Spec.Credentials.SecretName
+		}
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{
+			Name: secretName, Namespace: sc.Namespace,
+		}, secret); err == nil {
+			info.bindPW = string(secret.Data["replication-password"])
+		}
+		log.V(1).Info("CSN query credentials",
+			"db", db.Name, "suffix", db.Spec.Suffix,
+			"bindDN", info.bindDN, "bindPWLen", len(info.bindPW),
+			"secret", secretName)
+		infos = append(infos, info)
+	}
+	return infos
+}
+
+// checkLocalCSNConvergence queries contextCSN on all local RW pods and sets
+// the ReplicationConverged condition. Returns the newest local CSN timestamp
+// for use as a baseline in cross-site comparison.
+func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	dbInfos []databaseCSNInfo,
+) time.Time {
+	log := logf.FromContext(ctx)
+	headlessSvc := sc.Name + "-headless"
+	tlsEnabled := sc.Spec.LDAP.TLS.Enabled
+	port := ldapContainerPort
+	if tlsEnabled {
+		port = ldapsContainerPort
+	}
+
+	var allCSNSets [][]string
+	var newestTime time.Time
+	var queryErrors []string
+
+	for i := int32(0); i < sc.Spec.Replicas; i++ {
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", sc.Name, i, headlessSvc, sc.Namespace)
+		for _, db := range dbInfos {
+			csns, err := queryContextCSN(host, port, tlsEnabled, db.suffix, db.bindDN, db.bindPW)
+			if err != nil {
+				log.V(1).Info("local CSN query failed", "pod", host, "suffix", db.suffix, "err", err)
+				queryErrors = append(queryErrors, fmt.Sprintf("%s-%d: %v", sc.Name, i, err))
+				continue
+			}
+			allCSNSets = append(allCSNSets, csns)
+			if t, _, err := newestCSN(csns); err == nil && t.After(newestTime) {
+				newestTime = t
+			}
+		}
+	}
+
+	if len(allCSNSets) < 2 {
+		// Not enough data to check convergence.
+		return newestTime
+	}
+
+	now := metav1.Now()
+	if csnConverged(allCSNSets) {
+		setCondition(&sc.Status.Conditions, metav1.Condition{
+			Type:               "ReplicationConverged",
+			Status:             metav1.ConditionTrue,
+			Reason:             "CSNsMatch",
+			Message:            "all local pods report identical contextCSN",
+			LastTransitionTime: now,
+			ObservedGeneration: sc.Generation,
+		})
+	} else {
+		// Compute lag between newest and oldest.
+		var oldestTime time.Time
+		for _, csns := range allCSNSets {
+			if t, _, err := newestCSN(csns); err == nil {
+				if oldestTime.IsZero() || t.Before(oldestTime) {
+					oldestTime = t
+				}
+			}
+		}
+		lag := newestTime.Sub(oldestTime)
+		msg := fmt.Sprintf("local CSN divergence: %.1fs lag across %d pods", lag.Seconds(), sc.Spec.Replicas)
+		if len(queryErrors) > 0 {
+			msg += fmt.Sprintf(" (%d query errors)", len(queryErrors))
+		}
+		setCondition(&sc.Status.Conditions, metav1.Condition{
+			Type:               "ReplicationConverged",
+			Status:             metav1.ConditionFalse,
+			Reason:             "CSNsDiverged",
+			Message:            msg,
+			LastTransitionTime: now,
+			ObservedGeneration: sc.Generation,
+		})
+	}
+
+	return newestTime
+}
+
+// csnSyncThreshold is the maximum CSN lag considered "Synced".
+// Cross-site delta-syncrepl has inherent propagation delay.
+const csnSyncThreshold = 5 * time.Second
+
+// checkPeerCSNConvergence queries contextCSN on a remote peer's pods and
+// populates the ReplicationState, LagSeconds, and LastChecked fields.
+func (r *SlapdClusterReconciler) checkPeerCSNConvergence(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	ep *ldapv1alpha1.ExternalPeer,
+	status *ldapv1alpha1.ExternalPeerStatus,
+	dbInfos []databaseCSNInfo,
+	localNewestTime time.Time,
+) {
+	log := logf.FromContext(ctx)
+	now := metav1.Now()
+	status.LastChecked = &now
+
+	tlsEnabled := sc.Spec.LDAP.TLS.Enabled
+	port := ep.Port
+	if port == 0 {
+		if tlsEnabled {
+			port = ldapsContainerPort
+		} else {
+			port = ldapContainerPort
+		}
+	}
+
+	// Determine remote addresses to query.
+	var addrs []string
+	if ep.Discovery != nil {
+		addrs = status.DiscoveredAddresses
+	} else if len(ep.PodAddresses) > 0 {
+		addrs = ep.PodAddresses
+	} else if ep.URI != "" {
+		// URI mode: query contextCSN on the single URI directly.
+		for _, db := range dbInfos {
+			csns, err := queryContextCSNFromURI(ep.URI, db.suffix, db.bindDN, db.bindPW)
+			if err != nil {
+				log.V(1).Info("remote CSN query failed (URI)", "peer", ep.Name, "err", err)
+				status.ReplicationState = ldapv1alpha1.ReplicationUnreachable
+				status.LastError = err.Error()
+				return
+			}
+			remoteTime, _, _ := newestCSN(csns)
+			if !remoteTime.IsZero() {
+				lag := localNewestTime.Sub(remoteTime)
+				if lag < 0 {
+					lag = 0 // remote is ahead — clocks or just received a write first
+				}
+				if lag <= csnSyncThreshold {
+					status.ReplicationState = ldapv1alpha1.ReplicationSynced
+				} else {
+					status.ReplicationState = ldapv1alpha1.ReplicationLagging
+					status.LagSeconds = fmt.Sprintf("%.1f", lag.Seconds())
+				}
+				return
+			}
+		}
+		status.ReplicationState = ldapv1alpha1.ReplicationSynced
+		return
+	}
+
+	if len(addrs) == 0 {
+		// No addresses available (discovery pending or empty podAddresses).
+		status.ReplicationState = ldapv1alpha1.ReplicationUnreachable
+		status.LastError = "no remote addresses available"
+		return
+	}
+
+	// Query contextCSN on remote pods. Use the newest CSN across all remote pods.
+	var remoteNewestTime time.Time
+	var anySuccess bool
+	for _, addr := range addrs {
+		for _, db := range dbInfos {
+			csns, err := queryContextCSN(addr, port, tlsEnabled, db.suffix, db.bindDN, db.bindPW)
+			if err != nil {
+				log.V(1).Info("remote CSN query failed", "peer", ep.Name, "addr", addr, "err", err)
+				continue
+			}
+			anySuccess = true
+			if t, _, err := newestCSN(csns); err == nil && t.After(remoteNewestTime) {
+				remoteNewestTime = t
+			}
+		}
+	}
+
+	if !anySuccess {
+		status.ReplicationState = ldapv1alpha1.ReplicationUnreachable
+		status.LastError = "all remote pod CSN queries failed"
+		return
+	}
+
+	status.LastError = ""
+	if remoteNewestTime.IsZero() {
+		// Remote has no CSN yet (empty database).
+		status.ReplicationState = ldapv1alpha1.ReplicationLagging
+		return
+	}
+
+	lag := localNewestTime.Sub(remoteNewestTime)
+	if lag < 0 {
+		lag = 0
+	}
+	if lag <= csnSyncThreshold {
+		status.ReplicationState = ldapv1alpha1.ReplicationSynced
+		status.LagSeconds = ""
+	} else {
+		status.ReplicationState = ldapv1alpha1.ReplicationLagging
+		status.LagSeconds = fmt.Sprintf("%.1f", lag.Seconds())
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 // Watches SlapdDatabase CRs to trigger reconciliation when databases are
 // added or removed — the StatefulSet's init container env (DATABASE_DIRS)
@@ -884,9 +1144,14 @@ func readOnlySelectorLabels(name string) map[string]string {
 }
 
 // setCondition upserts a condition in the conditions slice.
+// LastTransitionTime is preserved when the Status field has not changed,
+// per Kubernetes API conventions.
 func setCondition(conditions *[]metav1.Condition, newCond metav1.Condition) {
 	for i, c := range *conditions {
 		if c.Type == newCond.Type {
+			if c.Status == newCond.Status {
+				newCond.LastTransitionTime = c.LastTransitionTime
+			}
 			(*conditions)[i] = newCond
 			return
 		}

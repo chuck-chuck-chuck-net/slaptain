@@ -280,11 +280,25 @@ type SlapdClusterSpec struct {
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
+// ExternalPeerReplicationState summarises the replication health of one external peer.
+// +kubebuilder:validation:Enum=Synced;Lagging;Unreachable
+type ExternalPeerReplicationState string
+
+const (
+	// ReplicationSynced means the peer's newest contextCSN is within the sync threshold.
+	ReplicationSynced ExternalPeerReplicationState = "Synced"
+	// ReplicationLagging means the peer's newest contextCSN is behind the local newest.
+	ReplicationLagging ExternalPeerReplicationState = "Lagging"
+	// ReplicationUnreachable means the operator could not query contextCSN on the peer.
+	ReplicationUnreachable ExternalPeerReplicationState = "Unreachable"
+)
+
 // ExternalPeerStatus reports the observed replication state of one external peer.
 type ExternalPeerStatus struct {
 	// name matches ExternalPeer.Name.
 	Name string `json:"name"`
-	// connected indicates whether the operator can reach this peer (URI mode only).
+	// connected indicates whether the operator can reach this peer.
+	// Derived from replicationState: true when not Unreachable.
 	Connected bool `json:"connected"`
 	// lastError is the last connection or discovery error, if any.
 	// +optional
@@ -294,6 +308,19 @@ type ExternalPeerStatus struct {
 	// consumes these the same way as static podAddresses.
 	// +optional
 	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
+	// replicationState reports the CSN convergence state of this peer.
+	// Synced: remote CSN is within threshold of local CSN.
+	// Lagging: remote CSN is behind local CSN by more than the threshold.
+	// Unreachable: operator could not query contextCSN on any remote pod.
+	// +optional
+	ReplicationState ExternalPeerReplicationState `json:"replicationState,omitempty"`
+	// lagSeconds reports the max CSN timestamp delta between local and remote
+	// as a decimal string (e.g. "3.2"). Only set when replicationState is Lagging.
+	// +optional
+	LagSeconds string `json:"lagSeconds,omitempty"`
+	// lastChecked is the time the CSN check last ran.
+	// +optional
+	LastChecked *metav1.Time `json:"lastChecked,omitempty"`
 }
 
 // SlapdClusterStatus defines the observed state of SlapdCluster.

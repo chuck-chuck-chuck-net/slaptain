@@ -44,7 +44,9 @@ type externalPeerInfo struct {
 	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
 	Connected           *bool    `json:"connected,omitempty"` // nil = not tested (Multus/discovery)
 	LastError           string   `json:"lastError,omitempty"`
-	Multus              bool     `json:"multus,omitempty"` // true = podAddresses or discovery peer
+	Multus              bool     `json:"multus,omitempty"`    // true = podAddresses or discovery peer
+	ReplicationState    string   `json:"replicationState,omitempty"`
+	LagSeconds          string   `json:"lagSeconds,omitempty"`
 }
 
 type podJSON struct {
@@ -202,36 +204,34 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 		epi := externalPeerInfo{Name: ep.Name}
 		if ep.Discovery != nil {
 			epi.Multus = true
-			// Discovery mode: get resolved addresses from status.
-			for _, eps := range sc.Status.ExternalPeerStatuses {
-				if eps.Name == ep.Name {
-					epi.DiscoveredAddresses = eps.DiscoveredAddresses
-					epi.LastError = eps.LastError
-					break
-				}
+		} else if len(ep.PodAddresses) > 0 {
+			epi.Multus = true
+			epi.PodAddresses = ep.PodAddresses
+		} else {
+			epi.URI = ep.URI
+		}
+		// Look up status entry for this peer.
+		for _, eps := range sc.Status.ExternalPeerStatuses {
+			if eps.Name != ep.Name {
+				continue
 			}
+			c := eps.Connected
+			epi.Connected = &c
+			epi.LastError = eps.LastError
+			epi.DiscoveredAddresses = eps.DiscoveredAddresses
+			epi.ReplicationState = string(eps.ReplicationState)
+			epi.LagSeconds = eps.LagSeconds
+			break
+		}
+		// Set URI display for Multus/discovery modes.
+		if ep.Discovery != nil {
 			if len(epi.DiscoveredAddresses) > 0 {
 				epi.URI = fmt.Sprintf("%d pod(s) via discovery", len(epi.DiscoveredAddresses))
 			} else {
 				epi.URI = "discovery (no addresses yet)"
 			}
 		} else if len(ep.PodAddresses) > 0 {
-			epi.Multus = true
-			epi.PodAddresses = ep.PodAddresses
 			epi.URI = fmt.Sprintf("%d pod(s) via Multus", len(ep.PodAddresses))
-		} else {
-			epi.URI = ep.URI
-		}
-		// Look up status for non-discovery peers (discovery peers handled above).
-		if ep.Discovery == nil {
-			for _, eps := range sc.Status.ExternalPeerStatuses {
-				if eps.Name == ep.Name {
-					c := eps.Connected
-					epi.Connected = &c
-					epi.LastError = eps.LastError
-					break
-				}
-			}
 		}
 		result.ExternalPeers = append(result.ExternalPeers, epi)
 	}
@@ -813,6 +813,49 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 		} else {
 			check("external-syncrepl", "fail", strings.Join(epStanzaIssues, "; "))
 		}
+
+		// ── Cross-site CSN convergence (from operator status) ──
+		csnOK := true
+		var csnIssues []string
+		anyCSNData := false
+		for _, eps := range sc.Status.ExternalPeerStatuses {
+			switch eps.ReplicationState {
+			case "Synced":
+				anyCSNData = true
+			case "Lagging":
+				anyCSNData = true
+				csnOK = false
+				detail := eps.Name + ": Lagging"
+				if eps.LagSeconds != "" {
+					detail += fmt.Sprintf(" (%ss)", eps.LagSeconds)
+				}
+				csnIssues = append(csnIssues, detail)
+			case "Unreachable":
+				anyCSNData = true
+				csnOK = false
+				csnIssues = append(csnIssues, eps.Name+": Unreachable")
+			}
+		}
+		if anyCSNData {
+			if csnOK {
+				check("cross-site-csn", "pass", "all external peers report Synced")
+			} else {
+				// Use "warn" for Lagging (data is flowing, just delayed) and
+				// "fail" for Unreachable (can't reach remote pods).
+				hasUnreachable := false
+				for _, issue := range csnIssues {
+					if strings.Contains(issue, "Unreachable") {
+						hasUnreachable = true
+						break
+					}
+				}
+				if hasUnreachable {
+					check("cross-site-csn", "fail", strings.Join(csnIssues, "; "))
+				} else {
+					check("cross-site-csn", "warn", strings.Join(csnIssues, "; "))
+				}
+			}
+		}
 	}
 
 	return checks
@@ -911,20 +954,34 @@ func printInspectResult(result inspectJSON) {
 		if len(result.ExternalPeers) > 0 {
 			fmt.Println("\n  External Peers:")
 			for _, ep := range result.ExternalPeers {
-				var status string
-				if len(ep.DiscoveredAddresses) > 0 {
-					status = fmt.Sprintf("discovery (%d pod(s))", len(ep.DiscoveredAddresses))
-				} else if ep.Connected == nil {
-					status = "Multus (not reachable from operator)"
-				} else if *ep.Connected {
-					status = "connected"
-				} else {
-					status = "disconnected"
+				var replStr string
+				switch ep.ReplicationState {
+				case "Synced":
+					replStr = "Synced"
+				case "Lagging":
+					if ep.LagSeconds != "" {
+						replStr = fmt.Sprintf("Lagging (%ss)", ep.LagSeconds)
+					} else {
+						replStr = "Lagging"
+					}
+				case "Unreachable":
+					replStr = "Unreachable"
 					if ep.LastError != "" {
-						status += " (" + ep.LastError + ")"
+						replStr += " (" + ep.LastError + ")"
+					}
+				default:
+					if ep.Connected != nil && !*ep.Connected {
+						replStr = "disconnected"
+						if ep.LastError != "" {
+							replStr += " (" + ep.LastError + ")"
+						}
 					}
 				}
-				fmt.Printf("    %-20s %s  %s\n", ep.Name, ep.URI, status)
+				if replStr != "" {
+					fmt.Printf("    %-20s %s  %s\n", ep.Name, ep.URI, replStr)
+				} else {
+					fmt.Printf("    %-20s %s\n", ep.Name, ep.URI)
+				}
 			}
 		}
 

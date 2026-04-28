@@ -139,31 +139,48 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 		fmt.Println("  External Peers:")
 		for _, ep := range sc.Spec.Replication.ExternalPeers {
 			// Find status entry for this peer.
-			var statusStr string
+			var modeStr, replStr string
 			for _, eps := range sc.Status.ExternalPeerStatuses {
 				if eps.Name != ep.Name {
 					continue
 				}
+				// Mode descriptor.
 				if len(eps.DiscoveredAddresses) > 0 {
-					statusStr = fmt.Sprintf("discovery (%d pod(s))", len(eps.DiscoveredAddresses))
+					modeStr = fmt.Sprintf("discovery (%d pod(s))", len(eps.DiscoveredAddresses))
 				} else if eps.Connected {
-					statusStr = "connected"
+					modeStr = "connected"
+				} else if eps.LastError != "" {
+					modeStr = "disconnected (" + eps.LastError + ")"
 				} else {
-					statusStr = "disconnected"
-					if eps.LastError != "" {
-						statusStr += " (" + eps.LastError + ")"
+					modeStr = "disconnected"
+				}
+				// Replication state.
+				switch eps.ReplicationState {
+				case "Synced":
+					replStr = "Synced"
+				case "Lagging":
+					if eps.LagSeconds != "" {
+						replStr = fmt.Sprintf("Lagging (%ss)", eps.LagSeconds)
+					} else {
+						replStr = "Lagging"
 					}
+				case "Unreachable":
+					replStr = "Unreachable"
 				}
 				break
 			}
-			if statusStr == "" {
+			if modeStr == "" {
 				if len(ep.PodAddresses) > 0 {
-					statusStr = fmt.Sprintf("Multus (%d pod(s))", len(ep.PodAddresses))
+					modeStr = fmt.Sprintf("Multus (%d pod(s))", len(ep.PodAddresses))
 				} else if ep.Discovery != nil {
-					statusStr = "discovery (pending)"
+					modeStr = "discovery (pending)"
 				}
 			}
-			fmt.Printf("    %-20s %s\n", ep.Name, statusStr)
+			line := fmt.Sprintf("    %-20s %s", ep.Name, modeStr)
+			if replStr != "" {
+				line += "  " + replStr
+			}
+			fmt.Println(line)
 		}
 	}
 

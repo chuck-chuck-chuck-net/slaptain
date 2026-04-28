@@ -750,8 +750,9 @@ spec:
                     state of one external peer.
                   properties:
                     connected:
-                      description: connected indicates whether the operator can reach
-                        this peer (URI mode only).
+                      description: |-
+                        connected indicates whether the operator can reach this peer.
+                        Derived from replicationState: true when not Unreachable.
                       type: boolean
                     discoveredAddresses:
                       description: |-
@@ -761,12 +762,32 @@ spec:
                       items:
                         type: string
                       type: array
+                    lagSeconds:
+                      description: |-
+                        lagSeconds reports the max CSN timestamp delta between local and remote
+                        as a decimal string (e.g. "3.2"). Only set when replicationState is Lagging.
+                      type: string
+                    lastChecked:
+                      description: lastChecked is the time the CSN check last ran.
+                      format: date-time
+                      type: string
                     lastError:
                       description: lastError is the last connection or discovery error,
                         if any.
                       type: string
                     name:
                       description: name matches ExternalPeer.Name.
+                      type: string
+                    replicationState:
+                      description: |-
+                        replicationState reports the CSN convergence state of this peer.
+                        Synced: remote CSN is within threshold of local CSN.
+                        Lagging: remote CSN is behind local CSN by more than the threshold.
+                        Unreachable: operator could not query contextCSN on any remote pod.
+                      enum:
+                      - Synced
+                      - Lagging
+                      - Unreachable
                       type: string
                   required:
                   - connected
