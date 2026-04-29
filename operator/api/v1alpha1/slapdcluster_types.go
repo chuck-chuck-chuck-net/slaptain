@@ -152,6 +152,18 @@ type ExternalPeer struct {
 	// Mutually exclusive with uri and podAddresses.
 	// +optional
 	Discovery *ExternalPeerDiscovery `json:"discovery,omitempty"`
+	// replicasPerPeer controls cross-site syncrepl fan-out when this peer resolves
+	// to multiple remote pods (podAddresses or discovery mode). Each local pod connects
+	// to this many remote pods using diagonal-first assignment: local pod ordinal i,
+	// connection k → remote pod (i + k) % len(addresses). Default 1 gives the 1:1
+	// diagonal (one connection per local pod, evenly distributed across remote pods);
+	// setting it equal to or greater than the number of addresses degrades to a full
+	// N×M mesh. Values exceeding the address count are silently capped. Ignored in
+	// uri mode (single endpoint).
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ReplicasPerPeer *int32 `json:"replicasPerPeer,omitempty"`
 	// port is the remote slapd port when using podAddresses or discovery.
 	// Defaults to 1025 (LDAPS container port). Ignored when uri is set.
 	// +kubebuilder:default=1025

@@ -150,6 +150,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `externalPeers[].discovery.kubeconfigSecret.{name,key}` | `KubeconfigSecretRef` | Secret containing kubeconfig for remote cluster (key default: `kubeconfig`) |
 | `externalPeers[].discovery.namespace` | string | Remote SlapdCluster namespace (default: local namespace) |
 | `externalPeers[].discovery.clusterName` | string | Remote SlapdCluster name (default: local name) |
+| `externalPeers[].replicasPerPeer` | `*int32` | Cross-site fan-out (default 1). Local pod `i`, connection `k` → remote pod `(i+k) % N`. Capped at address count. Ignored in `uri` mode |
 
 Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs.
 
@@ -581,14 +582,14 @@ ADR-002 and ADR-004.
   (Synced/Lagging/Unreachable) and `lagSeconds` per external peer. Local intra-site
   convergence is reported via a `ReplicationConverged` condition. Periodic requeue (60s)
   keeps status fresh. See `ExternalPeerStatus` fields and `csn.go`. e2e: 48/48 green.
-- **Cross-site syncrepl fan-out control (`ExternalPeer.replicasPerPeer`).** Currently each local
-  pod creates a syncrepl stanza for every remote pod in `podAddresses` (full N×M mesh). This
-  wastes connections — the remote cluster's internal mesh already ensures all remote pods have
-  the same data. Add `replicasPerPeer` (default 1) to `ExternalPeer`: each local pod connects
-  to that many remote pods using diagonal-first assignment: local pod `i`, connection `k` →
-  remote pod `(i + k) % len(podAddresses)`. At `replicasPerPeer=1`, this gives the 1:1 diagonal
-  (same connection count as the old NodePort model). Each additional connection shifts by one,
-  spreading load evenly. At `replicasPerPeer == len(podAddresses)`, it degrades to full mesh.
+- ~~**Cross-site syncrepl fan-out control (`ExternalPeer.replicasPerPeer`).**~~ **Done.**
+  `ExternalPeer.replicasPerPeer` (default 1) controls how many remote pods each local pod
+  binds to in `podAddresses` / discovery modes. Selection is diagonal-first: local pod
+  ordinal `i`, connection `k` → remote pod `(i + k) % len(addresses)`. Default 1 gives
+  the 1:1 diagonal (one cross-site connection per local pod, evenly spread); setting it
+  equal to or greater than the address count degrades to a full N×M mesh. Values
+  exceeding the address count are silently capped. URI-mode peers (single endpoint) are
+  unaffected. Stanza counts are surfaced via `slctl status` and `slctl inspect` (`rpp=K/N`).
 - **Reduce env var dependency for e2e multisite setup.** Currently `e2e-multisite.sh` relies on
   `HELM_VALUES_SLAPD_CLUSTER` and `HELM_VALUES_SLAPD_TESTING` being set in the shell environment.
   These point at values files like `tests/values.slapd.yaml`. Investigate whether the script can

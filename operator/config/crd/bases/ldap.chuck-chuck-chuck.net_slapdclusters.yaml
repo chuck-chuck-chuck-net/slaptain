@@ -319,6 +319,20 @@ spec:
                             Defaults to 1025 (LDAPS container port). Ignored when uri is set.
                           format: int32
                           type: integer
+                        replicasPerPeer:
+                          default: 1
+                          description: |-
+                            replicasPerPeer controls cross-site syncrepl fan-out when this peer resolves
+                            to multiple remote pods (podAddresses or discovery mode). Each local pod connects
+                            to this many remote pods using diagonal-first assignment: local pod ordinal i,
+                            connection k → remote pod (i + k) % len(addresses). Default 1 gives the 1:1
+                            diagonal (one connection per local pod, evenly distributed across remote pods);
+                            setting it equal to or greater than the number of addresses degrades to a full
+                            N×M mesh. Values exceeding the address count are silently capped. Ignored in
+                            uri mode (single endpoint).
+                          format: int32
+                          minimum: 1
+                          type: integer
                         tlsSecretName:
                           description: tlsSecretName is the name of the Secret containing
                             the CA cert for verifying the peer.

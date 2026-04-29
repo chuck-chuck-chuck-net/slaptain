@@ -146,7 +146,19 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 				}
 				// Mode descriptor.
 				if len(eps.DiscoveredAddresses) > 0 {
-					modeStr = fmt.Sprintf("discovery (%d pod(s))", len(eps.DiscoveredAddresses))
+					rpp := int32(1)
+					if ep.ReplicasPerPeer != nil && *ep.ReplicasPerPeer > 1 {
+						rpp = *ep.ReplicasPerPeer
+					}
+					if rpp > 1 {
+						sel := rpp
+						if sel > int32(len(eps.DiscoveredAddresses)) {
+							sel = int32(len(eps.DiscoveredAddresses))
+						}
+						modeStr = fmt.Sprintf("discovery (%d pod(s), rpp=%d/%d)", len(eps.DiscoveredAddresses), sel, len(eps.DiscoveredAddresses))
+					} else {
+						modeStr = fmt.Sprintf("discovery (%d pod(s))", len(eps.DiscoveredAddresses))
+					}
 				} else if eps.Connected {
 					modeStr = "connected"
 				} else if eps.LastError != "" {
@@ -169,9 +181,17 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 				}
 				break
 			}
+			rpp := int32(1)
+			if ep.ReplicasPerPeer != nil && *ep.ReplicasPerPeer > 1 {
+				rpp = *ep.ReplicasPerPeer
+			}
+			rppSuffix := ""
+			if rpp > 1 {
+				rppSuffix = fmt.Sprintf(", rpp=%d", rpp)
+			}
 			if modeStr == "" {
 				if len(ep.PodAddresses) > 0 {
-					modeStr = fmt.Sprintf("Multus (%d pod(s))", len(ep.PodAddresses))
+					modeStr = fmt.Sprintf("Multus (%d pod(s)%s)", len(ep.PodAddresses), rppSuffix)
 				} else if ep.Discovery != nil {
 					modeStr = "discovery (pending)"
 				}

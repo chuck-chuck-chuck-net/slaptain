@@ -42,6 +42,7 @@ type externalPeerInfo struct {
 	URI                 string   `json:"uri"`
 	PodAddresses        []string `json:"podAddresses,omitempty"`
 	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
+	ReplicasPerPeer     int32    `json:"replicasPerPeer,omitempty"`
 	Connected           *bool    `json:"connected,omitempty"` // nil = not tested (Multus/discovery)
 	LastError           string   `json:"lastError,omitempty"`
 	Multus              bool     `json:"multus,omitempty"`    // true = podAddresses or discovery peer
@@ -224,14 +225,36 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 			break
 		}
 		// Set URI display for Multus/discovery modes.
+		rpp := int32(1)
+		if ep.ReplicasPerPeer != nil && *ep.ReplicasPerPeer > 1 {
+			rpp = *ep.ReplicasPerPeer
+		}
+		epi.ReplicasPerPeer = rpp
+		fanout := ""
 		if ep.Discovery != nil {
+			n := int32(len(epi.DiscoveredAddresses))
+			if n > 0 && rpp > 1 {
+				selected := rpp
+				if selected > n {
+					selected = n
+				}
+				fanout = fmt.Sprintf(", rpp=%d/%d", selected, n)
+			}
 			if len(epi.DiscoveredAddresses) > 0 {
-				epi.URI = fmt.Sprintf("%d pod(s) via discovery", len(epi.DiscoveredAddresses))
+				epi.URI = fmt.Sprintf("%d pod(s) via discovery%s", len(epi.DiscoveredAddresses), fanout)
 			} else {
 				epi.URI = "discovery (no addresses yet)"
 			}
 		} else if len(ep.PodAddresses) > 0 {
-			epi.URI = fmt.Sprintf("%d pod(s) via Multus", len(ep.PodAddresses))
+			n := int32(len(ep.PodAddresses))
+			if rpp > 1 {
+				selected := rpp
+				if selected > n {
+					selected = n
+				}
+				fanout = fmt.Sprintf(", rpp=%d/%d", selected, n)
+			}
+			epi.URI = fmt.Sprintf("%d pod(s) via Multus%s", len(ep.PodAddresses), fanout)
 		}
 		result.ExternalPeers = append(result.ExternalPeers, epi)
 	}
@@ -561,23 +584,35 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 	}
 
 	// ── syncRepl stanza count ──
-	// Each ExternalPeer contributes 1 stanza (URI mode), len(podAddresses) stanzas
-	// (static Multus), or len(DiscoveredAddresses) stanzas (discovery mode).
+	// Each ExternalPeer contributes 1 stanza (URI mode) or min(replicasPerPeer,
+	// len(addresses)) stanzas in podAddresses / discovery modes.
 	externalStanzaCount := 0
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		var addrCount int
 		if ep.Discovery != nil {
-			// Discovery mode: count from status DiscoveredAddresses.
 			for _, eps := range sc.Status.ExternalPeerStatuses {
 				if eps.Name == ep.Name {
-					externalStanzaCount += len(eps.DiscoveredAddresses)
+					addrCount = len(eps.DiscoveredAddresses)
 					break
 				}
 			}
 		} else if len(ep.PodAddresses) > 0 {
-			externalStanzaCount += len(ep.PodAddresses)
+			addrCount = len(ep.PodAddresses)
 		} else {
 			externalStanzaCount++
+			continue
 		}
+		if addrCount == 0 {
+			continue
+		}
+		rpp := 1
+		if ep.ReplicasPerPeer != nil && int(*ep.ReplicasPerPeer) > 1 {
+			rpp = int(*ep.ReplicasPerPeer)
+		}
+		if rpp > addrCount {
+			rpp = addrCount
+		}
+		externalStanzaCount += rpp
 	}
 	expectedRW := int(sc.Spec.Replicas-1) + externalStanzaCount
 	expectedRO := int(sc.Spec.Replicas)
