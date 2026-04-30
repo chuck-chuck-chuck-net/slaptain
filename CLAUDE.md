@@ -585,25 +585,4 @@ ADR-002 and ADR-004.
 
 ### Backlog
 
-- ~~**Cross-site operator peering for CSN convergence monitoring.**~~ **Done.** The operator
-  queries contextCSN directly on remote slapd pods, binding as `cn=replication,<suffix>`
-  with the replication password (ADR-008). Reports `ReplicationState`
-  (Synced/Lagging/Unreachable) and `lagSeconds` per external peer. Local intra-site
-  convergence is reported via a `ReplicationConverged` condition. Periodic requeue (60s)
-  keeps status fresh. See `ExternalPeerStatus` fields and `csn.go`. e2e: 48/48 green.
-- ~~**Cross-site syncrepl fan-out control (`ExternalPeer.replicasPerPeer`).**~~ **Done.**
-  `ExternalPeer.replicasPerPeer` (default 1) controls how many remote pods each local pod
-  binds to in `podAddresses` / discovery modes. Selection is diagonal-first: local pod
-  ordinal `i`, connection `k` → remote pod `(i + k) % len(addresses)`. Default 1 gives
-  the 1:1 diagonal (one cross-site connection per local pod, evenly spread); setting it
-  equal to or greater than the address count degrades to a full N×M mesh. Values
-  exceeding the address count are silently capped. URI-mode peers (single endpoint) are
-  unaffected. Stanza counts are surfaced via `slctl status` and `slctl inspect` (`rpp=K/N`).
-- ~~**Reduce env var dependency for e2e multisite setup.**~~ **Done.** Both
-  `e2e-singlesite.sh` and `e2e-multisite.sh` already pass `-f tests/values.slapd.yaml` by
-  default; `HELM_VALUES_SLAPD_CLUSTER` is now strictly an *additional* override.
-  `HELM_VALUES_SLAPD_TESTING` is gone — `tests/values.slapd-test.yaml` and the
-  `slapd-test` chart were retired in favour of `tests/resources/` manifests and the
-  slim `charts/slapd-toolkit/` chart for debug pods. SOPS-based `*.secret.yaml.sample`
-  templates were removed; the only remaining SOPS use is for real lab credentials in
-  `tests/resources/lab/`.
+No open items.
