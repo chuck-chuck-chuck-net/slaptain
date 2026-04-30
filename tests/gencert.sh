@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Work in a self-cleaning temp directory so artifacts (private key, CSR YAML,
+# Secret YAML) never accumulate in the repo. The Secret is applied to the
+# cluster before the script exits, so on-disk copies are disposable.
+workdir=$(mktemp -d -t gencert.XXXXXXXX)
+trap 'rm -rf "$workdir"' EXIT
+cd "$workdir"
+
 # https://stackoverflow.com/questions/1527049/how-can-i-join-elements-of-a-bash-array-into-a-delimited-string
 join_by() {
     local d=${1-} f=${2-}

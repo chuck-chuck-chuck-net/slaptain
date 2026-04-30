@@ -57,7 +57,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   │   └── templates/              # deployment, RBAC, serviceaccount, metrics, networkpolicy
 │   ├── slapd/                      # Standalone Helm chart (baseline / comparison / testing vehicle)
 │   ├── slapd-cluster/              # Helm chart deploying a SlapdCluster CR (operator required)
-│   └── slapd-test/                 # DEPRECATED — replaced by SlapdDatabase/SlapdSchema CRs in tests/resources/
+│   └── slapd-toolkit/              # Persistent debug pod (ldap-utils, python3, ldap3) wired to operator-managed Secrets
 ├── images/
 │   ├── slapd/Containerfile         # slapd runtime image
 │   ├── slapd-init/Containerfile    # Bootstrap init container image
@@ -184,14 +184,21 @@ Database-level config (ACLs, schemas, indices, replication per-DB) is declared o
 
 ### Test Resources (`tests/resources/`)
 
-**The `slapd-test` Helm chart (`charts/slapd-test`) is deprecated.** Test fixtures are now
-plain Kubernetes manifests (SlapdDatabase, SlapdSchema, Secret) applied via `kubectl apply`.
+Test fixtures are plain Kubernetes manifests (SlapdDatabase, SlapdSchema, Secret) applied
+via `kubectl apply`.
 
 - `tests/resources/example/` — open-source test fixtures suitable for CI and getting started.
 - `tests/resources/lab/` — internal lab configuration (SOPS-encrypted secrets, additional schemas).
 
 Deploy with `make testing-apply`, remove with `make testing-delete`.
 Or use `./tests/e2e-singlesite.sh all <context>` for an all-in-one cycle.
+
+### slapd-toolkit chart (`charts/slapd-toolkit/`)
+
+A debug-only chart deploying a long-running pod from the `slapd-toolkit` image. Defaults
+target `clusterName: slapd` + `dbName: default`, wiring `LDAP_ADMIN_PW` from
+`<dbName>-credentials` and `LDAP_ROOT_PW` from `<clusterName>-config-password`. Use it via
+`make toolkit-install` or as the image for `kubectl debug --target=slapd`.
 
 ### e2e Test Suite (`tests/e2e/`)
 
@@ -242,6 +249,8 @@ runs without readpw configuration but skips those test cases.
 | `make cluster-helm-uninstall` | Uninstall the slapd-cluster Helm release |
 | `make testing-apply` | `kubectl apply` test resources (SlapdDatabase, SlapdSchema, Secrets) |
 | `make testing-delete` | `kubectl delete` test resources |
+| `make toolkit-install` | `helm upgrade --install toolkit ./charts/slapd-toolkit` (debug pod) |
+| `make toolkit-uninstall` | Uninstall the toolkit Helm release |
 | `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` |
 | `make e2e-singlesite` | All-in-one single-site e2e cycle via `tests/e2e-singlesite.sh` |
 | `make e2e-external-replication` | Run cross-cluster external replication tests (E2E_EXTERNAL_REPL=1) |
@@ -590,8 +599,11 @@ ADR-002 and ADR-004.
   equal to or greater than the address count degrades to a full N×M mesh. Values
   exceeding the address count are silently capped. URI-mode peers (single endpoint) are
   unaffected. Stanza counts are surfaced via `slctl status` and `slctl inspect` (`rpp=K/N`).
-- **Reduce env var dependency for e2e multisite setup.** Currently `e2e-multisite.sh` relies on
-  `HELM_VALUES_SLAPD_CLUSTER` and `HELM_VALUES_SLAPD_TESTING` being set in the shell environment.
-  These point at values files like `tests/values.slapd.yaml`. Investigate whether the script can
-  default to the test values files automatically (e.g. detect and use `tests/values.slapd.yaml`
-  when present), so running `./e2e-multisite.sh setup s1 s2` works without any env vars set.
+- ~~**Reduce env var dependency for e2e multisite setup.**~~ **Done.** Both
+  `e2e-singlesite.sh` and `e2e-multisite.sh` already pass `-f tests/values.slapd.yaml` by
+  default; `HELM_VALUES_SLAPD_CLUSTER` is now strictly an *additional* override.
+  `HELM_VALUES_SLAPD_TESTING` is gone — `tests/values.slapd-test.yaml` and the
+  `slapd-test` chart were retired in favour of `tests/resources/` manifests and the
+  slim `charts/slapd-toolkit/` chart for debug pods. SOPS-based `*.secret.yaml.sample`
+  templates were removed; the only remaining SOPS use is for real lab credentials in
+  `tests/resources/lab/`.

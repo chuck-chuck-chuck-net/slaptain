@@ -2,7 +2,6 @@
 
 Resources for deploying and testing the `slapd` LDAP server.
 All commands run from the **project root**.
-For SOPS secret management, see [SOPS.md](SOPS.md).
 
 ---
 
@@ -12,18 +11,17 @@ Assuming the operator is installed and a TLS certificate exists in the namespace
 [One-time prerequisites](#one-time-prerequisites)):
 
 ```bash
-# Deploy
-make cluster-helm-install testing-helm-install
+# Deploy: SlapdCluster (operator) + SlapdDatabase / SlapdSchema test resources
+make cluster-helm-install testing-apply
 
 # Test
 make e2e-run
 
 # Tear down
-make testing-helm-uninstall cluster-helm-uninstall
+make testing-delete cluster-helm-uninstall
 ```
 
-The standalone path (no operator) is equivalent: replace `cluster-helm-install` /
-`cluster-helm-uninstall` with `helm-install` / `helm-uninstall`.
+The all-in-one wrapper does the same: `./tests/e2e-singlesite.sh all <kube-context>`.
 
 ---
 
@@ -40,89 +38,38 @@ make gencert
 
 Creates the `slaptain-testing` namespace if needed and generates the `slapd-tls` Secret.
 
-### Operator (operator path only)
-
-Only needed if you want to test against an operator-managed `SlapdCluster`:
+### Operator
 
 ```bash
 make operator-helm-install
 ```
 
-### Environment variables
+### Optional: extra Helm values
 
-The Helm install targets read values from environment variables. Set them in your shell or
-`.envrc`:
+`make cluster-helm-install` already passes `-f tests/values.slapd.yaml` (3 RW + 1 RO with
+replication enabled). Pass additional `-f` flags via `HELM_VALUES_SLAPD_CLUSTER`:
 
 ```bash
-# Values for the slapd / slapd-cluster chart
-export HELM_VALUES_SLAPD="-f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml"
-export HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd.yaml -f secrets://tests/values.slapd.secret.yaml"
-
-# Values for the slapd-test chart.
-# The non-secret file holds deployment-specific overrides (custom schema, extra OUs, …).
-# The secret file holds plaintext passwords — copy from *.sample and fill in.
-export HELM_VALUES_SLAPD_TESTING="-f tests/values.slapd-test.yaml -f secrets://tests/values.slapd-test.secret.yaml"
+HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd-site-b.yaml" make cluster-helm-install
 ```
 
-Secret templates to fill in (copy, rename, populate, encrypt with SOPS):
-
-| Template | Contents |
-|---|---|
-| `tests/values.slapd.secret.yaml.sample` | Admin/root SSHA password hashes for slapd |
-| `tests/values.slapd-test.secret.yaml.sample` | Admin/root plaintext passwords + readpw user hashes and plaintext passwords |
+The standalone (non-operator) chart at `charts/slapd` is kept for reference but is no longer
+exercised by the test suite — use the operator path.
 
 ---
 
-## Deploy slapd
+## Deploy test resources
 
-Two deployment paths are available — pick one per environment. Both produce identical service
-names (`slapd`) so the test suite and slapd-test chart work identically with either.
-
-### Option A — Standalone Helm chart (`charts/slapd`)
+Test fixtures (`SlapdDatabase`, `SlapdSchema`, `slapd-test-passwords` Secret) are plain
+manifests under `tests/resources/example/`. They get applied with:
 
 ```bash
-make helm-install    # deploy
-make helm-uninstall  # tear down
+make testing-apply    # kubectl apply tests/resources/$TEST_RESOURCES/
+make testing-delete
 ```
 
-### Option B — Operator-managed `SlapdCluster` (`charts/slapd-cluster`)
-
-```bash
-make cluster-helm-install    # deploy (operator must be running)
-make cluster-helm-uninstall  # tear down
-```
-
-`charts/slapd-cluster` creates a `SlapdCluster` CR; the operator reconciles the StatefulSet,
-Services, and PVCs.
-
----
-
-## Deploy slapd-test
-
-`slapd-test` bootstraps the LDAP directory and provides a persistent toolkit pod. Install
-after slapd is ready:
-
-```bash
-make testing-helm-install
-make testing-helm-uninstall  # tear down
-```
-
-| Component | Default | What it does |
-|---|---|---|
-| `bootstrap` | enabled | One-shot Job: loads custom schema (if configured), creates OUs and readpw service accounts |
-| `toolkit` | enabled | Long-running pod for interactive `kubectl exec` sessions |
-
-Watch the bootstrap Job complete:
-
-```bash
-kubectl logs -n slaptain-testing -l app.kubernetes.io/name=slapd-test -f
-```
-
-To install the toolkit only (skip bootstrap — useful for a clean, unmodified slapd):
-
-```bash
-make testing-helm-install TOOLKIT_ONLY=true
-```
+`TEST_RESOURCES` defaults to `example` (open-source fixtures). Set it to `lab` for the
+internal lab variant; see `tests/resources/lab/` for SOPS-encrypted secrets used there.
 
 ---
 
@@ -156,7 +103,7 @@ and the `e2e-runner` image in the registry.
 ### Common options
 
 Both modes auto-discover the LDAP base DN from the server's rootDSE — no domain env var
-needed. Both assume slapd and slapd-test are already installed.
+needed. Both assume the SlapdCluster and the test resources are already deployed.
 
 | Env var | Default | Description |
 |---|---|---|
@@ -164,9 +111,9 @@ needed. Both assume slapd and slapd-test are already installed.
 | `LDAP_SVC` | `svc/slapd` | Service to port-forward for LDAP access (local mode only) |
 | `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable slow pod-restart and warm-start tests |
 
-**Readpw ACL tests** require plaintext passwords for the readpw service accounts. Set
-`bootstrap.readpwPasswords` in your `tests/values.slapd-test.secret.yaml` (see `.sample`).
-These tests skip gracefully when not configured.
+**Readpw ACL tests** require plaintext passwords for the readpw service accounts. The suite
+reads them from the `slapd-test-passwords` Secret (`readpw-*` keys), which is provided by
+`tests/resources/example/readpw-secret.yaml`. Tests skip gracefully when keys are absent.
 
 ---
 
@@ -355,14 +302,14 @@ KUBECONFIG=~/.kube/config-siteB make operator-helm-install
 KUBECONFIG=~/.kube/config-siteB HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd-site-b.yaml ..." make cluster-helm-install
 ```
 
-#### 5. Install slapd-test on siteA only
+#### 5. Apply test resources on siteA only
 
 ```bash
-KUBECONFIG=~/.kube/config-siteA make testing-helm-install
+KUBECONFIG=~/.kube/config-siteA make testing-apply
 ```
 
-The bootstrap job creates OUs and test users on siteA. These replicate to siteB
-automatically via the cross-cluster syncrepl.
+This creates the `default` SlapdDatabase, schemas, and the `slapd-test-passwords` Secret on
+siteA. The data replicates to siteB automatically via cross-cluster syncrepl.
 
 #### 6. Wait for replication convergence
 
@@ -543,30 +490,66 @@ make e2e-multisite-teardown CONTEXTS="s1 s2"
 
 ---
 
-## Using the toolkit
+## Debugging with the toolkit
 
-The toolkit pod has `ldap-utils`, `python3`, `ldap3`, and `pyyaml` pre-installed.
+The slapd image is distroless and has no shell. For interactive LDAP debugging there are two
+options, both based on the `slapd-toolkit` image (ldap-utils, python3, ldap3, pyyaml).
+
+### Option A — persistent toolkit pod (`charts/slapd-toolkit`)
+
+A long-running Deployment pre-wired to operator-managed Secrets and the cluster CA:
 
 ```bash
-# Wait for it to be ready
-kubectl rollout status deployment/slapd-test-toolkit -n slaptain-testing
+make toolkit-install
+kubectl rollout status deployment/toolkit -n slaptain-testing
 
-# Exec in
-kubectl exec -it -n slaptain-testing deploy/slapd-test-toolkit -- bash
+kubectl exec -it -n slaptain-testing deploy/toolkit -- bash
 ```
 
-Inside the pod, all required environment variables are pre-set by the chart:
+Defaults assume `clusterName: slapd` and `dbName: default` (matches `tests/resources/example/`).
+Override via `--set clusterName=... --set dbName=...` if your CRs are named differently.
 
-| Variable | Example value |
+Pre-set inside the pod:
+
+| Variable | Source |
 |---|---|
-| `$SLAPD_HOST` | `slapd` |
-| `$LDAP_DOMAIN` | `dc=as8,dc=lab,dc=test` |
-| `$READPW_OU` | `Readpw` |
-| `$LDAP_ADMIN_PW` | data admin password (plaintext, from Secret) |
-| `$LDAP_ROOT_PW` | config admin password (plaintext, from Secret) |
-| `$LDAPTLS_CACERT` | `/etc/ldap/tls/ca.crt` |
+| `$SLAPD_HOST` | `clusterName` value (resolves to in-cluster service `slapd`) |
+| `$LDAP_ADMIN_PW` | `<dbName>-credentials` / `root-password` (data admin) |
+| `$LDAP_ROOT_PW` | `<clusterName>-config-password` / `root-password` (cn=config admin) |
+| `$LDAPTLS_CACERT` | `/etc/ldap/tls/ca.crt` (mounted from `slapd-tls` Secret) |
 
-Config files and bootstrap scripts are mounted at `/config/`.
+### Option B — `tests/pod-debug.sh` (ephemeral debug container)
+
+Wraps `kubectl debug` against a running slapd pod, attaching the toolkit image and a custom
+profile (`tests/debug-profile.json`) that grants `SYS_PTRACE`, `SYS_ADMIN`, `NET_ADMIN`, and
+`NET_RAW` for low-level diagnostics.
+
+```bash
+# Interactive shell with admin/root passwords pre-loaded as env vars
+./tests/pod-debug.sh -i slapd-0
+
+# Collect mode: dumps diagnostic artifacts under pod-debug-<pod>-<timestamp>/
+./tests/pod-debug.sh slapd-0
+```
+
+Use `-n <namespace>` to target a non-default test namespace.
+
+### Option C — raw `kubectl debug`
+
+Bare equivalent of Option B without the helper script:
+
+```bash
+kubectl debug -n slaptain-testing slapd-0 \
+  --image=ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit:latest \
+  --target=slapd -it -- bash
+```
+
+You then need to fetch credentials yourself, e.g.:
+
+```bash
+LDAP_ADMIN_PW=$(kubectl get secret -n slaptain-testing default-credentials \
+  -o jsonpath='{.data.root-password}' | base64 -d)
+```
 
 ### Useful commands
 
@@ -578,14 +561,13 @@ ldapsearch -x -H ldaps://$SLAPD_HOST -LLL -s base
 ldapsearch -x -H ldaps://$SLAPD_HOST -D "cn=admin,cn=config" -w "$LDAP_ROOT_PW" \
   -b "cn=config" -LLL -s sub "(olcSuffix=*)" olcSuffix olcRootDN
 
-# Run the full bootstrap (same as the Job)
-bash /config/bootstrap.sh
+# Discover the data baseDN from rootDSE (anonymous)
+ldapsearch -x -H ldaps://$SLAPD_HOST -b "" -s base namingContexts
 
-# Verify readpw ACL: a readpw user should be able to read userPassword from ou=Mail
-# (replace <user> and <password> with a configured readpw account)
+# Verify a readpw ACL — replace <baseDN>, <user>, <password>
 ldapsearch -x -H ldaps://$SLAPD_HOST \
-  -D "uid=<user>,ou=$READPW_OU,$LDAP_DOMAIN" -w "<password>" \
-  -b "ou=Mail,$LDAP_DOMAIN" -LLL -s sub "(objectClass=*)" userPassword
+  -D "uid=<user>,ou=Readpw,<baseDN>" -w "<password>" \
+  -b "ou=Mail,<baseDN>" -LLL -s sub "(objectClass=*)" userPassword
 ```
 
 ### Reading slapd logs

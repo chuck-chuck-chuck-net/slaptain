@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "slapd-toolkit.fullname" . }}
+  labels:
+    {{- include "slapd-toolkit.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "slapd-toolkit.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "slapd-toolkit.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: toolkit
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sleep", "infinity"]
+          env:
+            - name: SLAPD_HOST
+              value: {{ .Values.clusterName | quote }}
+            - name: LDAP_ADMIN_PW
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-credentials" .Values.dbName | quote }}
+                  key: root-password
+            - name: LDAP_ROOT_PW
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-config-password" .Values.clusterName | quote }}
+                  key: root-password
+            - name: LDAPTLS_CACERT
+              value: /etc/ldap/tls/ca.crt
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/ldap/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt

@@ -1,0 +1,27 @@
+# Default values for slapd-toolkit.
+# Deploys a long-running debug pod (ldap-utils, python3, ldap3) wired to an
+# operator-managed SlapdCluster. Use it via `kubectl exec`.
+
+# -- Name of the target SlapdCluster. Drives the cn=config admin Secret name
+# (`<clusterName>-config-password`) and the in-cluster LDAP service hostname.
+clusterName: slapd
+
+# -- Name of the target SlapdDatabase. Drives the data admin Secret name
+# (`<dbName>-credentials`).
+dbName: default
+
+# -- Toolkit image (built from images/slapd-toolkit/).
+image:
+  repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# -- TLS Secret created by `make gencert`; mounted at /etc/ldap/tls so
+# LDAPTLS_CACERT can point at the cluster CA.
+tls:
+  secretName: slapd-tls
+
+replicas: 1
+
+# -- Optional: list of image pull secrets for private registries.
+imagePullSecrets: []

@@ -244,12 +244,13 @@ operator-helm-install:
 operator-helm-uninstall:
 	$(HELM) uninstall slaptain-operator --namespace $(NAMESPACE)
 
-test:
-	$(HELM) upgrade --install slapd-test ./charts/slapd-test \
+## toolkit-install: deploy the slapd-toolkit debug pod (ldap-utils, python3, ldap3).
+toolkit-install:
+	$(HELM) upgrade --install toolkit ./charts/slapd-toolkit \
 		--namespace $(NAMESPACE_TESTING) --create-namespace
 
-test-uninstall:
-	$(HELM) uninstall slapd-test --namespace $(NAMESPACE_TESTING)
+toolkit-uninstall:
+	$(HELM) uninstall toolkit --namespace $(NAMESPACE_TESTING)
 
 ## e2e: full setup + test run + teardown
 e2e: e2e-run

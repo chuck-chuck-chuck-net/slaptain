@@ -1,11 +1,7 @@
 ## Test values for the slapd-cluster chart.
 ## Deploys a 3-replica RW + 1 RO cluster with replication enabled.
 ## Databases and schemas are deployed separately via SlapdDatabase / SlapdSchema CRs.
-
-ldap:
-  tls:
-    enabled: true
-    secretName: "slapd-tls"
+## Only non-default settings are listed; everything else comes from the chart defaults.
 
 logLevel: 256
 
@@ -14,4 +10,3 @@ readReplicas: 1
 replication:
   enabled: true
   keepalive: "300:10:60"
-  retry: "10 +"

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: slapd-toolkit
+description: Persistent debug pod with ldap-utils + python ldap3, wired to an operator-managed SlapdCluster
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
