@@ -42,6 +42,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ├── docs/
 │   ├── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
 │   ├── ONBOARDING.md               # Team onboarding: LDAP concepts, operator model, credential model
+│   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
 │   └── adrs/
 │       ├── adr-001-double-reconcile-runs.md
 │       ├── adr-002-cn-config-node-local-operator-managed.md
@@ -50,7 +51,10 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-005-slapddatabase-cleanup-policy.md
 │       ├── adr-006-schema-lifecycle.md
 │       ├── adr-007-multus-replication-network.md
-│       └── adr-008-csn-monitoring-credentials.md
+│       ├── adr-008-csn-monitoring-credentials.md
+│       ├── adr-009-slapduser-lifecycle.md
+│       ├── adr-010-replication-modes.md
+│       └── adr-011-hot-migration-topology.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -334,6 +338,9 @@ the original decision — the history of reasoning matters.
 - ADR-006: Schema lifecycle (additive-only, desired-minimum model)
 - ADR-007: Multus-based dedicated replication network for cross-site traffic (amended: dynamic peer discovery via remote kubeconfig)
 - ADR-008: CSN monitoring uses replication bind credentials (uniform-password assumption)
+- ADR-009: SlapdUser lifecycle (service users only, single-pod write, retain default) — *Proposed*
+- ADR-010: SlapdCluster replication modes (peer / consumer-only, in-place promotion) — *Proposed*
+- ADR-011: Hot migration topology contract (RID/ServerID coexistence, plain-syncrepl interop, stage transitions) — *Proposed*
 
 ---
 
@@ -585,4 +592,10 @@ ADR-002 and ADR-004.
 
 ### Backlog
 
-No open items.
+Active engineering work is tracked in `docs/MIGRATION-PLAN.md` — a three-phase plan
+to replace a legacy OpenLDAP-on-VMs deployment with slaptain. Phase 0 work is
+generic and decoupled from the migration timing; Phases 1 and 2 are cold and hot
+migration preparation respectively. ADRs 009–011 codify the architectural
+decisions referenced from the plan.
+
+If you are picking this up after a gap, start with `docs/MIGRATION-PLAN.md` §"Resuming this work".
