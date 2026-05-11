@@ -59,6 +59,15 @@ E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:$(GIT_TAG)
 CHART_REGISTRY ?= oci://$(REGISTRY)/$(PROJECT)/charts
 CHART_OUT      := .charts
 
+# Chart version derived from GIT_TAG; must be SemVer-2 for Helm.
+# - On a release tag (vX.Y.Z): strip the leading 'v' → X.Y.Z.
+# - Off-tag dev builds: 0.0.0-<commit>[-dirty] pseudo-version (valid SemVer pre-release).
+ifneq ($(filter v%,$(GIT_TAG)),)
+    CHART_VERSION := $(GIT_TAG:v%=%)
+else
+    CHART_VERSION := 0.0.0-$(GIT_TAG)
+endif
+
 # Stamp-file directory for incremental builds.
 STAMPS := .stamps
 
@@ -249,19 +258,18 @@ operator-helm-install:
 operator-helm-uninstall:
 	$(HELM) uninstall slaptain-operator --namespace $(NAMESPACE)
 
-## operator-chart-package: package the operator Helm chart into $(CHART_OUT)/
+## operator-chart-package: package the operator Helm chart into $(CHART_OUT)/.
+## Version and appVersion are overridden from the git tag (see CHART_VERSION/GIT_TAG).
 ## CRDs are synced first so the packaged chart includes the current CRD.
 operator-chart-package: operator-sync-crd
 	@mkdir -p $(CHART_OUT)
-	$(HELM) package ./charts/operator -d $(CHART_OUT)
+	$(HELM) package ./charts/operator -d $(CHART_OUT) \
+		--version $(CHART_VERSION) --app-version $(GIT_TAG)
 
 ## operator-chart-push: push the packaged operator chart to $(CHART_REGISTRY).
 ## Requires `helm registry login` against $(REGISTRY) first.
 operator-chart-push: operator-chart-package
-	@chart_version=$$($(HELM) show chart ./charts/operator | awk '/^version:/ {print $$2}'); \
-	tgz=$(CHART_OUT)/slaptain-operator-$$chart_version.tgz; \
-	echo "Pushing $$tgz to $(CHART_REGISTRY)"; \
-	$(HELM) push $$tgz $(CHART_REGISTRY)
+	$(HELM) push $(CHART_OUT)/slaptain-operator-$(CHART_VERSION).tgz $(CHART_REGISTRY)
 
 ## toolkit-install: deploy the slapd-toolkit debug pod (ldap-utils, python3, ldap3).
 toolkit-install:
