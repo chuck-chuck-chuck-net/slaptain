@@ -948,7 +948,10 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	if replicas == 0 {
 		replicas = 1
 	}
-	if replicas < 2 {
+	// Skip only when there is genuinely nothing to replicate to: single local
+	// pod AND no external peers. Single-pod-per-site cross-site delta-sync
+	// still needs syncrepl stanzas for the external peers.
+	if replicas < 2 && len(sc.Spec.Replication.ExternalPeers) == 0 {
 		return false, nil
 	}
 

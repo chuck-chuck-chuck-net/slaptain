@@ -171,8 +171,10 @@ spec:
                 properties:
                   accesslog:
                     description: |-
-                      accesslog is the PVC for the delta-syncrepl access log (/ldap-accesslog).
-                      Only provisioned when replication is enabled.
+                      accesslog is the PVC for the delta-syncrepl access log (/accesslog).
+                      Only provisioned for read-write pods that need to produce replication
+                      events: spec.replication.enabled=true AND spec.replicas>1. Read-only
+                      replicas and single-pod clusters never get this PVC.
                     properties:
                       accessMode:
                         default: ReadWriteOnce
@@ -189,7 +191,7 @@ spec:
                     type: object
                   config:
                     description: config is the PVC for the slapd configuration directory
-                      (/ldap-config).
+                      (/config).
                     properties:
                       accessMode:
                         default: ReadWriteOnce
@@ -205,7 +207,7 @@ spec:
                         type: string
                     type: object
                   data:
-                    description: data is the PVC for the slapd data directory (/ldap-data).
+                    description: data is the PVC for the slapd data directory (/data).
                     properties:
                       accessMode:
                         default: ReadWriteOnce

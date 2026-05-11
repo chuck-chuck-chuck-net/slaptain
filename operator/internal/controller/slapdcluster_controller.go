@@ -555,7 +555,12 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
-	replicationEnabled := sc.Spec.Replication.Enabled && sc.Spec.Replicas > 1
+	// replicationEnabled gates the accesslog DB + PVC + mounts. True when either
+	// in-cluster multi-master (replicas > 1) or cross-site replication
+	// (externalPeers) is active — both modes require the accesslog/syncprov
+	// infrastructure on the data DB.
+	replicationEnabled := sc.Spec.Replication.Enabled &&
+		(sc.Spec.Replicas > 1 || len(sc.Spec.Replication.ExternalPeers) > 0)
 
 	// Pod security context.
 	podSecCtx := sc.Spec.SecurityContext

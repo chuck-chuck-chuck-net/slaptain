@@ -110,14 +110,16 @@ type SlapdPersistenceConfig struct {
 	// enabled controls whether PVCs are created. When false, emptyDir is used.
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
-	// config is the PVC for the slapd configuration directory (/ldap-config).
+	// config is the PVC for the slapd configuration directory (/config).
 	// +optional
 	Config SlapdPVCConfig `json:"config,omitempty"`
-	// data is the PVC for the slapd data directory (/ldap-data).
+	// data is the PVC for the slapd data directory (/data).
 	// +optional
 	Data SlapdPVCConfig `json:"data,omitempty"`
-	// accesslog is the PVC for the delta-syncrepl access log (/ldap-accesslog).
-	// Only provisioned when replication is enabled.
+	// accesslog is the PVC for the delta-syncrepl access log (/accesslog).
+	// Only provisioned for read-write pods that need to produce replication
+	// events: spec.replication.enabled=true AND spec.replicas>1. Read-only
+	// replicas and single-pod clusters never get this PVC.
 	// +optional
 	Accesslog SlapdPVCConfig `json:"accesslog,omitempty"`
 }
