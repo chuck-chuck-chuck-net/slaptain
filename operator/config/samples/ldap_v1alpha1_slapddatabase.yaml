@@ -8,7 +8,23 @@ spec:
   # rootDN defaults to "cn=admin,dc=example,dc=org"
 
   # credentials:
-  #   secretName: "example-db-credentials"  # optional; auto-generated if omitted
+  #   # Optional. If omitted, the operator generates a Secret named
+  #   # "<metadata.name>-credentials" with random plaintext values.
+  #   # To pin a known password (e.g. preserving the admin password through a
+  #   # migration), pre-create the Secret BEFORE this CR with this schema:
+  #   #
+  #   #   apiVersion: v1
+  #   #   kind: Secret
+  #   #   metadata:
+  #   #     name: example-db-credentials
+  #   #   type: Opaque
+  #   #   stringData:
+  #   #     root-password: "<plaintext for cn=admin,<suffix>>"            # required
+  #   #     replication-password: "<plaintext for cn=replication,...>"    # optional
+  #   #
+  #   # The operator binds to slapd using these passwords — they must be plaintext,
+  #   # not {SSHA}/{ARGON2}/{CRYPT}. See docs/ONBOARDING.md §Secret and Credential Model.
+  #   secretName: example-db-credentials
 
   # dataDirectory defaults to "example" (sanitized suffix)
 

@@ -350,18 +350,22 @@ complexity. Each RO pod gets the same ACLs as RW pods (since cn=config is node-l
 
 ## Secret and Credential Model
 
-Four passwords flow through this system. Understanding where each one is used prevents
-confusion when something fails to authenticate.
+Three operator-managed credentials flow through the system, split across the cluster-level and
+per-database scope (post-ADR-004). Understanding where each one is used prevents confusion when
+something fails to authenticate.
 
-| Password | Where defined | Who uses it | Secret key |
+| Password | Where defined | Who uses it | Secret / key |
 |---|---|---|---|
-| Data admin | slapd.conf `rootpw` + `cn=admin` entry | Operator bootstrap, day-to-day ldap ops | `<name>-passwords` / `admin-password` |
-| Config admin | slapd.conf `rootpw` for `cn=config` | Operator ACL management (and Phase 3 topology ops) | `<name>-config-password` / `root-password` |
-| Replication bind | `cn=replication` entry `userPassword` | Inter-node syncrepl | `<name>-passwords` / `replication-password` |
-| Readpw accounts | Individual `userPassword` in directory | Application service accounts (Dovecot, etc.) | `slapd-test-passwords` / `readpw-<name>` |
+| Config admin | `cn=config` rootpw | Operator: ACL, schema, replication, topology ops on `cn=config` | `<cluster>-config-password` / `root-password` |
+| Data admin   | per-DB `olcRootPW` + `cn=admin,<suffix>` | Operator: bootstrap, ACL/seed/replication ops on the data DB | `<dbname>-credentials` / `root-password` |
+| Replication bind | `cn=replication,<suffix>` `userPassword` | Inter-pod and cross-site syncrepl | `<dbname>-credentials` / `replication-password` |
 
-The operator manages the first three. The fourth is managed by the slapd-test Helm chart and
-is outside the operator's scope.
+The operator creates each of these Secrets create-only — the value is generated if the Secret
+does not exist, and never updated thereafter. You can also pre-create a Secret with the schema
+above to bring your own credentials (see below).
+
+A fourth category — application accounts in the data tree (`readpw-*` users, regular user
+passwords) — is the application's responsibility and outside the operator's scope.
 
 **Why plaintext Secrets?** The operator needs to bind to slapd using the plaintext password
 (LDAP SIMPLE bind sends the password in the clear over the wire — TLS protects it in transit
@@ -369,6 +373,44 @@ but the protocol itself does not hash). Hashing is slapd's job, done at storage 
 pre-hashed passwords in Kubernetes Secrets would mean the operator can never verify a bind or
 change a password without knowing the plaintext — making it unmanageable. Every database
 operator (Percona, CloudNativePG, Strimzi) uses the same pattern.
+
+### Bringing your own credentials (e.g. for migration)
+
+To preserve an admin password through a migration from a legacy slapd, create the credentials
+Secret **before** creating the SlapdDatabase / SlapdCluster CR — the operator's create-only
+logic will adopt your Secret instead of generating one.
+
+```bash
+# Per-database (cn=admin,<suffix>) + replication bind:
+kubectl create secret generic <dbname>-credentials \
+  --from-literal=root-password='<plaintext-admin-pw>' \
+  --from-literal=replication-password='<plaintext-replication-pw>'
+
+# Cluster-level (cn=config admin) — only needed if you also want to pin this:
+kubectl create secret generic <cluster>-config-password \
+  --from-literal=root-password='<plaintext-config-pw>'
+```
+
+Then reference (or rely on the default name) from the CR:
+
+```yaml
+# SlapdDatabase
+spec:
+  credentials:
+    secretName: <dbname>-credentials   # optional; default is "<metadata.name>-credentials"
+# SlapdCluster
+spec:
+  ldap:
+    cnConfigCredentials:
+      secretName: <cluster>-config-password   # optional
+```
+
+**You must provide plaintext, not the legacy `{SSHA}` hash.** SSHA includes a random salt, so
+"the same plaintext produces the same stored hash" was never true to begin with — clients bind
+with plaintext and slapd verifies against its stored hash regardless of salt. Preserving the
+plaintext (not the stored hash) is what keeps cached client credentials working through the
+migration. The operator must know the plaintext to bind to slapd for ongoing ACL / schema /
+replication management; an `{SSHA}` Secret cannot satisfy that.
 
 ---
 

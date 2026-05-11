@@ -96,11 +96,17 @@ spec:
                   secretName:
                     description: |-
                       secretName is the name of the Secret containing passwords for this database.
-                      Required keys: "root-password" (plaintext rootDN password).
-                      Optional keys: "replication-password" (plaintext syncrepl bind password;
-                      auto-generated if missing and replication is enabled).
+                      Required keys: "root-password" (plaintext password for cn=admin,<suffix>).
+                      Optional keys: "replication-password" (plaintext bind password for
+                      cn=replication,<suffix>; auto-generated if missing and replication is enabled).
                       When empty, the operator auto-generates a Secret named
                       "<slapddatabase-name>-credentials".
+
+                      Values MUST be plaintext, not {SSHA}/{ARGON2}/{CRYPT} hashes — the operator
+                      binds to slapd using these passwords for ACL, schema, seed, and replication
+                      management. To preserve an admin password through a migration, pre-create
+                      this Secret with the legacy plaintext (not its stored hash) before creating
+                      this CR. See docs/ONBOARDING.md §Secret and Credential Model.
                     type: string
                 type: object
               dataDirectory:

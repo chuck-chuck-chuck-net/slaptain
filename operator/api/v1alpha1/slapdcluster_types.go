@@ -66,8 +66,12 @@ type SlapdTLSConfig struct {
 // CnConfigCredentials references the Secret containing the cn=config admin password.
 type CnConfigCredentials struct {
 	// secretName references an existing Secret containing a "root-password" key
-	// (plaintext). When empty, the operator auto-generates a Secret named
-	// "<name>-config-password".
+	// (plaintext password for cn=admin,cn=config). When empty, the operator
+	// auto-generates a Secret named "<name>-config-password".
+	//
+	// The value MUST be plaintext, not {SSHA}/{ARGON2}/{CRYPT} — the operator
+	// binds to cn=config using this password to manage schemas, ACLs, replication
+	// stanzas, and topology. See docs/ONBOARDING.md §Secret and Credential Model.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
 }
