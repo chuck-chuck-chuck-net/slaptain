@@ -364,7 +364,18 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		}
 	}
 
-	// Apply ACLs.
+	// Apply ACLs. When spec.acls is empty/omitted, we skip applyACLs entirely
+	// so slapd's built-in default ("to * by * read", rootdn bypasses) takes
+	// effect — see SlapdDatabase.spec.acls godoc and docs/ONBOARDING.md §ACLs.
+	//
+	// TODO: latent issue. applyACLs also prepends the cn=replication,<suffix>
+	// read-all rule when replication is enabled (see line 462). Skipping it
+	// here means that rule is not written when acls is empty. Currently
+	// harmless because slapd's default already permits cn=replication to read
+	// everything (along with everyone else), so replication works. If a future
+	// change tightens the empty-acls default — or if someone adds a webhook
+	// that injects a baseline rule — the replication ACL must move out of
+	// applyACLs into a path that always runs when replication is enabled.
 	if len(sd.Spec.ACLs) > 0 {
 		if err := r.applyACLs(ctx, conn, host, dataDN, sd, sc); err != nil {
 			return fmt.Errorf("apply ACLs at %s: %w", host, err)

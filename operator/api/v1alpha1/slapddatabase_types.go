@@ -138,8 +138,13 @@ type SlapdDatabaseSpec struct {
 	// acls is the list of OpenLDAP ACL rules (olcAccess entries) to apply to
 	// this database on every pod. Rules are in standard slapd.conf "access to ..."
 	// format, without the {N} index prefix. The operator numbers them and applies
-	// them per-pod (cn=config is node-local). When empty, the default ACLs from
-	// the init container are preserved.
+	// them per-pod (cn=config is node-local).
+	//
+	// When empty or omitted, no olcAccess attribute is written and slapd uses
+	// its built-in default: "to * by * read" (anonymous + authenticated users
+	// read all attributes). The rootdn (cn=admin,<suffix>) always bypasses ACLs
+	// regardless of this list. To replicate legacy slapd's "no access rules"
+	// behavior, leave this field unset.
 	// +optional
 	ACLs []string `json:"acls,omitempty"`
 	// indices is the list of index directives for this database. Each string is

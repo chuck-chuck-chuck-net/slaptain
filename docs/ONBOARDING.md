@@ -192,42 +192,45 @@ Overlays are slapd plugins that intercept operations and add functionality. We u
 ### ACLs — Access Control Lists
 
 ACLs in slapd control who can read or write what. They are evaluated in order and the first
-matching rule wins.
+matching rule wins. The rootdn (`cn=admin,<suffix>` for data; `cn=admin,cn=config` for
+cn=config) always bypasses the ACL list regardless of what is configured.
 
 **Important:** ACLs live in `cn=config`, which is **node-local** — it is never replicated
 between pods. Each pod has its own independent `cn=config`. A one-time `ldapmodify` to one
 pod leaves all other pods unchanged, and a pod replacement (node failure, rolling update)
-re-runs the init container, resetting `cn=config` to the generated defaults.
+re-runs the init container, resetting `cn=config` to its generated state.
 
-The operator solves this by managing ACLs centrally via `spec.ldap.acls` on the `SlapdCluster`
-CR. On every reconcile loop the operator reads each pod's current `olcAccess` values and
-patches any pod whose ACLs have drifted from the desired state. This means ACL changes are
-applied to all pods simultaneously and are automatically re-applied after pod replacement.
+The operator manages this by declaring data-database ACLs on the `SlapdDatabase` CR's
+`spec.acls` field (post-ADR-004 — the `SlapdCluster` CR no longer carries them). On every
+reconcile loop the SlapdDatabase controller reads each pod's current `olcAccess` values and
+patches any pod whose ACLs have drifted from the desired state. ACL changes are applied to all
+pods simultaneously and are automatically re-applied after pod replacement.
 
-The init-container default ACLs (used when `spec.ldap.acls` is empty):
+**What happens when `acls` is empty or omitted:** the operator writes no `olcAccess`
+attribute, so slapd falls back to its built-in default: `to * by * read` — anonymous +
+authenticated users can read every attribute (including `userPassword`), and only the rootdn
+can write. This mirrors a legacy slapd.conf with no `access` rules, which is sometimes the
+right minimum-change starting point for a migration. It is **not** production-appropriate for
+multi-tenant deployments — anonymous bind reading `userPassword` is the canonical example of
+what you do not want.
 
-On the accesslog database — only the replication account can read it:
-```
-access to *
-  by dn.exact="cn=replication,<domain>" read
-  by * none
-```
+A typical hardened ruleset (the sample SlapdDatabase ships with this):
 
-On the main data database — `userPassword` is protected; everything else is readable:
-```
-access to attrs=userPassword
-  by self write
-  by anonymous auth
-  by * none
-
-access to *
-  by dn.exact="cn=replication,<domain>" read
-  by * read
+```yaml
+spec:
+  acls:
+    - 'to attrs=userPassword by self write by anonymous auth by * none'
+    - 'to * by * read'
 ```
 
-Production deployments typically add tighter ACLs — for example, restricting `userPassword`
-reads in specific OUs to named service accounts. These are declared in `spec.ldap.acls`; see
-`operator/config/samples/ldap_v1alpha1_slapdcluster.yaml` for an example.
+Replication peers (`cn=replication,<suffix>`) need read access to all attributes including
+`userPassword`. When you set any non-empty `acls` and replication is enabled, the operator
+automatically prepends a read-all rule for `cn=replication,<suffix>` — you do not need to add
+it yourself. With `acls` empty, the default `to * by * read` already covers the replication
+bind, but it also covers every other bind, which is the trade-off described above.
+
+The accesslog database (managed by the operator when delta-sync replication is enabled) is
+locked down separately so only `cn=replication` can read it.
 
 ---
 

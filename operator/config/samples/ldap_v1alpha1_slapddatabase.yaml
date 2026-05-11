@@ -28,6 +28,10 @@ spec:
 
   # dataDirectory defaults to "example" (sanitized suffix)
 
+  # acls is optional. When omitted, slapd's built-in default applies:
+  # "to * by * read" — anonymous + authenticated users read all attributes,
+  # rootdn (cn=admin,<suffix>) always bypasses ACLs. This matches a legacy
+  # slapd.conf with no "access to" rules. Specify a list here to harden.
   acls:
     - 'to attrs=userPassword by self write by anonymous auth by * none'
     - 'to * by * read'
