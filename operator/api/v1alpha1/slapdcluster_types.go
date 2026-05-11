@@ -118,7 +118,9 @@ type SlapdPersistenceConfig struct {
 	Accesslog SlapdPVCConfig `json:"accesslog,omitempty"`
 }
 
-// SlapdServiceConfig configures the ClusterIP service exposed by the operator.
+// SlapdServiceConfig configures the client-facing Service for the read-write
+// pods (the second StatefulSet's read-only Service inherits type and ports
+// only; load-balancer fields apply to the read-write Service only).
 type SlapdServiceConfig struct {
 	// type is the Kubernetes Service type.
 	// +kubebuilder:default=ClusterIP
@@ -129,6 +131,26 @@ type SlapdServiceConfig struct {
 	// ldapsPort is the external service port for LDAPS.
 	// +kubebuilder:default=636
 	LDAPSPort int32 `json:"ldapsPort,omitempty"`
+	// annotations is set on the Service's metadata. Useful for LB-controller
+	// hints (MetalLB pool, Cilium IP pool, AWS NLB attributes, etc).
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+	// loadBalancerIP requests a specific IP from the LB provider. Only honored
+	// when type=LoadBalancer. Deprecated upstream in favor of provider-specific
+	// annotations, but still supported by MetalLB, Cilium LB-IPAM, and others.
+	// +optional
+	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
+	// loadBalancerSourceRanges restricts traffic to the LB to the given CIDRs.
+	// Only honored when type=LoadBalancer.
+	// +optional
+	LoadBalancerSourceRanges []string `json:"loadBalancerSourceRanges,omitempty"`
+	// externalTrafficPolicy controls how the Service routes external traffic.
+	// "Local" preserves the client source IP and avoids an extra hop; "Cluster"
+	// load-balances across all nodes. Only honored when type=LoadBalancer or
+	// type=NodePort.
+	// +kubebuilder:validation:Enum=Cluster;Local
+	// +optional
+	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
 }
 
 // ExternalPeer defines a cross-cluster peer for multi-site replication.

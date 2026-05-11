@@ -676,6 +676,23 @@ spec:
               service:
                 description: service configures the ClusterIP service.
                 properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      annotations is set on the Service's metadata. Useful for LB-controller
+                      hints (MetalLB pool, Cilium IP pool, AWS NLB attributes, etc).
+                    type: object
+                  externalTrafficPolicy:
+                    description: |-
+                      externalTrafficPolicy controls how the Service routes external traffic.
+                      "Local" preserves the client source IP and avoids an extra hop; "Cluster"
+                      load-balances across all nodes. Only honored when type=LoadBalancer or
+                      type=NodePort.
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
                   ldapPort:
                     default: 389
                     description: ldapPort is the external service port for LDAP.
@@ -686,6 +703,19 @@ spec:
                     description: ldapsPort is the external service port for LDAPS.
                     format: int32
                     type: integer
+                  loadBalancerIP:
+                    description: |-
+                      loadBalancerIP requests a specific IP from the LB provider. Only honored
+                      when type=LoadBalancer. Deprecated upstream in favor of provider-specific
+                      annotations, but still supported by MetalLB, Cilium LB-IPAM, and others.
+                    type: string
+                  loadBalancerSourceRanges:
+                    description: |-
+                      loadBalancerSourceRanges restricts traffic to the LB to the given CIDRs.
+                      Only honored when type=LoadBalancer.
+                    items:
+                      type: string
+                    type: array
                   type:
                     default: ClusterIP
                     description: type is the Kubernetes Service type.

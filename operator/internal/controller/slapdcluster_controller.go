@@ -377,12 +377,16 @@ func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, 
 	svc := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name,
-			Namespace: sc.Namespace,
+			Name:        sc.Name,
+			Namespace:   sc.Namespace,
+			Annotations: sc.Spec.Service.Annotations,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     svcType,
-			Selector: selectorLabels(sc.Name),
+			Type:                     svcType,
+			Selector:                 selectorLabels(sc.Name),
+			LoadBalancerIP:           sc.Spec.Service.LoadBalancerIP,
+			LoadBalancerSourceRanges: sc.Spec.Service.LoadBalancerSourceRanges,
+			ExternalTrafficPolicy:    sc.Spec.Service.ExternalTrafficPolicy,
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "ldap",
