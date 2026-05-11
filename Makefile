@@ -54,6 +54,11 @@ TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:$(GIT_TAG)
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:$(GIT_TAG)
 E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:$(GIT_TAG)
 
+# Helm chart OCI registry. Charts land under <registry>/<project>/charts/<name>.
+# Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/slaptain/charts/slaptain-operator --version X.Y.Z
+CHART_REGISTRY ?= oci://$(REGISTRY)/$(PROJECT)/charts
+CHART_OUT      := .charts
+
 # Stamp-file directory for incremental builds.
 STAMPS := .stamps
 
@@ -94,7 +99,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-init import-slapd import-toolkit import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean show-tag
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-init import-slapd import-toolkit import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean show-tag
 
 all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl
 
@@ -244,6 +249,20 @@ operator-helm-install:
 operator-helm-uninstall:
 	$(HELM) uninstall slaptain-operator --namespace $(NAMESPACE)
 
+## operator-chart-package: package the operator Helm chart into $(CHART_OUT)/
+## CRDs are synced first so the packaged chart includes the current CRD.
+operator-chart-package: operator-sync-crd
+	@mkdir -p $(CHART_OUT)
+	$(HELM) package ./charts/operator -d $(CHART_OUT)
+
+## operator-chart-push: push the packaged operator chart to $(CHART_REGISTRY).
+## Requires `helm registry login` against $(REGISTRY) first.
+operator-chart-push: operator-chart-package
+	@chart_version=$$($(HELM) show chart ./charts/operator | awk '/^version:/ {print $$2}'); \
+	tgz=$(CHART_OUT)/slaptain-operator-$$chart_version.tgz; \
+	echo "Pushing $$tgz to $(CHART_REGISTRY)"; \
+	$(HELM) push $$tgz $(CHART_REGISTRY)
+
 ## toolkit-install: deploy the slapd-toolkit debug pod (ldap-utils, python3, ldap3).
 toolkit-install:
 	$(HELM) upgrade --install toolkit ./charts/slapd-toolkit \
@@ -300,4 +319,4 @@ show-tag: ## Print the current GIT_TAG used for image tagging
 	@echo $(GIT_TAG)
 
 clean:
-	rm -rf .stamps bin/ *.tar
+	rm -rf .stamps .charts bin/ *.tar
