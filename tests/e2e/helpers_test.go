@@ -153,12 +153,24 @@ func connectLDAP(addr, base, password string) *ldap.Conn {
 }
 
 // ldapExists returns true when a single entry exists at dn.
+//
+// Errors are folded into "false" because the typical caller is an Eventually
+// loop polling for an entry to appear/disappear, where transient "not yet"
+// states (LDAPResultNoSuchObject) are expected. But genuine failures
+// (connection drops, referrals, ACL refusals, server errors) would otherwise
+// be invisible — Expect-style callers see only "false" with no diagnostic.
+// So: NoSuchObject is silent (the expected "doesn't exist"); every other
+// error is logged to GinkgoWriter with the DN and the LDAP result code,
+// which surfaces in the failure output for the spec that called us.
 func ldapExists(conn *ldap.Conn, dn string) bool {
 	req := ldap.NewSearchRequest(dn,
 		ldap.ScopeBaseObject, ldap.NeverDerefAliases,
 		0, 0, false, "(objectClass=*)", []string{"dn"}, nil)
 	result, err := conn.Search(req)
 	if err != nil {
+		if !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
+			fmt.Fprintf(GinkgoWriter, "ldapExists(%q): search returned non-NoSuchObject error: %v\n", dn, err)
+		}
 		return false
 	}
 	return len(result.Entries) == 1
