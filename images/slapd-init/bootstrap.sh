@@ -30,10 +30,12 @@ fi
 
 echo "Replication: $REPLICATION_ENABLED (readonly=${READONLY_REPLICA})"
 
-# Check writability
+# Check writability. The accesslog dir may or may not be mounted depending on
+# whether this pod is peer-eligible (operator gates the volume on
+# NeedsAccesslogVolume()); only check if it actually exists.
 touch "$CONFIG_DIR/.writable" && rm "$CONFIG_DIR/.writable" || { echo "ERROR: $CONFIG_DIR is not writable"; exit 1; }
 touch "$DATA_DIR/.writable" && rm "$DATA_DIR/.writable" || { echo "ERROR: $DATA_DIR is not writable"; exit 1; }
-if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]]; then
+if [[ -d "$ACCESSLOG_DIR" ]]; then
     touch "$ACCESSLOG_DIR/.writable" && rm "$ACCESSLOG_DIR/.writable" || { echo "ERROR: $ACCESSLOG_DIR is not writable"; exit 1; }
 fi
 
@@ -138,29 +140,14 @@ rootdn "cn=admin,cn=config"
 rootpw $ROOT_PW_HASH
 EOF
 
-    # ── Accesslog database (RW replication only, not for read-only replicas) ──
-    # Sets up the accesslog infrastructure. The SlapdDatabase controller adds
-    # the accesslog overlay to each data database that opts into delta-sync
-    # and configures per-database ACLs on the accesslog.
-    if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]]; then
-        cat <<EOF >> "$TMP_CONF"
-
-database mdb
-suffix cn=accesslog
-rootdn "cn=admin,cn=config"
-directory "$ACCESSLOG_DIR"
-index default eq
-index reqEnd,reqResult,reqStart eq
-
-overlay syncprov
-syncprov-nopresent TRUE
-syncprov-reloadhint TRUE
-EOF
-    fi
-
-    # NOTE: No data database is created here. Data databases are created
-    # dynamically by the SlapdDatabase controller via ldapmodify on cn=config.
-    # See ADR-004 for the multi-resource architecture.
+    # NOTE: Neither the accesslog DB nor data databases are created here.
+    # - Data databases are created by the SlapdDatabase controller via
+    #   ldapmodify on cn=config (ADR-004).
+    # - The accesslog DB is created and torn down by the SlapdDatabase
+    #   controller at runtime based on the cluster's replication mode (ADR-010
+    #   3e). The accesslog + syncprov modules are still loaded here so the
+    #   symbols are available without a slapd restart when the operator later
+    #   adds the DB or its overlays.
 
     # Convert slapd.conf to slapd.d format
     slaptest -f "$TMP_CONF" -F "$CONFIG_DIR" || true

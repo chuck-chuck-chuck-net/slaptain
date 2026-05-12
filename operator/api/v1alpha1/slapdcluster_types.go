@@ -592,3 +592,23 @@ func (sc *SlapdCluster) NeedsAccesslog() bool {
 func (sc *SlapdCluster) IsConsumerOnly() bool {
 	return sc.Spec.Replication.Enabled && sc.Spec.Replication.Mode == "consumer-only"
 }
+
+// NeedsAccesslogVolume reports whether the cluster's RW pods should have the
+// /accesslog volume + mount provisioned. True for any peer-eligible RW pod
+// (replication enabled, not read-only, with at least one replication
+// participant). Crucially this is INDEPENDENT of mode: consumer-only clusters
+// also provision the volume so an in-place promotion to peer mode (ADR-010 3e)
+// can add the accesslog DB at runtime without requiring a rolling restart to
+// attach a new PVC.
+//
+// Pairs with NeedsAccesslog(): "volume exists" vs "DB exists." The operator
+// creates/removes the DB at runtime via ldapmodify; the volume stays.
+func (sc *SlapdCluster) NeedsAccesslogVolume() bool {
+	if !sc.Spec.Replication.Enabled {
+		return false
+	}
+	if sc.Spec.Replication.AccesslogEnabled != nil {
+		return *sc.Spec.Replication.AccesslogEnabled
+	}
+	return sc.Spec.Replicas > 1 || len(sc.Spec.Replication.ExternalPeers) > 0
+}

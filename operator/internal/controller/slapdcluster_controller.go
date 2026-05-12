@@ -597,7 +597,12 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
-	replicationEnabled := sc.NeedsAccesslog()
+	// Peer-eligible pods always carry the accesslog volume, module loads, and
+	// (in multi-pod clusters) ServerID directives — regardless of mode. The
+	// accesslog DB itself is created at runtime by the SlapdDatabase
+	// controller when the cluster is in peer mode (ADR-010 3e), so promotion
+	// from consumer-only to peer doesn't need a rolling restart.
+	replicationEnabled := sc.NeedsAccesslogVolume()
 
 	// Pod security context. PSA "restricted" profile is the floor: even when
 	// the user supplies their own SecurityContext, we layer RunAsNonRoot and
