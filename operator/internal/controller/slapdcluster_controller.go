@@ -750,6 +750,20 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		)
 	}
 
+	// ServerID coordination (ADR-011): emit per-pod serverID directives so
+	// multi-master mesh has a deterministic, conflict-free ID per pod. Needed
+	// in-cluster only (replicas > 1). External-peer ID coordination during hot
+	// migration is handled separately via ExternalPeer config.
+	if replicationEnabled && !readOnly && sc.Spec.Replicas > 1 {
+		initEnv = append(initEnv,
+			corev1.EnvVar{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(sc.Spec.Replicas))},
+			corev1.EnvVar{Name: "LDAP_SERVER_ID_BASE", Value: strconv.Itoa(int(sc.Spec.Replication.ServerIDBase))},
+			corev1.EnvVar{Name: "LDAP_CLUSTER_NAME", Value: sc.Name},
+			corev1.EnvVar{Name: "LDAP_CLUSTER_HEADLESS_SVC", Value: sc.Name + "-headless"},
+			corev1.EnvVar{Name: "LDAP_NAMESPACE", Value: sc.Namespace},
+		)
+	}
+
 	initMounts := []corev1.VolumeMount{
 		{Name: "config", MountPath: "/config"},
 		{Name: "data", MountPath: "/data"},

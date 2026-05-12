@@ -1069,6 +1069,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				BindDN:          ep.BindDN,
 				Password:        password,
 				TLSCACertPath:   tlsCACertPath,
+				PlainSyncRepl:   ep.SyncMode == "plain",
 			})
 		} else {
 			externalPeers = append(externalPeers, resolvedExternalPeer{
@@ -1078,6 +1079,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				BindDN:          ep.BindDN,
 				Password:        password,
 				TLSCACertPath:   tlsCACertPath,
+				PlainSyncRepl:   ep.SyncMode == "plain",
 			})
 		}
 	}
@@ -1163,6 +1165,10 @@ type resolvedExternalPeer struct {
 	BindDN          string
 	Password        string
 	TLSCACertPath   string
+	// PlainSyncRepl, when true, suppresses delta-syncrepl options (no
+	// logbase / syncdata=accesslog) for stanzas pointing at this peer. Set
+	// from ExternalPeer.SyncMode="plain" — see ADR-011.
+	PlainSyncRepl bool
 }
 
 // buildDatabaseSyncRepl computes syncrepl stanzas for one RW pod using per-database
@@ -1267,6 +1273,14 @@ func buildDatabaseSyncRepl(
 			rpp = n
 		}
 
+		// Per-peer delta opts: omit logbase / syncdata=accesslog when the peer
+		// is configured for plain syncrepl (ADR-011) — typically a legacy
+		// non-slaptain source that doesn't advertise an accesslog DB.
+		epDeltaOpts := deltaSyncOpts
+		if ep.PlainSyncRepl {
+			epDeltaOpts = ""
+		}
+
 		for k := int32(0); k < rpp; k++ {
 			uri := ep.URIs[(ordinal+k)%n]
 			rid := fmt.Sprintf("%03d", ridBase+50+externalOffset+1)
@@ -1289,7 +1303,7 @@ func buildDatabaseSyncRepl(
 				"%s%s%s"+
 				" retry=\"%s\"",
 				rid, uri, suffix, ep.BindDN, ep.Password,
-				deltaSyncOpts, epTLSOpt, keepaliveOpt, retryInterval)
+				epDeltaOpts, epTLSOpt, keepaliveOpt, retryInterval)
 			stanzas = append(stanzas, stanza)
 		}
 	}

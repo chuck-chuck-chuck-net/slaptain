@@ -88,6 +88,26 @@ include /etc/ldap/schema/inetorgperson.schema
 include /etc/ldap/schema/nis.schema
 EOF
 
+    # ── ServerID directives (multi-master only, ADR-011) ───────────────────────
+    # When this cluster runs >1 RW replica, emit one "serverID <id> <url>" per
+    # peer pod. Slapd matches its own pod URL against this list to identify
+    # itself; this is the standard mechanism for unique CSN attribution across
+    # a multi-master mesh.
+    if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]] && \
+       [[ -n "${LDAP_REPLICAS:-}" ]] && [[ "$LDAP_REPLICAS" -gt 1 ]]; then
+        sid_base="${LDAP_SERVER_ID_BASE:-0}"
+        scheme="ldap"; port=1024
+        if [[ "${LDAP_TLS_ENABLED^^}" == "TRUE" ]]; then
+            scheme="ldaps"; port=1025
+        fi
+        echo "" >> "$TMP_CONF"
+        for ((i=0; i<LDAP_REPLICAS; i++)); do
+            sid=$((sid_base + i + 1))
+            url="${scheme}://${LDAP_CLUSTER_NAME}-${i}.${LDAP_CLUSTER_HEADLESS_SVC}.${LDAP_NAMESPACE}.svc.cluster.local:${port}"
+            echo "serverID ${sid} ${url}" >> "$TMP_CONF"
+        done
+    fi
+
     if [[ "${LDAP_TLS_ENABLED^^}" == "TRUE" ]]; then
         cat <<EOF >> "$TMP_CONF"
 

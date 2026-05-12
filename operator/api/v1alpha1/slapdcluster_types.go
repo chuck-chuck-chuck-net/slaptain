@@ -221,6 +221,21 @@ type ExternalPeer struct {
 	// bindPasswordSecretName is the name of the Secret containing the bind password.
 	// +optional
 	BindPasswordSecretName string `json:"bindPasswordSecretName,omitempty"`
+	// syncMode selects the syncrepl wire protocol for this peer.
+	//
+	//   delta — default. Delta-syncrepl using the accesslog DB. Requires the
+	//     peer to run accesslog+syncprov overlays (a slaptain peer always does).
+	//   plain — plain refreshAndPersist syncrepl, no accesslog. Use this to
+	//     interoperate with a legacy OpenLDAP source that does not advertise an
+	//     accesslog DB (e.g. prod VMs during a hot migration — see ADR-011).
+	//
+	// Both modes preserve operational attributes (entryUUID, entryCSN, etc.)
+	// on the consumer side. The difference is reconnect/recovery cost: delta
+	// resumes from the last CSN; plain re-evaluates the full DIT on reconnect.
+	// +kubebuilder:validation:Enum=plain;delta
+	// +kubebuilder:default=delta
+	// +optional
+	SyncMode string `json:"syncMode,omitempty"`
 }
 
 // ExternalPeerDiscovery configures dynamic peer discovery via a remote cluster's Kubernetes API.
@@ -308,6 +323,20 @@ type SlapdReplicationConfig struct {
 	// Format: "<interval> <count>" pairs, e.g. "10 +" (retry every 10s, indefinitely).
 	// +kubebuilder:default="10 +"
 	Retry string `json:"retry,omitempty"`
+	// serverIDBase shifts slaptain's per-pod ServerIDs out of the 1..N range
+	// when needed to coexist with an external cluster's existing ServerIDs.
+	// Each pod's ServerID is computed as serverIDBase + ordinal + 1 (so the
+	// first pod with base=500 has ServerID 501, the second 502, etc.).
+	// Slapd requires unique non-zero ServerIDs across a multi-master mesh —
+	// during a hot migration alongside a legacy cluster that uses 101-104 and
+	// 201-204 (per ADR-011), set this to e.g. 500 to avoid collision. Default
+	// 0 yields IDs 1..N which is correct for a standalone slaptain cluster.
+	// Valid range is 0..4094 (slapd caps ServerID at 4095).
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4094
+	// +optional
+	ServerIDBase int32 `json:"serverIDBase,omitempty"`
 }
 
 // SlapdClusterSpec defines the desired state of SlapdCluster.
