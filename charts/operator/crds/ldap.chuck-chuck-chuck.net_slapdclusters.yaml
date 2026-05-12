@@ -786,6 +786,15 @@ spec:
                     description: type is the Kubernetes Service type.
                     type: string
                 type: object
+              suspend:
+                default: false
+                description: |-
+                  suspend pauses the operator's reconciliation of this resource. Existing
+                  StatefulSets, Services, and Secrets are left in place; the operator stops
+                  observing or mutating them. Use during manual interventions (e.g. running
+                  slapadd against the data PVC, hand-editing cn=config) where operator
+                  reconciliation would fight your changes. Resume by setting back to false.
+                type: boolean
             required:
             - images
             type: object

@@ -22,6 +22,14 @@ import (
 
 // SlapdSchemaSpec defines the desired state of SlapdSchema.
 type SlapdSchemaSpec struct {
+	// suspend pauses the operator's reconciliation of this resource. Applied
+	// schema attributes stay installed in cn=config; the operator stops
+	// observing or mutating them. Use during manual schema interventions where
+	// operator reconciliation would fight your changes. Resume by setting back
+	// to false.
+	// +kubebuilder:default=false
+	// +optional
+	Suspend bool `json:"suspend,omitempty"`
 	// clusterRef is the name of the SlapdCluster this schema belongs to.
 	// Must be in the same namespace.
 	// +required

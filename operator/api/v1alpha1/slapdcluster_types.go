@@ -312,6 +312,14 @@ type SlapdReplicationConfig struct {
 
 // SlapdClusterSpec defines the desired state of SlapdCluster.
 type SlapdClusterSpec struct {
+	// suspend pauses the operator's reconciliation of this resource. Existing
+	// StatefulSets, Services, and Secrets are left in place; the operator stops
+	// observing or mutating them. Use during manual interventions (e.g. running
+	// slapadd against the data PVC, hand-editing cn=config) where operator
+	// reconciliation would fight your changes. Resume by setting back to false.
+	// +kubebuilder:default=false
+	// +optional
+	Suspend bool `json:"suspend,omitempty"`
 	// images specifies the container images to use.
 	// +required
 	Images SlapdImages `json:"images"`

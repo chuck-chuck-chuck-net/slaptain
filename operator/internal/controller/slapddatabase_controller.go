@@ -102,6 +102,15 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// 3a. Honor spec.suspend on either CR. Parent SlapdCluster being suspended
+	// implies its databases should also pause — manual interventions that
+	// suspend the cluster will typically span cn=config edits this controller
+	// would otherwise revert.
+	if sd.Spec.Suspend || sc.Spec.Suspend {
+		log.Info("reconciliation suspended", "sdSuspend", sd.Spec.Suspend, "scSuspend", sc.Spec.Suspend)
+		return ctrl.Result{}, nil
+	}
+
 	// 4. Wait for cluster to be Running.
 	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
 		log.Info("waiting for cluster to be Running", "phase", sc.Status.Phase)

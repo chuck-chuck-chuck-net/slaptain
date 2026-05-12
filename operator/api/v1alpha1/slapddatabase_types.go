@@ -115,6 +115,15 @@ type DatabaseSeedConfig struct {
 
 // SlapdDatabaseSpec defines the desired state of SlapdDatabase.
 type SlapdDatabaseSpec struct {
+	// suspend pauses the operator's reconciliation of this resource. The data
+	// database, ACLs, syncrepl stanzas, and seed entries are left in place; the
+	// operator stops observing or mutating cn=config or the data tree on behalf
+	// of this CR. Use during manual interventions (e.g. external syncrepl setup
+	// before ADR-010 lands, hand-editing ACLs) where operator reconciliation
+	// would fight your changes. Resume by setting back to false.
+	// +kubebuilder:default=false
+	// +optional
+	Suspend bool `json:"suspend,omitempty"`
 	// clusterRef is the name of the SlapdCluster this database belongs to.
 	// Must be in the same namespace.
 	// +required

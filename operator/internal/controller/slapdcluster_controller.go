@@ -112,6 +112,12 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// 1a. Honor spec.suspend — leave everything in place, stop observing.
+	if sc.Spec.Suspend {
+		log.Info("reconciliation suspended via spec.suspend; leaving owned resources untouched")
+		return ctrl.Result{}, nil
+	}
+
 	// 2. Reconcile cn=config credential secret (<name>-config-password).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSecret: %w", err)

@@ -81,6 +81,12 @@ func (r *SlapdSchemaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// 2a. Honor spec.suspend on either CR.
+	if ss.Spec.Suspend || sc.Spec.Suspend {
+		log.Info("reconciliation suspended", "ssSuspend", ss.Spec.Suspend, "scSuspend", sc.Spec.Suspend)
+		return ctrl.Result{}, nil
+	}
+
 	// 3. Wait for cluster to be Running.
 	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
 		log.Info("waiting for cluster to be Running", "phase", sc.Status.Phase)

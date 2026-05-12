@@ -93,6 +93,15 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              suspend:
+                default: false
+                description: |-
+                  suspend pauses the operator's reconciliation of this resource. Applied
+                  schema attributes stay installed in cn=config; the operator stops
+                  observing or mutating them. Use during manual schema interventions where
+                  operator reconciliation would fight your changes. Resume by setting back
+                  to false.
+                type: boolean
             required:
             - clusterRef
             type: object
