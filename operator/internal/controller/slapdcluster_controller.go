@@ -290,6 +290,13 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		ObservedGeneration: sc.Generation,
 	})
 
+	// Replication mode wiring conditions (ADR-010). These are informational
+	// handoffs to the human operating the cross-cluster migration; slaptain
+	// cannot autonomously verify that the external peer (typically a legacy
+	// prod cluster) has performed the reciprocal configuration. The conditions
+	// surface in `kubectl describe slapdcluster` to make the handoff explicit.
+	emitWiringConditions(sc)
+
 	// SSA patch on the status subresource: no resourceVersion check, no conflict possible.
 	statusPatch := &ldapv1alpha1.SlapdCluster{
 		TypeMeta: metav1.TypeMeta{
@@ -1224,6 +1231,61 @@ func readOnlySelectorLabels(name string) map[string]string {
 		"app.kubernetes.io/name":     "slapd",
 		"app.kubernetes.io/instance": name + "-readonly",
 	}
+}
+
+// emitWiringConditions surfaces the prod-side handoff conditions called out
+// in ADR-010. They are informational — slaptain cannot verify that the
+// external cluster has performed the matching configuration, so the conditions
+// stand as documentation of "what the human must do next."
+//
+//   - ReplicationModePeerWiringRequired (Status=True) is set when the cluster
+//     is in mode=peer with at least one externalPeer. The handoff: the
+//     external cluster needs reciprocal syncrepl stanzas pointing at slaptain
+//     and slaptain's ServerIDs in its olcServerID list.
+//   - ReplicationModeDemoteWiringRequired (Status=True) is set when the
+//     cluster is in mode=consumer-only with at least one externalPeer. The
+//     handoff: the external cluster should drop syncrepl stanzas pointing at
+//     slaptain before slaptain stops accepting writes, to avoid losing the
+//     last batch of writes during the handover window.
+//
+// When externalPeers is empty, neither condition applies and both are removed
+// from the status (mode-as-handoff is meaningless without a counterpart).
+func emitWiringConditions(sc *ldapv1alpha1.SlapdCluster) {
+	now := metav1.Now()
+	hasPeers := len(sc.Spec.Replication.ExternalPeers) > 0
+
+	peerCond := metav1.Condition{
+		Type:               "ReplicationModePeerWiringRequired",
+		Status:             metav1.ConditionFalse,
+		Reason:             "NotApplicable",
+		Message:            "Cluster is not in peer mode with external peers; no reciprocal wiring expected.",
+		LastTransitionTime: now,
+		ObservedGeneration: sc.Generation,
+	}
+	demoteCond := metav1.Condition{
+		Type:               "ReplicationModeDemoteWiringRequired",
+		Status:             metav1.ConditionFalse,
+		Reason:             "NotApplicable",
+		Message:            "Cluster is not in consumer-only mode with external peers; no handoff required.",
+		LastTransitionTime: now,
+		ObservedGeneration: sc.Generation,
+	}
+
+	if hasPeers {
+		switch sc.Status.ReplicationMode {
+		case "peer":
+			peerCond.Status = metav1.ConditionTrue
+			peerCond.Reason = "PeerModeActive"
+			peerCond.Message = "External cluster(s) must add reciprocal syncrepl stanzas pointing at this slaptain cluster, and add slaptain's ServerIDs to their olcServerID list, for bidirectional replication to begin. See ADR-010 §promotion."
+		case "consumer-only":
+			demoteCond.Status = metav1.ConditionTrue
+			demoteCond.Reason = "ConsumerOnlyModeActive"
+			demoteCond.Message = "Before transitioning back to peer (or decommissioning this cluster), the external cluster(s) should drop syncrepl stanzas pointing at slaptain to avoid log spam from failed pulls. Informational only — not a transition gate."
+		}
+	}
+
+	setCondition(&sc.Status.Conditions, peerCond)
+	setCondition(&sc.Status.Conditions, demoteCond)
 }
 
 // setCondition upserts a condition in the conditions slice.

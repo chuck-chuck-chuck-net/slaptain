@@ -436,7 +436,64 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		}
 	}
 
+	// Align olcReadOnly on the data DB to the cluster's current mode. In
+	// consumer-only mode the data DB rejects client writes; in peer mode it
+	// accepts them. This is the load-bearing step for in-place mode
+	// promotion/demotion (ADR-010 3d) — at each reconcile, the current
+	// olcReadOnly value is read and ldapmodify'd to match desired only when
+	// it differs (idempotent).
+	if !readOnly {
+		desiredReadOnly := sc.IsConsumerOnly()
+		if err := r.ensureReadOnly(ctx, conn, host, dataDN, desiredReadOnly); err != nil {
+			return fmt.Errorf("ensure olcReadOnly at %s: %w", host, err)
+		}
+	}
+
 	return nil
+}
+
+// ensureReadOnly aligns the data DB's olcReadOnly attribute to the desired
+// state. Idempotent: reads the current value and modifies only when it differs.
+// In consumer-only mode (ADR-010) we set TRUE so clients can't write; in peer
+// mode we explicitly set FALSE so a demoted-then-promoted cluster doesn't
+// inherit a stale TRUE. The explicit "FALSE" write matters because slapd
+// treats missing and FALSE as equivalent, but ldapmodify Replace on a missing
+// attribute would error; we use Replace which slapd accepts as "set to this
+// value, creating if needed."
+func (r *SlapdDatabaseReconciler) ensureReadOnly(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	desired bool,
+) error {
+	log := logf.FromContext(ctx)
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		1, 0, false, "(objectClass=*)", []string{"olcReadOnly"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("read olcReadOnly: %w", err)
+	}
+	if len(sr.Entries) == 0 {
+		return fmt.Errorf("no entry at %s", dataDN)
+	}
+
+	current := sr.Entries[0].GetEqualFoldAttributeValue("olcReadOnly")
+	desiredStr := "FALSE"
+	if desired {
+		desiredStr = "TRUE"
+	}
+	// slapd normalizes missing → FALSE for boolean attributes; treat the two
+	// as equivalent so we don't write FALSE on every reconcile.
+	if (current == "" && !desired) || current == desiredStr {
+		return nil
+	}
+
+	log.Info("aligning olcReadOnly", "host", host, "from", current, "to", desiredStr)
+	modReq := ldap.NewModifyRequest(dataDN, nil)
+	modReq.Replace("olcReadOnly", []string{desiredStr})
+	return conn.Modify(modReq)
 }
 
 // createDatabase adds a new olcDatabase={N}mdb entry to cn=config.
