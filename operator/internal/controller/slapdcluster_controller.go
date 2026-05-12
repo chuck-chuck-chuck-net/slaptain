@@ -576,7 +576,10 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
 	replicationEnabled := sc.NeedsAccesslog()
 
-	// Pod security context.
+	// Pod security context. PSA "restricted" profile is the floor: even when
+	// the user supplies their own SecurityContext, we layer RunAsNonRoot and
+	// SeccompProfile onto it so the pod stays admissible to restricted
+	// namespaces. Users can still override the user/group/fsGroup.
 	podSecCtx := sc.Spec.SecurityContext
 	if podSecCtx == nil {
 		uid := int64(1024)
@@ -587,11 +590,26 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			FSGroup:    &gid,
 		}
 	}
+	if podSecCtx.RunAsNonRoot == nil {
+		trueVal := true
+		podSecCtx.RunAsNonRoot = &trueVal
+	}
+	if podSecCtx.SeccompProfile == nil {
+		podSecCtx.SeccompProfile = &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		}
+	}
 
 	// ── Volumes (non-PVC) ─────────────────────────────────────────────────────
 	volumes := []corev1.Volume{
 		{
 			Name:         "run",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+		{
+			// Writable /tmp for the init container's bootstrap.sh ($TMP_CONF).
+			// Lets us run init with readOnlyRootFilesystem=true.
+			Name:         "tmp",
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 	}
@@ -729,6 +747,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	initMounts := []corev1.VolumeMount{
 		{Name: "config", MountPath: "/config"},
 		{Name: "data", MountPath: "/data"},
+		{Name: "tmp", MountPath: "/tmp"},
 	}
 	if replicationEnabled && !readOnly {
 		initMounts = append(initMounts, corev1.VolumeMount{
@@ -746,12 +765,26 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 
 	initImage := r.imageRef(sc.Spec.Images.Init)
 
+	// Init container hardening for PSA "restricted". readOnlyRootFilesystem is
+	// enabled because bootstrap.sh's $TMP_CONF=/tmp/slapd.conf write target is
+	// backed by the "tmp" emptyDir volume mounted at /tmp above.
+	initFalse := false
+	initTrue := true
+	initSecCtx := &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &initFalse,
+		ReadOnlyRootFilesystem:   &initTrue,
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+
 	initContainer := corev1.Container{
 		Name:            "init",
 		Image:           initImage,
 		ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
 		Env:             initEnv,
 		VolumeMounts:    initMounts,
+		SecurityContext: initSecCtx,
 	}
 
 	// ── Main container ────────────────────────────────────────────────────────
@@ -793,6 +826,9 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	mainSecCtx := &corev1.SecurityContext{
 		AllowPrivilegeEscalation: &falseVal,
 		ReadOnlyRootFilesystem:   &trueVal,
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
 	}
 
 	mainImage := r.imageRef(sc.Spec.Images.Slapd)

@@ -25,6 +25,13 @@ spec:
         - name: init
           image: "{{ .Values.images.init.repository }}:{{ .Values.images.init.tag }}"
           imagePullPolicy: {{ .Values.images.init.pullPolicy }}
+          # bootstrap.sh writes /tmp/slapd.conf; "tmp" emptyDir below backs it
+          # so we can keep the root FS read-only.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           env:
             - name: LDAP_DOMAIN_DC
               value: {{ .Values.ldap.domain | quote }}
@@ -60,6 +67,8 @@ spec:
               mountPath: /ldap-config
             - name: ldap-data
               mountPath: /ldap-data
+            - name: tmp
+              mountPath: /tmp
             {{- if .Values.ldap.tls.enabled }}
             - name: ldap-tls
               mountPath: /etc/openldap/tls
@@ -98,6 +107,8 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
@@ -116,6 +127,10 @@ spec:
           emptyDir: {}
           {{- end }}
         - name: ldap-run
+          emptyDir: {}
+        - name: tmp
+          # Writable /tmp for bootstrap.sh ($TMP_CONF). Lets the init container
+          # run with readOnlyRootFilesystem=true.
           emptyDir: {}
         {{- if .Values.ldap.tls.enabled }}
         - name: ldap-tls
