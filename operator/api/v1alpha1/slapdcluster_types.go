@@ -328,8 +328,24 @@ type SlapdClusterSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	ReadReplicas int32 `json:"readReplicas,omitempty"`
-	// logLevel is the slapd -d debug level. 0 disables debug output.
-	// +kubebuilder:default=0
+	// logLevel is the slapd -d debug bitmask. Default 256 ("stats") logs the
+	// startup banner, connection accept/close, bind, and operation results —
+	// the bare minimum to know slapd is alive and to debug why a client got
+	// rejected. Higher levels add detail (see slapd.conf(5) "loglevel"):
+	//
+	//   0   no debug output at all (slapd is healthy but kubectl logs is empty
+	//       — useful only when log volume itself is the problem)
+	//   1   trace function calls (very noisy)
+	//   32  search filter processing
+	//   64  configuration processing
+	//   128 access control list processing
+	//   256 stats — recommended default
+	//   16384 sync replication (consumer side)
+	//   32768 sync replication (provider side)
+	//   -1  everything (firehose; only for one-off debugging)
+	//
+	// Bitmasks combine, e.g. 256+128=384 for stats+ACL.
+	// +kubebuilder:default=256
 	LogLevel int32 `json:"logLevel,omitempty"`
 	// persistence configures persistent storage for config and data volumes.
 	// +optional

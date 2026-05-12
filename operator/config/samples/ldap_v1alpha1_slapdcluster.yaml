@@ -23,7 +23,8 @@ spec:
 
   # Set replicas > 1 together with replication.enabled=true for N-way multi-master.
   replicas: 1
-  logLevel: 0
+  # logLevel is a slapd debug bitmask; omit to use the default 256 (stats).
+  # Set to 0 to silence slapd entirely.
 
   persistence:
     enabled: true

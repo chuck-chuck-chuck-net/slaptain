@@ -38,8 +38,10 @@ replicas: 1
 # -- Number of read-only consumer replicas. Requires replication.enabled=true.
 readReplicas: 0
 
-# -- slapd -d log level. 0 disables debug output.
-logLevel: 0
+# -- slapd -d debug bitmask. 256 = "stats" (startup banner + connection/op lines).
+# Set to 0 to silence slapd entirely. See SlapdCluster.spec.logLevel godoc for
+# the full bit table.
+logLevel: 256
 
 # -- Persistent storage.
 persistence:
