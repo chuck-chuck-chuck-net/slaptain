@@ -108,7 +108,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown import import-init import-slapd import-toolkit import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean show-tag
+.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean show-tag
 
 all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl
 
@@ -322,6 +322,22 @@ e2e-multisite-test:
 ## e2e-multisite-teardown: remove multi-site infrastructure
 e2e-multisite-teardown:
 	./tests/e2e-multisite.sh teardown $(CONTEXTS)
+
+## e2e-migration: full migration-scenario setup + test + teardown (ADR-010 3f).
+## Stands up a "fake-prod" SlapdCluster (peer, plain syncrepl) and a slaptain
+## SlapdCluster (consumer-only) in two namespaces, then exercises in-place
+## promotion (consumer-only → peer) with operational-attribute preservation.
+e2e-migration:
+	./tests/e2e-migration.sh all $(CONTEXT)
+
+e2e-migration-setup:
+	./tests/e2e-migration.sh setup $(CONTEXT)
+
+e2e-migration-test:
+	./tests/e2e-migration.sh test $(CONTEXT)
+
+e2e-migration-teardown:
+	./tests/e2e-migration.sh teardown $(CONTEXT)
 
 show-tag: ## Print the current GIT_TAG used for image tagging
 	@echo $(GIT_TAG)

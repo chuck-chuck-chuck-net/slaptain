@@ -490,6 +490,50 @@ make e2e-multisite-teardown CONTEXTS="s1 s2"
 
 ---
 
+## Migration scenario tests (consumer-only ↔ peer, ADR-010 3f)
+
+Exercises the hot-migration mode transitions in a single Kubernetes cluster by
+standing up two SlapdClusters in separate namespaces:
+
+| Cluster | Namespace | Role |
+|---|---|---|
+| `fakeprod` | `fakeprod` | Peer-mode slaptain with `deltaSync: false` — mimics a legacy non-slaptain provider that speaks plain syncrepl |
+| `slaptain` | `slaptain-target` | Starts in `mode: consumer-only` with an externalPeer pointing at `fakeprod` via in-cluster DNS |
+
+```bash
+make e2e-migration                # full setup + test + teardown
+# or step-by-step:
+make e2e-migration-setup
+make e2e-migration-test
+make e2e-migration-teardown
+```
+
+The Ginkgo spec (`tests/e2e/migration_test.go`, labeled `migration`) asserts:
+
+1. The seeded entry from `fakeprod` reaches `slaptain` via plain syncrepl.
+2. Operational attributes are preserved (`entryUUID` non-empty).
+3. Writes to `slaptain` in consumer-only mode are rejected with
+   `unwillingToPerform` (slapd's response when `olcReadOnly: TRUE`).
+4. Patching `spec.replication.mode: peer` triggers in-place promotion —
+   `status.replicationMode` converges to `peer` without recreating the pod
+   (asserted via pod UID + slapd container `StartedAt` comparison).
+5. Writes succeed post-promotion.
+6. `entryUUID` of the pre-existing entry is unchanged after promotion (no
+   data re-sync happened — the promotion was metadata-only).
+
+### Configuration env vars
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `NAMESPACE_OPERATOR` | `slaptain` | Operator namespace |
+| `NAMESPACE_FAKEPROD` | `fakeprod` | Source-cluster namespace |
+| `NAMESPACE_SLAPTAIN` | `slaptain-target` | Target-cluster namespace |
+| `NODEPORT_SLAPTAIN` | `30389` | NodePort for slaptain LDAP access from the test runner |
+| `SUFFIX` | `dc=example,dc=org` | Shared base DN |
+| `SHARED_REPL_PW` | random | Plaintext replication-bind password (must match across both clusters) |
+
+---
+
 ## Debugging with the toolkit
 
 The slapd image is distroless and has no shell. For interactive LDAP debugging there are two
