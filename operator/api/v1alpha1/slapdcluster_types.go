@@ -290,6 +290,27 @@ type SlapdReplicationConfig struct {
 	// When true, the init container sets up syncprov and accesslog overlays.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
+	// mode selects the cluster's replication role. See ADR-010.
+	//
+	//   peer (default) — every RW pod is a full multi-master peer. Accesslog
+	//     and syncprov overlays are provisioned, in-cluster syncrepl mesh is
+	//     established, and the cluster accepts writes from clients.
+	//
+	//   consumer-only — the cluster is read-only and consumes data from
+	//     externalPeers without advertising itself as a write source. No
+	//     accesslog DB, no syncprov/accesslog overlays, no in-cluster mesh,
+	//     and the data DB has olcReadOnly=TRUE. Use this during a hot
+	//     migration: slaptain pulls from a legacy source while clients still
+	//     write to the source, then is promoted to "peer" in place at cutover
+	//     without re-syncing data.
+	//
+	// consumer-only requires externalPeers and is incompatible with readReplicas>0
+	// (the cluster is already read-only). Promotion/demotion is in-place — pod
+	// identity and data on disk are preserved across mode transitions.
+	// +kubebuilder:validation:Enum=peer;consumer-only
+	// +kubebuilder:default=peer
+	// +optional
+	Mode string `json:"mode,omitempty"`
 	// accesslogEnabled overrides the operator's automatic decision about whether
 	// to bootstrap the accesslog DB + PVC + container mounts for delta-syncrepl.
 	//
@@ -340,6 +361,9 @@ type SlapdReplicationConfig struct {
 }
 
 // SlapdClusterSpec defines the desired state of SlapdCluster.
+//
+// +kubebuilder:validation:XValidation:rule="self.replication.mode != 'consumer-only' || size(self.replication.externalPeers) > 0",message="replication.mode=consumer-only requires at least one replication.externalPeers entry"
+// +kubebuilder:validation:XValidation:rule="self.replication.mode != 'consumer-only' || !has(self.readReplicas) || self.readReplicas == 0",message="replication.mode=consumer-only is incompatible with readReplicas>0 (the whole cluster is already read-only)"
 type SlapdClusterSpec struct {
 	// suspend pauses the operator's reconciliation of this resource. Existing
 	// StatefulSets, Services, and Secrets are left in place; the operator stops
@@ -460,6 +484,11 @@ type SlapdClusterStatus struct {
 	// phase summarises the current lifecycle state.
 	// +optional
 	Phase SlapdClusterPhase `json:"phase,omitempty"`
+	// replicationMode reflects the observed replication mode (ADR-010). Equals
+	// spec.replication.mode in steady state; may lag spec briefly during an
+	// in-place promotion or demotion (3d, not yet implemented).
+	// +optional
+	ReplicationMode string `json:"replicationMode,omitempty"`
 	// readyReplicas is the number of pods reporting Ready.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
@@ -536,6 +565,11 @@ func init() {
 // Always false when spec.replication.enabled is false — without replication
 // infrastructure as a whole, accesslog alone is meaningless.
 //
+// Always false in consumer-only mode (ADR-010) — the cluster does not produce
+// writes, so there is nothing for an accesslog to record. The explicit
+// accesslogEnabled override is intentionally not respected in consumer-only
+// (forcing accesslog on a read-only DB makes no sense).
+//
 // Otherwise: honor spec.replication.accesslogEnabled if explicitly set, else
 // derive — on when there is a consumer for the change journal (replicas > 1
 // or externalPeers configured), off otherwise.
@@ -543,8 +577,18 @@ func (sc *SlapdCluster) NeedsAccesslog() bool {
 	if !sc.Spec.Replication.Enabled {
 		return false
 	}
+	if sc.IsConsumerOnly() {
+		return false
+	}
 	if sc.Spec.Replication.AccesslogEnabled != nil {
 		return *sc.Spec.Replication.AccesslogEnabled
 	}
 	return sc.Spec.Replicas > 1 || len(sc.Spec.Replication.ExternalPeers) > 0
+}
+
+// IsConsumerOnly reports whether the cluster is configured for consumer-only
+// replication (ADR-010). True when spec.replication.mode == "consumer-only"
+// AND replication is enabled — the mode is meaningless without replication.
+func (sc *SlapdCluster) IsConsumerOnly() bool {
+	return sc.Spec.Replication.Enabled && sc.Spec.Replication.Mode == "consumer-only"
 }

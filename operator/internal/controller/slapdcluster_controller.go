@@ -180,6 +180,16 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	sc.Status.ReadyReplicas = ready
 	sc.Status.ObservedGeneration = sc.Generation
 
+	// ReplicationMode reflects what the controller is reconciling toward. In
+	// steady state, equals spec.replication.mode (or "peer" by default). 3d
+	// (in-place promotion/demotion) will let this lag spec briefly during a
+	// transition; for now it tracks spec verbatim.
+	mode := sc.Spec.Replication.Mode
+	if mode == "" {
+		mode = "peer"
+	}
+	sc.Status.ReplicationMode = mode
+
 	// Read-only StatefulSet status (informational only — does not affect phase).
 	if sc.Spec.ReadReplicas > 0 {
 		roSts := &appsv1.StatefulSet{}

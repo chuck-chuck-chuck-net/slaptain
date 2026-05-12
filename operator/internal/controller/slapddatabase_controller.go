@@ -391,8 +391,9 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	dataDN, err := findDataDBDN(conn, sd.Spec.Suffix)
 	if err != nil {
 		// Database doesn't exist yet — create it.
-		log.Info("creating database", "host", host, "suffix", sd.Spec.Suffix)
-		dataDN, err = r.createDatabase(conn, sd, rootPW)
+		log.Info("creating database", "host", host, "suffix", sd.Spec.Suffix,
+			"consumerOnly", sc.IsConsumerOnly())
+		dataDN, err = r.createDatabase(conn, sd, sc, rootPW)
 		if err != nil {
 			return fmt.Errorf("create database at %s: %w", host, err)
 		}
@@ -426,7 +427,10 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	// Apply replication overlays (accesslog + syncprov on data DB) when delta-sync
 	// is enabled. These are cn=config overlays on the data database entry, separate
 	// from the accesslog DB itself (which is set up by the init container).
-	if sd.Spec.Replication != nil && sd.Spec.Replication.DeltaSync && !readOnly {
+	//
+	// Consumer-only mode (ADR-010): no accesslog/syncprov overlays — the cluster
+	// is read-only and produces no writes for syncprov to publish.
+	if sd.Spec.Replication != nil && sd.Spec.Replication.DeltaSync && !readOnly && !sc.IsConsumerOnly() {
 		if err := r.ensureReplicationOverlays(ctx, conn, host, dataDN, sd); err != nil {
 			return fmt.Errorf("ensure replication overlays at %s: %w", host, err)
 		}
@@ -436,9 +440,12 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 }
 
 // createDatabase adds a new olcDatabase={N}mdb entry to cn=config.
+// In consumer-only mode (ADR-010), the new entry is marked olcReadOnly=TRUE
+// so client writes are rejected; data still arrives via syncrepl.
 func (r *SlapdDatabaseReconciler) createDatabase(
 	conn *ldap.Conn,
 	sd *ldapv1alpha1.SlapdDatabase,
+	sc *ldapv1alpha1.SlapdCluster,
 	rootPW string,
 ) (string, error) {
 	rootDN := sd.Spec.RootDN
@@ -482,6 +489,13 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 
 	// Default index on objectClass.
 	addReq.Attribute("olcDbIndex", []string{"objectClass eq"})
+
+	// Consumer-only mode: stamp olcReadOnly=TRUE on the data DB so the cluster
+	// rejects client writes while still accepting syncrepl updates from
+	// externalPeers. See ADR-010.
+	if sc.IsConsumerOnly() {
+		addReq.Attribute("olcReadOnly", []string{"TRUE"})
+	}
 
 	if err := conn.Add(addReq); err != nil {
 		return "", err
@@ -1105,6 +1119,15 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		replNetIPs = sc.Status.ReplicationNetworkIPs
 	}
 
+	// Consumer-only mode (ADR-010): no in-cluster mesh and no MultiProvider —
+	// each pod independently consumes from externalPeers, the data DB is
+	// olcReadOnly=TRUE, and slapd does not advertise as a write source.
+	consumerOnly := sc.IsConsumerOnly()
+	multiProvider := "TRUE"
+	if consumerOnly {
+		multiProvider = "FALSE"
+	}
+
 	// Apply to RW pods.
 	for i := int32(0); i < replicas; i++ {
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
@@ -1118,9 +1141,10 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			useDeltaSync,
 			externalPeers,
 			replNetIPs,
+			consumerOnly,
 		)
 
-		if err := r.applySyncreplToPod(ctx, host, configPW, sd.Spec.Suffix, desired, "TRUE"); err != nil {
+		if err := r.applySyncreplToPod(ctx, host, configPW, sd.Spec.Suffix, desired, multiProvider); err != nil {
 			log.Info("replication reconcile skipped for pod (will retry)",
 				"ordinal", i, "host", host, "err", err)
 			skipped = true
@@ -1190,6 +1214,7 @@ func buildDatabaseSyncRepl(
 	deltaSync bool,
 	externalPeers []resolvedExternalPeer,
 	replNetIPs map[string]string,
+	consumerOnly bool,
 ) []string {
 	var stanzas []string
 
@@ -1214,8 +1239,14 @@ func buildDatabaseSyncRepl(
 			` syncdata=accesslog`
 	}
 
-	// In-cluster stanzas.
-	for i := int32(0); i < replicas; i++ {
+	// In-cluster stanzas. Skipped entirely in consumer-only mode (ADR-010):
+	// each pod independently consumes from externalPeers and the cluster has
+	// no internal multi-master mesh.
+	inClusterReplicas := replicas
+	if consumerOnly {
+		inClusterReplicas = 0
+	}
+	for i := int32(0); i < inClusterReplicas; i++ {
 		if i == ordinal {
 			continue
 		}

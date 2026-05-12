@@ -434,6 +434,30 @@ spec:
                       keepalive sets the TCP keepalive parameters for syncrepl connections.
                       Format: "idle:probes:interval" (seconds), e.g. "300:10:60".
                     type: string
+                  mode:
+                    default: peer
+                    description: |-
+                      mode selects the cluster's replication role. See ADR-010.
+
+                        peer (default) — every RW pod is a full multi-master peer. Accesslog
+                          and syncprov overlays are provisioned, in-cluster syncrepl mesh is
+                          established, and the cluster accepts writes from clients.
+
+                        consumer-only — the cluster is read-only and consumes data from
+                          externalPeers without advertising itself as a write source. No
+                          accesslog DB, no syncprov/accesslog overlays, no in-cluster mesh,
+                          and the data DB has olcReadOnly=TRUE. Use this during a hot
+                          migration: slaptain pulls from a legacy source while clients still
+                          write to the source, then is promoted to "peer" in place at cutover
+                          without re-syncing data.
+
+                      consumer-only requires externalPeers and is incompatible with readReplicas>0
+                      (the cluster is already read-only). Promotion/demotion is in-place — pod
+                      identity and data on disk are preserved across mode transitions.
+                    enum:
+                    - peer
+                    - consumer-only
+                    type: string
                   network:
                     description: |-
                       network configures a dedicated replication network via Multus. When set,
@@ -832,6 +856,15 @@ spec:
             required:
             - images
             type: object
+            x-kubernetes-validations:
+            - message: replication.mode=consumer-only requires at least one replication.externalPeers
+                entry
+              rule: self.replication.mode != 'consumer-only' || size(self.replication.externalPeers)
+                > 0
+            - message: replication.mode=consumer-only is incompatible with readReplicas>0
+                (the whole cluster is already read-only)
+              rule: self.replication.mode != 'consumer-only' || !has(self.readReplicas)
+                || self.readReplicas == 0
           status:
             description: status defines the observed state of SlapdCluster.
             properties:
@@ -972,6 +1005,12 @@ spec:
                 description: replicas is the total number of pods (ready or not).
                 format: int32
                 type: integer
+              replicationMode:
+                description: |-
+                  replicationMode reflects the observed replication mode (ADR-010). Equals
+                  spec.replication.mode in steady state; may lag spec briefly during an
+                  in-place promotion or demotion (3d, not yet implemented).
+                type: string
               replicationNetworkIPs:
                 additionalProperties:
                   type: string

@@ -89,7 +89,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 			clusterName, headlessSvc, namespace, suffix,
 			replicas, ordinal, replPW,
 			true, ridBase, retry, keepalive, deltaSync,
-			peers, nil,
+			peers, nil, false,
 		)
 	}
 
@@ -190,6 +190,41 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 		// IP-detection path must NOT mark the DNS URI as IP-based.
 		if strings.Contains(ext[0], "tls_reqcert=allow") {
 			t.Fatalf("URI-mode DNS peer should not get tls_reqcert=allow: %s", ext[0])
+		}
+	})
+
+	t.Run("consumer-only suppresses in-cluster stanzas, keeps external", func(t *testing.T) {
+		// In consumer-only mode (ADR-010), each pod independently consumes from
+		// externalPeers — there is no in-cluster mesh.
+		peers := []resolvedExternalPeer{{
+			Name:            "legacy-prod",
+			URIs:            []string{"ldaps://10.1.1.20:636"},
+			ReplicasPerPeer: 1,
+			BindDN:          "cn=syncuser,ou=config,o=example",
+			Password:        "pw",
+			PlainSyncRepl:   true,
+		}}
+		stanzas := buildDatabaseSyncRepl(
+			clusterName, headlessSvc, namespace, suffix,
+			replicas, 0, replPW,
+			true, ridBase, retry, keepalive, deltaSync,
+			peers, nil, true, // consumerOnly=true
+		)
+		// No in-cluster peers means no slapd-1 or slapd-2 references.
+		for _, s := range stanzas {
+			if strings.Contains(s, headlessSvc) {
+				t.Fatalf("consumer-only emitted in-cluster stanza: %s", s)
+			}
+		}
+		// External peer stanza is present.
+		if len(filterExternal(stanzas, "10.1.1.20")) != 1 {
+			t.Fatalf("consumer-only: external stanza missing in %v", stanzas)
+		}
+		// Plain-syncrepl peer must NOT carry delta opts.
+		for _, s := range stanzas {
+			if strings.Contains(s, "syncdata=accesslog") || strings.Contains(s, "logbase") {
+				t.Fatalf("plain-syncrepl peer carries delta opts: %s", s)
+			}
 		}
 	})
 }
