@@ -10,6 +10,12 @@ images:
     tag: latest
     pullPolicy: IfNotPresent
 
+# imagePullSecrets: list of LocalObjectReferences for pulling images from a
+# private registry. Alternative: patch the default ServiceAccount in the
+# workload namespace with its own imagePullSecrets and leave this empty.
+imagePullSecrets: []
+# - name: ghcr-pull-secret
+
 ldap:
   domain: "dc=example,dc=org"
   forceRebootstrap: false

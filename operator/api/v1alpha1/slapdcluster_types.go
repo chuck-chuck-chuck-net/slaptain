@@ -335,7 +335,14 @@ type SlapdClusterSpec struct {
 	// replication configures N-way multi-master delta-syncrepl replication (Phase 2+).
 	// +optional
 	Replication SlapdReplicationConfig `json:"replication,omitempty"`
-	// imagePullSecrets is a list of references to secrets for pulling container images.
+	// imagePullSecrets references Secrets in the same namespace that the kubelet
+	// uses to pull the slapd and slapd-init images. Each Secret must be of
+	// type kubernetes.io/dockerconfigjson. Equivalent to setting imagePullSecrets
+	// on the StatefulSet pod template directly.
+	//
+	// Alternative if you standardize pull secrets at the namespace level: skip
+	// this field and patch the default ServiceAccount in the workload namespace
+	// with its own imagePullSecrets; the kubelet inherits them automatically.
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }

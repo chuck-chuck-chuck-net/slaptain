@@ -59,8 +59,15 @@ spec:
             description: spec defines the desired state of SlapdCluster.
             properties:
               imagePullSecrets:
-                description: imagePullSecrets is a list of references to secrets for
-                  pulling container images.
+                description: |-
+                  imagePullSecrets references Secrets in the same namespace that the kubelet
+                  uses to pull the slapd and slapd-init images. Each Secret must be of
+                  type kubernetes.io/dockerconfigjson. Equivalent to setting imagePullSecrets
+                  on the StatefulSet pod template directly.
+
+                  Alternative if you standardize pull secrets at the namespace level: skip
+                  this field and patch the default ServiceAccount in the workload namespace
+                  with its own imagePullSecrets; the kubelet inherits them automatically.
                 items:
                   description: |-
                     LocalObjectReference contains enough information to let you locate the
