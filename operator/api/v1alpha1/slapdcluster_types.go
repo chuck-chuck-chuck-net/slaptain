@@ -62,7 +62,19 @@ type SlapdTLSConfig struct {
 	// enabled controls whether TLS/LDAPS is active.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
-	// secretName is the name of the TLS Secret containing tls.crt, tls.key, and ca.crt.
+	// secretName is the name of the TLS Secret. Required keys: tls.crt
+	// (server certificate, full chain) and tls.key (private key). Optional
+	// key: ca.crt — a separate CA bundle for verifying peer/client certs.
+	//
+	// Public-CA certs (Let's Encrypt, ZeroSSL, cert-manager with a public
+	// Issuer) embed the chain in tls.crt and need no separate ca.crt; the
+	// init container skips the TLSCACertificateFile directive and slapd
+	// falls back to OpenSSL's system trust store, which is the right answer
+	// for verifying peers signed by a public CA.
+	//
+	// Provide ca.crt when running against a private/self-signed PKI, when
+	// requiring client certificate authentication, or when cross-site
+	// syncrepl peers present certs from an internal CA.
 	SecretName string `json:"secretName,omitempty"`
 }
 

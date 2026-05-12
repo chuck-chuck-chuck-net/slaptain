@@ -91,10 +91,23 @@ EOF
     if [[ "${LDAP_TLS_ENABLED^^}" == "TRUE" ]]; then
         cat <<EOF >> "$TMP_CONF"
 
-TLSCACertificateFile ${LDAP_TLS_CACERT_PATH:-/etc/openldap/tls/ca.crt}
 TLSCertificateFile ${LDAP_TLS_CERT_PATH:-/etc/openldap/tls/tls.crt}
 TLSCertificateKeyFile ${LDAP_TLS_KEY_PATH:-/etc/openldap/tls/tls.key}
 EOF
+        # TLSCACertificateFile is optional. Public-CA certs (Let's Encrypt
+        # etc.) embed the chain in tls.crt and don't need a separate CA file —
+        # slapd falls back to OpenSSL's system trust store. Self-signed or
+        # private-PKI setups should mount ca.crt alongside tls.crt/tls.key;
+        # only then do we emit the directive. Setting it to a missing file is
+        # a hard error in slapd (TLS init def ctx failed: -1).
+        cacert_path="${LDAP_TLS_CACERT_PATH:-/etc/openldap/tls/ca.crt}"
+        if [[ -f "$cacert_path" ]]; then
+            cat <<EOF >> "$TMP_CONF"
+TLSCACertificateFile $cacert_path
+EOF
+        else
+            echo "TLS: ca.crt not present at $cacert_path — relying on OpenSSL system trust store"
+        fi
     fi
 
     # ── Config database ────────────────────────────────────────────────────────
