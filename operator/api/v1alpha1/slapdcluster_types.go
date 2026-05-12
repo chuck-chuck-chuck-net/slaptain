@@ -36,8 +36,11 @@ type SlapdImageConfig struct {
 	// repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
 	// +required
 	Repository string `json:"repository"`
-	// tag is the image tag.
-	// +kubebuilder:default="latest"
+	// tag is the image tag. When empty, the operator substitutes its own image
+	// tag at reconcile time — so "I want slapd/init at the version that shipped
+	// with this operator" is the implicit default. Set this explicitly only when
+	// you need to pin slapd/init to a different version than the operator.
+	// +optional
 	Tag string `json:"tag,omitempty"`
 	// pullPolicy is the image pull policy.
 	// +kubebuilder:default=IfNotPresent
@@ -260,6 +263,23 @@ type SlapdReplicationConfig struct {
 	// When true, the init container sets up syncprov and accesslog overlays.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
+	// accesslogEnabled overrides the operator's automatic decision about whether
+	// to bootstrap the accesslog DB + PVC + container mounts for delta-syncrepl.
+	//
+	// Tristate:
+	//   nil   — derive (the default): on when replicas > 1 OR externalPeers are
+	//           configured, off otherwise.
+	//   true  — force on. Use when undeclared external consumers (replicas the
+	//           operator doesn't manage, e.g. a third party's RO mirror)
+	//           connect via delta-syncrepl and need an accesslog journal here.
+	//   false — force off. Save the per-write LMDB amplification of accesslog
+	//           writes. Setting this with replicas > 1 will break in-cluster
+	//           delta-sync replication — use only when you really know.
+	//
+	// Honored only when enabled=true; otherwise no replication infrastructure
+	// is provisioned at all.
+	// +optional
+	AccesslogEnabled *bool `json:"accesslogEnabled,omitempty"`
 	// externalPeers lists cross-cluster peers for multi-site replication.
 	// +optional
 	ExternalPeers []ExternalPeer `json:"externalPeers,omitempty"`
@@ -434,4 +454,25 @@ type SlapdClusterList struct {
 
 func init() {
 	SchemeBuilder.Register(&SlapdCluster{}, &SlapdClusterList{})
+}
+
+// NeedsAccesslog reports whether the cluster needs the accesslog DB +
+// PVC/volume + container mounts for delta-syncrepl. Single source of truth
+// consulted by both the SlapdCluster controller (infrastructure provisioning)
+// and the SlapdDatabase controller (ACL prepend, syncrepl stanza gating).
+//
+// Always false when spec.replication.enabled is false — without replication
+// infrastructure as a whole, accesslog alone is meaningless.
+//
+// Otherwise: honor spec.replication.accesslogEnabled if explicitly set, else
+// derive — on when there is a consumer for the change journal (replicas > 1
+// or externalPeers configured), off otherwise.
+func (sc *SlapdCluster) NeedsAccesslog() bool {
+	if !sc.Spec.Replication.Enabled {
+		return false
+	}
+	if sc.Spec.Replication.AccesslogEnabled != nil {
+		return *sc.Spec.Replication.AccesslogEnabled
+	}
+	return sc.Spec.Replicas > 1 || len(sc.Spec.Replication.ExternalPeers) > 0
 }

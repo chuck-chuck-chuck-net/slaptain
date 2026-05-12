@@ -41,6 +41,12 @@ spec:
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --metrics-secure=false
             {{- end }}
+          env:
+            # Default tag the operator substitutes into SlapdCluster.spec.images.{slapd,init}
+            # when the user leaves them blank. Tracks Chart.AppVersion so data-plane
+            # images stay aligned with the operator that shipped them.
+            - name: OPERATOR_IMAGE_TAG
+              value: "{{ .Values.image.tag | default .Chart.AppVersion }}"
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

@@ -179,8 +179,9 @@ func main() {
 	}
 
 	if err := (&controller.SlapdClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdCluster")
 		os.Exit(1)

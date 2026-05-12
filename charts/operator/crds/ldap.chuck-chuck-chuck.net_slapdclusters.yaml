@@ -92,8 +92,11 @@ spec:
                         description: repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
                         type: string
                       tag:
-                        default: latest
-                        description: tag is the image tag.
+                        description: |-
+                          tag is the image tag. When empty, the operator substitutes its own image
+                          tag at reconcile time — so "I want slapd/init at the version that shipped
+                          with this operator" is the implicit default. Set this explicitly only when
+                          you need to pin slapd/init to a different version than the operator.
                         type: string
                     required:
                     - repository
@@ -109,8 +112,11 @@ spec:
                         description: repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
                         type: string
                       tag:
-                        default: latest
-                        description: tag is the image tag.
+                        description: |-
+                          tag is the image tag. When empty, the operator substitutes its own image
+                          tag at reconcile time — so "I want slapd/init at the version that shipped
+                          with this operator" is the implicit default. Set this explicitly only when
+                          you need to pin slapd/init to a different version than the operator.
                         type: string
                     required:
                     - repository
@@ -247,6 +253,24 @@ spec:
                 description: replication configures N-way multi-master delta-syncrepl
                   replication (Phase 2+).
                 properties:
+                  accesslogEnabled:
+                    description: |-
+                      accesslogEnabled overrides the operator's automatic decision about whether
+                      to bootstrap the accesslog DB + PVC + container mounts for delta-syncrepl.
+
+                      Tristate:
+                        nil   — derive (the default): on when replicas > 1 OR externalPeers are
+                                configured, off otherwise.
+                        true  — force on. Use when undeclared external consumers (replicas the
+                                operator doesn't manage, e.g. a third party's RO mirror)
+                                connect via delta-syncrepl and need an accesslog journal here.
+                        false — force off. Save the per-write LMDB amplification of accesslog
+                                writes. Setting this with replicas > 1 will break in-cluster
+                                delta-sync replication — use only when you really know.
+
+                      Honored only when enabled=true; otherwise no replication infrastructure
+                      is provisioned at all.
+                    type: boolean
                   enabled:
                     default: false
                     description: |-

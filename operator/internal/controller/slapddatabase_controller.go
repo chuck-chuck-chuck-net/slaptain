@@ -468,11 +468,10 @@ func (r *SlapdDatabaseReconciler) applyACLs(
 ) error {
 	log := logf.FromContext(ctx)
 
-	// Build effective ACL list. When replication is enabled, prepend a rule
+	// Build effective ACL list. When replication is active, prepend a rule
 	// granting the replication bind DN read access to all attributes.
 	acls := sd.Spec.ACLs
-	replicationEnabled := sc.Spec.Replication.Enabled && sc.Spec.Replicas > 1
-	if replicationEnabled || len(sc.Spec.Replication.ExternalPeers) > 0 {
+	if sc.NeedsAccesslog() {
 		replACL := fmt.Sprintf(
 			`to * by dn.exact="cn=replication,%s" read by * break`,
 			sd.Spec.Suffix)
@@ -948,10 +947,9 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	if replicas == 0 {
 		replicas = 1
 	}
-	// Skip only when there is genuinely nothing to replicate to: single local
-	// pod AND no external peers. Single-pod-per-site cross-site delta-sync
-	// still needs syncrepl stanzas for the external peers.
-	if replicas < 2 && len(sc.Spec.Replication.ExternalPeers) == 0 {
+	// Skip when there is no replication consumer at all. Same condition as
+	// the accesslog infrastructure gate — single source of truth.
+	if !sc.NeedsAccesslog() {
 		return false, nil
 	}
 

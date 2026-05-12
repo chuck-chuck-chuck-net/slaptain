@@ -70,6 +70,25 @@ const (
 type SlapdClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// DefaultImageTag is the tag substituted into SlapdCluster.spec.images.{slapd,init}
+	// when the user leaves them blank. Wired from the OPERATOR_IMAGE_TAG env in
+	// the operator Deployment (Helm chart injects it from Chart.AppVersion), so
+	// "unpinned" data-plane images track the operator's own version. Empty falls
+	// back to "latest" so `make run` outside a cluster still works.
+	DefaultImageTag string
+}
+
+// imageRef builds the "repository:tag" image reference for a data-plane image,
+// falling back to the operator's running tag (then "latest") when unpinned.
+func (r *SlapdClusterReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig) string {
+	tag := img.Tag
+	if tag == "" {
+		tag = r.DefaultImageTag
+	}
+	if tag == "" {
+		tag = "latest"
+	}
+	return img.Repository + ":" + tag
 }
 
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters,verbs=get;list;watch;create;update;patch;delete
@@ -555,12 +574,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
-	// replicationEnabled gates the accesslog DB + PVC + mounts. True when either
-	// in-cluster multi-master (replicas > 1) or cross-site replication
-	// (externalPeers) is active — both modes require the accesslog/syncprov
-	// infrastructure on the data DB.
-	replicationEnabled := sc.Spec.Replication.Enabled &&
-		(sc.Spec.Replicas > 1 || len(sc.Spec.Replication.ExternalPeers) > 0)
+	replicationEnabled := sc.NeedsAccesslog()
 
 	// Pod security context.
 	podSecCtx := sc.Spec.SecurityContext
@@ -730,10 +744,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		})
 	}
 
-	initImage := sc.Spec.Images.Init.Repository
-	if sc.Spec.Images.Init.Tag != "" {
-		initImage += ":" + sc.Spec.Images.Init.Tag
-	}
+	initImage := r.imageRef(sc.Spec.Images.Init)
 
 	initContainer := corev1.Container{
 		Name:            "init",
@@ -784,10 +795,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		ReadOnlyRootFilesystem:   &trueVal,
 	}
 
-	mainImage := sc.Spec.Images.Slapd.Repository
-	if sc.Spec.Images.Slapd.Tag != "" {
-		mainImage += ":" + sc.Spec.Images.Slapd.Tag
-	}
+	mainImage := r.imageRef(sc.Spec.Images.Slapd)
 
 	mainContainer := corev1.Container{
 		Name:            "slapd",
