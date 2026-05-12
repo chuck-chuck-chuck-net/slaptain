@@ -429,10 +429,17 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	// from the accesslog DB itself (which is set up by the init container).
 	//
 	// Consumer-only mode (ADR-010): no accesslog/syncprov overlays — the cluster
-	// is read-only and produces no writes for syncprov to publish.
-	if sd.Spec.Replication != nil && sd.Spec.Replication.DeltaSync && !readOnly && !sc.IsConsumerOnly() {
+	// is read-only and produces no writes for syncprov to publish. If the data DB
+	// was previously a peer (had overlays), tear them down here as part of
+	// in-place demotion (3e).
+	overlaysWanted := sd.Spec.Replication != nil && sd.Spec.Replication.DeltaSync && !readOnly && !sc.IsConsumerOnly()
+	if overlaysWanted {
 		if err := r.ensureReplicationOverlays(ctx, conn, host, dataDN, sd); err != nil {
 			return fmt.Errorf("ensure replication overlays at %s: %w", host, err)
+		}
+	} else if !readOnly {
+		if err := r.removeReplicationOverlays(ctx, conn, host, dataDN); err != nil {
+			return fmt.Errorf("remove replication overlays at %s: %w", host, err)
 		}
 	}
 
@@ -755,6 +762,50 @@ func (r *SlapdDatabaseReconciler) ensureReplicationOverlays(
 		}
 	}
 
+	return nil
+}
+
+// removeReplicationOverlays is the inverse of ensureReplicationOverlays: it
+// deletes any accesslog or syncprov overlay entry that currently lives under
+// the data DB's cn=config DN. Called during peer → consumer-only demotion
+// (ADR-010 3e) so the demoted DB doesn't carry stale overlays that record or
+// publish writes the cluster will never accept.
+//
+// Idempotent: missing overlays are not an error. Entries are deleted by their
+// actual DN (which carries the {N} ordering prefix slapd assigned at add
+// time) since the bare name "olcOverlay=accesslog,..." may not resolve when
+// slapd has reordered.
+func (r *SlapdDatabaseReconciler) removeReplicationOverlays(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+) error {
+	log := logf.FromContext(ctx)
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcOverlayConfig)", []string{"olcOverlay"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search overlays under %s: %w", dataDN, err)
+	}
+
+	for _, entry := range sr.Entries {
+		stripped := ""
+		if vals := entry.GetEqualFoldAttributeValues("olcOverlay"); len(vals) > 0 {
+			stripped = stripOrderingPrefix(vals[0])
+		}
+		if stripped != "accesslog" && stripped != "syncprov" {
+			continue
+		}
+		log.Info("removing replication overlay", "host", host, "overlay", stripped, "dn", entry.DN)
+		if err := conn.Del(ldap.NewDelRequest(entry.DN, nil)); err != nil {
+			if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
+				continue
+			}
+			return fmt.Errorf("delete overlay %s: %w", entry.DN, err)
+		}
+	}
 	return nil
 }
 
