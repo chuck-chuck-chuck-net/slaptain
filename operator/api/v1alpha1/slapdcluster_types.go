@@ -344,14 +344,25 @@ type SlapdReplicationConfig struct {
 	// Format: "<interval> <count>" pairs, e.g. "10 +" (retry every 10s, indefinitely).
 	// +kubebuilder:default="10 +"
 	Retry string `json:"retry,omitempty"`
-	// serverIDBase shifts slaptain's per-pod ServerIDs out of the 1..N range
-	// when needed to coexist with an external cluster's existing ServerIDs.
+	// serverIDBase shifts slaptain's per-pod ServerIDs out of the 1..N range.
 	// Each pod's ServerID is computed as serverIDBase + ordinal + 1 (so the
 	// first pod with base=500 has ServerID 501, the second 502, etc.).
-	// Slapd requires unique non-zero ServerIDs across a multi-master mesh —
-	// during a hot migration alongside a legacy cluster that uses 101-104 and
-	// 201-204 (per ADR-011), set this to e.g. 500 to avoid collision. Default
-	// 0 yields IDs 1..N which is correct for a standalone slaptain cluster.
+	//
+	// **Required when this cluster participates in a multi-master mesh with
+	// any other cluster** (other slaptain instances via externalPeers, or a
+	// legacy prod cluster via plain-syncrepl interop). Slapd's CSN tracking
+	// uses ServerID to attribute writes to their origin; two clusters using
+	// overlapping ServerID ranges silently drop each other's writes because
+	// contextCSN tracks "highest CSN per serverID" — colliding serverIDs
+	// merge into a single bucket and updates appear already-seen. There is
+	// no validation slapd performs at startup; the only symptom is "my
+	// writes don't propagate," visible only via contextCSN inspection.
+	//
+	// Convention: assign each site/cluster its own decade or hundred. ADR-011
+	// codifies a legacy two-site layout (site A 101-104, site B 201-204); slaptain's
+	// e2e-multisite test uses site_idx*100. A standalone cluster (no
+	// externalPeers, no plans to add any) can leave this at 0.
+	//
 	// Valid range is 0..4094 (slapd caps ServerID at 4095).
 	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0

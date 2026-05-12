@@ -63,6 +63,12 @@ spec:
 
   replication:
     enabled: {{ .Values.replication.enabled }}
+    {{- if hasKey .Values.replication "serverIDBase" }}
+    serverIDBase: {{ .Values.replication.serverIDBase }}
+    {{- end }}
+    {{- if .Values.replication.mode }}
+    mode: {{ .Values.replication.mode | quote }}
+    {{- end }}
     {{- if .Values.replication.keepalive }}
     keepalive: {{ .Values.replication.keepalive | quote }}
     {{- end }}

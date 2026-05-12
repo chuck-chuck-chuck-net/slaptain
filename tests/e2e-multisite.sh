@@ -168,8 +168,10 @@ configure_multus_external_peers_static() {
     local helm_suffix="${DB_SUFFIX//,/\\,}"
     local helm_bind_dn="cn=replication\\,${helm_suffix}"
 
+    local site_idx=0
     for ctx in "${CONTEXTS[@]}"; do
-        log "[$ctx] Configuring externalPeers with static Multus podAddresses..."
+        local server_id_base=$((site_idx * 100))
+        log "[$ctx] Configuring externalPeers with static Multus podAddresses (serverIDBase=${server_id_base})..."
 
         local peer_sets=()
         local peer_idx=0
@@ -200,9 +202,11 @@ configure_multus_external_peers_static() {
             --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
             --set "images.init.tag=$GIT_TAG" \
             --set "replication.network.multusNetwork=$MULTUS_NETWORK" \
+            --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \
             ${HELM_VALUES_SLAPD_CLUSTER:-}
+        ((site_idx++)) || true
     done
 }
 
@@ -380,8 +384,15 @@ setup_slapd_clusters() {
     local helm_suffix="${DB_SUFFIX//,/\\,}"
     local helm_bind_dn="cn=replication\\,${helm_suffix}"
 
+    local site_idx=0
     for ctx in "${CONTEXTS[@]}"; do
-        log "[$ctx] Installing SlapdCluster..."
+        # Per-site serverIDBase keeps slapd's multimaster CSN tracking
+        # collision-free across sites. With base=site_idx*100 each cluster
+        # gets its own decade (siteA: 1-99, siteB: 101-199, ...) — matches
+        # the convention codified in ADR-011.
+        # Required for cross-cluster syncrepl to converge.
+        local server_id_base=$((site_idx * 100))
+        log "[$ctx] Installing SlapdCluster (serverIDBase=${server_id_base})..."
 
         local peer_sets=()
         local peer_idx=0
@@ -428,10 +439,12 @@ setup_slapd_clusters() {
             --set "images.slapd.tag=$GIT_TAG" \
             --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
             --set "images.init.tag=$GIT_TAG" \
+            --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \
             "${multus_sets[@]}" \
             ${HELM_VALUES_SLAPD_CLUSTER:-}
+        ((site_idx++)) || true
     done
 }
 
