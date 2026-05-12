@@ -394,6 +394,15 @@ kubectl create secret generic <cluster>-config-password \
   --from-literal=root-password='<plaintext-config-pw>'
 ```
 
+**`replication-password` is required when the cluster needs replication** (i.e.
+`replicas > 1` OR `externalPeers` configured — equivalently:
+`(*SlapdCluster).NeedsAccesslog()` returns true). For a single standalone pod
+with no peers it may be omitted. The operator does **not** patch missing keys
+into a user-provided Secret; a Secret missing a required key fails
+reconciliation with `phase=Error` / `reason=CredentialsInvalid` rather than
+silently breaking replication. If there's any chance you'll enable replication
+later, include `replication-password` preemptively (`openssl rand -base64 24`).
+
 Then reference (or rely on the default name) from the CR:
 
 ```yaml

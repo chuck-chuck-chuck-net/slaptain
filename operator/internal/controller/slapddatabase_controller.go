@@ -111,7 +111,9 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// 5. Reconcile credentials secret.
-	if err := r.reconcileCredentials(ctx, sd); err != nil {
+	if err := r.reconcileCredentials(ctx, sd, sc); err != nil {
+		r.setStatus(ctx, sd, ldapv1alpha1.DatabasePhaseError, nil, nil,
+			"CredentialsInvalid", err.Error())
 		return ctrl.Result{}, fmt.Errorf("reconcileCredentials: %w", err)
 	}
 
@@ -241,12 +243,35 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 // ── Credentials ──────────────────────────────────────────────────────────────
 
-// reconcileCredentials creates the per-database credentials secret if needed.
-func (r *SlapdDatabaseReconciler) reconcileCredentials(ctx context.Context, sd *ldapv1alpha1.SlapdDatabase) error {
+// reconcileCredentials creates the per-database credentials secret if needed,
+// or validates a user-provided Secret against the cluster's replication needs.
+func (r *SlapdDatabaseReconciler) reconcileCredentials(
+	ctx context.Context,
+	sd *ldapv1alpha1.SlapdDatabase,
+	sc *ldapv1alpha1.SlapdCluster,
+) error {
 	secretName := r.credentialsSecretName(sd)
 
-	// If user-provided, nothing to do.
+	// User-provided: validate required keys are present. The operator never
+	// patches missing keys into a BYO Secret (it would change the semantics of
+	// "bring your own"), so a missing replication-password silently produces an
+	// empty bind credential and a broken replication topology. Fail fast here
+	// instead.
 	if sd.Spec.Credentials.SecretName != "" {
+		existing := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, existing); err != nil {
+			return fmt.Errorf("read user-provided credentials Secret %s: %w", secretName, err)
+		}
+		if len(existing.Data["root-password"]) == 0 {
+			return fmt.Errorf("user-provided credentials Secret %s is missing required key \"root-password\"", secretName)
+		}
+		if sc.NeedsAccesslog() && len(existing.Data["replication-password"]) == 0 {
+			return fmt.Errorf(
+				"user-provided credentials Secret %s is missing key \"replication-password\" "+
+					"but the cluster needs it (replication.enabled=true with "+
+					"replicas>1 or externalPeers); add the key (plaintext) before the operator can configure syncrepl",
+				secretName)
+		}
 		return nil
 	}
 

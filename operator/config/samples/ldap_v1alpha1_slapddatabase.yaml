@@ -19,11 +19,16 @@ spec:
   #   #     name: example-db-credentials
   #   #   type: Opaque
   #   #   stringData:
-  #   #     root-password: "<plaintext for cn=admin,<suffix>>"            # required
-  #   #     replication-password: "<plaintext for cn=replication,...>"    # optional
+  #   #     root-password:        "<plaintext for cn=admin,<suffix>>"          # required
+  #   #     replication-password: "<plaintext for cn=replication,<suffix>>"    # required when
+  #   #                                                                        # replicas>1 or
+  #   #                                                                        # externalPeers set;
+  #   #                                                                        # optional otherwise
   #   #
   #   # The operator binds to slapd using these passwords — they must be plaintext,
-  #   # not {SSHA}/{ARGON2}/{CRYPT}. See docs/ONBOARDING.md §Secret and Credential Model.
+  #   # not {SSHA}/{ARGON2}/{CRYPT}. The operator does not patch missing keys into a
+  #   # user-provided Secret; a missing required key fails reconciliation with
+  #   # phase=Error / reason=CredentialsInvalid. See docs/ONBOARDING.md §Secret and Credential Model.
   #   secretName: example-db-credentials
 
   # dataDirectory defaults to "example" (sanitized suffix)

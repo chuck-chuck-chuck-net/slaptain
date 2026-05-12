@@ -101,11 +101,20 @@ spec:
                   secretName:
                     description: |-
                       secretName is the name of the Secret containing passwords for this database.
-                      Required keys: "root-password" (plaintext password for cn=admin,<suffix>).
-                      Optional keys: "replication-password" (plaintext bind password for
-                      cn=replication,<suffix>; auto-generated if missing and replication is enabled).
-                      When empty, the operator auto-generates a Secret named
-                      "<slapddatabase-name>-credentials".
+
+                      Keys (all plaintext):
+                        - "root-password" — required. Password for cn=admin,<suffix>.
+                        - "replication-password" — required when the cluster needs replication
+                          (replicas > 1 OR externalPeers configured). Bind password for
+                          cn=replication,<suffix>. May be omitted when the cluster is a single
+                          standalone pod with no peers.
+
+                      When this field is empty, the operator auto-generates a Secret named
+                      "<slapddatabase-name>-credentials" with both keys populated. When this
+                      field is set, the Secret is used as-is — the operator does NOT patch
+                      missing keys into it. A user-provided Secret missing a required key
+                      fails reconciliation with phase=Error / reason=CredentialsInvalid so the
+                      gap is surfaced at apply time rather than silently breaking replication.
 
                       Values MUST be plaintext, not {SSHA}/{ARGON2}/{CRYPT} hashes — the operator
                       binds to slapd using these passwords for ACL, schema, seed, and replication
