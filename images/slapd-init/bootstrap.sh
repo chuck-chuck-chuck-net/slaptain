@@ -62,7 +62,7 @@ if [[ "${FORCE_REBOOTSTRAP^^}" == "TRUE" ]]; then
     fi
 fi
 
-if [[ ! -d "$CONFIG_DIR/cn=config" ]]; then
+if [[ ! -d "$CONFIG_DIR/slapd.d/cn=config" ]]; then
     echo "Generating base configuration..."
 
     ROOT_PW_HASH=$(slappasswd -s "$LDAP_ROOT_PW" -h {SSHA})
@@ -149,10 +149,11 @@ EOF
     #   symbols are available without a slapd restart when the operator later
     #   adds the DB or its overlays.
 
-    # Convert slapd.conf to slapd.d format
-    slaptest -f "$TMP_CONF" -F "$CONFIG_DIR" || true
+    # Subdir under $CONFIG_DIR: slaptest -F requires an empty target dir, and
+    # ext4-backed PVCs (e.g. OpenEBS) always have lost+found at the volume root.
+    slaptest -f "$TMP_CONF" -F "$CONFIG_DIR/slapd.d"
     rm -f "$TMP_CONF"
 fi
 
 echo "Bootstrap complete."
-ls -R "$CONFIG_DIR"
+ls -R "$CONFIG_DIR/slapd.d"

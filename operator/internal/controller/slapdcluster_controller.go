@@ -955,7 +955,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		Args: []string{
 			"-h", "ldap://:1024/ ldaps://:1025/ ldapi://%2frun%2fopenldap%2fslapd.ldapi",
 			"-d", logLevel,
-			"-F", "/config",
+			"-F", "/config/slapd.d",
 		},
 		Ports: []corev1.ContainerPort{
 			{Name: "ldap", ContainerPort: ldapContainerPort, Protocol: corev1.ProtocolTCP},
