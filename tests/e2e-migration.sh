@@ -102,11 +102,33 @@ setup_operator() {
     $KUBECTL -n "$NAMESPACE_OPERATOR" rollout status deployment/slaptain-operator --timeout=120s
 }
 
-# Pre-create the shared replication password Secret in both namespaces. The
-# bind DN must exist on fake-prod (created by its SlapdDatabase seed entry)
-# and the same plaintext must be referenced by slaptain's externalPeer.
+# Pre-create credentials secrets so the operator's auto-gen logic adopts them
+# instead of generating fresh random passwords. The critical constraint:
+# fakeprod's cn=replication,<suffix> userPassword (hashed from
+# fakeprod-db-credentials.replication-password) must MATCH the plaintext
+# slaptain binds with (mig-replication-pw.replication-password). Without
+# this match, slaptain's syncrepl to fakeprod fails with ldap_sasl_bind_s=49.
+#
+# Two secrets, three roles:
+#
+#   - fakeprod/fakeprod-db-credentials  — adopted by the operator's
+#     reconcileCredentials (default name <sdname>-credentials). Holds a
+#     random root-password (cn=admin,<suffix>) and the SHARED replication-
+#     password used to stamp cn=replication's userPassword.
+#
+#   - {fakeprod,slaptain-target}/mig-replication-pw — referenced by
+#     slaptain's externalPeer.bindPasswordSecretName. Holds the same
+#     SHARED replication-password under both keys (`password` is the
+#     operator's preferred key; `replication-password` is the fallback).
 setup_shared_repl_secret() {
-    log "Pre-creating shared replication credentials Secret..."
+    log "Pre-creating shared replication credentials secrets..."
+    local fakeprod_root_pw="fakeprod-root-$(openssl rand -hex 6 2>/dev/null || echo cafebabe)"
+    $KUBECTL create secret generic fakeprod-db-credentials \
+        -n "$NAMESPACE_FAKEPROD" \
+        --from-literal=root-password="$fakeprod_root_pw" \
+        --from-literal=replication-password="$SHARED_REPL_PW" \
+        --dry-run=client -o yaml \
+        | $KUBECTL apply -f -
     for ns in "$NAMESPACE_FAKEPROD" "$NAMESPACE_SLAPTAIN"; do
         $KUBECTL create secret generic mig-replication-pw \
             -n "$ns" \

@@ -68,6 +68,16 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	By("Setting up CRD client for SlapdCluster access")
 	crdClient = newCRDClient()
 
+	// The migration scenario (tests/e2e/migration_test.go) uses two
+	// SlapdClusters in different namespaces with custom names; none of the
+	// legacy "slapd" cluster setup below applies. The migration spec does its
+	// own BeforeAll-scoped setup, so just hand it the k8sClient + crdClient
+	// and bail out early.
+	if os.Getenv("E2E_MIGRATION") == "1" {
+		By("E2E_MIGRATION=1 — skipping legacy slapd suite setup")
+		return
+	}
+
 	By("Waiting for slapd StatefulSet to be ready")
 	Eventually(ctx, func() bool {
 		return statefulSetReady(k8sClient, namespace, "slapd")
