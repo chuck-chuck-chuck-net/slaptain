@@ -433,7 +433,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	// Consumer-only mode (ADR-010 3e): tear down both halves. RW-pod path
 	// (!readOnly) is what manages the DB; RO StatefulSet pods never had the
 	// accesslog DB to begin with so we skip them here entirely.
-	overlaysWanted := sd.Spec.Replication != nil && sd.Spec.Replication.DeltaSync && !readOnly && !sc.IsConsumerOnly()
+	overlaysWanted := sd.DeltaSyncEnabled() && !readOnly && !sc.IsConsumerOnly()
 	if overlaysWanted {
 		if err := r.ensureAccesslogDB(ctx, conn, host); err != nil {
 			return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
@@ -1386,7 +1386,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	}
 	keepalive := sc.Spec.Replication.Keepalive
 
-	useDeltaSync := sd.Spec.Replication != nil && sd.Spec.Replication.DeltaSync
+	useDeltaSync := sd.DeltaSyncEnabled()
 
 	// Resolve replication network IPs for in-cluster peers (Multus, ADR-007).
 	// Only used when useForInCluster is true.

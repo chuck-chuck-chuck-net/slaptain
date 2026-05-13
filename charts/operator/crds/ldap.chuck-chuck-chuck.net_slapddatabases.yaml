@@ -166,6 +166,12 @@ spec:
                       deltaSync enables delta-syncrepl via the accesslog overlay for this database.
                       When true, the accesslog overlay is added to this database and syncrepl stanzas
                       use syncdata=accesslog. When false, plain syncrepl (full entry sync) is used.
+
+                      Tristate (*bool): nil falls back to the default (true). An explicit
+                      false must round-trip from kubectl through the API server unchanged,
+                      which a plain bool + omitempty + kubebuilder:default does NOT guarantee
+                      (false is the bool zero value, gets stripped at marshal time, and the
+                      API server fills the default back in).
                     type: boolean
                   ridBase:
                     description: |-

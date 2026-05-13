@@ -84,8 +84,15 @@ type DatabaseReplicationConfig struct {
 	// deltaSync enables delta-syncrepl via the accesslog overlay for this database.
 	// When true, the accesslog overlay is added to this database and syncrepl stanzas
 	// use syncdata=accesslog. When false, plain syncrepl (full entry sync) is used.
+	//
+	// Tristate (*bool): nil falls back to the default (true). An explicit
+	// false must round-trip from kubectl through the API server unchanged,
+	// which a plain bool + omitempty + kubebuilder:default does NOT guarantee
+	// (false is the bool zero value, gets stripped at marshal time, and the
+	// API server fills the default back in).
 	// +kubebuilder:default=true
-	DeltaSync bool `json:"deltaSync,omitempty"`
+	// +optional
+	DeltaSync *bool `json:"deltaSync,omitempty"`
 	// syncprovCheckpoint sets the syncprov overlay checkpoint interval.
 	// Format: "<ops> <minutes>", e.g. "500 15" means checkpoint every 500 operations
 	// or 15 minutes. Empty means no explicit checkpoint (OpenLDAP default).
@@ -254,4 +261,17 @@ type SlapdDatabaseList struct {
 
 func init() {
 	SchemeBuilder.Register(&SlapdDatabase{}, &SlapdDatabaseList{})
+}
+
+// DeltaSyncEnabled reports whether delta-syncrepl should be used for this
+// database, treating an unset (nil) DeltaSync as the documented default
+// (true). Wraps the *bool tristate so reconciler code stays clean.
+func (sd *SlapdDatabase) DeltaSyncEnabled() bool {
+	if sd.Spec.Replication == nil {
+		return false
+	}
+	if sd.Spec.Replication.DeltaSync == nil {
+		return true
+	}
+	return *sd.Spec.Replication.DeltaSync
 }
