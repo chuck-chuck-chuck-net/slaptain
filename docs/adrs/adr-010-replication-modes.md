@@ -1,7 +1,8 @@
 # ADR-010: SlapdCluster Replication Modes (peer / consumer-only)
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-04
+**Accepted:** 2026-05-13 — implemented and e2e-verified (`tests/e2e/migration_test.go`, 6/6 specs green)
 
 ## Context
 

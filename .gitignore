@@ -1,4 +1,5 @@
 .stamps/
+.charts/
 bin/
 *.tar
 tests/image-pull-secret.yaml

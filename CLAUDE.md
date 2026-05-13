@@ -43,6 +43,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
 │   ├── ONBOARDING.md               # Team onboarding: LDAP concepts, operator model, credential model
 │   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
+│   ├── MIGRATION-LEGACY-SOURCE.md  # Source-side (legacy slapd) prep for hot migration
 │   └── adrs/
 │       ├── adr-001-double-reconcile-runs.md
 │       ├── adr-002-cn-config-node-local-operator-managed.md
@@ -339,8 +340,8 @@ the original decision — the history of reasoning matters.
 - ADR-007: Multus-based dedicated replication network for cross-site traffic (amended: dynamic peer discovery via remote kubeconfig)
 - ADR-008: CSN monitoring uses replication bind credentials (uniform-password assumption)
 - ADR-009: SlapdUser lifecycle (service users only, single-pod write, retain default) — *Proposed*
-- ADR-010: SlapdCluster replication modes (peer / consumer-only, in-place promotion) — *Proposed*
-- ADR-011: Hot migration topology contract (RID/ServerID coexistence, plain-syncrepl interop, stage transitions) — *Proposed*
+- ADR-010: SlapdCluster replication modes (peer / consumer-only, in-place promotion) — *Accepted (impl + e2e green 2026-05-13)*
+- ADR-011: Hot migration topology contract (RID/ServerID coexistence, plain-syncrepl interop, stage transitions) — *Accepted (impl + e2e green 2026-05-13)*
 
 ---
 
