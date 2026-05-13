@@ -882,6 +882,12 @@ spec:
                 (the whole cluster is already read-only)
               rule: self.replication.mode != 'consumer-only' || !has(self.readReplicas)
                 || self.readReplicas == 0
+            - message: replication.mode=consumer-only requires replication.enabled=true
+                (otherwise the mode is silently ignored)
+              rule: self.replication.mode != 'consumer-only' || self.replication.enabled
+            - message: replication.externalPeers requires replication.enabled=true
+                (otherwise the peers are silently ignored)
+              rule: size(self.replication.externalPeers) == 0 || self.replication.enabled
           status:
             description: status defines the observed state of SlapdCluster.
             properties:

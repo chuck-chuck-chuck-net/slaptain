@@ -382,6 +382,8 @@ type SlapdReplicationConfig struct {
 //
 // +kubebuilder:validation:XValidation:rule="self.replication.mode != 'consumer-only' || size(self.replication.externalPeers) > 0",message="replication.mode=consumer-only requires at least one replication.externalPeers entry"
 // +kubebuilder:validation:XValidation:rule="self.replication.mode != 'consumer-only' || !has(self.readReplicas) || self.readReplicas == 0",message="replication.mode=consumer-only is incompatible with readReplicas>0 (the whole cluster is already read-only)"
+// +kubebuilder:validation:XValidation:rule="self.replication.mode != 'consumer-only' || self.replication.enabled",message="replication.mode=consumer-only requires replication.enabled=true (otherwise the mode is silently ignored)"
+// +kubebuilder:validation:XValidation:rule="size(self.replication.externalPeers) == 0 || self.replication.enabled",message="replication.externalPeers requires replication.enabled=true (otherwise the peers are silently ignored)"
 type SlapdClusterSpec struct {
 	// suspend pauses the operator's reconciliation of this resource. Existing
 	// StatefulSets, Services, and Secrets are left in place; the operator stops
