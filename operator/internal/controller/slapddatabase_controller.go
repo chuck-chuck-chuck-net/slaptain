@@ -209,7 +209,16 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// 9. Create replication bind user if replication is enabled.
 	//    The user cn=replication,<suffix> must exist in the data tree before
 	//    syncrepl stanzas can authenticate. Created idempotently on pod-0.
-	if sc.Spec.Replication.Enabled && sd.Spec.Replication != nil {
+	//
+	//    Skipped in consumer-only mode (ADR-010): the cn=replication user is
+	//    the bind identity for external consumers authenticating *to* this
+	//    cluster, but consumer-only clusters don't advertise as a provider —
+	//    nobody binds, so the user isn't needed. Additionally the data DB
+	//    has olcReadOnly=TRUE in consumer-only, so the add would be rejected
+	//    with unwillingToPerform anyway. On in-place promotion to peer mode,
+	//    the next reconcile flips olcReadOnly (step 7) before this step
+	//    fires, and the bind user gets created cleanly.
+	if sc.Spec.Replication.Enabled && sd.Spec.Replication != nil && !sc.IsConsumerOnly() {
 		if err := r.ensureReplicationUser(ctx, sc, sd, rootPW); err != nil {
 			log.Info("replication user not yet created (will retry)", "err", err)
 			pendingWork = true
