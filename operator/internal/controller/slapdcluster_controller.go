@@ -597,12 +597,27 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
-	// Peer-eligible pods always carry the accesslog volume, module loads, and
-	// (in multi-pod clusters) ServerID directives — regardless of mode. The
-	// accesslog DB itself is created at runtime by the SlapdDatabase
-	// controller when the cluster is in peer mode (ADR-010 3e), so promotion
-	// from consumer-only to peer doesn't need a rolling restart.
-	replicationEnabled := sc.NeedsAccesslogVolume()
+	// Three orthogonal gates:
+	//
+	//   accesslogVolumeNeeded — provision /accesslog PVC + container mount.
+	//     Only true when an accesslog DB might exist (peer-eligible with
+	//     consumers AND DeltaSync). Empty in plain-syncrepl-only providers.
+	//
+	//   replicationActive — the cluster participates in replication in some
+	//     way (provider, consumer, or both). Triggers
+	//     LDAP_REPLICATION_ENABLED=true on the init container, which loads
+	//     syncprov + accesslog modules so slapd recognizes their objectClasses
+	//     at runtime ldapadd time. Modules MUST be loaded at boot — they
+	//     can't be loaded dynamically — so the gate is broad: any cluster
+	//     with replication.enabled=true, regardless of topology specifics.
+	//     Without this, consumer-only → peer promotion would require a pod
+	//     restart to load the modules (ADR-010 3e is moot otherwise).
+	//
+	//   serverIDsNeeded — in-cluster multi-master CSN attribution. Only true
+	//     for multi-pod RW clusters (replicas > 1).
+	accesslogVolumeNeeded := sc.NeedsAccesslogVolume()
+	replicationActive := sc.Spec.Replication.Enabled
+	serverIDsNeeded := replicationActive && sc.Spec.Replicas > 1
 
 	// Pod security context. PSA "restricted" profile is the floor: even when
 	// the user supplies their own SecurityContext, we layer RunAsNonRoot and
@@ -665,8 +680,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			pvcTemplate("config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
 			pvcTemplate("data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
 		}
-		// Accesslog PVC only for RW replicas with replication enabled.
-		if replicationEnabled && !readOnly {
+		// Accesslog PVC only for RW pods where an accesslog DB might exist.
+		if accesslogVolumeNeeded && !readOnly {
 			accesslogSize := sc.Spec.Persistence.Accesslog.Size
 			if accesslogSize == "" {
 				accesslogSize = "1Gi"
@@ -690,7 +705,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			},
 		)
-		if replicationEnabled && !readOnly {
+		if accesslogVolumeNeeded && !readOnly {
 			volumes = append(volumes, corev1.Volume{
 				Name:         "accesslog",
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -766,7 +781,10 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			corev1.EnvVar{Name: "LDAP_READONLY_REPLICA", Value: "true"},
 			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
 		)
-	} else if replicationEnabled {
+	} else if replicationActive {
+		// Load syncprov + accesslog modules regardless of mode (peer or
+		// consumer-only) so promotion / runtime overlay-add succeeds without
+		// a pod restart. Modules can only be loaded at slapd startup.
 		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
 		)
@@ -776,7 +794,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// multi-master mesh has a deterministic, conflict-free ID per pod. Needed
 	// in-cluster only (replicas > 1). External-peer ID coordination during hot
 	// migration is handled separately via ExternalPeer config.
-	if replicationEnabled && !readOnly && sc.Spec.Replicas > 1 {
+	if serverIDsNeeded && !readOnly {
 		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(sc.Spec.Replicas))},
 			corev1.EnvVar{Name: "LDAP_SERVER_ID_BASE", Value: strconv.Itoa(int(sc.Spec.Replication.ServerIDBase))},
@@ -791,7 +809,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "data", MountPath: "/data"},
 		{Name: "tmp", MountPath: "/tmp"},
 	}
-	if replicationEnabled && !readOnly {
+	if accesslogVolumeNeeded && !readOnly {
 		initMounts = append(initMounts, corev1.VolumeMount{
 			Name:      "accesslog",
 			MountPath: "/accesslog",
@@ -835,7 +853,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "data", MountPath: "/data"},
 		{Name: "run", MountPath: "/run/openldap"},
 	}
-	if replicationEnabled && !readOnly {
+	if accesslogVolumeNeeded && !readOnly {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
 			Name:      "accesslog",
 			MountPath: "/accesslog",
