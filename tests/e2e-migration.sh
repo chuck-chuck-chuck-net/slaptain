@@ -34,6 +34,7 @@ NAMESPACE_SLAPTAIN="${NAMESPACE_SLAPTAIN:-slaptain-target}"
 REGISTRY="${REGISTRY:-ghcr.io/chuck-chuck-chuck-net}"
 PROJECT="${PROJECT:-slaptain}"
 NODEPORT_SLAPTAIN="${NODEPORT_SLAPTAIN:-30389}"
+NODEPORT_FAKEPROD="${NODEPORT_FAKEPROD:-30390}"
 SUFFIX="${SUFFIX:-dc=example,dc=org}"
 SHARED_REPL_PW="${SHARED_REPL_PW:-mig-repl-$(openssl rand -hex 6 2>/dev/null || echo deadbeef)}"
 
@@ -330,13 +331,41 @@ spec:
 EOF
 }
 
+# A NodePort for fakeprod too, so the e2e spec can do a real source-vs-target
+# entryUUID comparison instead of relying on the protocol-correctness reasoning
+# chain. Lets the test directly assert "syncrepl preserved the source's UUID"
+# rather than "post-promotion UUID equals pre-promotion UUID" (which is a
+# different invariant, covered separately).
+setup_nodeport_for_fakeprod() {
+    log "Creating NodePort service for fakeprod (for source-vs-target verification)..."
+    $KUBECTL apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: fakeprod-external
+  namespace: $NAMESPACE_FAKEPROD
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: slapd
+    app.kubernetes.io/instance: fakeprod
+  ports:
+    - name: ldap
+      port: 389
+      targetPort: 1024
+      nodePort: $NODEPORT_FAKEPROD
+EOF
+}
+
 # ── Test ─────────────────────────────────────────────────────────────────────
 
 run_tests() {
     log "Running migration e2e tests..."
 
-    local admin_pw repl_pw
+    local admin_pw fakeprod_admin_pw repl_pw
     admin_pw=$($KUBECTL -n "$NAMESPACE_SLAPTAIN" get secret slaptain-db-credentials \
+        -o jsonpath='{.data.root-password}' | base64 -d)
+    fakeprod_admin_pw=$($KUBECTL -n "$NAMESPACE_FAKEPROD" get secret fakeprod-db-credentials \
         -o jsonpath='{.data.root-password}' | base64 -d)
     repl_pw=$($KUBECTL -n "$NAMESPACE_SLAPTAIN" get secret mig-replication-pw \
         -o jsonpath='{.data.replication-password}' | base64 -d)
@@ -356,6 +385,8 @@ run_tests() {
         E2E_MIGRATION=1 \
         E2E_MIGRATION_LDAP_ADDR="${NODE_IP}:${NODEPORT_SLAPTAIN}" \
         E2E_MIGRATION_ADMIN_PW="$admin_pw" \
+        E2E_MIGRATION_FAKEPROD_LDAP_ADDR="${NODE_IP}:${NODEPORT_FAKEPROD}" \
+        E2E_MIGRATION_FAKEPROD_ADMIN_PW="$fakeprod_admin_pw" \
         E2E_MIGRATION_NS_SLAPTAIN="$NAMESPACE_SLAPTAIN" \
         E2E_MIGRATION_NS_FAKEPROD="$NAMESPACE_FAKEPROD" \
         E2E_MIGRATION_SUFFIX="$SUFFIX" \
@@ -410,6 +441,7 @@ case "$subcommand" in
         wait_for_running "$NAMESPACE_SLAPTAIN" slaptain
         wait_for_db_running "$NAMESPACE_SLAPTAIN" slaptain-db
         setup_nodeport_for_slaptain
+        setup_nodeport_for_fakeprod
         log "Setup complete."
         ;;
     test)
@@ -432,6 +464,7 @@ case "$subcommand" in
         wait_for_running "$NAMESPACE_SLAPTAIN" slaptain
         wait_for_db_running "$NAMESPACE_SLAPTAIN" slaptain-db
         setup_nodeport_for_slaptain
+        setup_nodeport_for_fakeprod
         run_tests
         teardown_all
         ;;

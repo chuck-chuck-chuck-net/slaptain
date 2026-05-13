@@ -21,24 +21,29 @@ import (
 //
 // Required env vars (set by e2e-migration.sh test):
 //
-//	E2E_MIGRATION=1                 — enables this suite
-//	E2E_MIGRATION_LDAP_ADDR         — slaptain's LDAP endpoint (NodePort)
-//	E2E_MIGRATION_ADMIN_PW          — slaptain's cn=admin,<suffix> password
-//	E2E_MIGRATION_NS_SLAPTAIN       — slaptain namespace
-//	E2E_MIGRATION_NS_FAKEPROD       — fake-prod namespace
-//	E2E_MIGRATION_SUFFIX            — shared base DN (e.g. dc=example,dc=org)
+//	E2E_MIGRATION=1                       — enables this suite
+//	E2E_MIGRATION_LDAP_ADDR               — slaptain's LDAP endpoint (NodePort)
+//	E2E_MIGRATION_ADMIN_PW                — slaptain's cn=admin,<suffix> password
+//	E2E_MIGRATION_FAKEPROD_LDAP_ADDR      — fakeprod's LDAP endpoint (NodePort)
+//	E2E_MIGRATION_FAKEPROD_ADMIN_PW       — fakeprod's cn=admin,<suffix> password
+//	E2E_MIGRATION_NS_SLAPTAIN             — slaptain namespace
+//	E2E_MIGRATION_NS_FAKEPROD             — fake-prod namespace
+//	E2E_MIGRATION_SUFFIX                  — shared base DN (e.g. dc=example,dc=org)
 
 var _ = Describe("migration: consumer-only → peer", Label("migration"), Ordered, func() {
 
 	var (
-		ldapAddr     string
-		adminPW      string
-		nsSlap       string
-		suffix       string
-		adminDN      string
-		aliceDN      string
-		migConn      *ldap.Conn
-		preEntryUUID string
+		ldapAddr         string
+		adminPW          string
+		fakeprodLdapAddr string
+		fakeprodAdminPW  string
+		nsSlap           string
+		suffix           string
+		adminDN          string
+		aliceDN          string
+		migConn          *ldap.Conn // bound to slaptain (the target under test)
+		srcConn          *ldap.Conn // bound to fakeprod (the source for comparison)
+		preEntryUUID     string     // alice's entryUUID on slaptain before promotion
 	)
 
 	BeforeAll(func() {
@@ -47,10 +52,14 @@ var _ = Describe("migration: consumer-only → peer", Label("migration"), Ordere
 		}
 		ldapAddr = os.Getenv("E2E_MIGRATION_LDAP_ADDR")
 		adminPW = os.Getenv("E2E_MIGRATION_ADMIN_PW")
+		fakeprodLdapAddr = os.Getenv("E2E_MIGRATION_FAKEPROD_LDAP_ADDR")
+		fakeprodAdminPW = os.Getenv("E2E_MIGRATION_FAKEPROD_ADMIN_PW")
 		nsSlap = os.Getenv("E2E_MIGRATION_NS_SLAPTAIN")
 		suffix = os.Getenv("E2E_MIGRATION_SUFFIX")
 		Expect(ldapAddr).NotTo(BeEmpty(), "E2E_MIGRATION_LDAP_ADDR required")
 		Expect(adminPW).NotTo(BeEmpty(), "E2E_MIGRATION_ADMIN_PW required")
+		Expect(fakeprodLdapAddr).NotTo(BeEmpty(), "E2E_MIGRATION_FAKEPROD_LDAP_ADDR required")
+		Expect(fakeprodAdminPW).NotTo(BeEmpty(), "E2E_MIGRATION_FAKEPROD_ADMIN_PW required")
 		Expect(nsSlap).NotTo(BeEmpty(), "E2E_MIGRATION_NS_SLAPTAIN required")
 		Expect(suffix).NotTo(BeEmpty(), "E2E_MIGRATION_SUFFIX required")
 		adminDN = "cn=admin," + suffix
@@ -58,13 +67,20 @@ var _ = Describe("migration: consumer-only → peer", Label("migration"), Ordere
 
 		var err error
 		migConn, err = ldap.DialURL("ldap://" + ldapAddr)
-		Expect(err).NotTo(HaveOccurred(), "dial %s", ldapAddr)
-		Expect(migConn.Bind(adminDN, adminPW)).To(Succeed(), "admin bind")
+		Expect(err).NotTo(HaveOccurred(), "dial slaptain %s", ldapAddr)
+		Expect(migConn.Bind(adminDN, adminPW)).To(Succeed(), "slaptain admin bind")
+
+		srcConn, err = ldap.DialURL("ldap://" + fakeprodLdapAddr)
+		Expect(err).NotTo(HaveOccurred(), "dial fakeprod %s", fakeprodLdapAddr)
+		Expect(srcConn.Bind(adminDN, fakeprodAdminPW)).To(Succeed(), "fakeprod admin bind")
 	})
 
 	AfterAll(func() {
 		if migConn != nil {
 			migConn.Close()
+		}
+		if srcConn != nil {
+			srcConn.Close()
 		}
 	})
 
@@ -77,17 +93,46 @@ var _ = Describe("migration: consumer-only → peer", Label("migration"), Ordere
 			"alice never reached slaptain via syncrepl from fake-prod")
 	})
 
-	It("preserves operational attributes from the source (entryUUID)", func() {
-		req := ldap.NewSearchRequest(aliceDN,
-			ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-			1, 0, false, "(objectClass=*)", []string{"entryUUID", "creatorsName"}, nil)
-		res, err := migConn.Search(req)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Entries).To(HaveLen(1))
-		preEntryUUID = res.Entries[0].GetAttributeValue("entryUUID")
-		Expect(preEntryUUID).NotTo(BeEmpty(),
-			"entryUUID should be preserved from fake-prod's copy (syncrepl protocol guarantee)")
-		GinkgoWriter.Printf("pre-promotion entryUUID(alice) = %s\n", preEntryUUID)
+	It("preserves operational attributes from the source (entryUUID matches fakeprod)", func() {
+		// Direct source-vs-target equality: read alice from BOTH clusters and
+		// assert the entryUUIDs (and other operational attributes) are
+		// identical byte-for-byte. This is the load-bearing migration
+		// guarantee — that data lands on slaptain carrying the source's
+		// identity, not a locally-fabricated one.
+		attrs := []string{"entryUUID", "creatorsName", "createTimestamp"}
+		readAlice := func(conn *ldap.Conn, label string) *ldap.Entry {
+			req := ldap.NewSearchRequest(aliceDN,
+				ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+				1, 0, false, "(objectClass=*)", attrs, nil)
+			res, err := conn.Search(req)
+			Expect(err).NotTo(HaveOccurred(), "search alice on %s", label)
+			Expect(res.Entries).To(HaveLen(1), "alice not present on %s", label)
+			return res.Entries[0]
+		}
+
+		srcAlice := readAlice(srcConn, "fakeprod")
+		tgtAlice := readAlice(migConn, "slaptain")
+
+		srcUUID := srcAlice.GetAttributeValue("entryUUID")
+		tgtUUID := tgtAlice.GetAttributeValue("entryUUID")
+		Expect(srcUUID).NotTo(BeEmpty(), "fakeprod alice missing entryUUID")
+		Expect(tgtUUID).NotTo(BeEmpty(), "slaptain alice missing entryUUID")
+		Expect(tgtUUID).To(Equal(srcUUID),
+			"slaptain's entryUUID for alice (%s) differs from fakeprod's (%s) — syncrepl did NOT preserve the source's UUID",
+			tgtUUID, srcUUID)
+
+		// creatorsName and createTimestamp should also match. These are the
+		// other "client cannot set" operational attributes that ldapadd-over-
+		// wire would strip and a faithful syncrepl preserves.
+		Expect(tgtAlice.GetAttributeValue("creatorsName")).To(Equal(
+			srcAlice.GetAttributeValue("creatorsName")),
+			"creatorsName differs")
+		Expect(tgtAlice.GetAttributeValue("createTimestamp")).To(Equal(
+			srcAlice.GetAttributeValue("createTimestamp")),
+			"createTimestamp differs")
+
+		preEntryUUID = tgtUUID
+		GinkgoWriter.Printf("pre-promotion entryUUID(alice) = %s (matches fakeprod ✓)\n", preEntryUUID)
 	})
 
 	It("rejects writes while in consumer-only mode (olcReadOnly=TRUE)", func() {
@@ -155,6 +200,11 @@ var _ = Describe("migration: consumer-only → peer", Label("migration"), Ordere
 	})
 
 	It("preserves pre-promotion entryUUIDs (no re-sync happened)", func() {
+		// This is a different invariant from the earlier "matches fakeprod"
+		// check — it asserts that the in-place promotion did NOT re-key the
+		// data (e.g., by deleting+recreating the DB and re-pulling from
+		// scratch). Comparing pre- and post-promotion entryUUIDs on the same
+		// cluster is the direct way to prove "metadata-only transition."
 		req := ldap.NewSearchRequest(aliceDN,
 			ldap.ScopeBaseObject, ldap.NeverDerefAliases,
 			1, 0, false, "(objectClass=*)", []string{"entryUUID"}, nil)

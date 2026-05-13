@@ -508,18 +508,21 @@ make e2e-migration-test
 make e2e-migration-teardown
 ```
 
-The Ginkgo spec (`tests/e2e/migration_test.go`, labeled `migration`) asserts:
+The Ginkgo spec (`tests/e2e/migration_test.go`, labeled `migration`) opens
+LDAP connections to **both** clusters (each via its own NodePort) and asserts:
 
 1. The seeded entry from `fakeprod` reaches `slaptain` via plain syncrepl.
-2. Operational attributes are preserved (`entryUUID` non-empty).
+2. Operational attributes (`entryUUID`, `creatorsName`, `createTimestamp`)
+   on slaptain's copy match fakeprod's byte-for-byte — direct source-vs-target
+   comparison, not relying on protocol-correctness reasoning.
 3. Writes to `slaptain` in consumer-only mode are rejected with
    `unwillingToPerform` (slapd's response when `olcReadOnly: TRUE`).
 4. Patching `spec.replication.mode: peer` triggers in-place promotion —
    `status.replicationMode` converges to `peer` without recreating the pod
    (asserted via pod UID + slapd container `StartedAt` comparison).
 5. Writes succeed post-promotion.
-6. `entryUUID` of the pre-existing entry is unchanged after promotion (no
-   data re-sync happened — the promotion was metadata-only).
+6. `entryUUID` on slaptain is unchanged across the promotion (different
+   invariant from #2: proves no re-sync happened — metadata-only transition).
 
 ### Configuration env vars
 
@@ -529,6 +532,7 @@ The Ginkgo spec (`tests/e2e/migration_test.go`, labeled `migration`) asserts:
 | `NAMESPACE_FAKEPROD` | `fakeprod` | Source-cluster namespace |
 | `NAMESPACE_SLAPTAIN` | `slaptain-target` | Target-cluster namespace |
 | `NODEPORT_SLAPTAIN` | `30389` | NodePort for slaptain LDAP access from the test runner |
+| `NODEPORT_FAKEPROD` | `30390` | NodePort for fakeprod LDAP access (source-vs-target comparison) |
 | `SUFFIX` | `dc=example,dc=org` | Shared base DN |
 | `SHARED_REPL_PW` | random | Plaintext replication-bind password (must match across both clusters) |
 
