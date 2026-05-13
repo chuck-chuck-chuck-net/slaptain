@@ -149,8 +149,10 @@ EOF
     #   symbols are available without a slapd restart when the operator later
     #   adds the DB or its overlays.
 
-    # Subdir under $CONFIG_DIR: slaptest -F requires an empty target dir, and
-    # ext4-backed PVCs (e.g. OpenEBS) always have lost+found at the volume root.
+    # Subdir under $CONFIG_DIR: slaptest -F requires an existing, empty target
+    # dir, and ext4-backed PVCs (e.g. OpenEBS) always have lost+found at the
+    # volume root.
+    mkdir -p "$CONFIG_DIR/slapd.d"
     slaptest -f "$TMP_CONF" -F "$CONFIG_DIR/slapd.d"
     rm -f "$TMP_CONF"
 fi
