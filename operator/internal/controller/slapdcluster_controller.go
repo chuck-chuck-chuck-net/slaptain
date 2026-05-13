@@ -464,7 +464,49 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
 	}
+	if err := r.adoptImmutableSTSFields(ctx, sts); err != nil {
+		return err
+	}
 	return r.Patch(ctx, sts, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+}
+
+// adoptImmutableSTSFields preserves the StatefulSet's immutable fields from
+// the cluster's stored copy when the STS already exists. K8s forbids updating
+// volumeClaimTemplates, serviceName, selector, and podManagementPolicy on an
+// existing StatefulSet (see appsv1 validation), so re-asserting our computed
+// values on every reconcile is a footgun: if any input that contributes to
+// those fields drifts between when the STS was first created and now —
+// kubebuilder defaults landed, an operator-side fallback constant changed,
+// new computed field — k8s rejects the apply with "Forbidden: updates to
+// statefulset spec for fields other than ...".
+//
+// The fix is the standard SSA pattern for objects with immutable fields:
+// adopt-from-storage rather than re-compute. Initial create stamps the spec
+// from buildStatefulSetSpec; subsequent reconciles take the stored values and
+// pass them through unchanged, so SSA sees "no diff" on those fields and the
+// apply succeeds for mutable fields only (template, replicas, etc.).
+//
+// If the user genuinely wants to change one of these — e.g., a different PVC
+// size for a fresh install — the operator can't help. They'd need to delete
+// the STS (cascade=orphan keeps the pods + PVCs) and let the operator
+// recreate it, OR resize the PVCs directly via VolumeExpansion (which is a
+// separate, supported workflow).
+func (r *SlapdClusterReconciler) adoptImmutableSTSFields(ctx context.Context, desired *appsv1.StatefulSet) error {
+	existing := &appsv1.StatefulSet{}
+	err := r.Get(ctx, client.ObjectKey{Name: desired.Name, Namespace: desired.Namespace}, existing)
+	if err != nil {
+		// NotFound = first create, our spec is authoritative for these fields.
+		// Any other error: let the caller propagate; the next reconcile retries.
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("read existing StatefulSet %s for immutable-field adoption: %w", desired.Name, err)
+	}
+	desired.Spec.VolumeClaimTemplates = existing.Spec.VolumeClaimTemplates
+	desired.Spec.ServiceName = existing.Spec.ServiceName
+	desired.Spec.Selector = existing.Spec.Selector
+	desired.Spec.PodManagementPolicy = existing.Spec.PodManagementPolicy
+	return nil
 }
 
 // reconcileReadOnlyHeadlessService applies the read-only headless Service via SSA.
@@ -571,6 +613,9 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
 	}
+	if err := r.adoptImmutableSTSFields(ctx, sts); err != nil {
+		return err
+	}
 	return r.Patch(ctx, sts, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
@@ -660,13 +705,23 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	var volumeClaimTemplates []corev1.PersistentVolumeClaim
 
 	if sc.PersistenceEnabled() {
+		// PVC size fallbacks. The CRD's +kubebuilder:default="1Gi" on
+		// SlapdPVCConfig.Size means in normal operation these branches never
+		// fire — the API server stamps "1Gi" at admission. The fallbacks are
+		// kept as belt-and-braces for `make run` outside a cluster (no
+		// admission defaulting) and for forward-compat if the CRD default
+		// ever changes. Critically: they must MATCH the CRD default. A skew
+		// is silently load-bearing — the operator generates whatever shape
+		// matched at first-create-time, and StatefulSet volumeClaimTemplates
+		// are immutable, so a later mismatch makes the cluster controller
+		// hard-fail with "Forbidden: updates to statefulset spec".
 		cfgSize := sc.Spec.Persistence.Config.Size
 		if cfgSize == "" {
 			cfgSize = "1Gi"
 		}
 		dataSize := sc.Spec.Persistence.Data.Size
 		if dataSize == "" {
-			dataSize = "5Gi"
+			dataSize = "1Gi"
 		}
 		cfgAM := sc.Spec.Persistence.Config.AccessMode
 		if cfgAM == "" {
