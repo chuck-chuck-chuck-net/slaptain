@@ -644,9 +644,12 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
 	// Three orthogonal gates:
 	//
-	//   accesslogVolumeNeeded — provision /accesslog PVC + container mount.
+	//   accesslogMountNeeded — mount /accesslog into init + main containers.
 	//     Only true when an accesslog DB might exist (peer-eligible with
 	//     consumers AND DeltaSync). Empty in plain-syncrepl-only providers.
+	//     The accesslog VOLUME (PVC or emptyDir) is provisioned unconditionally
+	//     on every RW pod regardless of this gate — see the volumes block
+	//     below for the immutability rationale.
 	//
 	//   replicationActive — the cluster participates in replication in some
 	//     way (provider, consumer, or both). Triggers
@@ -660,7 +663,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	//
 	//   serverIDsNeeded — in-cluster multi-master CSN attribution. Only true
 	//     for multi-pod RW clusters (replicas > 1).
-	accesslogVolumeNeeded := sc.NeedsAccesslogVolume()
+	accesslogMountNeeded := sc.NeedsAccesslogVolume()
 	replicationActive := sc.Spec.Replication.Enabled
 	serverIDsNeeded := replicationActive && sc.Spec.Replicas > 1
 
@@ -735,8 +738,14 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			pvcTemplate("config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
 			pvcTemplate("data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
 		}
-		// Accesslog PVC only for RW pods where an accesslog DB might exist.
-		if accesslogVolumeNeeded && !readOnly {
+		// Accesslog PVC: provisioned on every RW pod regardless of current
+		// replication state. StatefulSet volumeClaimTemplates is immutable, so
+		// adding accesslog later (when the user flips replication.enabled or
+		// adds an externalPeer) would otherwise require a manual STS recreate
+		// with --cascade=orphan. The cost is a ~1Gi PVC sitting unused in
+		// standalone clusters. The MOUNT is still gated on accesslogMountNeeded
+		// so slapd doesn't see an empty /accesslog when there's no DB for it.
+		if !readOnly {
 			accesslogSize := sc.Spec.Persistence.Accesslog.Size
 			if accesslogSize == "" {
 				accesslogSize = "1Gi"
@@ -760,7 +769,9 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			},
 		)
-		if accesslogVolumeNeeded && !readOnly {
+		// Same rationale as the PVC branch above: pre-provision the accesslog
+		// volume so that toggling replication on doesn't require an STS recreate.
+		if !readOnly {
 			volumes = append(volumes, corev1.Volume{
 				Name:         "accesslog",
 				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
@@ -864,7 +875,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "data", MountPath: "/data"},
 		{Name: "tmp", MountPath: "/tmp"},
 	}
-	if accesslogVolumeNeeded && !readOnly {
+	if accesslogMountNeeded && !readOnly {
 		initMounts = append(initMounts, corev1.VolumeMount{
 			Name:      "accesslog",
 			MountPath: "/accesslog",
@@ -908,7 +919,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "data", MountPath: "/data"},
 		{Name: "run", MountPath: "/run/openldap"},
 	}
-	if accesslogVolumeNeeded && !readOnly {
+	if accesslogMountNeeded && !readOnly {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
 			Name:      "accesslog",
 			MountPath: "/accesslog",
