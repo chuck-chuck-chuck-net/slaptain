@@ -644,7 +644,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 
 	var volumeClaimTemplates []corev1.PersistentVolumeClaim
 
-	if sc.Spec.Persistence.Enabled {
+	if sc.PersistenceEnabled() {
 		cfgSize := sc.Spec.Persistence.Config.Size
 		if cfgSize == "" {
 			cfgSize = "1Gi"

@@ -265,8 +265,14 @@ spec:
                     type: object
                   enabled:
                     default: true
-                    description: enabled controls whether PVCs are created. When false,
-                      emptyDir is used.
+                    description: |-
+                      enabled controls whether PVCs are created. When false, emptyDir is used.
+
+                      Tristate (*bool): nil falls back to the default (true). An explicit
+                      false must round-trip from kubectl through the API server unchanged,
+                      which a plain bool + omitempty + kubebuilder:default does NOT
+                      guarantee (false is the bool zero value, gets stripped at marshal
+                      time, and the API server fills the default back in).
                     type: boolean
                 type: object
               readReplicas:
