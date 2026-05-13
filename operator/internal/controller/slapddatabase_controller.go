@@ -433,31 +433,58 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		}
 	}
 
-	// Manage the cluster-shared accesslog DB (cn=accesslog) and the data DB's
-	// accesslog/syncprov overlays as a single transition unit. The DB must
-	// exist BEFORE the overlay (which references it via olcAccessLogDB), and
-	// the overlay must be removed BEFORE the DB during demotion. Both halves
-	// are gated on the same condition: peer mode + delta-sync + RW pod.
+	// Manage the data DB's replication infrastructure. Two independent gates:
 	//
-	// Consumer-only mode (ADR-010 3e): tear down both halves. RW-pod path
-	// (!readOnly) is what manages the DB; RO StatefulSet pods never had the
-	// accesslog DB to begin with so we skip them here entirely.
-	overlaysWanted := sd.DeltaSyncEnabled() && !readOnly && !sc.IsConsumerOnly()
-	if overlaysWanted {
-		if err := r.ensureAccesslogDB(ctx, conn, host); err != nil {
-			return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
+	//   wantsSyncProv  — this cluster acts as a syncrepl provider. True in
+	//                    peer mode on RW pods regardless of delta-sync.
+	//                    Without the syncprov overlay slapd serves regular
+	//                    LDAP but consumers fail with "got search entry
+	//                    without Sync State control."
+	//
+	//   wantsAccesslog — this DB participates in delta-syncrepl. Additive
+	//                    over syncprov: gated on syncprov being wanted AND
+	//                    the per-DB DeltaSync flag. Requires the cluster-
+	//                    shared cn=accesslog DB.
+	//
+	// Order of operations matters for transitions:
+	//   adding   — accesslog DB before accesslog overlay (overlay references
+	//              cn=accesslog via olcAccessLogDB; slapd validates at add).
+	//   removing — accesslog overlay before accesslog DB (same reference,
+	//              same validation, reverse direction).
+	// syncprov has no dependencies; ordered freely relative to the others.
+	//
+	// RO StatefulSet pods (readOnly=true) never carry any of this — they are
+	// consumers only, not providers; cluster-shared DBs were created on the
+	// RW path.
+	wantsSyncProv := sc.Spec.Replication.Enabled && !readOnly && !sc.IsConsumerOnly()
+	wantsAccesslog := wantsSyncProv && sd.DeltaSyncEnabled()
+
+	if !readOnly {
+		if !wantsAccesslog {
+			if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "accesslog"); err != nil {
+				return fmt.Errorf("remove accesslog overlay at %s: %w", host, err)
+			}
+			if err := r.removeAccesslogDB(ctx, conn, host); err != nil {
+				return fmt.Errorf("remove accesslog DB at %s: %w", host, err)
+			}
 		}
-		if err := r.ensureReplicationOverlays(ctx, conn, host, dataDN, sd); err != nil {
-			return fmt.Errorf("ensure replication overlays at %s: %w", host, err)
+		if !wantsSyncProv {
+			if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "syncprov"); err != nil {
+				return fmt.Errorf("remove syncprov overlay at %s: %w", host, err)
+			}
 		}
-	} else if !readOnly {
-		// Overlay teardown depends on the accesslog DB (slapd validates the
-		// olcAccessLogDB reference at modify time), so remove overlays first.
-		if err := r.removeReplicationOverlays(ctx, conn, host, dataDN); err != nil {
-			return fmt.Errorf("remove replication overlays at %s: %w", host, err)
+		if wantsSyncProv {
+			if err := r.ensureSyncProvOverlay(ctx, conn, host, dataDN, sd); err != nil {
+				return fmt.Errorf("ensure syncprov overlay at %s: %w", host, err)
+			}
 		}
-		if err := r.removeAccesslogDB(ctx, conn, host); err != nil {
-			return fmt.Errorf("remove accesslog DB at %s: %w", host, err)
+		if wantsAccesslog {
+			if err := r.ensureAccesslogDB(ctx, conn, host); err != nil {
+				return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
+			}
+			if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd); err != nil {
+				return fmt.Errorf("ensure accesslog overlay at %s: %w", host, err)
+			}
 		}
 	}
 
@@ -707,12 +734,42 @@ func normalizeIndex(s string) string {
 
 // ── Seed Data ────────────────────────────────────────────────────────────────
 
-// ensureReplicationOverlays adds the accesslog and syncprov overlays to a data
-// database's cn=config entry. These overlays are required for delta-syncrepl:
-// - overlay accesslog: logs all writes to the accesslog DB (cn=accesslog)
-// - overlay syncprov: makes the database available as a syncrepl provider
-// Idempotent: checks for existing overlays before adding.
-func (r *SlapdDatabaseReconciler) ensureReplicationOverlays(
+// dataDBOverlays returns which replication-related overlays are currently
+// present on the data DB's cn=config entry. Helper for the ensure/remove
+// pair below.
+func dataDBOverlays(conn *ldap.Conn, dataDN string) (hasAccesslog, hasSyncprov bool, err error) {
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcOverlayConfig)", []string{"olcOverlay"}, nil,
+	))
+	if err != nil {
+		return false, false, fmt.Errorf("search overlays under %s: %w", dataDN, err)
+	}
+	for _, entry := range sr.Entries {
+		for _, ov := range entry.GetEqualFoldAttributeValues("olcOverlay") {
+			switch stripOrderingPrefix(ov) {
+			case "accesslog":
+				hasAccesslog = true
+			case "syncprov":
+				hasSyncprov = true
+			}
+		}
+	}
+	return hasAccesslog, hasSyncprov, nil
+}
+
+// ensureSyncProvOverlay adds the syncprov overlay to the data DB's cn=config
+// entry. Required for the cluster to act as a **syncrepl provider** of any
+// flavour (plain syncrepl OR delta-syncrepl). Without syncprov, slapd serves
+// regular LDAP searches but does not attach Sync State controls to results —
+// consumers fail with "got search entry without Sync State control."
+//
+// Separate from accesslog: a peer-mode cluster acts as a provider regardless
+// of whether it offers delta-sync. ensureAccesslogOverlay is the additional
+// step that opts a provider into delta-sync.
+//
+// Idempotent: checks for existing overlay before adding.
+func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 	ctx context.Context,
 	conn *ldap.Conn,
 	host, dataDN string,
@@ -720,66 +777,70 @@ func (r *SlapdDatabaseReconciler) ensureReplicationOverlays(
 ) error {
 	log := logf.FromContext(ctx)
 
-	// Check if overlays already exist under the data database DN.
-	sr, err := conn.Search(ldap.NewSearchRequest(
-		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		0, 0, false, "(objectClass=olcOverlayConfig)", []string{"olcOverlay"}, nil,
-	))
+	_, hasSyncprov, err := dataDBOverlays(conn, dataDN)
 	if err != nil {
-		return fmt.Errorf("search overlays under %s: %w", dataDN, err)
+		return err
+	}
+	if hasSyncprov {
+		return nil
 	}
 
-	hasAccesslog := false
-	hasSyncprov := false
-	for _, entry := range sr.Entries {
-		for _, ov := range entry.GetEqualFoldAttributeValues("olcOverlay") {
-			stripped := stripOrderingPrefix(ov)
-			if stripped == "accesslog" {
-				hasAccesslog = true
-			}
-			if stripped == "syncprov" {
-				hasSyncprov = true
-			}
+	log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
+	syncprovDN := "olcOverlay=syncprov," + dataDN
+	addReq := ldap.NewAddRequest(syncprovDN, nil)
+	addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
+	addReq.Attribute("olcOverlay", []string{"syncprov"})
+	if sd.Spec.Replication != nil && sd.Spec.Replication.SyncprovCheckpoint != "" {
+		addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
+	}
+	if err := conn.Add(addReq); err != nil {
+		if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+			return fmt.Errorf("add syncprov overlay: %w", err)
 		}
 	}
+	return nil
+}
 
-	// Add accesslog overlay if missing.
-	if !hasAccesslog {
-		log.Info("adding accesslog overlay to data database", "host", host, "dataDN", dataDN)
-		accesslogDN := "olcOverlay=accesslog," + dataDN
-		addReq := ldap.NewAddRequest(accesslogDN, nil)
-		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcAccessLogConfig"})
-		addReq.Attribute("olcOverlay", []string{"accesslog"})
-		addReq.Attribute("olcAccessLogDB", []string{"cn=accesslog"})
-		addReq.Attribute("olcAccessLogOps", []string{"writes"})
-		addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
-		if sd.Spec.Replication.AccesslogPurge != "" {
-			addReq.Attribute("olcAccessLogPurge", []string{sd.Spec.Replication.AccesslogPurge})
-		}
-		if err := conn.Add(addReq); err != nil {
-			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-				return fmt.Errorf("add accesslog overlay: %w", err)
-			}
-		}
+// ensureAccesslogOverlay adds the accesslog overlay to the data DB's
+// cn=config entry. Required for **delta-syncrepl** specifically: the overlay
+// captures every write into the cluster-shared cn=accesslog DB, where
+// consumers pull change deltas instead of re-walking the full DIT on
+// reconnect. Strictly an add-on to ensureSyncProvOverlay — the cluster must
+// already be a syncrepl provider for the change journal to be useful.
+//
+// Idempotent: checks for existing overlay before adding.
+func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	sd *ldapv1alpha1.SlapdDatabase,
+) error {
+	log := logf.FromContext(ctx)
+
+	hasAccesslog, _, err := dataDBOverlays(conn, dataDN)
+	if err != nil {
+		return err
+	}
+	if hasAccesslog {
+		return nil
 	}
 
-	// Add syncprov overlay if missing.
-	if !hasSyncprov {
-		log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
-		syncprovDN := "olcOverlay=syncprov," + dataDN
-		addReq := ldap.NewAddRequest(syncprovDN, nil)
-		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
-		addReq.Attribute("olcOverlay", []string{"syncprov"})
-		if sd.Spec.Replication.SyncprovCheckpoint != "" {
-			addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
-		}
-		if err := conn.Add(addReq); err != nil {
-			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-				return fmt.Errorf("add syncprov overlay: %w", err)
-			}
+	log.Info("adding accesslog overlay to data database", "host", host, "dataDN", dataDN)
+	accesslogDN := "olcOverlay=accesslog," + dataDN
+	addReq := ldap.NewAddRequest(accesslogDN, nil)
+	addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcAccessLogConfig"})
+	addReq.Attribute("olcOverlay", []string{"accesslog"})
+	addReq.Attribute("olcAccessLogDB", []string{"cn=accesslog"})
+	addReq.Attribute("olcAccessLogOps", []string{"writes"})
+	addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
+	if sd.Spec.Replication != nil && sd.Spec.Replication.AccesslogPurge != "" {
+		addReq.Attribute("olcAccessLogPurge", []string{sd.Spec.Replication.AccesslogPurge})
+	}
+	if err := conn.Add(addReq); err != nil {
+		if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+			return fmt.Errorf("add accesslog overlay: %w", err)
 		}
 	}
-
 	return nil
 }
 
@@ -936,20 +997,15 @@ func (r *SlapdDatabaseReconciler) removeAccesslogDB(
 	return nil
 }
 
-// removeReplicationOverlays is the inverse of ensureReplicationOverlays: it
-// deletes any accesslog or syncprov overlay entry that currently lives under
-// the data DB's cn=config DN. Called during peer → consumer-only demotion
-// (ADR-010 3e) so the demoted DB doesn't carry stale overlays that record or
-// publish writes the cluster will never accept.
-//
-// Idempotent: missing overlays are not an error. Entries are deleted by their
-// actual DN (which carries the {N} ordering prefix slapd assigned at add
-// time) since the bare name "olcOverlay=accesslog,..." may not resolve when
-// slapd has reordered.
-func (r *SlapdDatabaseReconciler) removeReplicationOverlays(
+// removeDataDBOverlay deletes a single named replication overlay (accesslog
+// or syncprov) from the data DB's cn=config children. Entries are deleted by
+// their actual DN — which carries slapd's {N} ordering prefix — since the
+// bare-name DN may not resolve when slapd has reordered. Idempotent:
+// NoSuchObject is success.
+func (r *SlapdDatabaseReconciler) removeDataDBOverlay(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host, dataDN string,
+	host, dataDN, overlayName string,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -962,20 +1018,18 @@ func (r *SlapdDatabaseReconciler) removeReplicationOverlays(
 	}
 
 	for _, entry := range sr.Entries {
-		stripped := ""
-		if vals := entry.GetEqualFoldAttributeValues("olcOverlay"); len(vals) > 0 {
-			stripped = stripOrderingPrefix(vals[0])
-		}
-		if stripped != "accesslog" && stripped != "syncprov" {
+		vals := entry.GetEqualFoldAttributeValues("olcOverlay")
+		if len(vals) == 0 || stripOrderingPrefix(vals[0]) != overlayName {
 			continue
 		}
-		log.Info("removing replication overlay", "host", host, "overlay", stripped, "dn", entry.DN)
+		log.Info("removing data DB overlay", "host", host, "overlay", overlayName, "dn", entry.DN)
 		if err := conn.Del(ldap.NewDelRequest(entry.DN, nil)); err != nil {
 			if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
-				continue
+				return nil
 			}
 			return fmt.Errorf("delete overlay %s: %w", entry.DN, err)
 		}
+		return nil
 	}
 	return nil
 }
