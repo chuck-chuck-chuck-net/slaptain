@@ -231,7 +231,13 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
-	// 10. Update status.
+	// 10. Evaluate DataPresent (pure observability — never drives reconciler
+	//     behaviour, see ADR-012). Set before setStatus so the condition
+	//     rides along in the same status patch.
+	dataPresent := r.evaluateDataPresent(ctx, sc, sd, rootPW)
+	setCondition(&sd.Status.Conditions, dataPresent)
+
+	// 11. Update status.
 	phase := ldapv1alpha1.DatabasePhaseRunning
 	reason := "Applied"
 	msg := fmt.Sprintf("Database applied to %d pods", len(appliedPods))
@@ -1180,6 +1186,98 @@ func (r *SlapdDatabaseReconciler) applySeedData(
 
 	log.Info("seed data applied and verified", "host", host, "entries", len(sd.Spec.Seed.Entries))
 	return nil
+}
+
+// evaluateDataPresent computes the DataPresent status condition: is the
+// database suffix's root entry visible on at least one reachable RW pod?
+//
+// Pure observability. ADR-012 is emphatic that this signal NEVER drives
+// reconciler behaviour — no re-seed, no recreate, nothing. It exists so that
+// monitoring/alerting can detect "we accidentally lost the directory" within
+// one reconcile interval instead of waiting for a user to report failing
+// queries. The reason field distinguishes:
+//
+//   NotSeeded         — Status.SeedApplied=false. Bootstrap hasn't finished;
+//                       absence is expected. ConditionUnknown.
+//   RootEntryVisible  — root entry found on at least one pod. ConditionTrue.
+//   NoReachablePod    — could not bind on any pod (cluster churning, all
+//                       pods crash-looping). ConditionUnknown.
+//   DataMissing       — SeedApplied=true, bound successfully somewhere, root
+//                       entry not visible anywhere. ConditionFalse — alert.
+func (r *SlapdDatabaseReconciler) evaluateDataPresent(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	sd *ldapv1alpha1.SlapdDatabase,
+	rootPW string,
+) metav1.Condition {
+	cond := metav1.Condition{
+		Type:               "DataPresent",
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sd.Generation,
+	}
+
+	if !sd.Status.SeedApplied {
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = "NotSeeded"
+		cond.Message = "Database has not been seeded yet; data-presence check is not meaningful"
+		return cond
+	}
+
+	rootDN := sd.Spec.RootDN
+	if rootDN == "" {
+		rootDN = "cn=admin," + sd.Spec.Suffix
+	}
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	headlessSvc := sc.Name + "-headless"
+
+	reachedAny := false
+	for i := int32(0); i < replicas; i++ {
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
+			sc.Name, i, headlessSvc, sc.Namespace)
+		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
+
+		conn, err := ldap.DialURL("ldap://"+addr,
+			ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+		)
+		if err != nil {
+			continue
+		}
+		conn.SetTimeout(ldapRequestTimeout)
+		if err := conn.Bind(rootDN, rootPW); err != nil {
+			conn.Close()
+			continue
+		}
+		reachedAny = true
+		exists, err := ldapEntryExists(conn, sd.Spec.Suffix)
+		conn.Close()
+		if err != nil {
+			continue
+		}
+		if exists {
+			cond.Status = metav1.ConditionTrue
+			cond.Reason = "RootEntryVisible"
+			cond.Message = fmt.Sprintf("root entry %s visible on %s", sd.Spec.Suffix, host)
+			return cond
+		}
+	}
+
+	if !reachedAny {
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = "NoReachablePod"
+		cond.Message = "could not reach any RW pod to verify data presence"
+		return cond
+	}
+
+	cond.Status = metav1.ConditionFalse
+	cond.Reason = "DataMissing"
+	cond.Message = fmt.Sprintf(
+		"root entry %s not visible on any reachable RW pod — possible data loss; "+
+			"this condition is informational and does not trigger operator action (see ADR-012)",
+		sd.Spec.Suffix)
+	return cond
 }
 
 // applySeedEntry parses a simplified LDIF entry and adds it via LDAP.
