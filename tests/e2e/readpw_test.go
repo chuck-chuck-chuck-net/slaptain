@@ -224,14 +224,23 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 
 		Expect(conn.Bind(fmt.Sprintf("uid=%s,ou=%s,%s", user, readpwOU, baseDN), pw)).To(Succeed())
 
-		req := ldap.NewSearchRequest(fmt.Sprintf("uid=alice,ou=People,%s", baseDN),
-			ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-			0, 0, false, "(objectClass=*)", []string{"userPassword"}, nil)
-		result, err := conn.Search(req)
-		Expect(err).NotTo(HaveOccurred())
-		if len(result.Entries) > 0 {
-			Expect(result.Entries[0].GetAttributeValue("userPassword")).To(BeEmpty(),
+		// Eventually: this fresh dial landed via the LB on whatever pod kube-proxy
+		// picked, which may not be the same one ldapConn (the admin connection
+		// that added alice in BeforeAll) wrote to. Allow up to 30s for syncrepl
+		// to propagate alice into the pod we're bound to. Same pattern as the
+		// sibling "CAN read userPassword from ou=Mail" test above. The race is
+		// more frequently triggered on the ephemeral fixture, where the
+		// dataloss-recovery test deliberately wipes a pod mid-suite.
+		Eventually(func(g Gomega) {
+			req := ldap.NewSearchRequest(fmt.Sprintf("uid=alice,ou=People,%s", baseDN),
+				ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+				0, 0, false, "(objectClass=*)", []string{"userPassword"}, nil)
+			result, err := conn.Search(req)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(result.Entries).To(HaveLen(1),
+				"alice must be present on the readpw-bound pod before ACL denial can be asserted")
+			g.Expect(result.Entries[0].GetAttributeValue("userPassword")).To(BeEmpty(),
 				"readpw user %q must not be able to read userPassword from ou=People", user)
-		}
+		}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 	})
 })
