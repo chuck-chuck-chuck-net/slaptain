@@ -350,6 +350,45 @@ directory queries return no data. Initial deployment works because
 every reconcile, not just set-and-forget. "We already did X" is only valid if the
 effect of X is still visible.
 
+> **Postscript 2026-05-14 — this fix was conceptually wrong and has been reverted.
+> See ADR-012.** The lesson generalised correctly for operator-owned declarative
+> state (cn=config — ACLs, schemas, syncrepl stanzas) but should never have been
+> applied to seed data. Seed entries are the user's one-time initial-conditions
+> sketch, not operator-owned state. After first apply, the directory's actual
+> contents are the users' accumulated data — millions of entries the operator
+> never knew about. Re-applying seed on "data missing" creates two failure modes
+> that are strictly worse than not re-applying:
+>
+> 1. **Multi-pod write race during initial bootstrap.** Each reconcile after a
+>    pod-readiness change re-evaluated `verifySeedExists` against the first
+>    reachable pod, which during startup is a moving target (replication hasn't
+>    propagated yet). `applySeedData` then wrote the seed to a *different* pod
+>    each time. Three independent same-DN adds with three different `olcServerID`s
+>    created a CSN-conflict storm; entries 4-6 of the example seed routinely
+>    went missing in the resolution race. Observed in the 2026-05-13 multi-site
+>    e2e run with `seedApplied=true` but `ou=Mail` and `ou=ServiceAccounts` gone
+>    from the directory.
+>
+> 2. **False recovery masking data loss.** A single-pod cluster losing its PVC
+>    would trigger `verifySeedExists=false`, the operator would re-seed, and the
+>    cluster would report `seedApplied=true` and `Ready=True` again — while
+>    thousands of user entries accumulated over the cluster's lifetime were gone.
+>    Strictly worse than failing loudly.
+>
+> The replacement: `Status.SeedApplied` is now a one-way latch (set on first
+> verified success, never re-evaluated). `applySeedData` targets pod-0
+> deterministically with per-entry post-add verification. Recovery from data
+> loss is replication's job (multi-pod) or backup-restore-or-redeploy
+> (single-pod / total). A `DataPresent` informational condition on SlapdDatabase
+> surfaces the situation for monitoring but does **not** drive operator action.
+> See ADR-012 for the full reasoning and the alternatives considered.
+>
+> **Do not re-introduce `verifySeedExists` or anything functionally equivalent.**
+> If a future scenario seems to need "the operator should re-apply seed because
+> X," the answer is almost always either "X is genuine data loss and needs a
+> human" or "the operator should fix the underlying declarative state via a
+> separate, non-seed code path."
+
 ---
 
 ## 2026-04-20: SlapdDatabase controller missed externalPeers changes on SlapdCluster
