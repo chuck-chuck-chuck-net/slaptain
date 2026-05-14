@@ -52,8 +52,6 @@ spec:
                   key: root-password
             - name: LDAP_TLS_ENABLED
               value: {{ .Values.ldap.tls.enabled | quote }}
-            - name: FORCE_REBOOTSTRAP
-              value: {{ .Values.ldap.forceRebootstrap | quote }}
             - name: CONFIG_DIR
               value: "/ldap-config"
             - name: DATA_DIR

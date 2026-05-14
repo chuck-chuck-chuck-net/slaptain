@@ -18,7 +18,6 @@ imagePullSecrets: []
 
 ldap:
   domain: "dc=example,dc=org"
-  forceRebootstrap: false
   tls:
     enabled: true
     secretName: "slapd-tls"

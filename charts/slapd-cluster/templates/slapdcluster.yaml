@@ -20,7 +20,6 @@ spec:
     cnConfigCredentials:
       secretName: {{ .Values.ldap.cnConfigCredentials.secretName | quote }}
     {{- end }}
-    forceRebootstrap: {{ .Values.ldap.forceRebootstrap }}
     tls:
       enabled: {{ .Values.ldap.tls.enabled }}
       {{- if .Values.ldap.tls.enabled }}
