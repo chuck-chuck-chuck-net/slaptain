@@ -477,26 +477,25 @@ for pod in slapd-0 slapd-1 slapd-2; do
 done
 ```
 
-### Force rebootstrap (destroys all data)
+### Wipe a cluster and start fresh (destroys all data)
+
+There is no in-operator "rebootstrap" switch (see ADR-012 for why). Use the normal
+Kubernetes resource lifecycle:
 
 ```bash
-# 1. Set the flag
-kubectl patch slapdcluster slapd -n slaptain-testing \
-  --type=merge -p '{"spec":{"ldap":{"forceRebootstrap":true}}}'
+# Delete the CR — cascade deletes StatefulSet, Services, Secrets (owned).
+kubectl delete slapdcluster slapd -n slaptain-testing
 
-# 2. Restart pods so the init container runs
-kubectl rollout restart statefulset/slapd -n slaptain-testing
-kubectl rollout status statefulset/slapd -n slaptain-testing
+# Delete the PVCs — these survive CR deletion by default (retain policy on STS PVCs).
+kubectl delete pvc -n slaptain-testing -l app.kubernetes.io/instance=slapd
 
-# 3. Reset the flag (so next restart doesn't wipe again)
-kubectl patch slapdcluster slapd -n slaptain-testing \
-  --type=merge -p '{"spec":{"ldap":{"forceRebootstrap":false}}}'
-
-# 4. Reset bootstrapComplete so the operator re-runs bootstrap
-kubectl patch slapdcluster slapd -n slaptain-testing \
-  --subresource=status --type=merge \
-  -p '{"status":{"bootstrapComplete":false}}'
+# Redeploy via your normal path (helm / flux / kubectl apply).
 ```
+
+Seed runs again on first reconcile of the recreated CR (since `SeedApplied` lives on
+the CR's status and doesn't survive deletion). For a multi-pod cluster where you only
+want to wipe one pod (e.g. to test replication recovery), delete just that pod's PVC
+and let the StatefulSet recreate the pod — syncrepl will rebuild its data from peers.
 
 ### Inspect slapd's running configuration
 

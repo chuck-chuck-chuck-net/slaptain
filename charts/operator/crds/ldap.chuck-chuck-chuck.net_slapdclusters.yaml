@@ -153,12 +153,6 @@ spec:
                           stanzas, and topology. See docs/ONBOARDING.md §Secret and Credential Model.
                         type: string
                     type: object
-                  forceRebootstrap:
-                    default: false
-                    description: |-
-                      forceRebootstrap instructs the init container to re-run bootstrap even if
-                      data already exists. Handle with care — this will overwrite existing data.
-                    type: boolean
                   tls:
                     description: tls configures TLS/LDAPS.
                     properties:

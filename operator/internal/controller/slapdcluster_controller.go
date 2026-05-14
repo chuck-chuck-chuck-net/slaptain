@@ -827,7 +827,6 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			},
 		},
 		{Name: "LDAP_TLS_ENABLED", Value: strconv.FormatBool(sc.Spec.LDAP.TLS.Enabled)},
-		{Name: "FORCE_REBOOTSTRAP", Value: strconv.FormatBool(sc.Spec.LDAP.ForceRebootstrap)},
 		{Name: "CONFIG_DIR", Value: "/config"},
 		{Name: "DATA_DIR", Value: "/data"},
 		{Name: "ACCESSLOG_DIR", Value: "/accesslog"},

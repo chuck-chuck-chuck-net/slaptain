@@ -16,7 +16,6 @@ spec:
   ldap:
     # cnConfigCredentials:
     #   secretName: "my-config-credentials"  # optional; omit to auto-generate
-    forceRebootstrap: false
     tls:
       enabled: true
       secretName: slapd-tls

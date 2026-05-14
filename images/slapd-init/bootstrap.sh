@@ -53,15 +53,6 @@ if [[ -n "$DATABASE_DIRS" ]]; then
     done
 fi
 
-FORCE_REBOOTSTRAP="${FORCE_REBOOTSTRAP:-false}"
-if [[ "${FORCE_REBOOTSTRAP^^}" == "TRUE" ]]; then
-    echo "FORCE_REBOOTSTRAP is TRUE. Cleaning up existing data..."
-    rm -rf "$CONFIG_DIR"/* "$DATA_DIR"/*
-    if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]]; then
-        rm -rf "$ACCESSLOG_DIR"/*
-    fi
-fi
-
 if [[ ! -d "$CONFIG_DIR/slapd.d/cn=config" ]]; then
     echo "Generating base configuration..."
 

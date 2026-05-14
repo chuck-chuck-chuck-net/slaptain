@@ -49,8 +49,10 @@ The generated configuration includes:
 - Replication overlays (`accesslog`, `syncprov`) and a `syncrepl` stanza for **every peer pod
   except itself** — only when replication is enabled (see [Replication Topology](#replication-topology))
 
-**Idempotency:** if `$CONFIG_DIR/cn=config` already exists, the entire generation block is
-skipped. Data is only wiped when `spec.ldap.forceRebootstrap=true`.
+**Idempotency:** if `$CONFIG_DIR/slapd.d/cn=config` already exists, the entire generation
+block is skipped. The init container never wipes existing data — see ADR-012 for the cluster
+lifecycle model (wipe and rebootstrap are done via `kubectl delete` of the CR + PVCs, not
+via an in-operator switch).
 
 **Password handling:** the operator passes `LDAP_ADMIN_PW` and `LDAP_ROOT_PW` as plaintext
 env vars from Kubernetes Secrets. The init container hashes them at runtime using:
@@ -118,8 +120,8 @@ container, not in the operator.
 - `root-password` — plaintext password for `cn=admin,cn=config` (config DB admin)
 
 Both Secrets are **create-only** — the operator writes them once and never modifies them.
-Rotating passwords requires manual intervention (delete the Secrets and the SlapdCluster, or
-use `forceRebootstrap`).
+Rotating passwords requires manual intervention (delete the Secrets and the SlapdCluster +
+its PVCs, then redeploy). See ADR-012 for the cluster lifecycle model.
 
 ### Auto-generated credentials (default)
 
@@ -412,30 +414,20 @@ call repeatedly and safe across operator restarts.
 
 ---
 
-## forceRebootstrap
+## Wiping a cluster
 
-Setting `spec.ldap.forceRebootstrap=true` causes the init container to delete all contents of
-`/ldap-config`, `/ldap-data`, and (when replication is enabled) `/ldap-accesslog` before
-regenerating configuration. **This is destructive and irreversible — all LDAP data is lost.**
-
-The pod must restart for this to take effect:
+There is no in-operator "rebootstrap" switch. To intentionally discard all directory data
+and start fresh, use the Kubernetes resource lifecycle:
 
 ```bash
-kubectl rollout restart statefulset/<name> -n <namespace>
+kubectl delete slapdcluster <name> -n <ns>
+kubectl delete pvc -n <ns> -l app.kubernetes.io/instance=<name>
 ```
 
-After the pod restarts:
-1. The init container runs again with a clean slate and regenerates `cn=config`.
-2. Because `/ldap-data` is empty, `ldapEntryExists` returns `false` on the next operator
-   reconcile.
-3. `status.bootstrapComplete` is a persistent status field and is **not** automatically
-   cleared. To re-run operator-side bootstrap, patch the status manually:
-
-```bash
-kubectl patch slapdcluster/<name> -n <namespace> \
-  --subresource=status --type=merge \
-  -p '{"status":{"bootstrapComplete":false}}'
-```
+Redeploy via your normal flow (helm / flux / kubectl apply). The operator will recreate
+everything from spec, the init container will re-bootstrap `cn=config`, and the seed
+runs again because `SeedApplied` doesn't survive CR deletion. See ADR-012 for why this
+is the only supported wipe path (and why an earlier `forceRebootstrap` flag was removed).
 
 ---
 

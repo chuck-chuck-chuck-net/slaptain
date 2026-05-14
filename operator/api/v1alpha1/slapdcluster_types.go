@@ -98,10 +98,6 @@ type SlapdLDAPConfig struct {
 	// replication, database creation). See ADR-002.
 	// +optional
 	CnConfigCredentials CnConfigCredentials `json:"cnConfigCredentials,omitempty"`
-	// forceRebootstrap instructs the init container to re-run bootstrap even if
-	// data already exists. Handle with care — this will overwrite existing data.
-	// +kubebuilder:default=false
-	ForceRebootstrap bool `json:"forceRebootstrap,omitempty"`
 	// tls configures TLS/LDAPS.
 	// +optional
 	TLS SlapdTLSConfig `json:"tls,omitempty"`
