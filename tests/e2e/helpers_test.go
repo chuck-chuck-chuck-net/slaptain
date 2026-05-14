@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -125,21 +124,6 @@ func deploymentReady(c *kubernetes.Clientset, ns, name string) bool {
 		return false
 	}
 	return d.Status.ReadyReplicas >= 1
-}
-
-// ── Port-forward ──────────────────────────────────────────────────────────────
-
-func startPortForward(ns, resource, localPort, remotePort string) context.CancelFunc {
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
-		"-n", ns,
-		resource,
-		fmt.Sprintf("%s:%s", localPort, remotePort),
-	)
-	cmd.Stdout = GinkgoWriter
-	cmd.Stderr = GinkgoWriter
-	Expect(cmd.Start()).To(Succeed(), "failed to start port-forward")
-	return cancel
 }
 
 // ── LDAP helpers ──────────────────────────────────────────────────────────────
@@ -295,39 +279,27 @@ func podNodePortAddr(podName, baseEnv string) string {
 	return fmt.Sprintf("%s:%d", nodeIP, base+ordinal)
 }
 
-// dialPodLDAP connects directly to a specific slapd pod as admin.
-//
-// Three modes (checked in order):
-//   - NodePort mode (E2E_NODE_IP + E2E_POD_NODEPORT_BASE set): connect via per-pod NodePort.
-//   - In-cluster mode (E2E_IN_CLUSTER=1): connect via headless DNS.
-//   - Local mode (default): kubectl port-forward to the pod.
-func dialPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
-	if addr := podNodePortAddr(podName, "E2E_POD_NODEPORT_BASE"); addr != "" {
-		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
-	}
-	if os.Getenv("E2E_IN_CLUSTER") == "1" {
-		addr := fmt.Sprintf("%s.%s.%s.svc.cluster.local:1024", podName, ldapHeadlessSvc, ns)
-		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
-	}
-	// Local: open a kubectl port-forward tunnel.
-	cancel := startPortForward(ns, "pod/"+podName, localPort, "1024")
-	time.Sleep(2 * time.Second)
-	return connectLDAP("localhost:"+localPort, baseDN, adminPW), cancel
+// dialPodLDAP connects directly to a specific slapd pod as admin via its
+// dedicated NodePort. E2E_NODE_IP and E2E_POD_NODEPORT_BASE must be set by
+// the e2e setup scripts. The returned cancel func is a no-op (kept in the
+// signature for callers that still hold per-pod connection lifecycle state);
+// connections are torn down by ldap.Conn.Close().
+func dialPodLDAP(ns, podName, _ string) (*ldap.Conn, context.CancelFunc) {
+	addr := podNodePortAddr(podName, "E2E_POD_NODEPORT_BASE")
+	Expect(addr).NotTo(BeEmpty(),
+		"E2E_NODE_IP and E2E_POD_NODEPORT_BASE must be set to dial pod %s", podName)
+	_ = ns
+	return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
 }
 
-// dialReadOnlyPodLDAP connects directly to a specific read-only slapd pod as admin.
-// Same as dialPodLDAP but uses the read-only NodePort base / headless service.
-func dialReadOnlyPodLDAP(ns, podName, localPort string) (*ldap.Conn, context.CancelFunc) {
-	if addr := podNodePortAddr(podName, "E2E_RO_POD_NODEPORT_BASE"); addr != "" {
-		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
-	}
-	if os.Getenv("E2E_IN_CLUSTER") == "1" {
-		addr := fmt.Sprintf("%s.%s.%s.svc.cluster.local:1024", podName, ldapReadOnlyHeadlessSvc, ns)
-		return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
-	}
-	cancel := startPortForward(ns, "pod/"+podName, localPort, "1024")
-	time.Sleep(2 * time.Second)
-	return connectLDAP("localhost:"+localPort, baseDN, adminPW), cancel
+// dialReadOnlyPodLDAP connects directly to a specific read-only slapd pod via
+// its dedicated NodePort. E2E_NODE_IP and E2E_RO_POD_NODEPORT_BASE must be set.
+func dialReadOnlyPodLDAP(ns, podName, _ string) (*ldap.Conn, context.CancelFunc) {
+	addr := podNodePortAddr(podName, "E2E_RO_POD_NODEPORT_BASE")
+	Expect(addr).NotTo(BeEmpty(),
+		"E2E_NODE_IP and E2E_RO_POD_NODEPORT_BASE must be set to dial RO pod %s", podName)
+	_ = ns
+	return retryConnectLDAP(context.Background(), addr, baseDN, adminPW), func() {}
 }
 
 // addReplTestUser adds a minimal posixAccount entry to ou=People for use in

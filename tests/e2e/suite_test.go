@@ -1,7 +1,6 @@
 package e2e_test
 
 import (
-	"context"
 	"os"
 	"strings"
 	"testing"
@@ -21,7 +20,6 @@ var (
 	k8sClient *kubernetes.Clientset
 	crdClient client.Client // controller-runtime client for SlapdCluster CRD access
 	ldapConn  *ldap.Conn
-	pfCancel  context.CancelFunc
 	adminPW   string
 	rootPW    string
 	readpwPWs map[string]string // username → plaintext; empty when not configured
@@ -30,22 +28,11 @@ var (
 	// NAMESPACE_TESTING — Kubernetes namespace to test in.
 	namespace = envOrDefault("NAMESPACE_TESTING", "slaptain-testing")
 
-	// LDAP_SVC — service to port-forward for plain LDAP access (port 389).
-	// Only used when LDAP_ADDR is not set.
-	ldapSvc = envOrDefault("LDAP_SVC", "svc/slapd")
-
-	// LDAP_ADDR — direct LDAP address (host:port). When set, kubectl port-forward
-	// for the main ldapConn is skipped. Works with both in-cluster DNS
-	// (e.g. slapd.slaptain-testing.svc.cluster.local:389) and NodePort
-	// (e.g. 192.168.7.11:30389).
-	localLDAPAddr = envOrDefault("LDAP_ADDR", "localhost:13891")
-
-	// LDAP_HEADLESS_SVC — headless service name for per-pod DNS in in-cluster mode.
-	// Pods are reachable at <pod>.<headless>.<namespace>.svc.cluster.local:1024.
-	ldapHeadlessSvc = envOrDefault("LDAP_HEADLESS_SVC", "slapd-headless")
-
-	// LDAP_READONLY_HEADLESS_SVC — headless service for read-only replica pods.
-	ldapReadOnlyHeadlessSvc = envOrDefault("LDAP_READONLY_HEADLESS_SVC", "slapd-readonly-headless")
+	// LDAP_ADDR — direct LDAP address (host:port). REQUIRED. Set by the e2e
+	// scripts to a NodePort (single-site: ${NODE_IP}:30389; multi-site: per
+	// context). The previous port-forward fallback has been removed — see
+	// commit log and CLAUDE.md.
+	localLDAPAddr = os.Getenv("LDAP_ADDR")
 
 	// READPW_OU — OU name for read-only service accounts (readpw users).
 	readpwOU = envOrDefault("READPW_OU", "ServiceAccounts")
@@ -62,6 +49,10 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func(ctx SpecContext) {
+	Expect(localLDAPAddr).NotTo(BeEmpty(),
+		"LDAP_ADDR is required (NodePort target host:port). The e2e scripts set this; if you "+
+			"are running tests directly, export LDAP_ADDR=<NODE_IP>:<NodePort> before invoking go test.")
+
 	By("Setting up Kubernetes client")
 	k8sClient = newK8sClient()
 
@@ -113,16 +104,7 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		}
 	}
 
-	// In local mode set up a kubectl port-forward so tests can reach slapd.
-	// In in-cluster mode (LDAP_ADDR set) we have direct network access and
-	// the port-forward subprocess is neither needed nor available.
-	if os.Getenv("LDAP_ADDR") == "" {
-		By("Starting kubectl port-forward to " + ldapSvc + ":389")
-		pfCancel = startPortForward(namespace, ldapSvc, "13891", "389")
-		time.Sleep(2 * time.Second)
-	} else {
-		By("Using direct LDAP address (in-cluster mode): " + localLDAPAddr)
-	}
+	By("Using LDAP address: " + localLDAPAddr)
 
 	By("Discovering base DN from LDAP rootDSE")
 	{
@@ -172,9 +154,6 @@ var _ = BeforeEach(func() {
 var _ = AfterSuite(func() {
 	if ldapConn != nil {
 		ldapConn.Close()
-	}
-	if pfCancel != nil {
-		pfCancel()
 	}
 })
 

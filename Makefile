@@ -52,7 +52,6 @@ INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:$(GIT_TAG)
 SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:$(GIT_TAG)
 TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:$(GIT_TAG)
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:$(GIT_TAG)
-E2E_RUNNER_IMAGE = $(REGISTRY)/$(PROJECT)/e2e-runner:$(GIT_TAG)
 
 # Helm chart OCI registry. Charts land under <registry>/<project>/charts/<name>.
 # Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/slaptain/charts/slaptain-operator --version X.Y.Z
@@ -76,7 +75,6 @@ INIT_SRCS    := $(shell find images/slapd-init -type f)
 SLAPD_SRCS   := $(shell find images/slapd -type f)
 TOOLKIT_SRCS := $(shell find images/slapd-toolkit -type f)
 OPERATOR_SRCS := $(shell find images/operator -type f) $(shell find operator -type f -name '*.go') operator/go.mod operator/go.sum
-E2E_SRCS     := $(shell find images/e2e-runner -type f) $(shell find tests/e2e -type f)
 
 # Import a container image to all k8s nodes via SSH (unconditional).
 # No leading @ — called from within import-if-needed which handles suppression.
@@ -108,9 +106,9 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl install-slctl push push-e2e-runner gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-in-cluster e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-e2e-runner deliver deliver-operator deliver-e2e-runner deploy-operator clean show-tag
+.PHONY: all build-init build-slapd build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator deliver deliver-operator deploy-operator clean show-tag
 
-all: build-init build-slapd build-toolkit build-operator build-e2e-runner build-slctl
+all: build-init build-slapd build-toolkit build-operator build-slctl
 
 ## Stamp-file backed build targets (incremental)
 
@@ -142,16 +140,11 @@ $(STAMPS)/operator: $(OPERATOR_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -f images/operator/Containerfile -t $(OPERATOR_IMAGE) .
 	@touch $@
 
-$(STAMPS)/e2e: $(E2E_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build -f images/e2e-runner/Containerfile -t $(E2E_RUNNER_IMAGE) .
-	@touch $@
-
 ## Phony aliases so `make build-operator` etc. still work
 build-init: $(STAMPS)/init
 build-slapd: $(STAMPS)/slapd
 build-toolkit: $(STAMPS)/toolkit
 build-operator: $(STAMPS)/operator
-build-e2e-runner: $(STAMPS)/e2e
 
 build-slctl:
 	cd operator && go build -o ../bin/slctl ./cmd/slctl/
@@ -160,15 +153,11 @@ install-slctl: build-slctl
 	sudo install -m 0755 bin/slctl /usr/local/bin/slctl
 
 ## Push to container registry
-push: build-init build-slapd build-toolkit build-operator build-e2e-runner
+push: build-init build-slapd build-toolkit build-operator
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
 	$(CONTAINER_ENGINE) push $(TOOLKIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
-	$(CONTAINER_ENGINE) push $(E2E_RUNNER_IMAGE)
-
-push-e2e-runner: build-e2e-runner
-	$(CONTAINER_ENGINE) push $(E2E_RUNNER_IMAGE)
 
 ## Import images into k8s node CRI via SSH.
 ## Checks kubectl node image list first — skips import if the tag is already present.
@@ -186,15 +175,11 @@ import-toolkit: build-toolkit
 import-operator: build-operator
 	$(call import-if-needed,$(OPERATOR_IMAGE))
 
-import-e2e-runner: build-e2e-runner
-	$(call import-if-needed,$(E2E_RUNNER_IMAGE))
-
-import: import-init import-slapd import-toolkit import-operator import-e2e-runner
+import: import-init import-slapd import-toolkit import-operator
 
 ## Delivery: dispatch to push or import based on DELIVERY variable
 deliver: $(DELIVERY)
 deliver-operator: $(DELIVERY)-operator
-deliver-e2e-runner: $(DELIVERY)-e2e-runner
 
 ## Operator dev fast-path: build + deliver + helm upgrade + restart
 deploy-operator: deliver-operator operator-helm-install
@@ -293,19 +278,6 @@ e2e-resilience:
 ## e2e-external-replication: run cross-cluster external replication tests
 e2e-external-replication:
 	cd tests/e2e && E2E_EXTERNAL_REPL=1 go test -v ./... --ginkgo.v --ginkgo.timeout=10m --ginkgo.label-filter=external-replication
-
-## e2e-in-cluster: build + deliver e2e runner image, deploy as a Job, stream logs, report result
-e2e-in-cluster: deliver-e2e-runner
-	$(KUBECTL) delete job e2e-runner -n $(NAMESPACE_TESTING) --ignore-not-found
-	sed 's|__E2E_RUNNER_IMAGE__|$(E2E_RUNNER_IMAGE)|g; s|__NAMESPACE_TESTING__|$(NAMESPACE_TESTING)|g' \
-		tests/e2e-runner-rbac.yaml | $(KUBECTL) apply -f -
-	sed 's|__E2E_RUNNER_IMAGE__|$(E2E_RUNNER_IMAGE)|g; s|__NAMESPACE_TESTING__|$(NAMESPACE_TESTING)|g' \
-		tests/e2e-runner-job.yaml | $(KUBECTL) apply -f -
-	@echo "Waiting for e2e-runner pod to start..."
-	@until $(KUBECTL) logs -n $(NAMESPACE_TESTING) -f job/e2e-runner 2>/dev/null; do sleep 2; done
-	@$(KUBECTL) wait job/e2e-runner -n $(NAMESPACE_TESTING) \
-		--for=condition=complete --timeout=30s 2>/dev/null \
-		|| (echo "FAIL: e2e-runner job did not complete successfully" && exit 1)
 
 ## e2e-multisite: full multi-site setup + test + teardown (pass CONTEXTS="s1 s2 s3")
 e2e-multisite:

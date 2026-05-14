@@ -75,40 +75,27 @@ internal lab variant; see `tests/resources/lab/` for SOPS-encrypted secrets used
 
 ## Run the e2e tests
 
-### Option A — Local (kubectl port-forward)
-
 ```bash
-make e2e-run
+./tests/e2e-singlesite.sh all <kubectl-context>
 ```
 
-Runs from your workstation. The suite starts a `kubectl port-forward svc/slapd` tunnel
-automatically. Works well for quick iteration but can be flaky due to port-forward reconnect
-latency after pod restarts (especially in resilience tests).
+The single-site script provisions NodePort Services for `slapd`, each RW pod, and
+each RO pod, exports `LDAP_ADDR` / `E2E_NODE_IP` / `E2E_POD_NODEPORT_BASE` /
+`E2E_RO_POD_NODEPORT_BASE` for the Go test process, runs `go test ./tests/e2e`,
+then tears the NodePorts down. There is no `kubectl port-forward` and no
+in-cluster runner Job — both were retired in favour of NodePorts (the previous
+port-forward fallback was flaky during pod restarts; the in-cluster runner
+duplicated a code path that itself was never e2e-tested). Cross-site replication
+testing has always used NodePorts; single-site now matches.
 
-### Option B — In-cluster (recommended for CI and resilience tests)
-
-```bash
-make e2e-in-cluster
-```
-
-Builds and pushes an `e2e-runner` image, deploys it as a Kubernetes Job in the test namespace,
-and streams logs. The test pod connects directly to `slapd.slaptain-testing.svc.cluster.local`
-— no port-forward, so pod restarts don't break the LDAP connection. Resilience tests (pod
-restarts, warm start) are **always enabled** in this mode since the port-forward flakiness
-that motivated the `E2E_RESILIENCE` gate doesn't apply in-cluster.
-
-The in-cluster runner requires a one-time RBAC setup (applied automatically by the target)
-and the `e2e-runner` image in the registry.
-
-### Common options
-
-Both modes auto-discover the LDAP base DN from the server's rootDSE — no domain env var
-needed. Both assume the SlapdCluster and the test resources are already deployed.
+The script auto-discovers the LDAP base DN from the server's rootDSE — no domain
+env var needed. SlapdCluster and the test resources must already be deployed
+(or use the `setup` subcommand which deploys them).
 
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Namespace to test in |
-| `LDAP_SVC` | `svc/slapd` | Service to port-forward for LDAP access (local mode only) |
+| `LDAP_ADDR` | *(set by script)* | `<node-ip>:<nodeport>` — required when invoking `go test` directly |
 | `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable slow pod-restart and warm-start tests |
 
 **Readpw ACL tests** require plaintext passwords for the readpw service accounts. The suite
@@ -145,9 +132,9 @@ running in **separate Kubernetes clusters** (siteA and siteB). They are gated by
          └────── test runner (your workstation) ───┘
 ```
 
-The test runner runs on your workstation (or in siteA). It connects to siteA via
-`kubectl port-forward` (or direct if `LDAP_ADDR` is set) and to siteB via
-`E2E_REMOTE_LDAP_ADDR` (a routable address — NodePort, LoadBalancer, or VPN).
+The test runner runs on your workstation. It connects to siteA via `LDAP_ADDR`
+(NodePort, set by `e2e-multisite.sh`) and to siteB via `E2E_REMOTE_LDAP_ADDR`
+(also a NodePort).
 
 Three cross-site connectivity modes are supported:
 

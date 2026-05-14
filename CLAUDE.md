@@ -95,7 +95,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
     ├── README.md                   # Test suite documentation (quick-start cycle at top)
     ├── SOPS.md                     # SOPS/age secret management guide
     └── e2e/                        # Ginkgo e2e tests (go-ldap, client-go)
-        ├── suite_test.go           # BeforeSuite: port-forward, rootDSE baseDN discovery, admin connect
+        ├── suite_test.go           # BeforeSuite: NodePort LDAP connect, rootDSE baseDN discovery, admin connect
         ├── helpers_test.go         # k8s/LDAP helpers (ldapSearch, ldapAdd, portForward, …)
         ├── slapd_test.go           # StatefulSet, Service, PVC, passwords Secret checks
         ├── bootstrap_test.go       # SlapdDatabase Running checks
@@ -223,9 +223,8 @@ Or all-in-one: `./tests/e2e-singlesite.sh all <context>`
 4. Read `adminPW` from `<dbname>-credentials` Secret (`root-password` key)
 5. Read `rootPW` from `slapd-config-password` Secret (`root-password` key)
 6. Read `readpwPWs` from `slapd-test-passwords` Secret — `map[string]string` built from all `readpw-*` keys
-7. Start `kubectl port-forward svc/slapd 13891:389` (local mode only; skipped when `LDAP_ADDR` is set)
-8. Query LDAP rootDSE (anonymous, `namingContexts`) → set `baseDN` (auto-discovered, no env var)
-9. Connect `ldapConn` as `cn=admin,<baseDN>` (data rootDN, bypasses ACLs)
+7. Dial `LDAP_ADDR` (NodePort, set by the e2e scripts) and query rootDSE (anonymous, `namingContexts`) → set `baseDN` (auto-discovered, no env var)
+8. Connect `ldapConn` as `cn=admin,<baseDN>` (data rootDN, bypasses ACLs)
 
 **readpwOU** is configurable via `READPW_OU` env var (default: `ServiceAccounts`).
 
