@@ -75,7 +75,8 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		// External peer j → RID = ridBase + 50 + j + 1 (first peer: ridBase + 51).
 		sd := &ldapv1alpha1.SlapdDatabase{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: dbCRName, Namespace: namespace}, sd)).To(Succeed())
-		extPeerRID = fmt.Sprintf("%d", sd.Spec.Replication.RIDBase+51)
+		Expect(sd.Spec.Replication.RIDBase).NotTo(BeNil(), "test fixture must set spec.replication.ridBase")
+		extPeerRID = fmt.Sprintf("%d", *sd.Spec.Replication.RIDBase+51)
 	}, NodeTimeout(30*time.Second))
 
 	// ── 1. Syncrepl stanzas applied ──────────────────────────────────────────

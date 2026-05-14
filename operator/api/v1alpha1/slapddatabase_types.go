@@ -72,15 +72,37 @@ type DatabaseCredentials struct {
 
 // DatabaseReplicationConfig holds per-database replication settings.
 type DatabaseReplicationConfig struct {
+	// enabled controls whether this database participates in cluster
+	// replication. Default true. Set false to explicitly exclude this database
+	// from the cluster's syncrepl topology — rare but legitimate cases include
+	// partial-migration coexistence (one DB pulls from legacy while another is
+	// brand-new and standalone), per-site local state, and static reference DBs.
+	//
+	// When the parent SlapdCluster has replication.enabled=false this setting
+	// has no effect: the cluster-level gate short-circuits all replication
+	// work regardless of per-database intent. The field is still required at
+	// the CRD level (every SlapdDatabase must declare its replication intent
+	// up-front, even in non-replicated clusters) — this is by design, to make
+	// "I forgot to configure replication" loud at admission time.
+	//
+	// Tristate (*bool) for the same reason as DeltaSync: round-trip safety for
+	// an explicit false through the API server's defaulting.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 	// ridBase is the base Replica ID for this database's syncrepl stanzas.
 	// In-cluster peer i gets RID = ridBase + i + 1.
 	// External peer j gets RID = ridBase + 50 + j + 1.
 	// Must be unique across all SlapdDatabase CRs in the same cluster to avoid
 	// RID collisions. The operator validates this.
-	// +required
+	//
+	// Required when enabled=true (the default); may be omitted when
+	// enabled=false. Encoded as *int32 so CEL's has() can distinguish
+	// "user supplied a value" from "Go zero value."
+	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=949
-	RIDBase int32 `json:"ridBase"`
+	RIDBase *int32 `json:"ridBase,omitempty"`
 	// deltaSync enables delta-syncrepl via the accesslog overlay for this database.
 	// When true, the accesslog overlay is added to this database and syncrepl stanzas
 	// use syncdata=accesslog. When false, plain syncrepl (full entry sync) is used.
@@ -121,6 +143,8 @@ type DatabaseSeedConfig struct {
 }
 
 // SlapdDatabaseSpec defines the desired state of SlapdDatabase.
+//
+// +kubebuilder:validation:XValidation:rule="self.replication.enabled == false || has(self.replication.ridBase)",message="spec.replication.ridBase is required when replication.enabled=true (the default). Set replication.enabled=false to explicitly exclude this database from cluster replication."
 type SlapdDatabaseSpec struct {
 	// suspend pauses the operator's reconciliation of this resource. The data
 	// database, ACLs, syncrepl stanzas, and seed entries are left in place; the
@@ -177,10 +201,13 @@ type SlapdDatabaseSpec struct {
 	// "uid eq,sub". The operator applies these as olcDbIndex entries.
 	// +optional
 	Indices []string `json:"indices,omitempty"`
-	// replication holds per-database replication settings. Required when the
-	// parent SlapdCluster has replication enabled.
-	// +optional
-	Replication *DatabaseReplicationConfig `json:"replication,omitempty"`
+	// replication holds per-database replication settings. Always required —
+	// every SlapdDatabase must declare its replication intent at the CR level,
+	// even if the parent cluster doesn't replicate. Set replication.enabled=false
+	// to explicitly exclude this database from cluster replication; otherwise
+	// supply replication.ridBase. See DatabaseReplicationConfig for the rationale.
+	// +required
+	Replication DatabaseReplicationConfig `json:"replication"`
 	// seed defines initial data to populate in the database on first creation.
 	// Applied once and tracked in status.
 	// +optional
@@ -263,11 +290,24 @@ func init() {
 	SchemeBuilder.Register(&SlapdDatabase{}, &SlapdDatabaseList{})
 }
 
+// ReplicationEnabled reports whether this database participates in cluster
+// replication. Treats an unset (nil) Enabled as the documented default (true).
+// Independent of the parent cluster's replication.enabled — callers gate on
+// both when deciding whether to perform replication work.
+func (sd *SlapdDatabase) ReplicationEnabled() bool {
+	if sd.Spec.Replication.Enabled == nil {
+		return true
+	}
+	return *sd.Spec.Replication.Enabled
+}
+
 // DeltaSyncEnabled reports whether delta-syncrepl should be used for this
 // database, treating an unset (nil) DeltaSync as the documented default
-// (true). Wraps the *bool tristate so reconciler code stays clean.
+// (true). Returns false when the database is excluded from replication
+// (ReplicationEnabled()==false) so callers that gate accesslog overlay setup
+// on this helper don't bootstrap an accesslog DB on an excluded database.
 func (sd *SlapdDatabase) DeltaSyncEnabled() bool {
-	if sd.Spec.Replication == nil {
+	if !sd.ReplicationEnabled() {
 		return false
 	}
 	if sd.Spec.Replication.DeltaSync == nil {

@@ -6,6 +6,12 @@ spec:
   clusterRef: slapd
   suffix: "dc=chuck-chuck-chuck,dc=net"
 
+  # Required since v0.0.13: every SlapdDatabase declares replication intent
+  # explicitly. The lab cluster is single-replica with no externalPeers, so
+  # this DB is excluded from any (non-existent) replication topology.
+  replication:
+    enabled: false
+
   acls:
     # Readpw service accounts can read userPassword in ou=Mail.
     - >-

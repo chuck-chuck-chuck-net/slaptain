@@ -48,11 +48,19 @@ spec:
     - "entryCSN eq"
     - "entryUUID eq"
 
-  # replication:
-  #   ridBase: 100
-  #   deltaSync: true
-  #   syncprovCheckpoint: "500 15"
-  #   accesslogPurge: "2+00:00 1+00:00"
+  # replication is required (v0.0.13+). Every SlapdDatabase must declare
+  # whether it participates in cluster replication, even when the parent
+  # SlapdCluster doesn't replicate at all — this makes "I forgot to configure
+  # replication" loud at admission time instead of silently broken.
+  #
+  # Set enabled=false to explicitly exclude this database from cluster
+  # replication (legitimate but rare: partial-migration coexistence, per-site
+  # local state, static reference DBs). Otherwise supply ridBase.
+  replication:
+    ridBase: 100
+    # deltaSync: true                # default
+    # syncprovCheckpoint: "500 15"
+    # accesslogPurge: "2+00:00 1+00:00"
 
   seed:
     entries:

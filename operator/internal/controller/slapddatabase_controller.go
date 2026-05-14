@@ -218,7 +218,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//    with unwillingToPerform anyway. On in-place promotion to peer mode,
 	//    the next reconcile flips olcReadOnly (step 7) before this step
 	//    fires, and the bind user gets created cleanly.
-	if sc.Spec.Replication.Enabled && sd.Spec.Replication != nil && !sc.IsConsumerOnly() {
+	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() {
 		if err := r.ensureReplicationUser(ctx, sc, sd, rootPW); err != nil {
 			log.Info("replication user not yet created (will retry)", "err", err)
 			pendingWork = true
@@ -226,7 +226,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// 10. Configure replication stanzas if replication is enabled.
-	if sc.Spec.Replication.Enabled && sd.Spec.Replication != nil {
+	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() {
 		skipped, err := r.reconcileReplication(ctx, sc, sd, configPW)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
@@ -790,7 +790,7 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 	addReq := ldap.NewAddRequest(syncprovDN, nil)
 	addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
 	addReq.Attribute("olcOverlay", []string{"syncprov"})
-	if sd.Spec.Replication != nil && sd.Spec.Replication.SyncprovCheckpoint != "" {
+	if sd.Spec.Replication.SyncprovCheckpoint != "" {
 		addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
 	}
 	if err := conn.Add(addReq); err != nil {
@@ -833,7 +833,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 	addReq.Attribute("olcAccessLogDB", []string{"cn=accesslog"})
 	addReq.Attribute("olcAccessLogOps", []string{"writes"})
 	addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
-	if sd.Spec.Replication != nil && sd.Spec.Replication.AccesslogPurge != "" {
+	if sd.Spec.Replication.AccesslogPurge != "" {
 		addReq.Attribute("olcAccessLogPurge", []string{sd.Spec.Replication.AccesslogPurge})
 	}
 	if err := conn.Add(addReq); err != nil {
@@ -1439,8 +1439,8 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 
 	skipped := false
 	ridBase := int32(0)
-	if sd.Spec.Replication != nil {
-		ridBase = sd.Spec.Replication.RIDBase
+	if sd.Spec.Replication.RIDBase != nil {
+		ridBase = *sd.Spec.Replication.RIDBase
 	}
 
 	retryInterval := sc.Spec.Replication.Retry
