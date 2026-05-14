@@ -114,8 +114,14 @@ if [[ -z "$domain" ]]; then
     domain="cluster.local"
 fi
 
-subj="/O=system:nodes/CN=system:node:$label.$namespace.svc.$domain"
-# no sans just based on the label
+# The kubernetes.io/kubelet-serving signer requires:
+#   * O=system:nodes
+#   * CN must start with "system:node:"
+# The rest of the CN is free-form. X.509 caps CN at 64 chars, so we DON'T
+# embed the FQDN here (would overflow for namespaces like
+# slaptain-testing-ephemeral). The FQDN(s) live in subjectAltName, where
+# they do the actual TLS hostname-validation work per RFC 6125.
+subj="/O=system:nodes/CN=system:node:$label"
 sans=()
 
 if [[ -n "$dns_names" ]]
@@ -128,7 +134,7 @@ fi
 
 if [[ -n "$service" ]]
 then
-    subj="/O=system:nodes/CN=system:node:$service.$namespace.svc.$domain"
+    subj="/O=system:nodes/CN=system:node:$service"
     sans+=(
         "DNS:$service"
         "DNS:$service.$namespace.svc.$domain"
@@ -139,7 +145,7 @@ fi
 
 if [[ -n "$sts" ]]
 then
-    subj="/O=system:nodes/CN=system:node:$sts-*.$sts.$namespace.svc.$domain"
+    subj="/O=system:nodes/CN=system:node:$sts"
     # RFC 6125 / OpenSSL 3: * must be the entire leftmost label (no partial wildcards).
     sans+=("DNS:*.$sts.$namespace.svc.$domain")
 fi
