@@ -183,26 +183,21 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// "Operator stops reconciling before all pods are configured").
 	pendingWork := len(failedPods) > 0
 
-	// 8. Seed initial data. Re-applied if the root entry is missing (e.g. after
-	//    a pod restart that wiped the data directory and re-ran the init container).
-	if sd.Spec.Seed != nil && len(sd.Spec.Seed.Entries) > 0 {
-		needsSeed := !sd.Status.SeedApplied
-		if sd.Status.SeedApplied {
-			// Verify the seed is still present — a StatefulSet rolling restart
-			// (triggered by DATABASE_DIRS update) re-runs the init container,
-			// which re-creates cn=config from scratch. The new pod gets the
-			// database re-created by reconcilePodDatabase above, but seed data
-			// is only in the old (now-gone) LMDB files.
-			needsSeed = !r.verifySeedExists(ctx, sc, sd, rootPW)
-		}
-		if needsSeed {
-			if err := r.applySeedData(ctx, sc, sd, rootPW); err != nil {
-				log.Info("seed data not yet applied (will retry)", "err", err)
-				pendingWork = true
-				sd.Status.SeedApplied = false
-			} else {
-				sd.Status.SeedApplied = true
-			}
+	// 8. Seed initial data. ONE-SHOT per cluster lifetime — once SeedApplied=true,
+	//    we never re-evaluate. Seed data is the user's initial-conditions sketch,
+	//    not operator-owned declarative state, so re-applying on a "missing data"
+	//    signal would be wrong: it would mask real data loss (PVC reset, single-pod
+	//    cluster) with a fake "recovery" to a tiny subset of what should be there.
+	//    For multi-pod clusters that genuinely lose a pod's data, syncrepl handles
+	//    recovery from peers — no operator action needed. For total data loss
+	//    (single-pod or all peers lost), the right answer is restore-from-backup
+	//    or explicit CR-and-PVC delete, not silent re-seed. See ADR-012.
+	if sd.Spec.Seed != nil && len(sd.Spec.Seed.Entries) > 0 && !sd.Status.SeedApplied {
+		if err := r.applySeedData(ctx, sc, sd, rootPW); err != nil {
+			log.Info("seed data not yet applied (will retry)", "err", err)
+			pendingWork = true
+		} else {
+			sd.Status.SeedApplied = true
 		}
 	}
 
@@ -1123,68 +1118,17 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 	return fmt.Errorf("no reachable RW pod for replication user creation")
 }
 
-// verifySeedExists checks whether the first seed entry (typically the root DN)
-// exists on any reachable RW pod. Returns false if the entry is missing, indicating
-// that seed data needs to be re-applied (e.g. after a StatefulSet rolling restart).
-func (r *SlapdDatabaseReconciler) verifySeedExists(
-	ctx context.Context,
-	sc *ldapv1alpha1.SlapdCluster,
-	sd *ldapv1alpha1.SlapdDatabase,
-	rootPW string,
-) bool {
-	if len(sd.Spec.Seed.Entries) == 0 {
-		return true
-	}
-
-	// Parse the DN of the first seed entry.
-	firstEntry := strings.TrimSpace(sd.Spec.Seed.Entries[0])
-	lines := strings.SplitN(firstEntry, "\n", 2)
-	if len(lines) == 0 || !strings.HasPrefix(strings.ToLower(lines[0]), "dn:") {
-		return true // Can't parse — assume exists to avoid infinite loop.
-	}
-	dn := strings.TrimSpace(lines[0][3:])
-
-	rootDN := sd.Spec.RootDN
-	if rootDN == "" {
-		rootDN = "cn=admin," + sd.Spec.Suffix
-	}
-
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-	headlessSvc := sc.Name + "-headless"
-
-	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
-			sc.Name, i, headlessSvc, sc.Namespace)
-		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
-
-		conn, err := ldap.DialURL("ldap://"+addr,
-			ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
-		)
-		if err != nil {
-			continue
-		}
-		conn.SetTimeout(ldapRequestTimeout)
-
-		if err := conn.Bind(rootDN, rootPW); err != nil {
-			conn.Close()
-			continue
-		}
-
-		exists, err := ldapEntryExists(conn, dn)
-		conn.Close()
-		if err != nil {
-			continue
-		}
-		return exists
-	}
-
-	return false // No pod reachable — assume missing.
-}
-
-// applySeedData connects to the first reachable RW pod and applies seed entries.
+// applySeedData applies seed entries to pod-0 deterministically. Targets pod-0
+// only — never falls back to higher ordinals — so we never end up writing the
+// same DNs from two different pods, which would create a CSN-conflict storm in
+// a multi-master mesh (entries 4-6 lost in the resolution race; see ADR-012
+// and reconcile-loop-fixes.md 2026-05-14 entry).
+//
+// After each entry's add, we re-bind-search to verify the entry actually
+// persisted on the same connection. If any verification fails, the whole call
+// returns error and Status.SeedApplied stays false; the next reconcile retries.
+// Only on a complete, verified run does the caller flip SeedApplied=true. Seed
+// is one-shot per cluster lifetime — the latch never reverts.
 func (r *SlapdDatabaseReconciler) applySeedData(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
@@ -1193,78 +1137,77 @@ func (r *SlapdDatabaseReconciler) applySeedData(
 ) error {
 	log := logf.FromContext(ctx)
 
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
 	headlessSvc := sc.Name + "-headless"
+	host := fmt.Sprintf("%s-0.%s.%s.svc.cluster.local",
+		sc.Name, headlessSvc, sc.Namespace)
+	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
 
 	rootDN := sd.Spec.RootDN
 	if rootDN == "" {
 		rootDN = "cn=admin," + sd.Spec.Suffix
 	}
 
-	// Try each RW pod until one works.
-	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
-			sc.Name, i, headlessSvc, sc.Namespace)
-		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
+	conn, err := ldap.DialURL("ldap://"+addr,
+		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
+	)
+	if err != nil {
+		return fmt.Errorf("dial pod-0 (%s): %w", addr, err)
+	}
+	defer conn.Close()
+	conn.SetTimeout(ldapRequestTimeout)
 
-		conn, err := ldap.DialURL("ldap://"+addr,
-			ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
-		)
-		if err != nil {
-			continue
-		}
-		conn.SetTimeout(ldapRequestTimeout)
-
-		if err := conn.Bind(rootDN, rootPW); err != nil {
-			conn.Close()
-			continue
-		}
-
-		// Apply each seed entry.
-		allOK := true
-		for _, entry := range sd.Spec.Seed.Entries {
-			if err := r.applySeedEntry(conn, entry); err != nil {
-				log.Info("seed entry failed", "host", host, "err", err)
-				allOK = false
-			}
-		}
-		conn.Close()
-
-		if allOK {
-			log.Info("seed data applied", "host", host, "entries", len(sd.Spec.Seed.Entries))
-			return nil
-		}
-		return fmt.Errorf("some seed entries failed on %s", host)
+	if err := conn.Bind(rootDN, rootPW); err != nil {
+		return fmt.Errorf("bind %s on pod-0: %w", rootDN, err)
 	}
 
-	return fmt.Errorf("no reachable RW pod for seed data")
+	for i, entry := range sd.Spec.Seed.Entries {
+		dn, err := r.applySeedEntry(conn, entry)
+		if err != nil {
+			return fmt.Errorf("seed entry %d (%s): %w", i, dn, err)
+		}
+		// Verify persistence: a successful Add doesn't guarantee the entry is
+		// readable (server-side rejection that returned success, ACL quirk,
+		// replication-layer interference). A base-scope search on the same
+		// connection catches all of these before we move on.
+		exists, err := ldapEntryExists(conn, dn)
+		if err != nil {
+			return fmt.Errorf("verify seed entry %d (%s): %w", i, dn, err)
+		}
+		if !exists {
+			return fmt.Errorf("seed entry %d (%s) added but not visible — aborting", i, dn)
+		}
+	}
+
+	log.Info("seed data applied and verified", "host", host, "entries", len(sd.Spec.Seed.Entries))
+	return nil
 }
 
 // applySeedEntry parses a simplified LDIF entry and adds it via LDAP.
 // Format: first line is "dn: <dn>", remaining lines are "attr: value".
-// Blank lines are ignored.
-func (r *SlapdDatabaseReconciler) applySeedEntry(conn *ldap.Conn, entry string) error {
+// Blank lines are ignored. Returns the parsed DN so the caller can verify
+// post-add persistence even when the add was an idempotent no-op.
+func (r *SlapdDatabaseReconciler) applySeedEntry(conn *ldap.Conn, entry string) (string, error) {
 	lines := strings.Split(strings.TrimSpace(entry), "\n")
 	if len(lines) == 0 {
-		return nil
+		return "", nil
 	}
 
 	// Parse dn.
 	if !strings.HasPrefix(strings.ToLower(lines[0]), "dn:") {
-		return fmt.Errorf("seed entry must start with 'dn:', got %q", lines[0])
+		return "", fmt.Errorf("seed entry must start with 'dn:', got %q", lines[0])
 	}
 	dn := strings.TrimSpace(lines[0][3:])
 
-	// Check if entry already exists (idempotent).
+	// Idempotent: if the entry already exists on pod-0 (most likely from a
+	// previous, partially-successful seed run that the caller retried), the
+	// caller's post-add verification will confirm it's still there and we
+	// move on without modifying it.
 	exists, err := ldapEntryExists(conn, dn)
 	if err != nil {
-		return fmt.Errorf("check existence of %s: %w", dn, err)
+		return dn, fmt.Errorf("check existence of %s: %w", dn, err)
 	}
 	if exists {
-		return nil
+		return dn, nil
 	}
 
 	// Parse attributes.
@@ -1289,11 +1232,11 @@ func (r *SlapdDatabaseReconciler) applySeedEntry(conn *ldap.Conn, entry string) 
 	}
 	if err := conn.Add(addReq); err != nil {
 		if ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-			return nil
+			return dn, nil
 		}
-		return fmt.Errorf("add %s: %w", dn, err)
+		return dn, fmt.Errorf("add %s: %w", dn, err)
 	}
-	return nil
+	return dn, nil
 }
 
 // ldapEntryExists returns true when the given DN exists in the directory.
