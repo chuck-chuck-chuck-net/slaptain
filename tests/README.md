@@ -46,11 +46,13 @@ make operator-helm-install
 
 ### Optional: extra Helm values
 
-`make cluster-helm-install` already passes `-f tests/values.slapd.yaml` (3 RW + 1 RO with
-replication enabled). Pass additional `-f` flags via `HELM_VALUES_SLAPD_CLUSTER`:
+When invoking `tests/e2e.sh`, the script passes the fixture's values file
+(`tests/values.slapd-persistent.yaml` or `-ephemeral.yaml`) automatically.
+For ad-hoc deployments via `make cluster-helm-install`, pass extra `-f` flags
+via `HELM_VALUES_SLAPD_CLUSTER`:
 
 ```bash
-HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd-site-b.yaml" make cluster-helm-install
+HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd-persistent.yaml" make cluster-helm-install
 ```
 
 The standalone (non-operator) chart at `charts/slapd` is kept for reference but is no longer
@@ -76,27 +78,54 @@ internal lab variant; see `tests/resources/lab/` for SOPS-encrypted secrets used
 ## Run the e2e tests
 
 ```bash
-./tests/e2e.sh all <kubectl-context>
+./tests/e2e.sh all <kubectl-context> [more-contexts...]
 ```
 
-The single-site script provisions NodePort Services for `slapd`, each RW pod, and
-each RO pod, exports `LDAP_ADDR` / `E2E_NODE_IP` / `E2E_POD_NODEPORT_BASE` /
+One context = single-site mode; two or more = multi-site mode with full
+external-peer mesh.
+
+The script provisions NodePort Services for `slapd`, each RW pod, and each RO
+pod, exports `LDAP_ADDR` / `E2E_NODE_IP` / `E2E_POD_NODEPORT_BASE` /
 `E2E_RO_POD_NODEPORT_BASE` for the Go test process, runs `go test ./tests/e2e`,
 then tears the NodePorts down. There is no `kubectl port-forward` and no
-in-cluster runner Job — both were retired in favour of NodePorts (the previous
-port-forward fallback was flaky during pod restarts; the in-cluster runner
-duplicated a code path that itself was never e2e-tested). Cross-site replication
-testing has always used NodePorts; single-site now matches.
+in-cluster runner Job — both were retired in favour of NodePorts.
 
-The script auto-discovers the LDAP base DN from the server's rootDSE — no domain
-env var needed. SlapdCluster and the test resources must already be deployed
-(or use the `setup` subcommand which deploys them).
+The script auto-discovers the LDAP base DN from the server's rootDSE — no
+domain env var needed.
+
+### Two fixtures by default: persistent + ephemeral
+
+`e2e.sh` deploys **two** SlapdClusters by default, in two separate namespaces
+per context:
+
+| Fixture     | Namespace                      | Persistence              | Tests gated on |
+|-------------|--------------------------------|--------------------------|----------------|
+| persistent  | `slaptain-testing`             | PVCs (config/data/accesslog) | `!ephemeral-only` |
+| ephemeral   | `slaptain-testing-ephemeral`   | emptyDir (all volumes)      | `!persistent-only` |
+
+The Go test suite runs once per active fixture, with a Ginkgo label filter
+that excludes specs explicitly scoped to the *other* fixture. Tests labelled
+`ephemeral-only` (e.g. data-loss-recovery-via-replication) only execute on
+the ephemeral fixture; tests labelled `persistent-only` (e.g. warm-start data
+survival across all-pod restart) only execute on the persistent fixture.
+Unlabelled tests run on both.
+
+Opt out with env flags. If you set both, the script errors out — nothing to test.
+
+```bash
+E2E_SKIP_EPHEMERAL=1 ./tests/e2e.sh all <ctx>    # persistent only (current behaviour)
+E2E_SKIP_PERSISTENT=1 ./tests/e2e.sh all <ctx>   # ephemeral only (useful on stateless lab clusters)
+```
+
+### Env vars
 
 | Env var | Default | Description |
 |---|---|---|
-| `NAMESPACE_TESTING` | `slaptain-testing` | Namespace to test in |
+| `NAMESPACE_TESTING` | `slaptain-testing` | Base namespace; ephemeral fixture gets `-ephemeral` suffix |
 | `LDAP_ADDR` | *(set by script)* | `<node-ip>:<nodeport>` — required when invoking `go test` directly |
-| `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable slow pod-restart and warm-start tests |
+| `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable the persistent fixture's warm-restart resilience test |
+| `E2E_SKIP_PERSISTENT` | *(unset)* | Skip the persistent fixture entirely |
+| `E2E_SKIP_EPHEMERAL` | *(unset)* | Skip the ephemeral fixture entirely |
 
 **Readpw ACL tests** require plaintext passwords for the readpw service accounts. The suite
 reads them from the `slapd-test-passwords` Secret (`readpw-*` keys), which is provided by
@@ -170,7 +199,7 @@ done
 ```
 
 Then set `credentials.existingSecret: slapd-credentials` in both sites' Helm values (or
-add it to `tests/values.slapd.yaml`).
+add it to `tests/values.slapd-persistent.yaml`).
 
 #### 2. TLS certificates with cross-trust
 

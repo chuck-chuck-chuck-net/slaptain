@@ -169,7 +169,13 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 	// then wait for full recovery. This avoids the false-positive window where
 	// StatefulSet status still shows the old ready count.
 
-	It("data persists after simultaneous restart of all pods (warm start from PVCs)", func(ctx SpecContext) {
+	// PVC-specific: this test relies on each pod's data surviving across the
+	// restart via its persistent volume. On the ephemeral fixture (emptyDir)
+	// all pods come back blank at the same time, no peer has the data, and
+	// recovery is impossible by design (ADR-012's "case 3" — total data loss).
+	// The ephemeral-only data-loss-recovery test in dataloss_recovery_test.go
+	// covers the partial-loss case (single pod loses its volume, peers survive).
+	It("data persists after simultaneous restart of all pods (warm start from PVCs)", Label("persistent-only"), func(ctx SpecContext) {
 		By("capturing UIDs of all current slapd pods")
 		podList, err := k8sClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: "app.kubernetes.io/name=slapd",

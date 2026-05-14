@@ -1,0 +1,17 @@
+## Test values for the slapd-cluster chart — persistent (PVC-backed) fixture.
+## Deploys a 3-replica RW + 1 RO cluster with replication enabled, full
+## persistence (config/data/accesslog PVCs).
+##
+## Pairs with tests/values.slapd-ephemeral.yaml: same shape, different
+## persistence semantics — see ADR-012 for why the ephemeral fixture exists
+## and what it tests.
+##
+## Only non-default settings are listed; everything else comes from the chart defaults.
+
+logLevel: 256
+
+replicas: 3
+readReplicas: 1
+replication:
+  enabled: true
+  keepalive: "300:10:60"

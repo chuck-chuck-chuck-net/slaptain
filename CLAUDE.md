@@ -87,8 +87,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   └── Makefile                    # kubebuilder-generated (generate, manifests, run, …)
 └── tests/
     ├── gencert.sh                  # TLS cert generation helper
-    ├── values.slapd.yaml           # Non-secret values for slapd / slapd-cluster charts
-    ├── e2e.sh                      # Unified e2e orchestration (N=1 → single-site; N≥2 → multi-site)
+    ├── values.slapd-persistent.yaml # SlapdCluster values for the PVC-backed fixture
+    ├── values.slapd-ephemeral.yaml  # SlapdCluster values for the emptyDir-backed fixture (data-loss recovery tests)
+    ├── e2e.sh                      # Unified e2e orchestration (N=1 → single-site; N≥2 → multi-site; both fixtures by default)
     ├── e2e-singlesite.sh           # Backward-compat wrapper around e2e.sh
     ├── e2e-multisite.sh            # Backward-compat wrapper around e2e.sh
     ├── e2e-migration.sh            # Migration-scenario e2e (independent: slaptain + fake-prod topology)
@@ -99,12 +100,15 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
     ├── SOPS.md                     # SOPS/age secret management guide
     └── e2e/                        # Ginkgo e2e tests (go-ldap, client-go)
         ├── suite_test.go           # BeforeSuite: NodePort LDAP connect, rootDSE baseDN discovery, admin connect
-        ├── helpers_test.go         # k8s/LDAP helpers (ldapSearch, ldapAdd, portForward, …)
+        ├── helpers_test.go         # k8s/LDAP helpers (ldapSearch, ldapAdd, dialPodLDAP, …)
         ├── slapd_test.go           # StatefulSet, Service, PVC, passwords Secret checks
         ├── bootstrap_test.go       # SlapdDatabase Running checks
         ├── ldap_test.go            # Directory content: base structure, user/group CRUD, ACL basics
         ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
         ├── readonly_test.go        # Read-only replica tests: data sync, write rejection
+        ├── resilience_test.go      # Pod-restart resilience (warm restart labelled persistent-only; gated E2E_RESILIENCE=1)
+        ├── dataloss_recovery_test.go # Ephemeral-only: pod loses emptyDir, replication restores DIT (ADR-012 case 2)
+        ├── migration_test.go       # Migration scenario (gated at registration time: E2E_MIGRATION=1)
         └── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
 ```
 

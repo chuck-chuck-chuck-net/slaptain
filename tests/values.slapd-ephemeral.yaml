@@ -1,0 +1,24 @@
+## Test values for the slapd-cluster chart — ephemeral (emptyDir-backed) fixture.
+## Same topology as the persistent fixture (3-replica RW + 1 RO with
+## replication) but with persistence disabled — config, data, and accesslog
+## volumes are emptyDir.
+##
+## The whole point of this fixture is to emulate "pod restart with full data
+## loss" without needing destructive PVC manipulation in the test orchestration.
+## When kubectl delete pod runs against this cluster, the new pod comes back
+## with empty volumes; recovery has to happen via syncrepl from peers
+## (ADR-012's "case 2" — multi-pod cluster, replication is the recovery path,
+## operator does not re-seed).
+##
+## Only non-default settings are listed; everything else comes from the chart defaults.
+
+logLevel: 256
+
+replicas: 3
+readReplicas: 1
+replication:
+  enabled: true
+  keepalive: "300:10:60"
+
+persistence:
+  enabled: false
