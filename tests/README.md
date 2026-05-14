@@ -21,7 +21,7 @@ make e2e-run
 make testing-delete cluster-helm-uninstall
 ```
 
-The all-in-one wrapper does the same: `./tests/e2e-singlesite.sh all <kube-context>`.
+The all-in-one wrapper does the same: `./tests/e2e.sh all <kube-context>`.
 
 ---
 
@@ -76,7 +76,7 @@ internal lab variant; see `tests/resources/lab/` for SOPS-encrypted secrets used
 ## Run the e2e tests
 
 ```bash
-./tests/e2e-singlesite.sh all <kubectl-context>
+./tests/e2e.sh all <kubectl-context>
 ```
 
 The single-site script provisions NodePort Services for `slapd`, each RW pod, and
@@ -133,7 +133,7 @@ running in **separate Kubernetes clusters** (siteA and siteB). They are gated by
 ```
 
 The test runner runs on your workstation. It connects to siteA via `LDAP_ADDR`
-(NodePort, set by `e2e-multisite.sh`) and to siteB via `E2E_REMOTE_LDAP_ADDR`
+(NodePort, set by `e2e.sh`) and to siteB via `E2E_REMOTE_LDAP_ADDR`
 (also a NodePort).
 
 Three cross-site connectivity modes are supported:
@@ -377,7 +377,7 @@ Note: the distroless slapd image has no shell. Use the toolkit pod for more adva
 
 ## Automated multi-site testing
 
-The `e2e-multisite.sh` script automates the entire cross-cluster workflow: it deploys the
+The `e2e.sh` script automates the entire cross-cluster workflow: it deploys the
 operator, SlapdClusters with mutual `externalPeers`, test resources, and runs the full e2e
 suite (including external replication tests) — all from a single command.
 

@@ -88,7 +88,10 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 └── tests/
     ├── gencert.sh                  # TLS cert generation helper
     ├── values.slapd.yaml           # Non-secret values for slapd / slapd-cluster charts
-    ├── e2e-singlesite.sh           # All-in-one single-site e2e: setup, run, teardown
+    ├── e2e.sh                      # Unified e2e orchestration (N=1 → single-site; N≥2 → multi-site)
+    ├── e2e-singlesite.sh           # Backward-compat wrapper around e2e.sh
+    ├── e2e-multisite.sh            # Backward-compat wrapper around e2e.sh
+    ├── e2e-migration.sh            # Migration-scenario e2e (independent: slaptain + fake-prod topology)
     ├── resources/
     │   ├── example/                # Open-source test fixtures (SlapdDatabase, SlapdSchema, Secrets)
     │   └── lab/                    # Internal lab configuration (SOPS-encrypted secrets)
@@ -196,7 +199,8 @@ via `kubectl apply`.
 - `tests/resources/lab/` — internal lab configuration (SOPS-encrypted secrets, additional schemas).
 
 Deploy with `make testing-apply`, remove with `make testing-delete`.
-Or use `./tests/e2e-singlesite.sh all <context>` for an all-in-one cycle.
+Or use `./tests/e2e.sh all <context> [more-contexts...]` for an all-in-one cycle —
+one context for single-site, two or more for multi-site.
 
 ### slapd-toolkit chart (`charts/slapd-toolkit/`)
 
@@ -214,7 +218,7 @@ make e2e-run
 make testing-delete cluster-helm-uninstall
 ```
 
-Or all-in-one: `./tests/e2e-singlesite.sh all <context>`
+Or all-in-one: `./tests/e2e.sh all <context> [more-contexts...]` (single-site with N=1, multi-site with N≥2)
 
 **Suite setup** (`suite_test.go` `BeforeSuite`):
 1. Build k8s client
@@ -255,8 +259,8 @@ runs without readpw configuration but skips those test cases.
 | `make testing-delete` | `kubectl delete` test resources |
 | `make toolkit-install` | `helm upgrade --install toolkit ./charts/slapd-toolkit` (debug pod) |
 | `make toolkit-uninstall` | Uninstall the toolkit Helm release |
-| `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` |
-| `make e2e-singlesite` | All-in-one single-site e2e cycle via `tests/e2e-singlesite.sh` |
+| `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` (requires NodePort cluster pre-deployed) |
+| `make e2e-multisite CONTEXTS="c1 c2"` | All-in-one multi-site e2e cycle via the unified `tests/e2e.sh` |
 | `make e2e-external-replication` | Run cross-cluster external replication tests (E2E_EXTERNAL_REPL=1) |
 
 ### Makefile Targets (operator/)
