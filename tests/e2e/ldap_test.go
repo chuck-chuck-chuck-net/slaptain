@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"fmt"
+	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
 	. "github.com/onsi/ginkgo/v2"
@@ -80,14 +81,19 @@ var _ = Describe("LDAP directory", func() {
 			Expect(entries).To(HaveLen(2))
 		})
 
-		It("allows a user to bind with the correct password", func() {
-			conn, err := ldap.Dial("tcp", localLDAPAddr)
-			Expect(err).NotTo(HaveOccurred())
-			defer conn.Close()
-
+		It("allows a user to bind with the correct password", func(ctx SpecContext) {
+			// Fresh ldap.Dial LB-routes to whichever pod kube-proxy picks,
+			// which may differ from the pod ldapConn wrote alice to. Allow
+			// replication a moment to converge. Same race the readpw_test
+			// userPassword tests already account for.
 			aliceDN := fmt.Sprintf("uid=alice,ou=People,%s", baseDN)
-			Expect(conn.Bind(aliceDN, testUserPassword)).To(Succeed(),
-				"bind as alice with correct password should succeed")
+			Eventually(ctx, func(g Gomega) {
+				conn, err := ldap.Dial("tcp", localLDAPAddr)
+				g.Expect(err).NotTo(HaveOccurred())
+				defer conn.Close()
+				g.Expect(conn.Bind(aliceDN, testUserPassword)).To(Succeed(),
+					"bind as alice with correct password should succeed")
+			}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 		})
 
 		It("rejects a bind with the wrong password", func() {
@@ -181,16 +187,20 @@ var _ = Describe("LDAP directory", func() {
 			}
 		})
 
-		It("allows readpw users to authenticate", func() {
+		It("allows readpw users to authenticate", func(ctx SpecContext) {
 			// Bind checks (auth) are always permitted for anonymous per ACL rule {1}.
 			// We verify by attempting an anonymous auth-style bind — i.e. any user
 			// can be authenticated against their stored password via Bind.
-			conn, err := ldap.Dial("tcp", localLDAPAddr)
-			Expect(err).NotTo(HaveOccurred())
-			defer conn.Close()
-
+			//
+			// Same Eventually pattern as the user-management bind test: fresh
+			// dial LB-routes to a pod that may not yet have alice's userPassword.
 			aliceDN := fmt.Sprintf("uid=alice,ou=People,%s", baseDN)
-			Expect(conn.Bind(aliceDN, testUserPassword)).To(Succeed())
+			Eventually(ctx, func(g Gomega) {
+				conn, err := ldap.Dial("tcp", localLDAPAddr)
+				g.Expect(err).NotTo(HaveOccurred())
+				defer conn.Close()
+				g.Expect(conn.Bind(aliceDN, testUserPassword)).To(Succeed())
+			}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 		})
 	})
 })
