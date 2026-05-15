@@ -583,13 +583,22 @@ wait_for_clusters_ready() {
     done
 }
 
-setup_test_resources() {
+apply_test_resources() {
+    # Apply SlapdDatabase + SlapdSchema BEFORE the SlapdCluster helm install
+    # (see do_setup ordering). That way the SlapdCluster controller's first
+    # STS reconcile sees databaseNames=[example-db] and bakes the correct
+    # DATABASE_DIRS into the initial pod template — no later template churn,
+    # no rolling restart on first apply. Documented in
+    # docs/BUG-ANALYSIS-database-dirs-rolling-restart.md (option A).
     local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
-
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Applying test resources from $resource_dir..."
         kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$resource_dir/"
+    done
+}
 
+wait_test_resources_ready() {
+    for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Waiting for SlapdDatabase $DB_CR_NAME to reach Running..."
         local attempts=0
         while true; do
@@ -772,11 +781,16 @@ do_setup() {
     setup_foundation
     setup_cross_trust
     setup_remote_kubeconfigs
+    # Apply SlapdDatabase + SlapdSchema BEFORE the SlapdCluster helm install,
+    # so the operator's first STS reconcile sees the database list and bakes
+    # DATABASE_DIRS into the initial pod template (avoids a rolling restart
+    # on first apply — see BUG-ANALYSIS-database-dirs-rolling-restart.md).
+    apply_test_resources
     setup_slapd_clusters
     wait_for_clusters_ready
     configure_multus_external_peers
     setup_nodeport_services
-    setup_test_resources
+    wait_test_resources_ready
 }
 
 discover_node_ips
