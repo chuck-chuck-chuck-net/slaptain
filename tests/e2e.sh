@@ -28,15 +28,12 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-slaptain}"
 
-# Base values for the persistent fixture. The ephemeral fixture derives its
-# own namespace and NodePort range from these by suffix / offset, see
-# configure_fixture below. Override these env vars to shift the entire
-# allocation (e.g. when running multiple suites in parallel on one cluster).
-BASE_NAMESPACE_TESTING="${NAMESPACE_TESTING:-slaptain-testing}"
-BASE_NODEPORT_LDAP="${NODEPORT_LDAP:-30389}"
-BASE_NODEPORT_LDAPS="${NODEPORT_LDAPS:-30636}"
-BASE_NODEPORT_POD_BASE="${NODEPORT_POD_BASE:-30400}"
-BASE_NODEPORT_RO_POD_BASE="${NODEPORT_RO_POD_BASE:-30410}"
+NAMESPACE_TESTING="${NAMESPACE_TESTING:-slaptain-testing}"
+NODEPORT_LDAP="${NODEPORT_LDAP:-30389}"
+NODEPORT_LDAPS="${NODEPORT_LDAPS:-30636}"
+NODEPORT_POD_BASE="${NODEPORT_POD_BASE:-30400}"
+NODEPORT_RO_POD_BASE="${NODEPORT_RO_POD_BASE:-30410}"
+VALUES_FILE="${VALUES_FILE:-$( cd "$(dirname "$0")" && pwd )/values.slapd-persistent.yaml}"
 
 REGISTRY="${REGISTRY:-ghcr.io/chuck-chuck-chuck-net}"
 PROJECT="${PROJECT:-slaptain}"
@@ -93,57 +90,12 @@ log() { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33mWARN:\033[0m %s\n" "$*" >&2; }
 die() { printf "\033[1;31mERROR:\033[0m %s\n" "$*" >&2; exit 1; }
 
-# ── Fixtures ─────────────────────────────────────────────────────────────────
+# ── Fixture ──────────────────────────────────────────────────────────────────
 #
-# Two fixtures: persistent (PVC-backed, current default) and ephemeral
-# (emptyDir-backed, tests "pod restart with full data loss → replication
-# recovers" per ADR-012). Default: both run. Skip with E2E_SKIP_PERSISTENT=1
-# / E2E_SKIP_EPHEMERAL=1 (both unset → both fixtures; both set → error).
-#
-# Per-fixture state is namespace and NodePort allocation. Fixtures share the
-# same operator install per context (operator is namespace-agnostic) and the
-# same SlapdCluster Helm release name ("slapd") — isolation comes from the
-# per-fixture namespace, not naming.
-
-FIXTURES=()
-[[ -z "${E2E_SKIP_PERSISTENT:-}" ]] && FIXTURES+=(persistent)
-[[ -z "${E2E_SKIP_EPHEMERAL:-}" ]] && FIXTURES+=(ephemeral)
-
-if [[ ${#FIXTURES[@]} -eq 0 ]]; then
-    die "Both fixtures skipped (E2E_SKIP_PERSISTENT and E2E_SKIP_EPHEMERAL both set) — nothing to test"
-fi
-
-# configure_fixture sets the working globals (NAMESPACE_TESTING, NODEPORT_*,
-# VALUES_FILE, FIXTURE_LABEL_FILTER) for the named fixture. Existing per-context
-# setup functions reference these globals and don't need fixture awareness.
-# Reassigning the variables keeps the diff small at every call site.
-configure_fixture() {
-    local fixture="$1"
-    FIXTURE="$fixture"
-    case "$fixture" in
-        persistent)
-            NAMESPACE_TESTING="$BASE_NAMESPACE_TESTING"
-            NODEPORT_LDAP="$BASE_NODEPORT_LDAP"
-            NODEPORT_LDAPS="$BASE_NODEPORT_LDAPS"
-            NODEPORT_POD_BASE="$BASE_NODEPORT_POD_BASE"
-            NODEPORT_RO_POD_BASE="$BASE_NODEPORT_RO_POD_BASE"
-            VALUES_FILE="$PROJECT_ROOT/tests/values.slapd-persistent.yaml"
-            FIXTURE_LABEL_FILTER='!ephemeral-only'
-            ;;
-        ephemeral)
-            NAMESPACE_TESTING="${BASE_NAMESPACE_TESTING}-ephemeral"
-            NODEPORT_LDAP=$((BASE_NODEPORT_LDAP + 100))
-            NODEPORT_LDAPS=$((BASE_NODEPORT_LDAPS + 100))
-            NODEPORT_POD_BASE=$((BASE_NODEPORT_POD_BASE + 100))
-            NODEPORT_RO_POD_BASE=$((BASE_NODEPORT_RO_POD_BASE + 100))
-            VALUES_FILE="$PROJECT_ROOT/tests/values.slapd-ephemeral.yaml"
-            FIXTURE_LABEL_FILTER='!persistent-only'
-            ;;
-        *)
-            die "Unknown fixture: $fixture"
-            ;;
-    esac
-}
+# Single fixture: persistent (PVC-backed). Per ADR-013, persistence is
+# mandatory in v1alpha1 (the `persistence.enabled` field is gone). The
+# historical dual-fixture orchestration (persistent + ephemeral) was retired
+# along with the field.
 
 kctl() {
     local ctx="$1"; shift
@@ -717,13 +669,12 @@ run_tests() {
         log "Test target: single-site $ctx0 ($local_ip:$NODEPORT_LDAP)"
     fi
 
-    log "Running e2e tests (fixture=$FIXTURE, label-filter='$FIXTURE_LABEL_FILTER')..."
+    log "Running e2e tests..."
     (
         cd "$PROJECT_ROOT/tests/e2e"
         env "${test_env[@]}" go test -v ./... \
             --ginkgo.v \
-            --ginkgo.timeout=15m \
-            --ginkgo.label-filter="$FIXTURE_LABEL_FILTER"
+            --ginkgo.timeout=15m
     )
 }
 
@@ -734,59 +685,52 @@ teardown_all() {
 
     local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
 
-    # Per-fixture, per-context: namespaces, SlapdCluster Helm releases, NodePort
-    # services, cross-trust secrets, RBAC, credentials.
-    for fixture in "${FIXTURES[@]}"; do
-        configure_fixture "$fixture"
-        for ctx in "${CONTEXTS[@]}"; do
-            log "[$ctx/$fixture] Removing resources from $NAMESPACE_TESTING..."
+    for ctx in "${CONTEXTS[@]}"; do
+        log "[$ctx] Removing resources from $NAMESPACE_TESTING..."
 
-            # Test resources (SlapdDatabase, SlapdSchema, readpw secret).
-            if [[ -d "$resource_dir" ]]; then
-                kctl "$ctx" delete -n "$NAMESPACE_TESTING" -f "$resource_dir/" \
-                    --ignore-not-found 2>/dev/null || true
-            fi
+        # Test resources (SlapdDatabase, SlapdSchema, readpw secret).
+        if [[ -d "$resource_dir" ]]; then
+            kctl "$ctx" delete -n "$NAMESPACE_TESTING" -f "$resource_dir/" \
+                --ignore-not-found 2>/dev/null || true
+        fi
 
-            # SlapdCluster.
-            hctl "$ctx" uninstall slapd -n "$NAMESPACE_TESTING" 2>/dev/null || true
+        # SlapdCluster.
+        hctl "$ctx" uninstall slapd -n "$NAMESPACE_TESTING" 2>/dev/null || true
 
-            # NodePort services (main + per-pod).
-            kctl "$ctx" delete svc slapd-external -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-            for i in 0 1 2 3 4 5 6 7; do
-                kctl "$ctx" delete svc "slapd-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-                kctl "$ctx" delete svc "slapd-readonly-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-            done
-
-            # Cross-trust and kubeconfig secrets.
-            for other in "${CONTEXTS[@]}"; do
-                [[ "$other" == "$ctx" ]] && continue
-                kctl "$ctx" delete secret "site-${other}-ca" -n "$NAMESPACE_TESTING" --ignore-not-found || true
-                kctl "$ctx" delete secret "${other}-kubeconfig" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-            done
-
-            # Remote reader RBAC (created by create-remote-kubeconfig.sh).
-            kctl "$ctx" delete rolebinding slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-            kctl "$ctx" delete role slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-            kctl "$ctx" delete secret slaptain-remote-reader-token -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-            kctl "$ctx" delete sa slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-
-            # Database credentials secret.
-            kctl "$ctx" delete secret "$DB_CREDENTIALS_SECRET" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
-
-            # CSR (cluster-scoped) — name includes the fixture's namespace.
-            kctl "$ctx" delete csr "slapd-${NAMESPACE_TESTING}-csr" --ignore-not-found 2>/dev/null || true
-
-            # PVCs.
-            kctl "$ctx" delete pvc --all -n "$NAMESPACE_TESTING" 2>/dev/null || true
-
-            # Fixture namespace.
-            kctl "$ctx" delete namespace "$NAMESPACE_TESTING" --ignore-not-found || true
+        # NodePort services (main + per-pod).
+        kctl "$ctx" delete svc slapd-external -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        for i in 0 1 2 3 4 5 6 7; do
+            kctl "$ctx" delete svc "slapd-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+            kctl "$ctx" delete svc "slapd-readonly-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
         done
+
+        # Cross-trust and kubeconfig secrets.
+        for other in "${CONTEXTS[@]}"; do
+            [[ "$other" == "$ctx" ]] && continue
+            kctl "$ctx" delete secret "site-${other}-ca" -n "$NAMESPACE_TESTING" --ignore-not-found || true
+            kctl "$ctx" delete secret "${other}-kubeconfig" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        done
+
+        # Remote reader RBAC (created by create-remote-kubeconfig.sh).
+        kctl "$ctx" delete rolebinding slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        kctl "$ctx" delete role slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        kctl "$ctx" delete secret slaptain-remote-reader-token -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        kctl "$ctx" delete sa slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+
+        # Database credentials secret.
+        kctl "$ctx" delete secret "$DB_CREDENTIALS_SECRET" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+
+        # CSR (cluster-scoped) — name includes the namespace.
+        kctl "$ctx" delete csr "slapd-${NAMESPACE_TESTING}-csr" --ignore-not-found 2>/dev/null || true
+
+        # PVCs.
+        kctl "$ctx" delete pvc --all -n "$NAMESPACE_TESTING" 2>/dev/null || true
+
+        # Testing namespace.
+        kctl "$ctx" delete namespace "$NAMESPACE_TESTING" --ignore-not-found || true
     done
 
-    # Cluster-scoped resources: operator, CRDs, operator namespace. Run once
-    # per context regardless of how many fixtures we just torn down — the
-    # operator is namespace-agnostic and the CRDs are global.
+    # Cluster-scoped resources: operator, CRDs, operator namespace.
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Removing cluster-scoped resources..."
 
@@ -835,36 +779,16 @@ do_setup() {
     setup_test_resources
 }
 
-# Per-fixture phase dispatcher. Each fixture iteration sets the fixture-scoped
-# globals (namespace, NodePort range, values file, label filter) and then
-# delegates to the existing per-context functions. Setup and test happen for
-# every active fixture; teardown runs once at the end with a per-fixture loop
-# inside teardown_all.
-run_fixture_phase() {
-    local phase="$1"
-    for fixture in "${FIXTURES[@]}"; do
-        configure_fixture "$fixture"
-        log ""
-        log "━━━ Fixture: $fixture (namespace=$NAMESPACE_TESTING, NodePort base=$NODEPORT_LDAP) ━━━"
-        case "$phase" in
-            setup) do_setup ;;
-            test)  run_tests ;;
-            all)   do_setup; run_tests ;;
-        esac
-    done
-}
-
 discover_node_ips
 resolve_cr_names
-generate_shared_credentials  # one shared password set across all fixtures and contexts
+generate_shared_credentials  # one shared password set across all contexts
 
 case "$subcommand" in
     setup)
-        run_fixture_phase setup
+        do_setup
         log ""
         log "Setup complete."
         log "  Contexts: ${CONTEXTS[*]}"
-        log "  Fixtures: ${FIXTURES[*]}"
         if [[ -n "$MULTUS_NETWORK" ]]; then
             if [[ -n "$STATIC_PODADDRESSES" ]]; then
                 log "  Replication network: $MULTUS_NETWORK (Multus, static podAddresses)"
@@ -874,16 +798,14 @@ case "$subcommand" in
         fi
         ;;
     test)
-        run_fixture_phase test
+        run_tests
         ;;
     teardown)
-        # teardown_all loops over fixtures internally — it needs to wipe both
-        # namespaces, then clean up cluster-scoped resources (CRDs, CSRs, operator)
-        # exactly once.
         teardown_all
         ;;
     all)
-        run_fixture_phase all
+        do_setup
+        run_tests
         teardown_all
         ;;
     *)

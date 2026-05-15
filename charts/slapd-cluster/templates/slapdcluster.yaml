@@ -33,8 +33,6 @@ spec:
   logLevel: {{ .Values.logLevel }}
 
   persistence:
-    enabled: {{ .Values.persistence.enabled }}
-    {{- if .Values.persistence.enabled }}
     config:
       size: {{ .Values.persistence.config.size | quote }}
       accessMode: {{ .Values.persistence.config.accessMode }}
@@ -53,7 +51,6 @@ spec:
       {{- if .Values.persistence.accesslog.storageClass }}
       storageClass: {{ .Values.persistence.accesslog.storageClass | quote }}
       {{- end }}
-    {{- end }}
 
   service:
     type: {{ .Values.service.type }}

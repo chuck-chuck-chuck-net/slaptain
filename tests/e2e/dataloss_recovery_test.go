@@ -1,19 +1,17 @@
 package e2e_test
 
 // Data-loss-via-replication recovery test. Validates ADR-012's "case 2":
-// a multi-pod cluster loses one pod's data (PVC reset, node failure,
-// emptyDir restart) — the empty pod rejoins the mesh and syncrepl restores
-// the directory from surviving peers. The operator does NOT re-seed.
+// a multi-pod cluster loses one pod's data (node disk failure, accidental
+// PVC deletion) — the empty pod rejoins the mesh and syncrepl restores the
+// directory from surviving peers. The operator does NOT re-seed.
 //
-// This test runs only against the ephemeral fixture (label `ephemeral-only`),
-// where pod deletion guarantees the new pod's volumes are blank. On the
-// persistent fixture this scenario is covered indirectly by the existing
-// resilience tests (slapd-0 / slapd-1 restart), where PVC reuse is the
-// recovery path — the explicit "empty pod recovers via replication"
-// guarantee only matters when persistence is actually disabled.
-//
-// Fixture selection is the gate — no E2E_RESILIENCE env-var check. If you've
-// deployed the ephemeral fixture you want this test to run.
+// The trigger is `kubectl delete pod + pvc` on the persistent fixture. This
+// is a more realistic failure simulation than the previous emptyDir-based
+// approach (ADR-013 retired the ephemeral fixture for being a non-product).
+// The StatefulSet controller recreates the pod from the spec, and because
+// the PVCs are gone too, fresh ones are provisioned from volumeClaimTemplates
+// — the new pod starts with empty /config, /data, /accesslog volumes, exactly
+// the post-disk-failure shape.
 
 import (
 	"fmt"
@@ -23,16 +21,24 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
-var _ = Describe("ephemeral: data loss recovery via replication",
-	Label("resilience", "ephemeral-only"), Ordered, func() {
+var _ = Describe("data loss recovery via replication",
+	Label("resilience"), Ordered, func() {
 
 	const targetPod = "slapd-1" // pick a non-seed pod to keep this orthogonal to seed semantics
+
+	// PVCs provisioned by the SlapdCluster's volumeClaimTemplates. Names follow
+	// the StatefulSet convention `<template>-<sts>-<ordinal>`. Order matters
+	// only insofar as we want to delete every volume that holds state — losing
+	// just /data wouldn't reproduce real disk failure (config and accesslog
+	// would still hold stale state that complicates recovery).
+	pvcTemplates := []string{"config", "data", "accesslog"}
 
 	var addedUserDN string
 	var preObservedGeneration int64
@@ -75,15 +81,53 @@ var _ = Describe("ephemeral: data loss recovery via replication",
 		}
 	})
 
-	It("a pod that loses its emptyDir volumes recovers the full DIT from peers", func(ctx SpecContext) {
+	It("a pod that loses its PVCs recovers the full DIT from peers", func(ctx SpecContext) {
 		By("capturing the original " + targetPod + " UID")
 		oldPod, err := k8sClient.CoreV1().Pods(namespace).Get(ctx, targetPod, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		oldUID := oldPod.UID
 
-		By("deleting " + targetPod + " (emptyDir → new pod comes back blank)")
+		By("deleting " + targetPod + "'s PVCs (deletion blocked by pvc-protection finalizer until pod is gone)")
+		// k8s adds kubernetes.io/pvc-protection to in-use PVCs. The delete call
+		// only marks them with a deletionTimestamp; actual garbage collection
+		// happens once no pod references them, which we trigger next by deleting
+		// the pod itself.
+		for _, tpl := range pvcTemplates {
+			pvcName := fmt.Sprintf("%s-%s", tpl, targetPod)
+			err := k8sClient.CoreV1().PersistentVolumeClaims(namespace).
+				Delete(ctx, pvcName, metav1.DeleteOptions{})
+			if err != nil && !kerrors.IsNotFound(err) {
+				Expect(err).NotTo(HaveOccurred(), "deleting pvc %s", pvcName)
+			}
+		}
+
+		By("deleting " + targetPod + " (frees the pvc-protection finalizers; PVCs garbage-collect; STS provisions fresh ones)")
 		Expect(k8sClient.CoreV1().Pods(namespace).Delete(ctx, targetPod, metav1.DeleteOptions{})).
 			To(Succeed())
+
+		By("waiting for the old PVCs to be fully gone (would block the new pod's volume mount)")
+		Eventually(ctx, func() bool {
+			for _, tpl := range pvcTemplates {
+				pvcName := fmt.Sprintf("%s-%s", tpl, targetPod)
+				p, err := k8sClient.CoreV1().PersistentVolumeClaims(namespace).
+					Get(ctx, pvcName, metav1.GetOptions{})
+				if err != nil {
+					if kerrors.IsNotFound(err) {
+						continue
+					}
+					return false
+				}
+				// Old PVC still present (either pre-deletion or stuck in
+				// terminating). New PVC has no DeletionTimestamp.
+				if p.DeletionTimestamp != nil {
+					return false
+				}
+				// PVC present without a deletion timestamp = it's been
+				// re-created by the STS controller. That's what we want.
+			}
+			return true
+		}).WithTimeout(3 * time.Minute).WithPolling(2 * time.Second).Should(BeTrue(),
+			"old PVCs should garbage-collect and be replaced by fresh ones within 3 min")
 
 		By("waiting for the StatefulSet to recreate " + targetPod + " with a new UID + Ready")
 		Eventually(ctx, func() bool {
@@ -120,7 +164,7 @@ var _ = Describe("ephemeral: data loss recovery via replication",
 			Eventually(ctx, func() bool {
 				return ldapExists(podConn, dn)
 			}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(BeTrue(),
-				"ou=%s should converge to %s via syncrepl after volume reset", ou, targetPod)
+				"ou=%s should converge to %s via syncrepl after PVC reset", ou, targetPod)
 		}
 
 		By("verifying the user-added witness entry also recovers")
@@ -134,7 +178,7 @@ var _ = Describe("ephemeral: data loss recovery via replication",
 		}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(BeTrue(),
 			"%s should converge via syncrepl — confirms recovery is replication-driven, "+
 				"not a fake re-seed", addedUserDN)
-	}, NodeTimeout(8*time.Minute))
+	}, NodeTimeout(10*time.Minute))
 
 	It("SlapdDatabase observedGeneration is unchanged across the recovery", func(ctx SpecContext) {
 		// Belt-and-braces check on the operator-side promise. ADR-012 says

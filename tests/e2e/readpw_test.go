@@ -228,9 +228,7 @@ var _ = Describe("readpw ACL enforcement", Ordered, func() {
 		// picked, which may not be the same one ldapConn (the admin connection
 		// that added alice in BeforeAll) wrote to. Allow up to 30s for syncrepl
 		// to propagate alice into the pod we're bound to. Same pattern as the
-		// sibling "CAN read userPassword from ou=Mail" test above. The race is
-		// more frequently triggered on the ephemeral fixture, where the
-		// dataloss-recovery test deliberately wipes a pod mid-suite.
+		// sibling "CAN read userPassword from ou=Mail" test above.
 		Eventually(func(g Gomega) {
 			req := ldap.NewSearchRequest(fmt.Sprintf("uid=alice,ou=People,%s", baseDN),
 				ldap.ScopeBaseObject, ldap.NeverDerefAliases,

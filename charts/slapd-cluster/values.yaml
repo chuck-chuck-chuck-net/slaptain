@@ -42,9 +42,9 @@ readReplicas: 0
 # the full bit table.
 logLevel: 256
 
-# -- Persistent storage.
+# -- Persistent storage (PVC sizes / storage classes). Persistence itself is
+# mandatory per ADR-013 — there is no opt-out.
 persistence:
-  enabled: true
   config:
     size: 1Gi
     storageClass: ""

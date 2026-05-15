@@ -94,10 +94,7 @@ var _ = Describe("slapd chart", func() {
 		})
 	})
 
-	// PVCs only exist on the persistent fixture (volumeClaimTemplates).
-	// The ephemeral fixture uses emptyDir for /config and /data — see
-	// values.slapd-ephemeral.yaml.
-	Describe("PersistentVolumeClaims", Label("persistent-only"), func() {
+	Describe("PersistentVolumeClaims", func() {
 		// PVCs are created by StatefulSet volumeClaimTemplates: <type>-<name>-<ordinal>.
 		for _, vol := range []string{"config", "data"} {
 			vol := vol

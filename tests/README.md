@@ -46,10 +46,9 @@ make operator-helm-install
 
 ### Optional: extra Helm values
 
-When invoking `tests/e2e.sh`, the script passes the fixture's values file
-(`tests/values.slapd-persistent.yaml` or `-ephemeral.yaml`) automatically.
-For ad-hoc deployments via `make cluster-helm-install`, pass extra `-f` flags
-via `HELM_VALUES_SLAPD_CLUSTER`:
+When invoking `tests/e2e.sh`, the script passes `tests/values.slapd-persistent.yaml`
+automatically. For ad-hoc deployments via `make cluster-helm-install`, pass
+extra `-f` flags via `HELM_VALUES_SLAPD_CLUSTER`:
 
 ```bash
 HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd-persistent.yaml" make cluster-helm-install
@@ -93,39 +92,25 @@ in-cluster runner Job — both were retired in favour of NodePorts.
 The script auto-discovers the LDAP base DN from the server's rootDSE — no
 domain env var needed.
 
-### Two fixtures by default: persistent + ephemeral
+### Fixture
 
-`e2e.sh` deploys **two** SlapdClusters by default, in two separate namespaces
-per context:
+`e2e.sh` deploys a single SlapdCluster in the testing namespace
+(`slaptain-testing` by default) using `tests/values.slapd-persistent.yaml`:
+3 RW pods + 1 RO replica, replication enabled, config/data/accesslog PVCs.
+Per ADR-013, persistent storage is mandatory; the `persistence.enabled`
+field was removed from v1alpha1.
 
-| Fixture     | Namespace                      | Persistence              | Tests gated on |
-|-------------|--------------------------------|--------------------------|----------------|
-| persistent  | `slaptain-testing`             | PVCs (config/data/accesslog) | `!ephemeral-only` |
-| ephemeral   | `slaptain-testing-ephemeral`   | emptyDir (all volumes)      | `!persistent-only` |
-
-The Go test suite runs once per active fixture, with a Ginkgo label filter
-that excludes specs explicitly scoped to the *other* fixture. Tests labelled
-`ephemeral-only` (e.g. data-loss-recovery-via-replication) only execute on
-the ephemeral fixture; tests labelled `persistent-only` (e.g. warm-start data
-survival across all-pod restart) only execute on the persistent fixture.
-Unlabelled tests run on both.
-
-Opt out with env flags. If you set both, the script errors out — nothing to test.
-
-```bash
-E2E_SKIP_EPHEMERAL=1 ./tests/e2e.sh all <ctx>    # persistent only (current behaviour)
-E2E_SKIP_PERSISTENT=1 ./tests/e2e.sh all <ctx>   # ephemeral only (useful on stateless lab clusters)
-```
+The data-loss-recovery test simulates per-pod storage loss with
+`kubectl delete pod + pvc`, exercising ADR-012's case-2 contract (single pod
+loses its volumes, syncrepl restores the DIT from surviving peers).
 
 ### Env vars
 
 | Env var | Default | Description |
 |---|---|---|
-| `NAMESPACE_TESTING` | `slaptain-testing` | Base namespace; ephemeral fixture gets `-ephemeral` suffix |
+| `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
 | `LDAP_ADDR` | *(set by script)* | `<node-ip>:<nodeport>` — required when invoking `go test` directly |
-| `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable the persistent fixture's warm-restart resilience test |
-| `E2E_SKIP_PERSISTENT` | *(unset)* | Skip the persistent fixture entirely |
-| `E2E_SKIP_EPHEMERAL` | *(unset)* | Skip the ephemeral fixture entirely |
+| `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable the warm-restart resilience test |
 
 **Readpw ACL tests** require plaintext passwords for the readpw service accounts. The suite
 reads them from the `slapd-test-passwords` Secret (`readpw-*` keys), which is provided by

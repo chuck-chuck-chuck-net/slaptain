@@ -87,9 +87,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   └── Makefile                    # kubebuilder-generated (generate, manifests, run, …)
 └── tests/
     ├── gencert.sh                  # TLS cert generation helper
-    ├── values.slapd-persistent.yaml # SlapdCluster values for the PVC-backed fixture
-    ├── values.slapd-ephemeral.yaml  # SlapdCluster values for the emptyDir-backed fixture (data-loss recovery tests)
-    ├── e2e.sh                      # Unified e2e orchestration (N=1 → single-site; N≥2 → multi-site; both fixtures by default)
+    ├── values.slapd-persistent.yaml # SlapdCluster values for the PVC-backed fixture (the only supported config per ADR-013)
+    ├── e2e.sh                      # Unified e2e orchestration (N=1 → single-site; N≥2 → multi-site)
     ├── e2e-singlesite.sh           # Backward-compat wrapper around e2e.sh
     ├── e2e-multisite.sh            # Backward-compat wrapper around e2e.sh
     ├── e2e-migration.sh            # Migration-scenario e2e (independent: slaptain + fake-prod topology)
@@ -107,7 +106,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
         ├── readonly_test.go        # Read-only replica tests: data sync, write rejection
         ├── resilience_test.go      # Pod-restart resilience (warm restart labelled persistent-only; gated E2E_RESILIENCE=1)
-        ├── dataloss_recovery_test.go # Ephemeral-only: pod loses emptyDir, replication restores DIT (ADR-012 case 2)
+        ├── dataloss_recovery_test.go # Pod loses its PVCs (kubectl delete pod + pvc); replication restores DIT (ADR-012 case 2)
         ├── migration_test.go       # Migration scenario (gated at registration time: E2E_MIGRATION=1)
         └── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
 ```
@@ -149,7 +148,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.replicas` | int32 | Default 1; replication is only active when `replicas > 1` AND `replication.enabled=true` |
 | `spec.readReplicas` | int32 | Default 0; number of read-only consumer replicas. Requires `replication.enabled=true`. Creates a second StatefulSet `<name>-readonly` |
 | `spec.logLevel` | int32 | slapd `-d` flag, default 0 |
-| `spec.persistence.{enabled,config,data}` | `SlapdPersistenceConfig` | PVC sizes and storage class; emptyDir when disabled |
+| `spec.persistence.{config,data,accesslog}` | `SlapdPersistenceConfig` | PVC sizes / storage class / access mode (per ADR-013, persistence is mandatory; the `enabled` field was removed) |
 | `spec.service.{type,ldapPort,ldapsPort}` | `SlapdServiceConfig` | ClusterIP service config, defaults 389/636 |
 | `spec.resources` | `corev1.ResourceRequirements` | Container resource requests/limits |
 | `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
@@ -173,7 +172,7 @@ Database-level config (ACLs, schemas, indices, replication per-DB) is declared o
 2. `reconcileSecret` — create `<name>-config-password` (plaintext `root-password`, create-only); or read from `spec.ldap.cnConfigCredentials.secretName`
 3. `reconcileHeadlessService` — `<name>-headless`, `clusterIP: None` (SSA patch)
 4. `reconcileClusterIPService` — `<name>` (bare name), ClusterIP (SSA patch)
-5. `reconcileStatefulSet` — `serviceName: <name>-headless`; queries SlapdDatabase CRs to compute `DATABASE_DIRS` env var for init container; uses `volumeClaimTemplates` when persistence enabled (SSA patch)
+5. `reconcileStatefulSet` — `serviceName: <name>-headless`; queries SlapdDatabase CRs to compute `DATABASE_DIRS` env var for init container; provisions `volumeClaimTemplates` for config/data/accesslog (persistence is mandatory per ADR-013) (SSA patch)
 5a. `reconcileReadOnlyHeadlessService` — `<name>-readonly-headless`, `clusterIP: None` (skipped when `readReplicas=0`)
 5b. `reconcileReadOnlyService` — `<name>-readonly`, ClusterIP (skipped when `readReplicas=0`)
 5c. `reconcileReadOnlyStatefulSet` — second StatefulSet for RO consumers: no accesslog, `LDAP_READONLY_REPLICA=true` (skipped when `readReplicas=0`)
@@ -350,6 +349,7 @@ the original decision — the history of reasoning matters.
 - ADR-010: SlapdCluster replication modes (peer / consumer-only, in-place promotion) — *Accepted (impl + e2e green 2026-05-13)*
 - ADR-011: Hot migration topology contract (RID/ServerID coexistence, plain-syncrepl interop, stage transitions) — *Accepted (impl + e2e green 2026-05-13)*
 - ADR-012: Seed is one-shot; cluster wipe is a Kubernetes resource lifecycle operation (replaces removed `forceRebootstrap` + reverted `verifySeedExists`)
+- ADR-013: Defer hot SlapdDatabase add/remove; require persistent storage (rolling restart on DB add/remove accepted as UX wart on persistent storage)
 
 ---
 

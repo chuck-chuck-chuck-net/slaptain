@@ -117,17 +117,11 @@ type SlapdPVCConfig struct {
 }
 
 // SlapdPersistenceConfig configures persistent storage for config and data volumes.
+//
+// Per ADR-013, persistent storage is mandatory; there is no "disabled" mode.
+// The `enabled` field was removed in v1alpha1 — CRs that still carry it will
+// be rejected at admission as an unknown field.
 type SlapdPersistenceConfig struct {
-	// enabled controls whether PVCs are created. When false, emptyDir is used.
-	//
-	// Tristate (*bool): nil falls back to the default (true). An explicit
-	// false must round-trip from kubectl through the API server unchanged,
-	// which a plain bool + omitempty + kubebuilder:default does NOT
-	// guarantee (false is the bool zero value, gets stripped at marshal
-	// time, and the API server fills the default back in).
-	// +kubebuilder:default=true
-	// +optional
-	Enabled *bool `json:"enabled,omitempty"`
 	// config is the PVC for the slapd configuration directory (/config).
 	// +optional
 	Config SlapdPVCConfig `json:"config,omitempty"`
@@ -607,17 +601,6 @@ func (sc *SlapdCluster) NeedsAccesslog() bool {
 // AND replication is enabled — the mode is meaningless without replication.
 func (sc *SlapdCluster) IsConsumerOnly() bool {
 	return sc.Spec.Replication.Enabled && sc.Spec.Replication.Mode == "consumer-only"
-}
-
-// PersistenceEnabled reports whether the cluster should use PVCs (true) or
-// fall back to emptyDir (false). Treats an unset (nil) Persistence.Enabled
-// as the documented default (true). Wraps the *bool tristate so reconciler
-// code stays clean.
-func (sc *SlapdCluster) PersistenceEnabled() bool {
-	if sc.Spec.Persistence.Enabled == nil {
-		return true
-	}
-	return *sc.Spec.Persistence.Enabled
 }
 
 // NeedsAccesslogVolume reports whether the cluster's RW pods should have the

@@ -181,11 +181,16 @@ cleanly with two existing commands.
   be rejected by strict-field validation on the new CRD and must be updated.
 
 **E2E coverage:**
-- Dual-fixture e2e suite (persistent + ephemeral SlapdCluster) ensures the
-  pod-restart and data-loss recovery paths are exercised on every run. The
-  ephemeral fixture uses `persistence.enabled=false` (emptyDir for config,
-  data, accesslog) to emulate "pod restart with full data loss" without
-  needing destructive PVC manipulation in the test orchestration.
+- The persistent e2e fixture exercises both pod-restart (warm, PVC reuse)
+  and data-loss recovery paths. Case 2 (single pod loses its volumes,
+  syncrepl restores from peers) is triggered explicitly by
+  `kubectl delete pod + pvc` on one of the RW pods — the StatefulSet
+  provisions fresh PVCs from its volumeClaimTemplates, and the new pod
+  starts blank and converges via replication.
+- An earlier ephemeral-emptyDir fixture was retired in ADR-013; it
+  simulated a non-product configuration (operator now rejects
+  `persistence.enabled=false`) and incidentally exposed an unrelated
+  rolling-restart bug.
 
 ## Related
 

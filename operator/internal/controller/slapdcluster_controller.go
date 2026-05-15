@@ -705,78 +705,55 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		},
 	}
 
-	var volumeClaimTemplates []corev1.PersistentVolumeClaim
-
-	if sc.PersistenceEnabled() {
-		// PVC size fallbacks. The CRD's +kubebuilder:default="1Gi" on
-		// SlapdPVCConfig.Size means in normal operation these branches never
-		// fire — the API server stamps "1Gi" at admission. The fallbacks are
-		// kept as belt-and-braces for `make run` outside a cluster (no
-		// admission defaulting) and for forward-compat if the CRD default
-		// ever changes. Critically: they must MATCH the CRD default. A skew
-		// is silently load-bearing — the operator generates whatever shape
-		// matched at first-create-time, and StatefulSet volumeClaimTemplates
-		// are immutable, so a later mismatch makes the cluster controller
-		// hard-fail with "Forbidden: updates to statefulset spec".
-		cfgSize := sc.Spec.Persistence.Config.Size
-		if cfgSize == "" {
-			cfgSize = "1Gi"
+	// PVC size/access-mode fallbacks. The CRD's +kubebuilder:default="1Gi" on
+	// SlapdPVCConfig.Size means in normal operation these branches never
+	// fire — the API server stamps "1Gi" at admission. The fallbacks are
+	// kept as belt-and-braces for `make run` outside a cluster (no
+	// admission defaulting) and for forward-compat if the CRD default
+	// ever changes. Critically: they must MATCH the CRD default. A skew
+	// is silently load-bearing — the operator generates whatever shape
+	// matched at first-create-time, and StatefulSet volumeClaimTemplates
+	// are immutable, so a later mismatch makes the cluster controller
+	// hard-fail with "Forbidden: updates to statefulset spec".
+	cfgSize := sc.Spec.Persistence.Config.Size
+	if cfgSize == "" {
+		cfgSize = "1Gi"
+	}
+	dataSize := sc.Spec.Persistence.Data.Size
+	if dataSize == "" {
+		dataSize = "1Gi"
+	}
+	cfgAM := sc.Spec.Persistence.Config.AccessMode
+	if cfgAM == "" {
+		cfgAM = corev1.ReadWriteOnce
+	}
+	dataAM := sc.Spec.Persistence.Data.AccessMode
+	if dataAM == "" {
+		dataAM = corev1.ReadWriteOnce
+	}
+	volumeClaimTemplates := []corev1.PersistentVolumeClaim{
+		pvcTemplate("config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
+		pvcTemplate("data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
+	}
+	// Accesslog PVC: provisioned on every RW pod regardless of current
+	// replication state. StatefulSet volumeClaimTemplates is immutable, so
+	// adding accesslog later (when the user flips replication.enabled or
+	// adds an externalPeer) would otherwise require a manual STS recreate
+	// with --cascade=orphan. The cost is a ~1Gi PVC sitting unused in
+	// standalone clusters. The MOUNT is still gated on accesslogMountNeeded
+	// so slapd doesn't see an empty /accesslog when there's no DB for it.
+	if !readOnly {
+		accesslogSize := sc.Spec.Persistence.Accesslog.Size
+		if accesslogSize == "" {
+			accesslogSize = "1Gi"
 		}
-		dataSize := sc.Spec.Persistence.Data.Size
-		if dataSize == "" {
-			dataSize = "1Gi"
+		accesslogAM := sc.Spec.Persistence.Accesslog.AccessMode
+		if accesslogAM == "" {
+			accesslogAM = corev1.ReadWriteOnce
 		}
-		cfgAM := sc.Spec.Persistence.Config.AccessMode
-		if cfgAM == "" {
-			cfgAM = corev1.ReadWriteOnce
-		}
-		dataAM := sc.Spec.Persistence.Data.AccessMode
-		if dataAM == "" {
-			dataAM = corev1.ReadWriteOnce
-		}
-		volumeClaimTemplates = []corev1.PersistentVolumeClaim{
-			pvcTemplate("config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
-			pvcTemplate("data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
-		}
-		// Accesslog PVC: provisioned on every RW pod regardless of current
-		// replication state. StatefulSet volumeClaimTemplates is immutable, so
-		// adding accesslog later (when the user flips replication.enabled or
-		// adds an externalPeer) would otherwise require a manual STS recreate
-		// with --cascade=orphan. The cost is a ~1Gi PVC sitting unused in
-		// standalone clusters. The MOUNT is still gated on accesslogMountNeeded
-		// so slapd doesn't see an empty /accesslog when there's no DB for it.
-		if !readOnly {
-			accesslogSize := sc.Spec.Persistence.Accesslog.Size
-			if accesslogSize == "" {
-				accesslogSize = "1Gi"
-			}
-			accesslogAM := sc.Spec.Persistence.Accesslog.AccessMode
-			if accesslogAM == "" {
-				accesslogAM = corev1.ReadWriteOnce
-			}
-			volumeClaimTemplates = append(volumeClaimTemplates,
-				pvcTemplate("accesslog", accesslogSize, sc.Spec.Persistence.Accesslog.StorageClass, accesslogAM),
-			)
-		}
-	} else {
-		volumes = append(volumes,
-			corev1.Volume{
-				Name:         "config",
-				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-			},
-			corev1.Volume{
-				Name:         "data",
-				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-			},
+		volumeClaimTemplates = append(volumeClaimTemplates,
+			pvcTemplate("accesslog", accesslogSize, sc.Spec.Persistence.Accesslog.StorageClass, accesslogAM),
 		)
-		// Same rationale as the PVC branch above: pre-provision the accesslog
-		// volume so that toggling replication on doesn't require an STS recreate.
-		if !readOnly {
-			volumes = append(volumes, corev1.Volume{
-				Name:         "accesslog",
-				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-			})
-		}
 	}
 
 	if sc.Spec.LDAP.TLS.Enabled {
