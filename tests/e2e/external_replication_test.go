@@ -165,6 +165,10 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		Expect(crdClient.Patch(ctx, sc, patch)).To(Succeed())
 
 		// Wait for the operator to remove the syncrepl stanza from all RW pods.
+		// Transient bind/search errors are expected while the operator
+		// reconciles cn=config (slapd's replication engine drops connections
+		// when olcSyncRepl is rewritten) — fold them into "not ready yet,
+		// retry" rather than letting them fail the test.
 		Eventually(ctx, func() bool {
 			for i := int32(0); i < replicas; i++ {
 				podName := fmt.Sprintf("slapd-%d", i)
@@ -173,12 +177,16 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 				defer cancel()
 				defer conn.Close()
 
-				Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed())
+				if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
+					return false
+				}
 				sr, err := conn.Search(ldap.NewSearchRequest(
 					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
 					0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
 					[]string{"olcSyncRepl"}, nil))
-				Expect(err).NotTo(HaveOccurred())
+				if err != nil {
+					return false
+				}
 				if len(sr.Entries) == 0 {
 					return false
 				}
@@ -204,6 +212,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		// still being updated have their replication engine restarting — subsequent
 		// tests that open new connections through the ClusterIP service can hit
 		// those unsettled pods and get transient auth failures.
+		// Same transient-error tolerance as the removal Eventually above.
 		Eventually(ctx, func() bool {
 			for i := int32(0); i < replicas; i++ {
 				podName := fmt.Sprintf("slapd-%d", i)
@@ -212,12 +221,16 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 				defer cancel()
 				defer conn.Close()
 
-				Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed())
+				if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
+					return false
+				}
 				sr, err := conn.Search(ldap.NewSearchRequest(
 					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
 					0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
 					[]string{"olcSyncRepl"}, nil))
-				Expect(err).NotTo(HaveOccurred())
+				if err != nil {
+					return false
+				}
 				if len(sr.Entries) == 0 {
 					return false
 				}
