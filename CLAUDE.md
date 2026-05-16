@@ -364,6 +364,7 @@ or inspecting cluster state.
 | `slctl status [-n ns] [name]` | Quick overview: phase, replicas, replication, conditions |
 | `slctl inspect [-n ns] [name]` | Per-pod LDAP queries + automated consistency checks (CSN convergence, topology, stanza counts). `--short` for CI. Exits non-zero on check failure |
 | `slctl debug-dump [-n ns] <name>` | Collect CR YAML, pod logs, LDAP state (rootDSE, contextCSN, syncrepl, ACLs), services, PVCs, events, operator logs into a timestamped directory |
+| `slctl ldapsearch [slctl-flags] [ldapsearch-args...]` | Wraps system `ldapsearch` with auto-discovered `-H`/`-D`/`-w`. Endpoint preference: LoadBalancer → NodePort → port-forward. `--as admin\|config\|replication\|<DN>` selects the bind identity (default `admin`); `--anonymous` skips the bind. `--pod <ord>` forces a port-forward to one pod (RW or RO). `--ldaps` for TLS. `--cluster`/`--database` only needed when the namespace has more than one. Sibling commands: `ldapadd`, `ldapmodify`, `ldapdelete` (same flags, read LDIF from stdin or `-f`) |
 
 Common flags: `--context`, `--kubeconfig`, `-n namespace`, `--json`, `-A` (all namespaces).
 
