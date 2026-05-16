@@ -1,17 +1,131 @@
 # Investigation: replication divergence after PVC-loss + full restart
 
-**Status:** Open — needs verification with sync-level logging
-**Discovered:** 2026-05-15, during the first e2e run after the ADR-013 revert
-**Severity:** Test-only (so far) — only reproduces under the specific test ordering
-introduced by ADR-013's revert. No production manifestation observed.
+**Status:** Closed (2026-05-16) — known upstream bug, OpenLDAP
+[ITS#9580](https://bugs.openldap.org/show_bug.cgi?id=9580). Mitigated in
+slaptain by tolerating the post-recovery noise in tests; documented for
+production operators.
+**Discovered:** 2026-05-15, during the first e2e run after the ADR-013 revert.
+**Severity:** Test flakes; production CPU spike on peers for several minutes
+after a pod rejoins via syncrepl. Data correctness is unaffected — DITs
+converge across all pods.
 
-This document is the parking handoff for a problem we surfaced but did not
-fully root-cause. A reader can come to it cold without the conversation
-context that produced it.
+A reader can come to this document cold without the conversation context
+that produced it. The "Background" section below assumes no prior OpenLDAP
+exposure; the rest of the document then walks through the diagnostic trail
+that led to the ITS#9580 identification.
+
+---
+
+## Background: how delta-syncrepl normally works
+
+OpenLDAP supports two replication modes between provider and consumer
+slapd instances. Both move LDAP entries from a *provider* to a *consumer*
+over an LDAP search with a special sync control attached. Reading this
+section is enough to follow the rest of the document without any prior
+OpenLDAP exposure.
+
+### Vocabulary
+
+- **Server ID (SID)** — a small integer (1–4095) configured per slapd
+  instance via `olcServerID`. Every write a server originates is tagged
+  with that server's SID. In our cluster: t3e pods have SIDs 1, 2, 3;
+  bento pods have SIDs 101, 102, 103 (which show up as hex `065`, `066`,
+  `067` in CSN strings).
+
+- **CSN (Change Sequence Number)** — a per-write identifier of the form
+  `20260515192835.013910Z#000000#003#000000`. The first field is the
+  write timestamp; the third hex field is the originating server's SID.
+  CSNs let any pod determine "have I already applied this write?"
+  without needing global coordination.
+
+- **`contextCSN`** — an attribute on the database root entry listing,
+  per SID, the most recent CSN this pod has seen. A pod with five SIDs
+  in its contextCSN has applied at least one write from each of those
+  five servers. Two pods that agree on contextCSN *should* have seen the
+  same set of writes — when everything is working correctly.
+
+- **Sync cookie** — the per-SID CSN state a consumer sends to a provider
+  as part of a search request, asking "tell me about changes since this
+  state." The cookie is essentially a serialized contextCSN.
+
+- **`cn=accesslog`** — an optional secondary database that slapd
+  populates via the `accesslog` overlay. Every write applied to the data
+  DB is echoed as an audit record in `cn=accesslog`. Audit records
+  inherit the original write's CSN in their `entryCSN` attribute.
+
+- **`minCSN`** — an attribute on the `cn=accesslog` root entry tracking
+  the oldest CSN (per SID) the accesslog can still serve. The
+  "we've purged everything older than this" watermark.
+
+- **Refresh phase** — when a consumer's cookie is too old or absent,
+  slapd switches to bulk-transfer mode: provider sends every entry it
+  has, consumer reconciles by UUID. Expensive but always correct.
+
+- **Persist phase** — the normal steady-state mode: consumer holds the
+  search open, provider streams updates as they happen.
+
+### Plain syncrepl vs delta-syncrepl
+
+**Plain syncrepl** has the consumer search the provider's *data DB*
+directly. To answer "what changed since cookie X?" the provider walks
+the data DB and sends entries whose `entryCSN` is newer than X. Cheap
+when few entries changed; doesn't scale when the DB is large.
+
+**Delta-syncrepl** instead has the consumer search the provider's
+`cn=accesslog` (configured by `syncdata=accesslog` on the syncrepl
+stanza). The provider's accesslog already has one entry per recent
+write, so answering "what changed since X?" is an indexed lookup rather
+than a full scan. Much faster on large DBs, but only works when the
+accesslog actually contains a faithful, in-order log of writes — the
+precondition that ITS#9580 breaks.
+
+### Normal flow when everything works
+
+1. Consumer connects to provider, sends cookie X (= consumer's current
+   contextCSN).
+2. Provider's `syncprov` overlay compares X against the provider's
+   contextCSN. If the consumer is older for some SID, the provider needs
+   to send those changes.
+3. With delta-syncrepl, the syncprov on the provider's `cn=accesslog`
+   serves the diff by searching audit records with CSN > X. With plain
+   syncrepl, the syncprov on the provider's data DB serves the diff by
+   scanning entries.
+4. After all relevant entries are sent, provider sends a final cookie ≥
+   provider's contextCSN, consumer updates its contextCSN to match, and
+   the connection transitions to persist phase.
+
+### How this can break — what the rest of the doc is about
+
+When a consumer joins a cluster without prior state (or with state that
+is too far behind), the provider can't serve the diff via accesslog —
+the relevant history is older than minCSN, or the cookie references
+SIDs the provider's accesslog cannot reason about. Slapd then falls
+back to a **refresh**: the provider walks its data DB and sends entries
+to the consumer in *provider-walk order*, not in write-occurrence
+order.
+
+The consumer dutifully echoes each received entry into its own
+accesslog (because the accesslog overlay sits on all writes, including
+syncrepl-applied ones). That accesslog is now poisoned for delta-sync
+purposes: entryCSNs are out of order with respect to the original
+writes, `minCSN` tracking is no longer meaningful, and any future
+consumer that attempts to delta-sync from it gets the verdict
+**`sync cookie is stale`** (LDAP_SYNC_REFRESH_REQUIRED, error code
+4096) and falls back to its own full refresh — which propagates the
+poison further. The result is sometimes data divergence between
+peers and a slapd that burns CPU in a tight stale-cookie loop while
+the cluster *eventually* converges by other means.
 
 ---
 
 ## TL;DR
+
+> **Reader's note (2026-05-16):** the rest of the document below this
+> point is the original investigation as it stood when we suspected this
+> was a slaptain-side bug. The actual cause turned out to be upstream
+> OpenLDAP ITS#9580 — see the **Resolution** section near the end of the
+> file for the conclusion. The trail below is preserved as the
+> diagnostic record that led there.
 
 After today's revert (drop ephemeral fixture, replace `dataloss_recovery_test`
 with a pod+PVC delete on persistent storage; require persistence), the
@@ -321,3 +435,166 @@ done
 
 Expected on the bug: 8 / 8 / 8 / 10. Bento (port 30400 in its NodePort range
 on its node IP): 10.
+
+---
+
+## Resolution (2026-05-16): upstream OpenLDAP ITS#9580
+
+The investigation closed when we reproduced the failure mode under
+`logLevel: 16640` (stats + sync), traced the staleness verdict to two
+specific lines in `servers/slapd/overlays/syncprov.c`, then matched the
+pattern to the upstream tracker.
+
+### Diagnostic trail
+
+On iter 28 of `tests/e2e-repro.sh t3e bento`, the
+`dataloss_recovery_test` witness check failed at the 2-minute timeout
+even though the DITs on all six pods (3 t3e + 3 bento) converged
+identically (11/11 entries, identical `contextCSN`). slapd-1 (the
+recreated pod) was burning hundreds of millicores in a tight loop
+against slapd-2 (rid=103), generating ~14k connections in 27 seconds.
+The provider's response was reliably `err=4096 text=sync cookie is
+stale`.
+
+The two "sync cookie is stale" emitters in syncprov.c:
+
+- **Line 3469** — fires when `ad_minCSN && si_nopres && si_usehint`
+  (our cn=accesslog syncprov has all three) and the provider's per-SID
+  `minCSN` indicates the consumer is behind in a SID the provider
+  cannot replay for.
+- **Line 3499** — fires when `syncprov_findcsn(mincsn)` cannot locate
+  an accesslog entry matching the consumer's oldest-divergent CSN.
+
+The TODO at `syncprov.c:3486` is the explicit upstream acknowledgement:
+
+> *"Using mincsn only (rather than the whole cookie) will
+>  under-approximate the set of entries that haven't changed, but we
+>  can't look up CSNs by serverid with the current indexing support.*
+>
+> *As a result, dormant serverids in the cluster become mincsns and
+>  more likely to make `syncprov_findcsn(,FIND_CSN,)` fail → triggering
+>  an expensive refresh…"*
+
+In our six-pod mesh, bento's SID 067 (bento-slapd-2) originated zero
+writes during the test run. That qualifies as "dormant" and biases the
+lookup toward failure on every reconnection.
+
+The trigger in our case is the PVC-loss test: slapd-1 is recreated
+with an empty data DB, must do a refresh from peers, and that refresh
+fills its accesslog with audit records in receive order rather than
+original-write order. From that point the accesslog is — in the
+upstream author's framing — no longer a faithful delta-sync source.
+
+### The upstream issue and the candidate fix
+
+[ITS#9580](https://bugs.openldap.org/show_bug.cgi?id=9580) (opened
+2021-06-14, status IN_PROGRESS as of 2023-11-07, last activity 2023):
+
+> *"A server consuming a plain syncrepl session (might be a delta-MMR
+>  refresh) still has to log the entries into accesslog, however that
+>  accesslog stops being capable of serving as a delta-sync source:*
+>  *operation entryCSNs will be out-of-order; the changes logged will
+>  not be the intended modifications…"*
+
+[MR 472](https://git.openldap.org/openldap/openldap/-/merge_requests/472)
+"ITS#9580 Propagate a present-phase cookie flush into accesslog"
+(commit `414866b8`, 2022-01-11) was merged to `master` and
+`OPENLDAP_REL_ENG_2_7`. As of 2026-05-16:
+
+- The commit is **not** in any 2.6.x release tag. Latest is
+  `OPENLDAP_REL_ENG_2_6_13`.
+- `OPENLDAP_REL_ENG_2_7` has never had a tagged release.
+- Debian trixie's `slapd 2.6.10+dfsg-1` — which we use — does **not**
+  contain the fix.
+- All currently-shipping Linux distributions on the OpenLDAP 2.6
+  stable line are affected.
+
+The fix is also documented by its author as incomplete:
+
+```c
+/*
+ * TODO: we should still be usable as sessionlog source, but maybe not
+ * quite for deltasync anymore, we can't really make that distinction
+ * yet.
+ */
+
+/*
+ * ITS#9580 FIXME: This will only work if we log successful writes
+ * and nothing else, otherwise we're reverting some CSNs (at least
+ * our own) in the contextCSN to an older value. Right now we depend
+ * on syncprov's checkpoint to clean up after.
+ */
+```
+
+It patches the visible symptom (the consumer's accesslog gets a
+synthetic contextCSN update at refresh end, which reseats `minCSN`)
+but does not address the deeper issue that a refresh-filled accesslog
+isn't truly a valid delta-sync source. The four-year gap between merge
+and release strongly suggests upstream considers this a partial
+mitigation, not a closure.
+
+### slaptain's posture
+
+We do **not** ship a custom slapd build. Instead:
+
+1. **Tolerate the loop in tests.** DITs converge in fact, just not
+   inside the 2-minute `Eventually` window the `dataloss_recovery_test`
+   uses. Extended to a longer timeout in
+   `tests/e2e/dataloss_recovery_test.go`.
+
+2. **Production guidance.** When a slaptain pod loses its data and
+   rejoins via syncrepl, expect a multi-minute CPU spike on peers
+   (several hundred millicores per pod) while the cluster reaches
+   convergence. Data is correct throughout; CPU recovers eventually.
+   No user action required.
+
+3. **Open follow-ups** (not load-bearing for this fix):
+   - `olcSpSessionLog` on the data DB's syncprov — would let recent
+     cookies be served from an in-memory ring buffer that bypasses the
+     poisoned accesslog. Cheap to try, may sidestep the worst of the
+     loop.
+   - Operator-driven "warming write" per pod at bootstrap so no SID is
+     dormant for long. Would reduce the probability of triggering the
+     bug at all.
+
+The remainder of this document preserves the diagnostic trail (and the
+unrelated `olcServerID` side-finding) in case the upstream picture
+changes or we ever consider building slapd from source.
+
+---
+
+## Side-finding (unverified): asymmetric `olcServerID`
+
+While investigating iter-28 (2026-05-15 evening) we noticed that
+`images/slapd-init/bootstrap.sh` only emits `serverID` directives for the
+**local** cluster's RW pods. Cross-cluster peers (declared via
+`spec.replication.externalPeers`) are never added to the local
+`olcServerID` list. So on t3e:
+
+```
+olcServerID: 1 ldaps://slapd-0.slapd-headless.…:1025
+olcServerID: 2 ldaps://slapd-1.slapd-headless.…:1025
+olcServerID: 3 ldaps://slapd-2.slapd-headless.…:1025
+```
+
+…even though writes carrying bento's SIDs (101/102/103, hex `065/066/067`)
+flow in via cross-cluster syncrepl and end up in the data DB's `contextCSN`.
+
+The operator's own message at `slapdcluster_controller.go:1344` already
+asserts that the *external* cluster must "add slaptain's ServerIDs to their
+olcServerID list" — but the *local* side never adds the *other* cluster's
+ServerIDs. The asymmetry is unintentional (no ADR covers it).
+
+**Verification result (2026-05-15):** Manually adding bento's SIDs (101/102/103
+with placeholder URLs) to slapd-2's `olcServerID` and restarting the pod
+**did NOT** affect the `sync cookie is stale` / `delta-sync lost` loop, and
+did NOT change which SIDs the accesslog DB's `contextCSN` tracks (still
+only local SID 003). So `olcServerID` is *not* the input that controls the
+syncprov staleness verdict — the loop hypothesis is wrong.
+
+**But the asymmetry is still real:** if it's correct to declare all peer
+SIDs locally for any reason (write attribution, CSN validation, future
+slapd versions), the current bootstrap is incomplete. Worth verifying
+against slapd source / docs before deciding whether to fix it. Tracked as
+a follow-up; not load-bearing for the replication divergence the rest of
+this document is about.
