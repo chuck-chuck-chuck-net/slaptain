@@ -44,15 +44,10 @@ Creates the `slaptain-testing` namespace if needed and generates the `slapd-tls`
 make operator-helm-install
 ```
 
-### Optional: extra Helm values
+### Helm values
 
-When invoking `tests/e2e.sh`, the script passes `tests/values.slapd-persistent.yaml`
-automatically. For ad-hoc deployments via `make cluster-helm-install`, pass
-extra `-f` flags via `HELM_VALUES_SLAPD_CLUSTER`:
-
-```bash
-HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd-persistent.yaml" make cluster-helm-install
-```
+Both `tests/e2e.sh` and `make cluster-helm-install` pass
+`tests/values.slapd-persistent.yaml` automatically — no env-var knob.
 
 The standalone (non-operator) chart at `charts/slapd` is kept for reference but is no longer
 exercised by the test suite — use the operator path.
@@ -298,9 +293,12 @@ helm upgrade --install slaptain-operator charts/operator \
 KUBECONFIG=~/.kube/config-siteA make operator-helm-install
 KUBECONFIG=~/.kube/config-siteA make cluster-helm-install
 
-# siteB (with its own values pointing externalPeers at siteA)
+# siteB (with its own externalPeers pointing at siteA — pass extra `-f` to helm directly)
 KUBECONFIG=~/.kube/config-siteB make operator-helm-install
-KUBECONFIG=~/.kube/config-siteB HELM_VALUES_SLAPD_CLUSTER="-f tests/values.slapd-site-b.yaml ..." make cluster-helm-install
+KUBECONFIG=~/.kube/config-siteB helm upgrade --install slapd ./charts/slapd-cluster \
+    --namespace slaptain-testing --create-namespace \
+    -f tests/values.slapd-persistent.yaml \
+    -f tests/values.slapd-site-b.yaml
 ```
 
 #### 5. Apply test resources on siteA only
@@ -486,8 +484,6 @@ make e2e-multisite-teardown CONTEXTS="s1 s2"
 | `NODEPORT_LDAPS` | `30636` | NodePort for LDAPS (cross-cluster syncrepl in NodePort mode) |
 | `MULTUS_NETWORK` | *(unset)* | NAD reference (e.g. `infra/replication-net`). Enables Multus mode |
 | `STATIC_PODADDRESSES` | *(unset)* | Set to `1` for legacy static podAddresses instead of dynamic discovery |
-| `HELM_VALUES_SLAPD_CLUSTER` | *(unset)* | Extra values for slapd-cluster chart |
-| `HELM_VALUES` | *(unset)* | Extra values for operator chart |
 
 ---
 

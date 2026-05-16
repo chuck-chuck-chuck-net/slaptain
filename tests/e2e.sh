@@ -128,8 +128,6 @@ Environment variables (with defaults):
   REGISTRY             = $REGISTRY
   PROJECT              = $PROJECT
   TEST_RESOURCES       = $TEST_RESOURCES  (example or lab)
-  HELM_VALUES          = operator chart values (use absolute paths)
-  HELM_VALUES_SLAPD_CLUSTER = slapd-cluster chart values (use absolute paths)
 
 Multus replication network (ADR-007):
   MULTUS_NETWORK       = NAD reference (e.g. "infra/replication-net")
@@ -227,8 +225,7 @@ configure_multus_external_peers_static() {
             --set "replication.network.multusNetwork=$MULTUS_NETWORK" \
             --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
-            "${peer_sets[@]}" \
-            ${HELM_VALUES_SLAPD_CLUSTER:-}
+            "${peer_sets[@]}"
         ((site_idx++)) || true
     done
 }
@@ -374,8 +371,7 @@ setup_foundation() {
             --set "image.repository=$REGISTRY/$PROJECT/operator" \
             --set "image.tag=$GIT_TAG" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
-            "${operator_multus_sets[@]}" \
-            ${HELM_VALUES:-}
+            "${operator_multus_sets[@]}"
     done
 }
 
@@ -468,8 +464,7 @@ setup_slapd_clusters() {
             --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \
-            "${multus_sets[@]}" \
-            ${HELM_VALUES_SLAPD_CLUSTER:-}
+            "${multus_sets[@]}"
         ((site_idx++)) || true
     done
 }

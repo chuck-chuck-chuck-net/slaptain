@@ -201,8 +201,7 @@ gencert:
 
 helm-install:
 	$(HELM) upgrade --install slapd ./charts/slapd \
-		--namespace $(NAMESPACE_TESTING) --create-namespace \
-		$(HELM_VALUES_SLAPD)
+		--namespace $(NAMESPACE_TESTING) --create-namespace
 
 helm-deploy: deliver gencert helm-install ## Full pipeline: build images, deliver, generate certs, deploy
 
@@ -226,9 +225,9 @@ testing-helm-uninstall: testing-delete
 cluster-helm-install:
 	$(HELM) upgrade --install slapd ./charts/slapd-cluster \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
+		-f tests/values.slapd-persistent.yaml \
 		--set images.slapd.tag=$(GIT_TAG) \
-		--set images.init.tag=$(GIT_TAG) \
-		$(HELM_VALUES_SLAPD_CLUSTER)
+		--set images.init.tag=$(GIT_TAG)
 
 cluster-helm-uninstall:
 	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
@@ -237,8 +236,7 @@ operator-helm-install:
 	$(HELM) upgrade --install slaptain-operator ./charts/operator \
 		--namespace $(NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(PROJECT)/operator \
-		--set image.tag=$(GIT_TAG) \
-		$(HELM_VALUES)
+		--set image.tag=$(GIT_TAG)
 
 operator-helm-uninstall:
 	$(HELM) uninstall slaptain-operator --namespace $(NAMESPACE)
