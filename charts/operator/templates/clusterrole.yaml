@@ -49,6 +49,7 @@ rules:
       - ldap.chuck-chuck-chuck.net
     resources:
       - slapdclusters
+      - slapdbackups
       - slapddatabases
       - slapdschemas
     verbs:
@@ -58,6 +59,16 @@ rules:
       - list
       - patch
       - update
+      - watch
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - create
+      - delete
+      - get
+      - list
       - watch
   - apiGroups:
       - ldap.chuck-chuck-chuck.net
@@ -70,6 +81,7 @@ rules:
   - apiGroups:
       - ldap.chuck-chuck-chuck.net
     resources:
+      - slapdbackups/status
       - slapdclusters/status
       - slapddatabases/status
       - slapdschemas/status

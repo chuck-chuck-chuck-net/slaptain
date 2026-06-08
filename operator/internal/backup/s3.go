@@ -23,12 +23,13 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -83,7 +84,7 @@ func Upload(ctx context.Context, cfg S3Config, key, localPath string) (int64, er
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", localPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -95,7 +96,9 @@ func Upload(ctx context.Context, cfg S3Config, key, localPath string) (int64, er
 		return 0, err
 	}
 
-	if _, err := manager.NewUploader(client).Upload(ctx, &s3.PutObjectInput{
+	// transfermanager.UploadObject buffers large files into parts and uploads
+	// them in parallel (multipart).
+	if _, err := transfermanager.New(client).UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket: aws.String(cfg.Bucket),
 		Key:    aws.String(key),
 		Body:   f,
@@ -105,27 +108,37 @@ func Upload(ctx context.Context, cfg S3Config, key, localPath string) (int64, er
 	return fi.Size(), nil
 }
 
-// Download streams s3://<bucket>/<key> to outPath, using parallel ranged GETs
-// for large objects.
+// Download streams s3://<bucket>/<key> to outPath.
 func Download(ctx context.Context, cfg S3Config, key, outPath string) error {
 	client, err := newClient(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
+	resp, err := transfermanager.New(client).GetObject(ctx, &transfermanager.GetObjectInput{
+		Bucket: aws.String(cfg.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("download s3://%s/%s: %w", cfg.Bucket, key, err)
+	}
+	if c, ok := resp.Body.(io.Closer); ok {
+		defer func() { _ = c.Close() }()
+	}
+
 	out, err := os.Create(outPath)
 	if err != nil {
 		return fmt.Errorf("create %s: %w", outPath, err)
 	}
-	defer out.Close()
 
-	// manager.Downloader writes concurrently and needs an io.WriterAt;
-	// *os.File satisfies it.
-	if _, err := manager.NewDownloader(client).Download(ctx, out, &s3.GetObjectInput{
-		Bucket: aws.String(cfg.Bucket),
-		Key:    aws.String(key),
-	}); err != nil {
-		return fmt.Errorf("download s3://%s/%s: %w", cfg.Bucket, key, err)
+	// Close explicitly (not deferred) so the flush error is surfaced.
+	_, copyErr := io.Copy(out, resp.Body)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return fmt.Errorf("write %s: %w", outPath, copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close %s: %w", outPath, closeErr)
 	}
 	return nil
 }

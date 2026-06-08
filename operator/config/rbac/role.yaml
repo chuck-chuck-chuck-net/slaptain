@@ -45,8 +45,19 @@ rules:
   - update
   - watch
 - apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - ldap.chuck-chuck-chuck.net
   resources:
+  - slapdbackups
   - slapdclusters
   - slapddatabases
   - slapdschemas
@@ -61,18 +72,19 @@ rules:
 - apiGroups:
   - ldap.chuck-chuck-chuck.net
   resources:
-  - slapdclusters/finalizers
-  - slapddatabases/finalizers
-  - slapdschemas/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - ldap.chuck-chuck-chuck.net
-  resources:
+  - slapdbackups/status
   - slapdclusters/status
   - slapddatabases/status
   - slapdschemas/status
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - ldap.chuck-chuck-chuck.net
+  resources:
+  - slapdclusters/finalizers
+  - slapddatabases/finalizers
+  - slapdschemas/finalizers
+  verbs:
   - update

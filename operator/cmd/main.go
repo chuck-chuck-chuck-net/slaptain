@@ -207,6 +207,15 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdDatabase")
 		os.Exit(1)
 	}
+	if err := (&controller.SlapdBackupReconciler{
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
+		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SlapdBackup")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

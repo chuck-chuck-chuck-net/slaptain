@@ -47,6 +47,10 @@ spec:
             # images stay aligned with the operator that shipped them.
             - name: OPERATOR_IMAGE_TAG
               value: "{{ .Values.image.tag | default .Chart.AppVersion }}"
+            # The operator's own image, used for the uploader container of backup
+            # Jobs (ADR-014). The Job runs `/manager backup-upload` from this image.
+            - name: OPERATOR_IMAGE
+              value: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
