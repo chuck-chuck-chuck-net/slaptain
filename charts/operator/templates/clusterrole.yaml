@@ -52,6 +52,7 @@ rules:
       - slapdbackups
       - slapddatabases
       - slapdschemas
+      - slapdscheduledbackups
     verbs:
       - create
       - delete
@@ -85,6 +86,7 @@ rules:
       - slapdclusters/status
       - slapddatabases/status
       - slapdschemas/status
+      - slapdscheduledbackups/status
     verbs:
       - get
       - patch

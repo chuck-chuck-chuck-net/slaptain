@@ -29,6 +29,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
@@ -49,6 +50,12 @@ type S3Config struct {
 	Region string
 	// InsecureTLS disables TLS verification against the endpoint (test-only).
 	InsecureTLS bool
+	// AccessKeyID / SecretAccessKey supply static credentials. When both are
+	// empty the SDK's default credential chain (AWS_ACCESS_KEY_ID etc.) is used
+	// instead — that is the path the backup/restore Jobs take. The operator's
+	// inline retention deletes set these explicitly from the credentials Secret.
+	AccessKeyID     string
+	SecretAccessKey string
 }
 
 // newClient builds an S3 client honoring a custom endpoint (path-style for
@@ -57,6 +64,11 @@ func newClient(ctx context.Context, cfg S3Config) (*s3.Client, error) {
 	var loadOpts []func(*awsconfig.LoadOptions) error
 	if cfg.Region != "" {
 		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.Region))
+	}
+	if cfg.AccessKeyID != "" && cfg.SecretAccessKey != "" {
+		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		))
 	}
 	if cfg.InsecureTLS {
 		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(&http.Client{
@@ -139,6 +151,22 @@ func Download(ctx context.Context, cfg S3Config, key, outPath string) error {
 	}
 	if closeErr != nil {
 		return fmt.Errorf("close %s: %w", outPath, closeErr)
+	}
+	return nil
+}
+
+// Delete removes s3://<bucket>/<key>. Used by retention pruning. It is a small
+// control-plane call (not a data transfer), so the operator runs it inline.
+func Delete(ctx context.Context, cfg S3Config, key string) error {
+	client, err := newClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(cfg.Bucket),
+		Key:    aws.String(key),
+	}); err != nil {
+		return fmt.Errorf("delete s3://%s/%s: %w", cfg.Bucket, key, err)
 	}
 	return nil
 }

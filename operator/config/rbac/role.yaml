@@ -60,6 +60,7 @@ rules:
   - slapdbackups
   - slapdclusters
   - slapddatabases
+  - slapdscheduledbackups
   - slapdschemas
   verbs:
   - create
@@ -75,6 +76,7 @@ rules:
   - slapdbackups/status
   - slapdclusters/status
   - slapddatabases/status
+  - slapdscheduledbackups/status
   - slapdschemas/status
   verbs:
   - get
