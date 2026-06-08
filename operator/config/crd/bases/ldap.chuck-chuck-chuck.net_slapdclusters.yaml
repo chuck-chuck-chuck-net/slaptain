@@ -1024,6 +1024,40 @@ spec:
                   replicationNetworkIPs reports discovered Multus IPs per pod on the replication network.
                   Key: pod name, Value: IP address. Only populated when spec.replication.network is set.
                 type: object
+              restore:
+                description: |-
+                  restore tracks an in-progress bootstrapFrom restore (ADR-014). Nil when no
+                  restore is active. While set (and not yet ScalingUp) the operator holds the
+                  StatefulSet(s) at 0 replicas for the offline slapadd window.
+                properties:
+                  databases:
+                    description: databases lists the SlapdDatabase names being restored
+                      in this window.
+                    items:
+                      type: string
+                    type: array
+                  message:
+                    description: message is a human-readable status detail (e.g. the
+                      failure reason).
+                    type: string
+                  originalReadReplicas:
+                    description: originalReadReplicas is spec.readReplicas captured
+                      before scaling down.
+                    format: int32
+                    type: integer
+                  originalReplicas:
+                    description: originalReplicas is spec.replicas captured before
+                      scaling down, restored on completion.
+                    format: int32
+                    type: integer
+                  phase:
+                    description: phase is the restore sub-state.
+                    type: string
+                  startedAt:
+                    description: startedAt is when the restore window began.
+                    format: date-time
+                    type: string
+                type: object
             type: object
         required:
         - spec

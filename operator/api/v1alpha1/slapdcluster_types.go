@@ -29,6 +29,29 @@ const (
 	PhaseRunning       SlapdClusterPhase = "Running"
 	PhaseDegraded      SlapdClusterPhase = "Degraded"
 	PhaseError         SlapdClusterPhase = "Error"
+	// PhaseRestoring indicates the cluster is held down (StatefulSets at 0
+	// replicas) for an offline bootstrapFrom restore. See ADR-014. The
+	// SlapdDatabase controller gates on phase==Running and so pauses while this
+	// is set.
+	PhaseRestoring SlapdClusterPhase = "Restoring"
+)
+
+// SlapdClusterRestorePhase is the sub-state of an in-progress restore (ADR-014).
+type SlapdClusterRestorePhase string
+
+const (
+	// RestoreScalingDown: scaling the StatefulSet(s) to 0; waiting for pods to
+	// terminate and release the PVCs.
+	RestoreScalingDown SlapdClusterRestorePhase = "ScalingDown"
+	// RestoreInProgress: per-database restore Jobs are running (download → wipe
+	// → slapadd) against pod-0's PVCs.
+	RestoreInProgress SlapdClusterRestorePhase = "Restoring"
+	// RestoreScalingUp: all Jobs succeeded; scaling back up to the original
+	// replica counts. Peers initial-sync from pod-0.
+	RestoreScalingUp SlapdClusterRestorePhase = "ScalingUp"
+	// RestoreFailed: a restore Job failed; the cluster is held at 0 replicas for
+	// human inspection rather than scaling up a half-restored DIT.
+	RestoreFailed SlapdClusterRestorePhase = "Failed"
 )
 
 // SlapdImageConfig defines the image repository, tag, and pull policy for one image.
@@ -490,6 +513,28 @@ type ExternalPeerStatus struct {
 }
 
 // SlapdClusterStatus defines the observed state of SlapdCluster.
+// SlapdClusterRestoreStatus tracks an in-progress bootstrapFrom restore window.
+type SlapdClusterRestoreStatus struct {
+	// phase is the restore sub-state.
+	// +optional
+	Phase SlapdClusterRestorePhase `json:"phase,omitempty"`
+	// originalReplicas is spec.replicas captured before scaling down, restored on completion.
+	// +optional
+	OriginalReplicas int32 `json:"originalReplicas,omitempty"`
+	// originalReadReplicas is spec.readReplicas captured before scaling down.
+	// +optional
+	OriginalReadReplicas int32 `json:"originalReadReplicas,omitempty"`
+	// databases lists the SlapdDatabase names being restored in this window.
+	// +optional
+	Databases []string `json:"databases,omitempty"`
+	// startedAt is when the restore window began.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// message is a human-readable status detail (e.g. the failure reason).
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
 type SlapdClusterStatus struct {
 	// phase summarises the current lifecycle state.
 	// +optional
@@ -514,6 +559,11 @@ type SlapdClusterStatus struct {
 	// observedGeneration is the .metadata.generation the controller last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// restore tracks an in-progress bootstrapFrom restore (ADR-014). Nil when no
+	// restore is active. While set (and not yet ScalingUp) the operator holds the
+	// StatefulSet(s) at 0 replicas for the offline slapadd window.
+	// +optional
+	Restore *SlapdClusterRestoreStatus `json:"restore,omitempty"`
 	// replicationNetworkIPs reports discovered Multus IPs per pod on the replication network.
 	// Key: pod name, Value: IP address. Only populated when spec.replication.network is set.
 	// +optional
@@ -621,4 +671,15 @@ func (sc *SlapdCluster) NeedsAccesslogVolume() bool {
 		return *sc.Spec.Replication.AccesslogEnabled
 	}
 	return sc.Spec.Replicas > 1 || len(sc.Spec.Replication.ExternalPeers) > 0
+}
+
+// RestoreHoldsDown reports whether an active bootstrapFrom restore requires the
+// StatefulSet(s) to be held at 0 replicas for the offline slapadd window
+// (ADR-014). True during ScalingDown, Restoring, and Failed; false during
+// ScalingUp (so the cluster scales back up) and when no restore is active.
+func (sc *SlapdCluster) RestoreHoldsDown() bool {
+	r := sc.Status.Restore
+	return r != nil && (r.Phase == RestoreScalingDown ||
+		r.Phase == RestoreInProgress ||
+		r.Phase == RestoreFailed)
 }

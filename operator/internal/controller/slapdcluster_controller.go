@@ -76,6 +76,9 @@ type SlapdClusterReconciler struct {
 	// "unpinned" data-plane images track the operator's own version. Empty falls
 	// back to "latest" so `make run` outside a cluster still works.
 	DefaultImageTag string
+	// OperatorImage is the operator's own image reference, used for the download
+	// container of restore Jobs (ADR-014). Wired from the OPERATOR_IMAGE env.
+	OperatorImage string
 }
 
 // imageRef builds the "repository:tag" image reference for a data-plane image,
@@ -98,6 +101,10 @@ func (r *SlapdClusterReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig) str
 // +kubebuilder:rbac:groups="",resources=services;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdbackups,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 
 func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -179,6 +186,19 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	sc.Status.Replicas = sts.Status.Replicas
 	sc.Status.ReadyReplicas = ready
 	sc.Status.ObservedGeneration = sc.Generation
+
+	// Restore coordination (ADR-014): when a bootstrapFrom restore is in
+	// progress, drive the scale-to-0 → slapadd → scale-up machine and skip the
+	// normal ready-based phase logic. The StatefulSet replica count itself is
+	// forced to 0 by buildStatefulSetSpec (sc.RestoreHoldsDown) one pass later.
+	if handled, res, err := r.reconcileRestore(ctx, sc, sts); err != nil {
+		return ctrl.Result{}, err
+	} else if handled {
+		if err := r.applyStatus(ctx, sc); err != nil {
+			return ctrl.Result{}, err
+		}
+		return res, nil
+	}
 
 	// ReplicationMode reflects what the controller is reconciling toward. In
 	// steady state, equals spec.replication.mode (or "peer" by default). 3d
@@ -298,18 +318,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	emitWiringConditions(sc)
 
 	// SSA patch on the status subresource: no resourceVersion check, no conflict possible.
-	statusPatch := &ldapv1alpha1.SlapdCluster{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
-			Kind:       "SlapdCluster",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name,
-			Namespace: sc.Namespace,
-		},
-	}
-	statusPatch.Status = sc.Status
-	if err := r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+	if err := r.applyStatus(ctx, sc); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -639,6 +648,14 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			replicas = 1
 		}
 		serviceName = sc.Name + "-headless"
+	}
+
+	// Restore hold-down: an in-progress bootstrapFrom restore takes the
+	// StatefulSet(s) to 0 so offline slapadd can run (ADR-014). Only the replica
+	// count changes — the rest of the pod template is identical, so scaling back
+	// up triggers no spurious rollout.
+	if sc.RestoreHoldsDown() {
+		replicas = 0
 	}
 
 	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
