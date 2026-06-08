@@ -127,6 +127,32 @@ type DatabaseReplicationConfig struct {
 	AccesslogPurge string `json:"accesslogPurge,omitempty"`
 }
 
+// BootstrapSource selects where a SlapdDatabase's data tree is restored from
+// when spec.bootstrapFrom is set. Exactly one of backupRef or s3 must be set.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.backupRef) != has(self.s3)",message="bootstrapFrom requires exactly one of backupRef or s3."
+type BootstrapSource struct {
+	// backupRef is the name of a SlapdBackup (same namespace) to restore from.
+	// +optional
+	BackupRef string `json:"backupRef,omitempty"`
+	// s3 points directly at a backup artifact in object storage — for restoring
+	// from a backup that has no SlapdBackup object (e.g. a legacy slapcat dump
+	// or a backup produced by another cluster).
+	// +optional
+	S3 *BootstrapS3Source `json:"s3,omitempty"`
+}
+
+// BootstrapS3Source addresses a single backup artifact in object storage.
+type BootstrapS3Source struct {
+	// storage configures the S3 bucket, endpoint, region, and credentials.
+	// +required
+	Storage S3StorageSpec `json:"storage"`
+	// key is the object key (within storage.prefix) of the gzipped LDIF
+	// artifact to restore.
+	// +required
+	Key string `json:"key"`
+}
+
 // DatabaseSeedConfig defines initial data to populate in the database.
 type DatabaseSeedConfig struct {
 	// entries is a list of LDIF entries to add when the database is first created.
@@ -145,6 +171,7 @@ type DatabaseSeedConfig struct {
 // SlapdDatabaseSpec defines the desired state of SlapdDatabase.
 //
 // +kubebuilder:validation:XValidation:rule="self.replication.enabled == false || has(self.replication.ridBase)",message="spec.replication.ridBase is required when replication.enabled=true (the default). Set replication.enabled=false to explicitly exclude this database from cluster replication."
+// +kubebuilder:validation:XValidation:rule="!(has(self.seed) && has(self.bootstrapFrom))",message="spec.seed and spec.bootstrapFrom are mutually exclusive: a restore replaces seeding. Set at most one."
 type SlapdDatabaseSpec struct {
 	// suspend pauses the operator's reconciliation of this resource. The data
 	// database, ACLs, syncrepl stanzas, and seed entries are left in place; the
@@ -212,6 +239,14 @@ type SlapdDatabaseSpec struct {
 	// Applied once and tracked in status.
 	// +optional
 	Seed *DatabaseSeedConfig `json:"seed,omitempty"`
+	// bootstrapFrom restores this database's data tree from a backup on first
+	// creation, instead of seeding it. Mutually exclusive with seed. One-shot,
+	// tracked via status.restoreApplied. Restore runs as a cluster-coordinated
+	// offline slapadd (scale-to-0) — a deliberate, documented cluster-wide
+	// interruption (see ADR-014). Valid only for a newly created database (its
+	// peer copies must be empty); it never overwrites a populated database.
+	// +optional
+	BootstrapFrom *BootstrapSource `json:"bootstrapFrom,omitempty"`
 	// cleanupPolicy controls what happens when this CR is deleted.
 	// Retain (default): database stays in slapd, becomes unmanaged.
 	// Delete: database definition is removed from cn=config (data files are NOT deleted).
@@ -237,6 +272,11 @@ type SlapdDatabaseStatus struct {
 	// Once true, seed data is never re-applied.
 	// +optional
 	SeedApplied bool `json:"seedApplied,omitempty"`
+	// restoreApplied indicates whether the bootstrapFrom restore has completed
+	// successfully. Once true, the restore is never re-run. Analogous to
+	// seedApplied (ADR-012 one-shot discipline).
+	// +optional
+	RestoreApplied bool `json:"restoreApplied,omitempty"`
 	// observedGeneration is the .metadata.generation the controller last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

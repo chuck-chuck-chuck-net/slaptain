@@ -1,0 +1,247 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: slapdscheduledbackups.ldap.chuck-chuck-chuck.net
+spec:
+  group: ldap.chuck-chuck-chuck.net
+  names:
+    kind: SlapdScheduledBackup
+    listKind: SlapdScheduledBackupList
+    plural: slapdscheduledbackups
+    shortNames:
+    - ssb
+    singular: slapdscheduledbackup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.databaseRef
+      name: Database
+      type: string
+    - jsonPath: .spec.schedule
+      name: Schedule
+      type: string
+    - jsonPath: .spec.suspend
+      name: Suspended
+      priority: 1
+      type: boolean
+    - jsonPath: .status.lastScheduleTime
+      name: Last
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SlapdScheduledBackup is the Schema for the slapdscheduledbackups API. Each
+          instance produces SlapdBackup objects on a cron schedule and prunes old ones
+          per its retention policy. See ADR-014.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired schedule.
+            properties:
+              compression:
+                default: gzip
+                description: compression for emitted backups' LDIF artifacts. Only
+                  "gzip" in the MVP.
+                enum:
+                - gzip
+                type: string
+              databaseRef:
+                description: |-
+                  databaseRef is the name of the SlapdDatabase to back up. Must be in the
+                  same namespace.
+                type: string
+              immediate:
+                default: false
+                description: |-
+                  immediate triggers one backup as soon as this resource is created, in
+                  addition to the schedule. Default false.
+                type: boolean
+              podAffinity:
+                default: true
+                description: |-
+                  podAffinity is passed through to each emitted SlapdBackup; see
+                  SlapdBackupSpec.podAffinity. Tristate (*bool); default true.
+                type: boolean
+              retention:
+                description: retention controls pruning of emitted backups (and their
+                  S3 objects).
+                properties:
+                  maxAge:
+                    description: |-
+                      maxAge deletes backups older than this duration. Go duration string,
+                      e.g. "720h" for 30 days. Empty means no age-based limit.
+                    type: string
+                  maxCount:
+                    description: |-
+                      maxCount keeps at most this many of the most recent successful backups.
+                      0 (default) means no count-based limit.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              schedule:
+                description: |-
+                  schedule is a standard 5-field cron expression (minute hour day-of-month
+                  month day-of-week) in the controller's timezone.
+                type: string
+              storage:
+                description: storage configures the S3 target stamped onto each emitted
+                  SlapdBackup.
+                properties:
+                  bucket:
+                    description: bucket is the S3 bucket name.
+                    type: string
+                  credentialsSecretName:
+                    description: |-
+                      credentialsSecretName references a Secret holding the S3 credentials.
+                      Required keys (plaintext): "access-key-id" and "secret-access-key".
+                      (IRSA / workload-identity credentials are a future addition; the MVP is
+                      static key-based only.)
+                    type: string
+                  endpoint:
+                    description: |-
+                      endpoint is the S3 endpoint URL. Leave empty for AWS S3; set it for an
+                      S3-compatible store (MinIO, Ceph RGW), e.g. "https://minio.example:9000".
+                    type: string
+                  insecureTLS:
+                    default: false
+                    description: |-
+                      insecureTLS disables TLS certificate verification against the endpoint.
+                      Use only for testing against a self-signed MinIO. Default false.
+                    type: boolean
+                  prefix:
+                    description: |-
+                      prefix is an optional key prefix within the bucket. Backup objects are
+                      written under "<prefix>/<cluster>/<database>/<timestamp>.ldif.gz".
+                    type: string
+                  region:
+                    description: region is the S3 region. Some S3-compatible stores
+                      ignore it.
+                    type: string
+                required:
+                - bucket
+                - credentialsSecretName
+                type: object
+              suspend:
+                default: false
+                description: |-
+                  suspend pauses scheduling without deleting the resource or its existing
+                  backups. Default false.
+                type: boolean
+            required:
+            - databaseRef
+            - schedule
+            - storage
+            type: object
+          status:
+            description: status defines the observed state of the schedule.
+            properties:
+              conditions:
+                description: conditions holds standard Kubernetes condition entries.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastBackupRef:
+                description: lastBackupRef is the name of the most recently created
+                  SlapdBackup.
+                type: string
+              lastScheduleTime:
+                description: lastScheduleTime is when the controller last created
+                  a backup from this schedule.
+                format: date-time
+                type: string
+              nextScheduleTime:
+                description: nextScheduleTime is the next time a backup is due.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: observedGeneration is the .metadata.generation the controller
+                  last reconciled.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

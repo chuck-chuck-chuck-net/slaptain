@@ -78,6 +78,76 @@ spec:
                 items:
                   type: string
                 type: array
+              bootstrapFrom:
+                description: |-
+                  bootstrapFrom restores this database's data tree from a backup on first
+                  creation, instead of seeding it. Mutually exclusive with seed. One-shot,
+                  tracked via status.restoreApplied. Restore runs as a cluster-coordinated
+                  offline slapadd (scale-to-0) — a deliberate, documented cluster-wide
+                  interruption (see ADR-014). Valid only for a newly created database (its
+                  peer copies must be empty); it never overwrites a populated database.
+                properties:
+                  backupRef:
+                    description: backupRef is the name of a SlapdBackup (same namespace)
+                      to restore from.
+                    type: string
+                  s3:
+                    description: |-
+                      s3 points directly at a backup artifact in object storage — for restoring
+                      from a backup that has no SlapdBackup object (e.g. a legacy slapcat dump
+                      or a backup produced by another cluster).
+                    properties:
+                      key:
+                        description: |-
+                          key is the object key (within storage.prefix) of the gzipped LDIF
+                          artifact to restore.
+                        type: string
+                      storage:
+                        description: storage configures the S3 bucket, endpoint, region,
+                          and credentials.
+                        properties:
+                          bucket:
+                            description: bucket is the S3 bucket name.
+                            type: string
+                          credentialsSecretName:
+                            description: |-
+                              credentialsSecretName references a Secret holding the S3 credentials.
+                              Required keys (plaintext): "access-key-id" and "secret-access-key".
+                              (IRSA / workload-identity credentials are a future addition; the MVP is
+                              static key-based only.)
+                            type: string
+                          endpoint:
+                            description: |-
+                              endpoint is the S3 endpoint URL. Leave empty for AWS S3; set it for an
+                              S3-compatible store (MinIO, Ceph RGW), e.g. "https://minio.example:9000".
+                            type: string
+                          insecureTLS:
+                            default: false
+                            description: |-
+                              insecureTLS disables TLS certificate verification against the endpoint.
+                              Use only for testing against a self-signed MinIO. Default false.
+                            type: boolean
+                          prefix:
+                            description: |-
+                              prefix is an optional key prefix within the bucket. Backup objects are
+                              written under "<prefix>/<cluster>/<database>/<timestamp>.ldif.gz".
+                            type: string
+                          region:
+                            description: region is the S3 region. Some S3-compatible
+                              stores ignore it.
+                            type: string
+                        required:
+                        - bucket
+                        - credentialsSecretName
+                        type: object
+                    required:
+                    - key
+                    - storage
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: bootstrapFrom requires exactly one of backupRef or s3.
+                  rule: has(self.backupRef) != has(self.s3)
               cleanupPolicy:
                 default: Retain
                 description: |-
@@ -268,6 +338,9 @@ spec:
                 (the default). Set replication.enabled=false to explicitly exclude
                 this database from cluster replication.
               rule: self.replication.enabled == false || has(self.replication.ridBase)
+            - message: 'spec.seed and spec.bootstrapFrom are mutually exclusive: a
+                restore replaces seeding. Set at most one.'
+              rule: '!(has(self.seed) && has(self.bootstrapFrom))'
           status:
             description: status defines the observed state of the database.
             properties:
@@ -352,6 +425,12 @@ spec:
               phase:
                 description: phase summarises the current lifecycle state of the database.
                 type: string
+              restoreApplied:
+                description: |-
+                  restoreApplied indicates whether the bootstrapFrom restore has completed
+                  successfully. Once true, the restore is never re-run. Analogous to
+                  seedApplied (ADR-012 one-shot discipline).
+                type: boolean
               seedApplied:
                 description: |-
                   seedApplied indicates whether the seed data has been successfully applied.
