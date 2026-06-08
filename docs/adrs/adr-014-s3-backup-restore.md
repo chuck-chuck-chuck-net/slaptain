@@ -358,7 +358,7 @@ Deferred to later phases, each a candidate for its own follow-up:
   S3 artifacts).
 - **Job builder**: the co-located two-container Job (PodAffinity, staging
   emptyDir, slapcat init container, operator-image uploader).
-- **S3 client**: add a Go S3 client (e.g. minio-go) and a backup/restore
+- **S3 client**: add a Go S3 client (`aws-sdk-go-v2`, not minio-go) and a backup/restore
   subcommand to the operator/`slctl` binary that runs in the uploader container.
 - **Restore state machine**: a `Restoring` phase on `SlapdCluster` that the
   cluster controller honors (desired `replicas := 0` while restoring), plus the

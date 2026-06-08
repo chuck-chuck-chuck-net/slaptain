@@ -41,8 +41,10 @@ If you are picking this up cold:
 
 ## Phase 0 — Dependencies & scaffolding
 
-- Add `github.com/minio/minio-go/v7` (S3 client; AWS + any S3-compatible/MinIO)
+- Add `github.com/aws/aws-sdk-go-v2` (`service/s3` + `config` + `credentials`;
+  Apache-2.0, official, reaches MinIO/Ceph via `BaseEndpoint` + `UsePathStyle`)
   and `github.com/robfig/cron/v3` (schedule parsing; the lib k8s CronJob uses).
+  Deliberately **not** minio-go — see the avoid-MinIO preference.
 - Scaffold the kinds: `kubebuilder create api --group ldap --version v1alpha1
   --kind SlapdBackup` and `--kind SlapdScheduledBackup` (no
   `--skip-go-version-check` needed for `create api` per CLAUDE.md), then
@@ -70,8 +72,8 @@ If you are picking this up cold:
 ## Phase 2 — S3 transfer subcommand (the Job's Go workload)
 
 - Add `slctl backup-upload --file … --s3-bucket/-endpoint/-region/-prefix …`
-  (creds from env) → minio-go `PutObject`; and
-  `slctl restore-download --key … --out …` → `GetObject`.
+  (creds from env) → aws-sdk-go-v2 `PutObject` (multipart via the s3 manager);
+  and `slctl restore-download --key … --out …` → `GetObject`.
 - Thin and unit-testable against a MinIO testcontainer.
 - **Outcome:** the binary can move artifacts to/from S3 independently of any
   controller.
