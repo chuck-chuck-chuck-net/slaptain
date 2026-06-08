@@ -64,7 +64,7 @@ including `slapcat`/`slapadd`. The PVC question is subtler than it first looks
 | **Backup method** | Logical `slapcat -F /config -b <suffix>` → gzip → S3. Prod-parity artifact. |
 | **Backup scope** | The data DIT only, per `SlapdDatabase`. Never `cn=config`. |
 | **Executor** | A one-shot Kubernetes **Job** (slapd-init image) co-located with the target pod via *required* PodAffinity, mounting that pod's `config-` and `data-` PVCs. An init container produces the dump into an `emptyDir` staging volume; a second container (operator image) uploads to S3. |
-| **Restore model** | `SlapdDatabase.spec.bootstrapFrom.backupRef` — restore into a **fresh** database via offline `slapadd` on pod-0 during bootstrap, then peers initial-sync. Never an in-place mutation of a running DB. |
+| **Restore model** | `SlapdDatabase.spec.bootstrapFrom.backupRef` — populate a **newly created** database via offline `slapadd`, driven by a cluster-coordinated scale-to-0 → restore Job → scale-up state machine, then peers initial-sync. Costs a deliberate cluster-wide downtime (inherent to offline `slapadd`). One-shot, mutually exclusive with `seed`. A future online `ldapadd` mode covers the small-DB / no-downtime case. Never an in-place overwrite of a populated DB. |
 | **API** | `SlapdBackup` (on-demand) + `SlapdScheduledBackup` (cron + retention) + a shared `storage.s3` struct + the `bootstrapFrom` field above. |
 
 The decisions are grounded in two references: the conventional slapcat/gzip/S3 backup approach (method +
@@ -171,36 +171,123 @@ first time it creates `batch/v1` Jobs, which requires new RBAC
 
 ## Restore
 
-### Chosen: `bootstrapFrom` into a fresh database, offline `slapadd` on pod-0
-
 Restore is modelled as a **bootstrap source**, never a mutation of a running
 database — the CNPG pattern. A new `SlapdDatabase` carries
-`spec.bootstrapFrom.backupRef` (a `SlapdBackup` name) or a direct S3 path. On
-first bootstrap:
+`spec.bootstrapFrom.backupRef` (a `SlapdBackup` name) or a direct S3 path.
 
-1. pod-0's **init container** downloads the LDIF from S3 and runs
-   `slapadd -F /config -b <suffix>` into the empty `/data` **before slapd
-   starts**. This is fast (bulk load) and matches prod's manual recovery.
-2. slapd starts; pods 1..N-1 perform their normal **initial syncrepl refresh**
-   from pod-0, exactly as in a fresh-cluster cold start.
+### The OpenLDAP constraint that drives everything
 
-`slapadd` bypasses the accesslog overlay, but that is correct here: it runs on
-an empty DB before replication is live, and the standard initial full sync
-(via the data DB's `syncprov`) populates peers. This is the same path a fresh
-cluster takes; it is distinct from the post-dataloss *re-refresh* of an
-already-initialized peer that triggers ITS#9580.
+`slapadd` is the matching restore tool for a `slapcat` dump, and it is
+**offline-only**: it opens the LMDB environment exclusively, so it must run with
+slapd **stopped**. Running it against a live slapd risks corruption. There is no
+"online slapadd". This single fact rules out doing the restore inside a live pod
+and dictates the whole mechanism below.
 
-`bootstrapFrom` is **one-shot**, consumed exactly once and tracked in status —
-the same lifecycle discipline as the seed (ADR-012). Re-applying does not
-re-restore.
+### Chosen: offline `slapadd` via a cluster-coordinated scale-to-0 state machine
 
-### Rejected: live `ldapadd` restore (the seed mechanism)
+The cluster is a StatefulSet owned by the SlapdCluster controller, which
+SSA-patches `replicas` from `spec.replicas` every reconcile. So restore cannot
+be a side actor poking the STS — the controller would immediately revert any
+scale change, and the two would fight forever. Instead, **restore is a
+first-class cluster phase**: while `status.phase == Restoring`, the SlapdCluster
+controller's desired replica count *is* 0.
 
-The seed deliberately loads via live `ldapadd` so entries flow through the
-accesslog (ADR-012, BOOTSTRAP.md). For restore that is the wrong trade: it is
-slow and memory-heavy at scale, and the accesslog-flow benefit is moot on an
-empty pre-replication DB. Offline `slapadd` is the correct, prod-matching tool
-for bulk restore.
+The sequence reuses the existing empty-DB creation so `slapadd` has its config
+target (DB definition + data dir) with no new `cn=config` logic anywhere:
+
+```
+Pending      wait until the empty data DB is defined in cn=config
+             (the normal SlapdDatabase controller flow does this)
+ScalingDown  STS.replicas := 0; wait until pods are gone and the PVC is released
+Restoring    node-pinned Job mounting config-/data- of pod-0:
+             download LDIF from S3 → wipe target DB files → slapadd → exit;
+             operator watches the Job to completion
+ScalingUp    on success: status.restoreApplied=true; phase clears;
+             STS.replicas := originalReplicas
+Completed    peers come up empty → initial syncrepl refresh from pod-0
+```
+
+**Downtime is inherent, deliberate, and documented — not gated on "no users".**
+`slapadd` is offline-only, so any `slapadd`-based restore *necessarily* means a
+slapd downtime. Because the restore takes the whole StatefulSet to 0, it is a
+**cluster-wide service interruption** — it affects every database in the cluster
+and any LDAP clients, not just the database being restored. We treat this as a
+deliberate operation a human chooses and that we document: it is the same
+interruption as today's manual `slapcat`/`slapadd` recovery, with less
+visibility and more surprise factor, which the docs must offset. It is **not** a
+precondition that the cluster be idle or clientless. (For the small-DB /
+no-downtime case, see the online `ldapadd` mode below.)
+
+**The real correctness constraint is about the *database*, not the cluster.**
+Why peers do "the right thing": pod-0 comes up with the restored DIT and its
+restored `contextCSN`; the peers' copies of *that database* come up **empty**,
+see pod-0's `contextCSN` greater than their own (absent), and pull a full
+initial refresh. This is the normal cold-start path — distinct from the
+post-dataloss *re-refresh* of an already-initialized peer that triggers
+ITS#9580. It is correct **only because the peers' copy of the restored database
+is empty**. `bootstrapFrom` therefore populates a **newly created** database
+only — the cluster may already hold other, populated databases and serve clients
+— and is **one-shot** (the same lifecycle discipline as the seed, ADR-012) and
+**mutually exclusive with `seed`** (a restore replaces seeding). Overwriting a
+database that already holds data on the peers is the deferred in-place-restore
+case below, which would additionally have to wipe every peer's copy to avoid a
+divergent multi-master re-sync.
+
+Robustness properties that keep the machine from getting stuck:
+
+- **Persist `originalReplicas` + phase *before* scaling down**, so a crashed
+  operator resumes from status instead of scaling up into the wrong count.
+- **Every transition gates on observed state and is re-entrant.**
+- **Idempotent Job**: wipe-then-`slapadd`, so a retried Job is clean (a
+  half-loaded DB would otherwise fail `slapadd` on duplicate DNs).
+  `restoreApplied` flips only on verified success.
+- **Failure policy**: on Job failure, set `RestoreFailed` and leave the STS at
+  0 with a loud status. The operation is already a deliberate interruption, so
+  halting visibly for human inspection beats scaling up a half-restored DIT into
+  a multi-master mesh.
+- **Optional**: gate the pre-restore scale at `replicas=1` so peers never come
+  up until after restore (cleanest sync); restore all `bootstrapFrom` databases
+  in one cluster in a **single** scale-down window, not one bounce per DB.
+
+### Rejected: enforce slapadd-vs-slapd exclusion via the PVC access mode
+
+The tempting shortcut is to create the restore Job and let Kubernetes serialize
+it against slapd through volume mounting. It does not work: `ReadWriteOnce`
+binds to a *node*, not a *pod*, and explicitly permits same-node co-mount — the
+exact property the backup Job relies on. So an RWO restore Job could mount
+`data-` *while slapd holds it* and `slapadd` into a live env. `ReadWriteOncePod`
+would enforce single-pod, but it breaks the backup co-mount, is a breaking
+change to existing PVCs, and still wouldn't stop the controller-ownership fight.
+The exclusion belongs in the operator's sequencing, not the volume layer.
+
+### Rejected: offline `slapadd` in the init container
+
+An earlier draft put `slapadd` in pod-0's init container, before slapd starts.
+It fails on ordering: the init container only builds `cn=config`
+**infrastructure**; the data DB definition is created **live by the
+SlapdDatabase controller after slapd is up**. At init time the DB is not defined
+in `slapd.d`, so `slapadd -b <suffix>` has no target. Pre-defining it in the
+init container would duplicate the controller's cn=config logic into bash and
+violate "the operator owns `cn=config`" (ADR-002/003).
+
+### Future complementary mode: online `ldapadd` restore (no downtime)
+
+The two restore methods are complementary, not competing, because they trade off
+along the axis that matters: **downtime vs. scale.**
+
+- **Offline `slapadd` (scale-to-0)** — the MVP. Fast and complete at the
+  millions-of-entries scale, prod-artifact-compatible, but costs a cluster-wide
+  interruption.
+- **Online `ldapadd`** — loads the backup over the network into a live cluster,
+  entries flowing through the accesslog like the seed path (ADR-012,
+  BOOTSTRAP.md). **Zero downtime**, but slow and memory-heavy on large DITs.
+
+The online mode is the right tool for a **small** database, or whenever a
+cluster-wide interruption is unacceptable — e.g. adding a modest new database to
+a busy cluster. It is deferred (the offline mode covers the load-bearing
+migration/DR cases first), but explicitly *not rejected*. When added it would
+surface as a mode selector on `bootstrapFrom` (e.g. `mode: offline|online`),
+reusing the seed controller's live-`ldapadd` machinery for the online path.
 
 ### Rejected (deferred): in-place `SlapdRestore` CRD
 
@@ -251,7 +338,10 @@ Deferred to later phases, each a candidate for its own follow-up:
 - **GCS / Azure Blob providers.** S3 and S3-compatible (MinIO) only.
 - **IRSA / workload-identity credentials.** Static key-based creds only; an
   `inheritFromIAMRole`-style flag is a natural later addition.
-- **In-place `SlapdRestore` CRD** (see above).
+- **Online `ldapadd` restore mode** — the no-downtime path for small DBs;
+  deferred but explicitly planned (see "Future complementary mode" above), not
+  rejected.
+- **In-place `SlapdRestore` CRD** (overwrite a populated DB) — see above.
 - **`cn=config` backup** — reconstructed from CRs by design.
 
 ## Consequences
@@ -270,11 +360,16 @@ Deferred to later phases, each a candidate for its own follow-up:
   emptyDir, slapcat init container, operator-image uploader).
 - **S3 client**: add a Go S3 client (e.g. minio-go) and a backup/restore
   subcommand to the operator/`slctl` binary that runs in the uploader container.
-- **Restore path**: extend the slapd-init container to handle
-  `bootstrapFrom` — download from S3 and `slapadd` on pod-0 before slapd starts;
-  track one-shot completion in `SlapdDatabase.status`.
+- **Restore state machine**: a `Restoring` phase on `SlapdCluster` that the
+  cluster controller honors (desired `replicas := 0` while restoring), plus the
+  scale-down → restore-Job → scale-up sequencing with persisted
+  `originalReplicas`. The restore Job (slapd-init image, node-pinned to pod-0's
+  PVCs) downloads from S3, wipes the target DB files, runs `slapadd`, and exits.
+  One-shot completion tracked in `SlapdDatabase.status.restoreApplied`. Admission
+  guard: `bootstrapFrom` and `seed` are mutually exclusive.
 - **RBAC**: grant the operator `batch/v1` `jobs` verbs
-  (`create/get/list/watch/delete`) — new for the operator.
+  (`create/get/list/watch/delete`) — new for the operator. (Scaling the STS
+  needs no new RBAC; the operator already patches StatefulSets.)
 - **e2e**: a backup→object-store→restore-into-fresh-cluster round-trip test,
   ideally asserting artifact compatibility with a prod-style `slapcat` dump.
 - **Docs**: a backup/restore section (likely `docs/BACKUP.md`), CLAUDE.md
@@ -287,7 +382,13 @@ Deferred to later phases, each a candidate for its own follow-up:
   cordoned/full node it may stay Pending until co-location is possible (tunable
   via `podAffinity: false`, at the cost of needing a node that can mount the
   PVC).
-- Restore creates a **new** database; it never overwrites a running one.
+- Restore populates a **newly created** database; it never overwrites a
+  populated one. It runs as a cluster-coordinated **scale-to-0 → restore →
+  scale-up** cycle, which is a **deliberate, cluster-wide service interruption**
+  (inherent to `slapadd` being offline-only) — documented and human-initiated,
+  the same downtime as today's manual recovery. It does **not** require the
+  cluster to be idle. `bootstrapFrom` and `seed` cannot both be set on a
+  `SlapdDatabase`.
 - Backups capture the data DIT only. Schema, ACLs, and topology are restored by
   re-applying the corresponding CRs, not from the backup.
 
@@ -303,3 +404,14 @@ Deferred to later phases, each a candidate for its own follow-up:
   backup/restore story) and the precedent for declining a permanent sidecar.
 - `docs/MIGRATION-PLAN.md` — backup parity with legacy prod is a migration
   readiness item.
+
+## Revision history
+
+- **2026-06-08 (same-day, pre-acceptance):** reworked the restore decision.
+  The initial draft proposed offline `slapadd` in pod-0's **init container**;
+  that fails because the data DB is not defined in `cn=config` at init time (the
+  SlapdDatabase controller defines it live, after slapd starts). The corrected
+  decision drives offline `slapadd` from a **cluster-coordinated scale-to-0
+  state machine** so slapd is genuinely stopped and the controllers don't fight
+  over `replicas`. The discarded init-container approach and the rejected
+  PVC-access-mode shortcut are retained above as rejected options.
