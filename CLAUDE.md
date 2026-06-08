@@ -56,7 +56,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-009-slapduser-lifecycle.md
 │       ├── adr-010-replication-modes.md
 │       ├── adr-011-hot-migration-topology.md
-│       └── adr-012-seed-and-lifecycle.md
+│       ├── adr-012-seed-and-lifecycle.md
+│       ├── adr-013-defer-hot-database-management.md
+│       └── adr-014-s3-backup-restore.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -350,6 +352,7 @@ the original decision — the history of reasoning matters.
 - ADR-011: Hot migration topology contract (RID/ServerID coexistence, plain-syncrepl interop, stage transitions) — *Accepted (impl + e2e green 2026-05-13)*
 - ADR-012: Seed is one-shot; cluster wipe is a Kubernetes resource lifecycle operation (replaces removed `forceRebootstrap` + reverted `verifySeedExists`)
 - ADR-013: Defer hot SlapdDatabase add/remove; require persistent storage (rolling restart on DB add/remove accepted as UX wart on persistent storage)
+- ADR-014: S3 backup/restore (slapcat→gzip→S3 via co-located Job; bootstrapFrom restore into a fresh DB) — *Proposed*
 
 ---
 
