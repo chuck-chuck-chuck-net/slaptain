@@ -611,4 +611,8 @@ generic and decoupled from the migration timing; Phases 1 and 2 are cold and hot
 migration preparation respectively. ADRs 009–011 codify the architectural
 decisions referenced from the plan.
 
+The S3 backup/restore feature (ADR-014) has its own breakdown in
+`docs/BACKUP-PLAN.md`. Cross-cutting tech-debt not tied to a plan or ADR (e.g.
+deprecation cleanups) lives in `docs/BACKLOG.md`.
+
 If you are picking this up after a gap, start with `docs/MIGRATION-PLAN.md` §"Resuming this work".
