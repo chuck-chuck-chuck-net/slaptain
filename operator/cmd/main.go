@@ -54,6 +54,13 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	// Multi-call binary: `manager backup-upload|restore-download ...` runs a
+	// one-shot S3 transfer (used by the backup/restore Jobs, ADR-014) and exits
+	// before any manager flags are parsed.
+	if maybeRunS3Subcommand() {
+		return
+	}
+
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
