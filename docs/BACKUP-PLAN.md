@@ -179,3 +179,50 @@ cluster down. Slot in here when picked up.
 - **Job → status reporting**: how the backup Job reports `sizeBytes`/`path`
   back to `SlapdBackup.status` — controller derives the key + a post-completion
   HEAD, vs. the Job writing a pod terminationMessage.
+
+## Phase 7 — In-place restore: preflight + slapadd-all-pods + `SlapdRestore` (ADR-014 amendment)
+
+Reverses the deferred in-place restore and reworks the data path. See the
+ADR-014 **Amendment (2026-06-09)**. Order: machine rework first (also makes
+`bootstrapFrom` peer-state-agnostic), then the CRD, then multi-replica e2e.
+
+**7.1 — Preflight (destroy-last).** Before any scale-down, the SlapdCluster
+controller validates each restore source **inline** (no Job, cluster stays up):
+read the creds Secret → stream the S3 object → gunzip → confirm a non-empty LDIF
+whose suffix entry (`dn: <suffix>`) is present, reading only the start. New
+restore sub-phase `Preflight` (does NOT hold the StatefulSet down). Failure →
+`PreflightFailed`, no scale-down, no data touched, no downtime.
+- `internal/backup`: add `Preflight(ctx, cfg, key, suffix)`.
+- shared `s3ConfigFromStorage(ctx, client, ns, S3StorageSpec)` (reads creds
+  Secret → static-cred `S3Config`); refactor the scheduled controller to use it.
+
+**7.2 — slapadd into every pod** (supersedes "slapadd pod-0 + peers
+initial-sync"). During the scale-to-0 window, run a wipe+`slapadd` Job for
+**each** RW and RO pod against that pod's own PVCs, so the cluster comes up
+already-converged with no syncrepl refresh (→ no ITS#9580 exposure).
+- `restore_job.go`: parameterize `buildRestoreJob` by pod identity — config/data
+  PVC names, and the accesslog mount gated per pod (RW on a replicated cluster
+  mounts `accesslog-<c>-<i>`; RO pods never, since their cn=config has no
+  accesslog DB).
+- `slapdcluster_restore.go`: fan `runRestoreJobs` across RW ordinals `0..N-1`
+  and RO ordinals `0..M-1` (counts from `status.restore.originalReplicas` /
+  `originalReadReplicas`). Wipe is per-pod, immediately before that pod's own
+  load. Refinement (later): pod-0 first, confirm, then peers (peers as safety
+  net); for now all-parallel with all-must-succeed-before-scale-up.
+- Fallback: a pod whose direct load fails falls back to syncrepl refresh on
+  scale-up (single-pod ITS#9580 exposure), or the machine aborts and retries.
+
+**7.3 — `SlapdRestore` CRD** (imperative in-place restore on a live, populated
+DB). `spec.databaseRef` + `spec.source.{backupRef|s3}`; immutable once terminal;
+status `phase`. The SlapdCluster controller watches it (Architecture A) and
+drives the same preflight → slapadd-all-pods machine against the named DB.
+Guard: refuse a second concurrent restore.
+
+**7.4 — e2e** (gated, multi-replica): rollback via `SlapdRestore`, and
+delete+recreate `bootstrapFrom`, both on N≥2 — assert restored DIT on every pod,
+no divergence, and (ideally) that no syncrepl refresh occurred.
+
+**Outcome:** `bootstrapFrom` is correct at any replica count (delete+recreate
+rollback "is gonna be fine"), and there is an explicit, non-destructive,
+auditable in-place restore path. Restore never traverses the syncrepl refresh
+path.
