@@ -94,11 +94,14 @@ gunzip -c ` + restoreLDIFFile + ` | slapadd -F /config/slapd.d -b "$SUFFIX"`
 			{Name: "SUFFIX", Value: sd.Spec.Suffix},
 			{Name: "DATADIR", Value: dataDir},
 		},
-		VolumeMounts: []corev1.VolumeMount{
+		// slapadd (-F) loads the whole cn=config; the accesslog DB's
+		// olcDbDirectory must exist or it aborts at config-load. Mount it when
+		// the cluster provisions the accesslog PVC.
+		VolumeMounts: mountsWithAccesslog(sc, []corev1.VolumeMount{
 			{Name: "config", MountPath: "/config", ReadOnly: true},
 			{Name: "data", MountPath: "/data"},
 			{Name: "staging", MountPath: backupStagingPath, ReadOnly: true},
-		},
+		}),
 		SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: &noEsc, Capabilities: dropAll},
 	}
 
@@ -123,11 +126,11 @@ gunzip -c ` + restoreLDIFFile + ` | slapadd -F /config/slapd.d -b "$SUFFIX"`
 					ImagePullSecrets: sc.Spec.ImagePullSecrets,
 					InitContainers:   []corev1.Container{download},
 					Containers:       []corev1.Container{restore},
-					Volumes: []corev1.Volume{
-						{Name: "config", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: configPVC}}},
-						{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: dataPVC}}},
+					Volumes: volumesWithAccesslog(sc, []corev1.Volume{
+						pvcVolume("config", configPVC),
+						pvcVolume("data", dataPVC),
 						{Name: "staging", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					}),
 				},
 			},
 		},

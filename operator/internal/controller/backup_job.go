@@ -63,6 +63,21 @@ func buildBackupJob(sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase
 	noEsc := false
 	dropAll := &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
 
+	// slapcat (-F) loads the entire cn=config, which on a replicated cluster
+	// references the accesslog DB's olcDbDirectory (/accesslog). That path must
+	// exist or slapcat aborts at config-load ("bad configuration directory"),
+	// even though we only dump the data DB. Mount the accesslog PVC when present.
+	mounts := mountsWithAccesslog(sc, []corev1.VolumeMount{
+		{Name: "config", MountPath: "/config", ReadOnly: true},
+		{Name: "data", MountPath: "/data"},
+		{Name: "staging", MountPath: backupStagingPath},
+	})
+	volumes := volumesWithAccesslog(sc, []corev1.Volume{
+		pvcVolume("config", configPVC),
+		pvcVolume("data", dataPVC),
+		{Name: "staging", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	})
+
 	// slapcat → gzip into staging. bash + pipefail so a slapcat failure isn't
 	// masked by gzip's exit 0. Config is read-only; data is RW because LMDB
 	// registers a reader slot in the lock file even for a read transaction.
@@ -72,11 +87,7 @@ func buildBackupJob(sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase
 		ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
 		Command:         []string{"bash", "-c", `set -eo pipefail; slapcat -F /config/slapd.d -b "$SUFFIX" | gzip -c > ` + backupDumpFile},
 		Env:             []corev1.EnvVar{{Name: "SUFFIX", Value: sd.Spec.Suffix}},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "config", MountPath: "/config", ReadOnly: true},
-			{Name: "data", MountPath: "/data"},
-			{Name: "staging", MountPath: backupStagingPath},
-		},
+		VolumeMounts:    mounts,
 		SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: &noEsc, Capabilities: dropAll},
 	}
 
@@ -133,11 +144,7 @@ func buildBackupJob(sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase
 					ImagePullSecrets: sc.Spec.ImagePullSecrets,
 					InitContainers:   []corev1.Container{slapcat},
 					Containers:       []corev1.Container{upload},
-					Volumes: []corev1.Volume{
-						{Name: "config", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: configPVC}}},
-						{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: dataPVC}}},
-						{Name: "staging", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					Volumes:          volumes,
 				},
 			},
 		},
@@ -161,4 +168,31 @@ func buildBackupJob(sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase
 	}
 
 	return job
+}
+
+// pvcVolume builds a PVC-backed pod volume.
+func pvcVolume(name, claim string) corev1.Volume {
+	return corev1.Volume{
+		Name:         name,
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}},
+	}
+}
+
+// mountsWithAccesslog appends an /accesslog mount when the cluster provisions
+// the accesslog PVC (replicated clusters). slapcat/slapadd load the whole
+// cn=config and validate every olcDbDirectory — including the accesslog DB's —
+// so that path must exist even when only the data DB is dumped/loaded.
+func mountsWithAccesslog(sc *ldapv1alpha1.SlapdCluster, base []corev1.VolumeMount) []corev1.VolumeMount {
+	if sc.NeedsAccesslogVolume() {
+		base = append(base, corev1.VolumeMount{Name: "accesslog", MountPath: "/accesslog"})
+	}
+	return base
+}
+
+// volumesWithAccesslog appends the accesslog PVC volume to match mountsWithAccesslog.
+func volumesWithAccesslog(sc *ldapv1alpha1.SlapdCluster, base []corev1.Volume) []corev1.Volume {
+	if sc.NeedsAccesslogVolume() {
+		base = append(base, pvcVolume("accesslog", "accesslog-"+sc.Name+"-0"))
+	}
+	return base
 }
