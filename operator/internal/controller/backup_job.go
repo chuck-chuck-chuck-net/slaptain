@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	backupStagingPath = "/staging"
-	backupDumpFile    = "/staging/dump.ldif.gz"
+	backupStagingPath   = "/staging"
+	backupDumpFile      = "/staging/dump.ldif.gz"
+	backupReplEntryFile = "/staging/replentry.ldif"
 )
 
 // backupPodSecurityContext mirrors the StatefulSet's pod security context so the
@@ -85,13 +86,19 @@ func buildBackupJob(sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase
 		Name:            "slapcat",
 		Image:           initImage,
 		ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
-		Command:         []string{"bash", "-c", `set -eo pipefail; slapcat -F /config/slapd.d -b "$SUFFIX" | gzip -c > ` + backupDumpFile},
+		// Also dump just cn=replication (if any) so the uploader can stamp its
+		// password hash as object metadata for restore-time verification (ADR-014
+		// amendment). The targeted slapcat is reliable regardless of where the
+		// entry sits in the full dump.
+		Command: []string{"bash", "-c", `set -eo pipefail
+slapcat -F /config/slapd.d -b "$SUFFIX" | gzip -c > ` + backupDumpFile + `
+slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEntryFile},
 		Env:             []corev1.EnvVar{{Name: "SUFFIX", Value: sd.Spec.Suffix}},
 		VolumeMounts:    mounts,
 		SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: &noEsc, Capabilities: dropAll},
 	}
 
-	uploadArgs := []string{"backup-upload", "--bucket", st.Bucket, "--key", objectKey, "--file", backupDumpFile}
+	uploadArgs := []string{"backup-upload", "--bucket", st.Bucket, "--key", objectKey, "--file", backupDumpFile, "--repl-entry", backupReplEntryFile}
 	if st.Endpoint != "" {
 		uploadArgs = append(uploadArgs, "--endpoint", st.Endpoint)
 	}

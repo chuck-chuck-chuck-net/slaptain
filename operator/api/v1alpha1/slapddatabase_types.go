@@ -140,6 +140,17 @@ type BootstrapSource struct {
 	// or a backup produced by another cluster).
 	// +optional
 	S3 *BootstrapS3Source `json:"s3,omitempty"`
+	// skipReplicationPasswordCheck disables the restore preflight's verification
+	// that the cluster's replication-password matches the cn=replication entry in
+	// the backup. The check is default-deny: it fails the restore on a password
+	// mismatch OR an unverifiable hash scheme (anything other than {SSHA}). Set
+	// this to true ONLY when you have accepted the consequence: if the passwords
+	// don't actually match, intra-cluster syncrepl will silently fail to
+	// authenticate after the restore and you must repair cn=replication yourself.
+	// A backup with no replication-pw-hash metadata (a foreign/legacy dump) is
+	// never checked and does not need this flag.
+	// +optional
+	SkipReplicationPasswordCheck bool `json:"skipReplicationPasswordCheck,omitempty"`
 }
 
 // BootstrapS3Source addresses a single backup artifact in object storage.

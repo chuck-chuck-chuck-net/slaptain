@@ -44,12 +44,14 @@ func maybeRunS3Subcommand() bool {
 
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	var (
-		bucket   = fs.String("bucket", "", "S3 bucket (required)")
-		endpoint = fs.String("endpoint", "", "S3 endpoint URL (empty for AWS S3)")
-		region   = fs.String("region", "", "S3 region")
-		key      = fs.String("key", "", "S3 object key (required)")
-		file     = fs.String("file", "", "local file to upload (backup-upload)")
-		out      = fs.String("out", "", "local path to write (restore-download)")
+		bucket    = fs.String("bucket", "", "S3 bucket (required)")
+		endpoint  = fs.String("endpoint", "", "S3 endpoint URL (empty for AWS S3)")
+		region    = fs.String("region", "", "S3 region")
+		key       = fs.String("key", "", "S3 object key (required)")
+		file      = fs.String("file", "", "local file to upload (backup-upload)")
+		out       = fs.String("out", "", "local path to write (restore-download)")
+		replEntry = fs.String("repl-entry", "",
+			"LDIF of cn=replication (backup-upload); its userPassword is stamped as object metadata")
 		insecure = fs.Bool("insecure-tls", false, "skip TLS verification against the endpoint (test-only)")
 	)
 	// flag.ExitOnError handles parse errors for us.
@@ -74,7 +76,20 @@ func maybeRunS3Subcommand() bool {
 			fmt.Fprintln(os.Stderr, "Error: --file is required for backup-upload")
 			os.Exit(2)
 		}
-		size, err := backup.Upload(ctx, cfg, *key, *file)
+		// Stamp cn=replication's password hash as object metadata so a restore
+		// can verify the provided replication-password without scanning the LDIF.
+		var metadata map[string]string
+		if *replEntry != "" {
+			hash, err := backup.ReplicationHashFromLDIF(*replEntry)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if hash != "" {
+				metadata = map[string]string{backup.MetaReplHashKey: hash}
+			}
+		}
+		size, err := backup.Upload(ctx, cfg, *key, *file, metadata)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

@@ -148,6 +148,28 @@ Restore populates a *new* database only — it never overwrites a populated one.
 A no-downtime online (`ldapadd`-based) restore mode for small databases is
 planned (see ADR-014).
 
+### Replication-password verification
+
+A restored DB **keeps the backup's `cn=replication` password** — the operator
+never rewrites it (that would be a hidden password rotation, which slaptain does
+not support). So for a replicated cluster, the target's `<db>-credentials`
+Secret must carry the *source's* `replication-password`, or intra-cluster
+syncrepl will silently fail to authenticate after the restore.
+
+To catch this before it costs you downtime, every slaptain backup stamps the
+`{SSHA}` hash of its `cn=replication` password onto the S3 object's
+`replication-pw-hash` metadata. Preflight verifies the cluster's
+`replication-password` against it and **default-denies**: a mismatch *or* a
+non-`{SSHA}` hash scheme fails the restore before anything is wiped.
+
+- A **foreign/legacy dump** (uploaded outside slaptain) has no such metadata and
+  is never checked — provide matching credentials and you're fine.
+- To restore despite a failing check (a deliberate mismatch you'll repair by
+  hand, or an unverifiable hash scheme), set
+  `spec.bootstrapFrom.skipReplicationPasswordCheck: true`. The operator logs the
+  bypass; if the passwords don't actually match, repairing `cn=replication` is
+  then on you.
+
 ## Testing locally
 
 The e2e backup tests use **versitygw** (`ghcr.io/versity/versitygw`, Apache-2.0)

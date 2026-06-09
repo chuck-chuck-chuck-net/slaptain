@@ -493,6 +493,17 @@ Preflight (cluster still UP — nothing wiped, no downtime):
   download artifact + validate (S3 reachable, creds OK, object present, gunzip
   clean, non-empty LDIF whose first DN == target suffix; optional trial slapadd
   into a scratch dir). Fail here → abort with neither downtime nor data loss.
+  Replication-password check: the backup Job stamps the {SSHA} of the source's
+  cn=replication userPassword onto the object's `replication-pw-hash` metadata
+  (a targeted `slapcat -a '(cn=replication)'`, not a body scan). When the target
+  DB replicates, preflight SSHA-verifies the cluster's replication-password
+  against that metadata. Default-deny: a mismatch OR a non-{SSHA} scheme fails —
+  the restored DB keeps the backup's password (we never rewrite it; that would
+  be a hidden rotation), so the target's credentials Secret must carry the
+  source's replication-password. A foreign/legacy dump has no such metadata and
+  is not checked. `spec.bootstrapFrom.skipReplicationPasswordCheck: true` bypasses
+  the check for a deliberate mismatch or unverifiable scheme — the operator logs
+  the bypass and the user owns repairing cn=replication if syncrepl then fails.
 ScaleDown:  STS (+ RO STS) → 0; wait for pods gone / PVCs released.
 Restore:    pod-0 first — wipe the target DB's data dir, then slapadd; confirm.
             Then, in parallel, every other RW + RO pod: wipe target DB dir +

@@ -54,6 +54,24 @@ func s3ConfigFromStorage(ctx context.Context, c client.Client, ns string, st lda
 	}, nil
 }
 
+// databaseReplPassword reads a database's replication-password from its
+// credentials Secret (the source-of-truth the restore must match against the
+// backup). Returns "" when the Secret or key is absent.
+func (r *SlapdClusterReconciler) databaseReplPassword(ctx context.Context, sd *ldapv1alpha1.SlapdDatabase) (string, error) {
+	name := sd.Spec.Credentials.SecretName
+	if name == "" {
+		name = sd.Name + "-credentials"
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sd.Namespace}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read credentials secret %q: %w", name, err)
+	}
+	return string(secret.Data["replication-password"]), nil
+}
+
 // reconcileRestore drives the bootstrapFrom restore state machine (ADR-014). It
 // returns handled=true when a restore is in progress and the caller should
 // persist status and requeue with the returned Result, skipping the normal
@@ -136,7 +154,23 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 				rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
 				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
-			if err := backup.Preflight(ctx, cfg, key, sd.Spec.Suffix); err != nil {
+			// Verify the provided replication-password matches the backup only
+			// when this DB actually participates in replication — and unless the
+			// operator was told to skip the check (foreign/legacy dump, or a
+			// deliberate mismatch the user owns; see BootstrapSource).
+			replPW := ""
+			switch {
+			case sd.Spec.BootstrapFrom != nil && sd.Spec.BootstrapFrom.SkipReplicationPasswordCheck:
+				log.Info("restore preflight: skipping replication-password verification per spec.bootstrapFrom.skipReplicationPasswordCheck",
+					"database", name)
+			case sc.Spec.Replication.Enabled && sd.ReplicationEnabled():
+				replPW, err = r.databaseReplPassword(ctx, sd)
+				if err != nil {
+					rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
+					return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+				}
+			}
+			if err := backup.Preflight(ctx, cfg, key, sd.Spec.Suffix, replPW); err != nil {
 				rst.Message = fmt.Sprintf("preflight failed for %s: %v", name, err)
 				log.Info("restore preflight failed; cluster stays up, will retry", "database", name, "err", err)
 				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
