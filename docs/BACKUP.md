@@ -50,6 +50,11 @@ spec:
     bucket: my-ldap-backups
     prefix: prod                  # optional; object key is <prefix>/<cluster>/<db>/<ts>.ldif.gz
     endpoint: ""                  # empty for AWS S3; set for S3-compatible stores
+                                  # (must resolve from BOTH the backup/restore
+                                  # Jobs' namespace AND the operator's namespace —
+                                  # the operator validates restores and prunes
+                                  # retention inline; for an in-cluster S3 service
+                                  # use an FQDN like svc.namespace.svc)
     region: eu-central-1
     credentialsSecretName: my-s3-creds
   # compression: gzip             # only value supported

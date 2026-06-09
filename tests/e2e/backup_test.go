@@ -27,9 +27,11 @@ var _ = Describe("backup", Label("backup"), Ordered, func() {
 	const (
 		backupName = "e2e-backup"
 		bucket     = "slaptain-backups"
-		endpoint   = "http://versitygw:7480"
 		credSecret = "versitygw-creds"
 	)
+	// Fully-qualified so it resolves from any namespace (the backup Job runs in
+	// the workload namespace; the operator's inline S3 ops run in the operator's).
+	endpoint := "http://versitygw." + namespace + ".svc:7480"
 
 	BeforeAll(func(ctx SpecContext) {
 		if os.Getenv("E2E_BACKUP") != "1" {

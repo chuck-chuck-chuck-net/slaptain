@@ -33,9 +33,11 @@ var _ = Describe("restore", Label("restore"), Ordered, func() {
 		restoreDB      = "restore-db"
 		restoreNPSvc   = "slapd-restore-np"
 		bucket         = "slaptain-backups"
-		endpoint       = "http://versitygw:7480"
 		credSecret     = "versitygw-creds"
 	)
+	// Fully-qualified so it resolves from the OPERATOR's namespace too (inline
+	// preflight runs in the operator pod, not the workload namespace).
+	endpoint := fmt.Sprintf("http://versitygw.%s.svc:7480", namespace)
 
 	var (
 		srcImages      ldapv1alpha1.SlapdImages
