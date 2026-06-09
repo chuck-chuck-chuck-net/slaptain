@@ -415,3 +415,124 @@ Deferred to later phases, each a candidate for its own follow-up:
   state machine** so slapd is genuinely stopped and the controllers don't fight
   over `replicas`. The discarded init-container approach and the rejected
   PVC-access-mode shortcut are retained above as rejected options.
+
+## Amendment (2026-06-09): in-place restore (`SlapdRestore`) + slapadd-all-pods machine
+
+**Status:** Accepted. Reverses the MVP's "in-place restore — deferred/rejected"
+decision and reworks the restore data path. The original sections above are
+preserved for history; this amendment supersedes two specific points, called out
+inline below.
+
+### Context
+
+The MVP shipped `bootstrapFrom` (restore into a *fresh* database) and deferred
+in-place restore (rollback into a *populated* cluster — "someone broke a database,
+roll back to yesterday"). Reviewing it on a live cluster surfaced three things:
+
+1. **delete+recreate is a footgun at N≥2.** Deleting a `SlapdDatabase` and
+   recreating it with `bootstrapFrom` *appears* to roll back — and does on a
+   single replica, because the restore Job wipes pod-0's data before `slapadd`.
+   But on a multi-replica cluster the Job only touches pod-0; peers keep the old
+   data, and on scale-up multi-master syncrepl resurrects it / diverges. That is
+   the exact reason in-place was deferred, and it is the dangerous kind of
+   "works in test (N=1), corrupts in prod (N>1)."
+2. **Destroy-last.** A restore must not wipe data before it is confident the
+   restore can succeed; finding out the backup is unreachable/corrupt *after*
+   wiping is unacceptable.
+3. **Relying on syncrepl to repopulate peers is the wrong data path.** The
+   original "slapadd pod-0, let peers initial-sync" approach transfers the whole
+   dataset N−1 times over a per-entry online refresh (slow at millions of
+   entries) and — critically — drives peers through the syncrepl **refresh**
+   path, which is exactly what triggers upstream **ITS#9580** (refresh fills the
+   accesslog with out-of-order CSNs). Restore should not depend on the buggiest
+   path in the stack.
+
+### Decisions
+
+**1. Add a `SlapdRestore` CRD for explicit in-place restore.** A restore is an
+event/command, not desired state, so it is its own object rather than a field on
+`SlapdDatabase` (a spec field for a one-shot imperative action forces clunky
+trigger-token patterns, and mutating the DB CR to roll it back is the opposite of
+the intent). Precedent: mariadb-operator `Restore`, Medusa `MedusaRestoreJob`.
+
+```
+SlapdRestore (sr)                     # imperative, immutable once terminal
+  spec.databaseRef                    # an existing (possibly populated) SlapdDatabase
+  spec.source.backupRef               # a SlapdBackup, or:
+  spec.source.s3 { storage, key }     # a direct object (e.g. a legacy slapcat dump)
+  status: phase (Pending|Preflight|Restoring|Completed|Failed) | startedAt | completedAt | message
+```
+
+Non-destructive to the CR (metadata preserved), auditable (one object per
+restore), guardable (refuse a second concurrent restore). Per the
+cluster-owns-the-StatefulSet decision (Architecture A above), the **SlapdCluster
+controller** watches `SlapdRestore` — like it already watches `SlapdDatabase` —
+and drives the machine; the `SlapdRestore` is just the request.
+
+**2. Rework the restore machine to `slapadd` into *every* pod** (supersedes the
+"slapadd pod-0 + peers initial-sync" step of the original Restore section). All
+RW *and* RO pods load the same artifact directly and offline, then come up
+already-converged — replication moves no bulk data.
+
+- **Efficient:** parallel offline LMDB bulk loads from a local artifact + N cheap
+  S3 downloads, instead of N−1 full online syncrepl refreshes.
+- **Robust:** no pod takes the syncrepl refresh path, so the restore cannot
+  trigger ITS#9580. (See the ITS#9580 write-up; restore deliberately bypasses
+  refresh.)
+- **Correct:** `slapadd` preserves `entryCSN`/`contextCSN` from the slapcat LDIF,
+  so loading the *same* artifact into every pod yields an identical starting
+  state → multi-master sees no diffs → instant convergence. Requires `serverID`
+  hygiene (ADR-011) so loaded source-CSNs and the restore cluster's new writes
+  don't collide.
+
+**3. Preflight before any destruction; peers as the safety net** (this is the
+"destroy-last" guarantee).
+
+```
+Preflight (cluster still UP — nothing wiped, no downtime):
+  download artifact + validate (S3 reachable, creds OK, object present, gunzip
+  clean, non-empty LDIF whose first DN == target suffix; optional trial slapadd
+  into a scratch dir). Fail here → abort with neither downtime nor data loss.
+ScaleDown:  STS (+ RO STS) → 0; wait for pods gone / PVCs released.
+Restore:    pod-0 first — wipe the target DB's data dir, then slapadd; confirm.
+            Then, in parallel, every other RW + RO pod: wipe target DB dir +
+            slapadd the same artifact. The per-pod wipe is the step immediately
+            before that pod's own load — never "wipe all, then start loading."
+ScaleUp:    STS → original counts. Cluster is already converged.
+Abort/fallback:
+  - preflight failure: no scale-down, no data touched.
+  - pod-0 load failure (despite preflight): peers still hold the old data →
+    scale back up on it and mark Failed; no total loss.
+  - a peer's direct load failure: that pod alone falls back to syncrepl refresh
+    on scale-up (the only residual, single-pod ITS#9580 exposure), or the
+    machine aborts and retries.
+```
+
+The wipe is scoped to the *target database's* `/data/<dir>` on each pod, so other
+databases on the cluster are untouched.
+
+### Consequences
+
+- **`bootstrapFrom` becomes peer-state-agnostic** (free, from decision 2): every
+  pod gets a direct load, so a `bootstrapFrom` restore is correct whether the
+  cluster is fresh *or* a delete-and-recreated rollback. The N≥2 footgun is gone;
+  delete+recreate "is gonna be fine."
+- Two triggers, one machine: `SlapdDatabase.spec.bootstrapFrom` (create-time,
+  declarative) and `SlapdRestore` (imperative, on a live DB) both feed the same
+  preflight → slapadd-all-pods machine.
+- Restore is deterministic and observable (discrete per-pod Jobs with clear
+  success/failure) rather than waiting on opaque syncrepl convergence.
+- New RBAC: `SlapdRestore` + status. The machine still creates only `batch/v1`
+  Jobs.
+- Supersedes: the original "Restore → Chosen" step "(slapadd pod-0) … peers
+  perform their normal initial syncrepl refresh from pod-0"; and the original
+  "Rejected (deferred): in-place `SlapdRestore` CRD".
+- Still out of scope: PITR, online `ldapadd` mode, GCS/Azure, IRSA.
+
+### Implementation order
+
+1. Rework the machine to preflight + slapadd-all-pods (this alone makes
+   `bootstrapFrom` safe at N≥2 and is the foundation).
+2. Add the `SlapdRestore` CRD + controller wiring on top (same machine).
+3. e2e on a multi-replica cluster: rollback via `SlapdRestore`, and
+   delete+recreate `bootstrapFrom`, both asserting no divergence and no refresh.
