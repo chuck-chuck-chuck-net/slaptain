@@ -393,10 +393,15 @@ type SlapdReplicationConfig struct {
 
 // SlapdClusterSpec defines the desired state of SlapdCluster.
 //
-// +kubebuilder:validation:XValidation:rule="self.replication.mode != 'consumer-only' || size(self.replication.externalPeers) > 0",message="replication.mode=consumer-only requires at least one replication.externalPeers entry"
-// +kubebuilder:validation:XValidation:rule="self.replication.mode != 'consumer-only' || !has(self.readReplicas) || self.readReplicas == 0",message="replication.mode=consumer-only is incompatible with readReplicas>0 (the whole cluster is already read-only)"
-// +kubebuilder:validation:XValidation:rule="self.replication.mode != 'consumer-only' || self.replication.enabled",message="replication.mode=consumer-only requires replication.enabled=true (otherwise the mode is silently ignored)"
-// +kubebuilder:validation:XValidation:rule="size(self.replication.externalPeers) == 0 || self.replication.enabled",message="replication.externalPeers requires replication.enabled=true (otherwise the peers are silently ignored)"
+// These guardrails (ADR-010) fire only when the relevant fields are present, so
+// a standalone cluster that omits the replication block — or sets only
+// replication.enabled — validates cleanly. self.replication is optional
+// (omitempty, no default); externalPeers has no default. Guard every access with
+// has() so the API server never errors with a bare "no such key".
+// +kubebuilder:validation:XValidation:rule="!has(self.replication) || self.replication.mode != 'consumer-only' || (has(self.replication.externalPeers) && size(self.replication.externalPeers) > 0)",message="replication.mode=consumer-only requires at least one replication.externalPeers entry"
+// +kubebuilder:validation:XValidation:rule="!has(self.replication) || self.replication.mode != 'consumer-only' || !has(self.readReplicas) || self.readReplicas == 0",message="replication.mode=consumer-only is incompatible with readReplicas>0 (the whole cluster is already read-only)"
+// +kubebuilder:validation:XValidation:rule="!has(self.replication) || self.replication.mode != 'consumer-only' || self.replication.enabled",message="replication.mode=consumer-only requires replication.enabled=true (otherwise the mode is silently ignored)"
+// +kubebuilder:validation:XValidation:rule="!has(self.replication) || !has(self.replication.externalPeers) || size(self.replication.externalPeers) == 0 || self.replication.enabled",message="replication.externalPeers requires replication.enabled=true (otherwise the peers are silently ignored)"
 type SlapdClusterSpec struct {
 	// suspend pauses the operator's reconciliation of this resource. Existing
 	// StatefulSets, Services, and Secrets are left in place; the operator stops
