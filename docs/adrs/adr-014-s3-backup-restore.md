@@ -1,6 +1,6 @@
 # ADR-014: S3 backup and restore
 
-**Status:** Proposed
+**Status:** Accepted (impl + e2e green on t3e 2026-06-09)
 **Date:** 2026-06-08
 
 ## Context
