@@ -192,9 +192,15 @@ read the creds Secret → stream the S3 object → gunzip → confirm a non-empt
 whose suffix entry (`dn: <suffix>`) is present, reading only the start. New
 restore sub-phase `Preflight` (does NOT hold the StatefulSet down). Failure →
 `PreflightFailed`, no scale-down, no data touched, no downtime.
-- `internal/backup`: add `Preflight(ctx, cfg, key, suffix)`.
+- `internal/backup`: add `Preflight(ctx, cfg, key, suffix, replPassword)`.
 - shared `s3ConfigFromStorage(ctx, client, ns, S3StorageSpec)` (reads creds
   Secret → static-cred `S3Config`); refactor the scheduled controller to use it.
+- **Done (2026-06-09):** replication-password verification. The backup Job
+  stamps the `{SSHA}` of the source's `cn=replication` userPassword onto the S3
+  object's `replication-pw-hash` metadata; preflight SSHA-verifies the target
+  cluster's `replication-password` against it, default-deny (mismatch or
+  non-`{SSHA}` scheme fails). `spec.bootstrapFrom.skipReplicationPasswordCheck`
+  bypasses it. Foreign/legacy dumps carry no metadata → not checked.
 
 **7.2 — slapadd into every pod** (supersedes "slapadd pod-0 + peers
 initial-sync"). During the scale-to-0 window, run a wipe+`slapadd` Job for
@@ -221,6 +227,15 @@ Guard: refuse a second concurrent restore.
 **7.4 — e2e** (gated, multi-replica): rollback via `SlapdRestore`, and
 delete+recreate `bootstrapFrom`, both on N≥2 — assert restored DIT on every pod,
 no divergence, and (ideally) that no syncrepl refresh occurred.
+- **Done (2026-06-09):** `bootstrapFrom` into a replicated cluster
+  (`restore_replication_test.go`, gated `E2E_BACKUP=1`). Asserts (1) preflight
+  default-deny on a mismatched `replication-password` without scaling down, and
+  (2) once the password matches, the slapadd-all-pods machine lands the full DIT
+  on **every** RW pod directly — verified per-pod and decoupled from syncrepl
+  convergence (the target reuses the source TLS cert, whose SANs don't cover it,
+  so cross-pod replication intentionally doesn't converge; preflight runs before
+  scale-down and slapadd loads each pod independently, so neither assertion needs
+  it). The `SlapdRestore` rollback variant waits on 7.3.
 
 **Outcome:** `bootstrapFrom` is correct at any replica count (delete+recreate
 rollback "is gonna be fine"), and there is an explicit, non-destructive,

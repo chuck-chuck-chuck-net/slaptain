@@ -170,6 +170,12 @@ non-`{SSHA}` hash scheme fails the restore before anything is wiped.
   bypass; if the passwords don't actually match, repairing `cn=replication` is
   then on you.
 
+For a **cross-cluster** restore into a fresh replicated cluster, pre-create the
+target's `<db>-credentials` Secret with the *source's* `replication-password`
+(copy it from the source's `<db>-credentials`) before the database is created —
+otherwise the operator generates a fresh random one that won't match the backup,
+and preflight will (correctly) default-deny.
+
 ## Testing locally
 
 The e2e backup tests use **versitygw** (`ghcr.io/versity/versitygw`, Apache-2.0)
