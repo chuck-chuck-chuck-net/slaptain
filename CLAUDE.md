@@ -30,6 +30,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller. e2e: 33/33 green.
 - [x] **Operator Phase 2**: N-way multi-master delta-syncrepl; operator-orchestrated bootstrap; per-pod `volumeClaimTemplates`; replication credential management. e2e: pending.
 - [x] **Operator Phase 3**: cross-cluster replication via `ExternalPeers`, mTLS peer auth. Operator owns all syncrepl configuration (in-cluster + external). See ADR-003.
+- [x] **S3 backup/restore** (ADR-014): `SlapdBackup` (on-demand) + `SlapdScheduledBackup` (cron + retention) → gzipped `slapcat` LDIF to S3 via co-located Jobs; `SlapdDatabase.spec.bootstrapFrom` restores into a fresh DB via a cluster-coordinated scale-to-0 → offline `slapadd` → scale-up machine. e2e green on t3e (versitygw S3 target). See `docs/BACKUP.md`.
 
 ---
 
@@ -78,10 +79,21 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   └── create-remote-kubeconfig.sh # Cross-site RBAC + kubeconfig Secret provisioning (ADR-007)
 ├── operator/                       # kubebuilder v4 Go operator (own Go module)
 │   ├── api/v1alpha1/
-│   │   ├── slapdcluster_types.go   # Full CRD type definitions (all phases)
+│   │   ├── slapdcluster_types.go   # SlapdCluster CRD (+ Restoring phase, status.restore — ADR-014)
+│   │   ├── slapddatabase_types.go  # SlapdDatabase CRD (+ bootstrapFrom, restoreApplied)
+│   │   ├── slapdschema_types.go    # SlapdSchema CRD
+│   │   ├── slapdbackup_types.go    # SlapdBackup + SlapdScheduledBackup CRDs + shared S3StorageSpec (ADR-014)
+│   │   ├── slapdscheduledbackup_types.go
 │   │   └── zz_generated.deepcopy.go
 │   ├── internal/controller/
-│   │   └── slapdcluster_controller.go
+│   │   ├── slapdcluster_controller.go
+│   │   ├── slapdcluster_restore.go # bootstrapFrom restore state machine (ADR-014 Phase 5)
+│   │   ├── slapddatabase_controller.go
+│   │   ├── slapdschema_controller.go
+│   │   ├── slapdbackup_controller.go        # on-demand backup → co-located Job
+│   │   ├── slapdscheduledbackup_controller.go # cron + retention
+│   │   ├── backup_job.go           # backup Job builder (slapcat→gzip→S3)
+│   │   └── restore_job.go          # restore Job builder (download→wipe→slapadd)
 │   ├── config/
 │   │   ├── crd/bases/              # Generated CRD YAML
 │   │   ├── rbac/role.yaml          # Generated RBAC ClusterRole
@@ -99,6 +111,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
     ├── e2e-migration.sh            # Migration-scenario e2e (independent: slaptain + fake-prod topology)
     ├── resources/
     │   ├── example/                # Open-source test fixtures (SlapdDatabase, SlapdSchema, Secrets)
+    │   ├── versitygw.yaml          # Lean S3 server (Apache-2.0) for backup e2e — NOT minio
     │   └── lab/                    # Internal lab configuration (SOPS-encrypted secrets)
     ├── README.md                   # Test suite documentation (quick-start cycle at top)
     ├── SOPS.md                     # SOPS/age secret management guide
@@ -113,7 +126,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── resilience_test.go      # Pod-restart resilience (warm restart labelled persistent-only; gated E2E_RESILIENCE=1)
         ├── dataloss_recovery_test.go # Pod loses its PVCs (kubectl delete pod + pvc); replication restores DIT (ADR-012 case 2)
         ├── migration_test.go       # Migration scenario (gated at registration time: E2E_MIGRATION=1)
-        └── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
+        ├── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
+        ├── backup_test.go          # SlapdBackup → S3 round-trip (gated: E2E_BACKUP=1, deploys versitygw)
+        └── restore_test.go         # bootstrapFrom restore into a fresh cluster (gated: E2E_BACKUP=1)
 ```
 
 ---
@@ -139,9 +154,15 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 
 **API:**
 - Group: `ldap.chuck-chuck-chuck.net`
-- Kind: `SlapdCluster` (shortName: `sc`)
-- Version: `v1alpha1`
-- Scope: Namespaced
+- Version: `v1alpha1`, Scope: Namespaced
+- Kinds: `SlapdCluster` (`sc`), `SlapdDatabase` (`sd`), `SlapdSchema` (`ss`),
+  `SlapdBackup` (`sb`), `SlapdScheduledBackup` (`ssb`)
+- Backup/restore (ADR-014, `docs/BACKUP.md`): `SlapdBackup` runs an on-demand
+  `slapcat`→gzip→S3 backup via a co-located Job; `SlapdScheduledBackup` emits
+  them on a cron schedule with `retention{maxCount,maxAge}`; `SlapdDatabase.spec.bootstrapFrom`
+  restores a backup into a fresh DB (cluster enters `status.phase=Restoring`,
+  scales to 0, runs offline `slapadd`, scales back up). S3 creds via a Secret
+  with keys `access-key-id`/`secret-access-key`.
 
 **CRD spec fields** (SlapdCluster manages infrastructure; database-level config lives on SlapdDatabase/SlapdSchema CRs — see ADR-004):
 
@@ -170,7 +191,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 
 Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs.
 
-**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `replicationNetworkIPs` (discovered Multus IPs per pod), `externalPeerStatuses` (per-peer: `replicationState` Synced/Lagging/Unreachable, `lagSeconds`, `lastChecked`, `discoveredAddresses`), `conditions` (including `ReplicationConverged` for local CSN convergence).
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error/**Restoring**), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `replicationNetworkIPs` (discovered Multus IPs per pod), `externalPeerStatuses` (per-peer: `replicationState` Synced/Lagging/Unreachable, `lagSeconds`, `lastChecked`, `discoveredAddresses`), `restore` (in-progress bootstrapFrom restore: sub-`phase`, `originalReplicas`, `databases` — ADR-014), `conditions` (including `ReplicationConverged` for local CSN convergence).
 
 **Reconcile order (SlapdCluster controller):**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)
@@ -227,6 +248,14 @@ make testing-delete cluster-helm-uninstall
 ```
 
 Or all-in-one: `./tests/e2e.sh all <context> [more-contexts...]` (single-site with N=1, multi-site with N≥2)
+
+**Backup/restore e2e** (gated `E2E_BACKUP=1`): `E2E_BACKUP=1 ./tests/e2e.sh test <ctx>`
+deploys `tests/resources/versitygw.yaml` (lean Apache-2.0 S3 server — NOT minio)
+and runs `backup_test.go` + `restore_test.go`. The restore spec stands up a
+second single-replica `slapd-restore` cluster and exercises the full scale-to-0
+restore machine. See `docs/BACKUP.md`. (For iterating on a lab cluster: pin
+images with `GIT_TAG=<pushed-tag>` and use `./tests/e2e.sh setup <ctx>` once,
+then re-run `test`.)
 
 **Suite setup** (`suite_test.go` `BeforeSuite`):
 1. Build k8s client
