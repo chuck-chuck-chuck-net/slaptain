@@ -355,7 +355,10 @@ func (r *SlapdClusterReconciler) markRestored(ctx context.Context, sc *ldapv1alp
 	return nil
 }
 
-// applyStatus server-side-applies the SlapdCluster status subresource.
+// applyStatus server-side-applies the SlapdCluster status subresource. A
+// NotFound is ignored: the cluster can be deleted while a reconcile is in
+// flight (e.g. teardown), and patching the status of a gone object is a no-op,
+// not an error worth logging with a stack trace.
 func (r *SlapdClusterReconciler) applyStatus(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	statusPatch := &ldapv1alpha1.SlapdCluster{
 		TypeMeta: metav1.TypeMeta{
@@ -368,7 +371,13 @@ func (r *SlapdClusterReconciler) applyStatus(ctx context.Context, sc *ldapv1alph
 		},
 	}
 	statusPatch.Status = sc.Status
-	return r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+	if err := r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // jobTerminalState reports a Job's completion/failure from its conditions.
