@@ -3,7 +3,9 @@ WORKDIR /workspace
 COPY operator/go.mod operator/go.sum ./
 RUN go mod download
 COPY operator/ .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -trimpath -o /manager ./cmd/main.go
+# Build the whole ./cmd package (main.go + backup_subcommand.go), not a single
+# file — `go build ./cmd/main.go` would miss the sibling subcommand file.
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -trimpath -o /manager ./cmd
 
 FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=builder /manager /manager

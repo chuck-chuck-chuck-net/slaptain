@@ -1,0 +1,93 @@
+# versitygw — lean S3-compatible server used as the in-cluster target for the
+# backup/restore e2e tests (ADR-014, Phase 6). Apache-2.0, single Go binary,
+# POSIX backend. Deliberately NOT MinIO. Apply into the test namespace:
+#
+#   kubectl apply -n slaptain-testing -f tests/resources/versitygw.yaml
+#
+# Ephemeral by design: data lives in an emptyDir, so backups are thrown away
+# with the pod. The bucket is a directory under the POSIX root; an init
+# container pre-creates it (versitygw does not auto-create buckets on PutObject).
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: versitygw-creds
+  labels:
+    app.kubernetes.io/name: versitygw
+type: Opaque
+stringData:
+  # Keys match the operator's S3StorageSpec contract (access-key-id /
+  # secret-access-key) so a single Secret serves both versitygw (its root
+  # account) and the SlapdBackup/bootstrapFrom credentialsSecretName reference.
+  access-key-id: e2e-test-access
+  secret-access-key: e2e-test-secret
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: versitygw
+  labels:
+    app.kubernetes.io/name: versitygw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versitygw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: versitygw
+    spec:
+      initContainers:
+        # Pre-create the bucket directory under the POSIX root. versitygw treats
+        # top-level directories as buckets; without this PutObject fails with
+        # NoSuchBucket. busybox is a standard tiny utility image (not a MinIO-
+        # style dependency); swap for any image with a shell if preferred.
+        - name: mkbucket
+          image: busybox:stable
+          command: ["sh", "-c", "mkdir -p /data/slaptain-backups"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: versitygw
+          image: ghcr.io/versity/versitygw:v1.5.0
+          args: ["--port", ":7480", "--iam-dir", "/iam", "posix", "/data"]
+          env:
+            - name: ROOT_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: versitygw-creds
+                  key: access-key-id
+            - name: ROOT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: versitygw-creds
+                  key: secret-access-key
+          ports:
+            - name: s3
+              containerPort: 7480
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: iam
+              mountPath: /iam
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: iam
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: versitygw
+  labels:
+    app.kubernetes.io/name: versitygw
+spec:
+  selector:
+    app.kubernetes.io/name: versitygw
+  ports:
+    - name: s3
+      port: 7480
+      targetPort: 7480

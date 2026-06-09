@@ -44,6 +44,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── ONBOARDING.md               # Team onboarding: LDAP concepts, operator model, credential model
 │   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
 │   ├── MIGRATION-LEGACY-SOURCE.md  # Source-side (legacy slapd) prep for hot migration
+│   ├── BACKUP.md                   # S3 backup/restore user guide (ADR-014)
+│   ├── BACKUP-PLAN.md              # ADR-014 implementation breakdown (phases)
+│   ├── BACKLOG.md                  # Cross-cutting tech debt (e.g. client.Apply deprecation)
 │   └── adrs/
 │       ├── adr-001-double-reconcile-runs.md
 │       ├── adr-002-cn-config-node-local-operator-managed.md

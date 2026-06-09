@@ -660,6 +660,14 @@ run_tests() {
         "READPW_OU=${READPW_OU:-ServiceAccounts}"
     )
 
+    # Backup e2e (ADR-014): deploy the versitygw S3 server and enable the gated
+    # backup specs. Opt-in via E2E_BACKUP=1 in the environment.
+    if [[ "${E2E_BACKUP:-}" == "1" ]]; then
+        log "[$ctx0] E2E_BACKUP=1 — deploying versitygw S3 server"
+        kubectl --context="$ctx0" -n "$NAMESPACE_TESTING" apply -f "$PROJECT_ROOT/tests/resources/versitygw.yaml"
+        test_env+=("E2E_BACKUP=1")
+    fi
+
     if [[ "$MULTISITE" -eq 1 ]]; then
         local ctx1="${CONTEXTS[1]}"
         local remote_ip="${NODE_IPS[$ctx1]}"
