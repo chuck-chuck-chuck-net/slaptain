@@ -40,6 +40,10 @@ const (
 type SlapdClusterRestorePhase string
 
 const (
+	// RestorePreflight: validating the backup source(s) are fetchable and valid
+	// BEFORE scaling anything down (destroy-last). Does NOT hold the cluster
+	// down — it keeps serving while preflight runs (ADR-014 amendment).
+	RestorePreflight SlapdClusterRestorePhase = "Preflight"
 	// RestoreScalingDown: scaling the StatefulSet(s) to 0; waiting for pods to
 	// terminate and release the PVCs.
 	RestoreScalingDown SlapdClusterRestorePhase = "ScalingDown"

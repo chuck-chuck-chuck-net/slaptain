@@ -32,7 +32,26 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/backup"
 )
+
+// s3ConfigFromStorage reads the credentials Secret referenced by an
+// S3StorageSpec and returns a static-credential S3Config for inline
+// operator-side S3 operations (preflight validation, retention deletes).
+func s3ConfigFromStorage(ctx context.Context, c client.Client, ns string, st ldapv1alpha1.S3StorageSpec) (backup.S3Config, error) {
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, client.ObjectKey{Name: st.CredentialsSecretName, Namespace: ns}, secret); err != nil {
+		return backup.S3Config{}, fmt.Errorf("read S3 credentials secret %q: %w", st.CredentialsSecretName, err)
+	}
+	return backup.S3Config{
+		Bucket:          st.Bucket,
+		Endpoint:        st.Endpoint,
+		Region:          st.Region,
+		InsecureTLS:     st.InsecureTLS,
+		AccessKeyID:     string(secret.Data["access-key-id"]),
+		SecretAccessKey: string(secret.Data["secret-access-key"]),
+	}, nil
+}
 
 // reconcileRestore drives the bootstrapFrom restore state machine (ADR-014). It
 // returns handled=true when a restore is in progress and the caller should
@@ -73,23 +92,59 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 		}
 		now := metav1.Now()
 		sc.Status.Restore = &ldapv1alpha1.SlapdClusterRestoreStatus{
-			Phase:                ldapv1alpha1.RestoreScalingDown,
+			Phase:                ldapv1alpha1.RestorePreflight,
 			OriginalReplicas:     sc.Spec.Replicas,
 			OriginalReadReplicas: sc.Spec.ReadReplicas,
 			Databases:            names,
 			StartedAt:            &now,
-			Message:              "scaling down for offline restore",
+			Message:              "validating backup source(s) before scaling down",
 		}
-		sc.Status.Phase = ldapv1alpha1.PhaseRestoring
-		log.Info("entering restore", "databases", names)
-		return true, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		// Preflight runs while the cluster is still serving — phase stays Running.
+		sc.Status.Phase = ldapv1alpha1.PhaseRunning
+		log.Info("entering restore (preflight)", "databases", names)
+		return true, ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
-	// Active restore: drive the machine. Phase stays Restoring throughout.
+	// Active restore. Preflight runs with the cluster still up; everything from
+	// ScalingDown onward holds the cluster down (RestoreHoldsDown) and reports
+	// phase=Restoring.
 	rst := sc.Status.Restore
-	sc.Status.Phase = ldapv1alpha1.PhaseRestoring
+	if rst.Phase == ldapv1alpha1.RestorePreflight {
+		sc.Status.Phase = ldapv1alpha1.PhaseRunning
+	} else {
+		sc.Status.Phase = ldapv1alpha1.PhaseRestoring
+	}
 
 	switch rst.Phase {
+	case ldapv1alpha1.RestorePreflight:
+		// Destroy-last: validate every source is fetchable + valid BEFORE any
+		// scale-down. A failure here costs neither downtime nor data — retry.
+		for _, name := range rst.Databases {
+			sd := &ldapv1alpha1.SlapdDatabase{}
+			if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, sd); err != nil {
+				return true, ctrl.Result{}, err
+			}
+			st, key, err := r.resolveBootstrapSource(ctx, sc, sd)
+			if err != nil {
+				rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
+				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			cfg, err := s3ConfigFromStorage(ctx, r.Client, sc.Namespace, st)
+			if err != nil {
+				rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
+				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			if err := backup.Preflight(ctx, cfg, key, sd.Spec.Suffix); err != nil {
+				rst.Message = fmt.Sprintf("preflight failed for %s: %v", name, err)
+				log.Info("restore preflight failed; cluster stays up, will retry", "database", name, "err", err)
+				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+		}
+		rst.Phase = ldapv1alpha1.RestoreScalingDown
+		rst.Message = "preflight passed; scaling down for offline restore"
+		log.Info("restore preflight passed; scaling down", "databases", rst.Databases)
+		return true, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+
 	case ldapv1alpha1.RestoreScalingDown:
 		// buildStatefulSetSpec has forced replicas to 0; wait for pod-0 (and all
 		// RW pods) to terminate and release the data PVC.
@@ -171,9 +226,17 @@ func (r *SlapdClusterReconciler) databasesNeedingRestore(ctx context.Context, sc
 	return needing, allDefined, nil
 }
 
-// runRestoreJobs ensures a restore Job exists for each database and reports
-// whether all have completed and whether any failed.
+// runRestoreJobs fans a restore Job out across every pod of every restoring
+// database — RW pods load the artifact directly (no syncrepl refresh), RO pods
+// are wiped and re-refresh on scale-up (ADR-014 amendment). Reports whether all
+// Jobs have completed and whether any failed.
 func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, dbNames []string) (allDone bool, anyFailed bool, err error) {
+	rwN := sc.Status.Restore.OriginalReplicas
+	if rwN == 0 {
+		rwN = 1
+	}
+	roN := sc.Status.Restore.OriginalReadReplicas
+
 	allDone = true
 	for _, name := range dbNames {
 		sd := &ldapv1alpha1.SlapdDatabase{}
@@ -185,33 +248,67 @@ func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1a
 			return false, false, fmt.Errorf("resolve bootstrapFrom for %q: %w", name, err)
 		}
 
-		jobName := name + "-restore"
-		job := &batchv1.Job{}
-		getErr := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: sc.Namespace}, job)
-		switch {
-		case apierrors.IsNotFound(getErr):
-			job = buildRestoreJob(sc, sd, st, key, r.imageRef(sc.Spec.Images.Init), r.OperatorImage)
-			if err := controllerutil.SetControllerReference(sc, job, r.Scheme); err != nil {
-				return false, false, err
+		for _, t := range restorePodTargets(sc, sd, rwN, roN) {
+			job := &batchv1.Job{}
+			getErr := r.Get(ctx, client.ObjectKey{Name: t.jobName, Namespace: sc.Namespace}, job)
+			switch {
+			case apierrors.IsNotFound(getErr):
+				job = buildRestoreJob(sc, sd, st, key, r.imageRef(sc.Spec.Images.Init), r.OperatorImage, t)
+				if err := controllerutil.SetControllerReference(sc, job, r.Scheme); err != nil {
+					return false, false, err
+				}
+				if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
+					return false, false, fmt.Errorf("create restore Job %q: %w", t.jobName, err)
+				}
+				allDone = false
+				continue
+			case getErr != nil:
+				return false, false, getErr
 			}
-			if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-				return false, false, fmt.Errorf("create restore Job for %q: %w", name, err)
-			}
-			allDone = false
-			continue
-		case getErr != nil:
-			return false, false, getErr
-		}
 
-		complete, failed := jobTerminalState(job)
-		if failed {
-			return false, true, nil
-		}
-		if !complete {
-			allDone = false
+			complete, failed := jobTerminalState(job)
+			if failed {
+				return false, true, nil
+			}
+			if !complete {
+				allDone = false
+			}
 		}
 	}
 	return allDone, false, nil
+}
+
+// restorePodTargets enumerates the per-pod restore Jobs for one database: every
+// RW pod (load the artifact directly; mount the accesslog PVC when present) and
+// every RO pod (wipe-only).
+func restorePodTargets(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDatabase, rwN, roN int32) []restorePodTarget {
+	base := sd.Name
+	if len(base) > 40 {
+		base = base[:40]
+	}
+	mountAccesslog := sc.NeedsAccesslogVolume()
+
+	targets := make([]restorePodTarget, 0, int(rwN+roN))
+	for i := range rwN {
+		t := restorePodTarget{
+			jobName:   fmt.Sprintf("%s-restore-rw-%d", base, i),
+			dataPVC:   fmt.Sprintf("data-%s-%d", sc.Name, i),
+			configPVC: fmt.Sprintf("config-%s-%d", sc.Name, i),
+			loadData:  true,
+		}
+		if mountAccesslog {
+			t.accesslogPVC = fmt.Sprintf("accesslog-%s-%d", sc.Name, i)
+		}
+		targets = append(targets, t)
+	}
+	for j := range roN {
+		targets = append(targets, restorePodTarget{
+			jobName:  fmt.Sprintf("%s-restore-ro-%d", base, j),
+			dataPVC:  fmt.Sprintf("data-%s-readonly-%d", sc.Name, j),
+			loadData: false,
+		})
+	}
+	return targets
 }
 
 // resolveBootstrapSource derives the S3 storage config and object key for a

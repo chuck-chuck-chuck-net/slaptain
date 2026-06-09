@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -217,19 +216,7 @@ func (r *SlapdScheduledBackupReconciler) enforceRetention(ctx context.Context, s
 // s3Config builds an S3 config for a backup, reading static credentials from its
 // referenced Secret (keys access-key-id / secret-access-key).
 func (r *SlapdScheduledBackupReconciler) s3Config(ctx context.Context, sb *ldapv1alpha1.SlapdBackup) (backup.S3Config, error) {
-	st := sb.Spec.Storage
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: st.CredentialsSecretName, Namespace: sb.Namespace}, secret); err != nil {
-		return backup.S3Config{}, fmt.Errorf("read S3 credentials secret %q: %w", st.CredentialsSecretName, err)
-	}
-	return backup.S3Config{
-		Bucket:          st.Bucket,
-		Endpoint:        st.Endpoint,
-		Region:          st.Region,
-		InsecureTLS:     st.InsecureTLS,
-		AccessKeyID:     string(secret.Data["access-key-id"]),
-		SecretAccessKey: string(secret.Data["secret-access-key"]),
-	}, nil
+	return s3ConfigFromStorage(ctx, r.Client, sb.Namespace, sb.Spec.Storage)
 }
 
 // backupTime is the timestamp used to order/age a backup: its completion time

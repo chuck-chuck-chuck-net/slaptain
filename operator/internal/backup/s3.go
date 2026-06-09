@@ -20,12 +20,15 @@ limitations under the License.
 package backup
 
 import (
+	"bufio"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -153,6 +156,49 @@ func Download(ctx context.Context, cfg S3Config, key, outPath string) error {
 		return fmt.Errorf("close %s: %w", outPath, closeErr)
 	}
 	return nil
+}
+
+// Preflight validates that a backup object is restorable WITHOUT downloading the
+// whole thing: it streams the object, gunzips, and confirms the suffix entry
+// (`dn: <suffix>`) appears near the start (slapcat emits the suffix entry first).
+// Run before any destructive restore step so a bad/unreachable/wrong backup
+// fails with neither downtime nor data loss (ADR-014 amendment). The read is
+// bounded — it stops as soon as the suffix entry is found.
+func Preflight(ctx context.Context, cfg S3Config, key, suffix string) error {
+	client, err := newClient(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	resp, err := transfermanager.New(client).GetObject(ctx, &transfermanager.GetObjectInput{
+		Bucket: aws.String(cfg.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("download s3://%s/%s: %w", cfg.Bucket, key, err)
+	}
+	if c, ok := resp.Body.(io.Closer); ok {
+		defer func() { _ = c.Close() }()
+	}
+
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("backup s3://%s/%s is not valid gzip: %w", cfg.Bucket, key, err)
+	}
+	defer func() { _ = gz.Close() }()
+
+	want := "dn: " + suffix
+	sc := bufio.NewScanner(gz)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	const maxLines = 10000 // the suffix entry is at the top; bound the read
+	for lines := 0; sc.Scan() && lines < maxLines; lines++ {
+		if strings.EqualFold(strings.TrimSpace(sc.Text()), want) {
+			return nil
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("read backup s3://%s/%s: %w", cfg.Bucket, key, err)
+	}
+	return fmt.Errorf("backup s3://%s/%s does not contain suffix entry %q (wrong or corrupt backup)", cfg.Bucket, key, want)
 }
 
 // Delete removes s3://<bucket>/<key>. Used by retention pruning. It is a small
