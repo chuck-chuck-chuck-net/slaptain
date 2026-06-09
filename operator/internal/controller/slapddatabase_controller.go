@@ -213,7 +213,14 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//    with unwillingToPerform anyway. On in-place promotion to peer mode,
 	//    the next reconcile flips olcReadOnly (step 7) before this step
 	//    fires, and the bind user gets created cleanly.
-	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() {
+	//    Deferred for a not-yet-restored bootstrapFrom database (ADR-014): its
+	//    suffix base entry doesn't exist until the restore loads it, so adding
+	//    cn=replication,<suffix> fails with "No Such Object" and wedges the DB in
+	//    Degraded — which blocks the restore that is gated on the DB reaching
+	//    Running (a deadlock). The backup itself contains cn=replication, so the
+	//    post-restore add (restoreApplied=true) is idempotent.
+	restorePending := sd.Spec.BootstrapFrom != nil && !sd.Status.RestoreApplied
+	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() && !restorePending {
 		if err := r.ensureReplicationUser(ctx, sc, sd, rootPW); err != nil {
 			log.Info("replication user not yet created (will retry)", "err", err)
 			pendingWork = true
