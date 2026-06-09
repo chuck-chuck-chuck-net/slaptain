@@ -106,10 +106,39 @@ loses its volumes, syncrepl restores the DIT from surviving peers).
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
 | `LDAP_ADDR` | *(set by script)* | `<node-ip>:<nodeport>` — required when invoking `go test` directly |
 | `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable the warm-restart resilience test |
+| `E2E_BACKUP` | *(unset)* | Set to `1` to enable the S3 backup/restore tests. `e2e.sh test` then deploys `tests/resources/versitygw.yaml` (a lean Apache-2.0 S3 server — not minio) and runs `backup_test.go` + `restore_test.go`. The restore spec spins up a second single-replica `slapd-restore` cluster and exercises the scale-to-0 restore machine. See `docs/BACKUP.md`. |
 
 **Readpw ACL tests** require plaintext passwords for the readpw service accounts. The suite
 reads them from the `slapd-test-passwords` Secret (`readpw-*` keys), which is provided by
 `tests/resources/example/readpw-secret.yaml`. Tests skip gracefully when keys are absent.
+
+---
+
+## Backup and restore tests
+
+The S3 backup/restore tests (`backup_test.go`, `restore_test.go`) are gated by
+`E2E_BACKUP=1` and skipped by default. They use **versitygw**
+(`ghcr.io/versity/versitygw`, Apache-2.0) as a lean in-cluster S3 target — *not*
+MinIO — deployed from `tests/resources/versitygw.yaml` (ephemeral `emptyDir`,
+bucket pre-created).
+
+```bash
+# All-in-one (deploys versitygw, runs the gated specs):
+E2E_BACKUP=1 ./tests/e2e.sh test <context>
+```
+
+- **backup** — creates a `SlapdBackup` against versitygw and asserts it reaches
+  `Completed` with a `status.path` object key.
+- **restore** — creates a source backup, then a fresh single-replica
+  `slapd-restore` cluster with `SlapdDatabase.spec.bootstrapFrom`, waits for the
+  cluster-coordinated scale-to-0 → `slapadd` → scale-up machine to finish, then
+  verifies the restored DIT (via a NodePort the spec creates) matches the source.
+  Covers restore-into-a-fresh-cluster only; in-place restore into a populated
+  cluster is a deferred feature (ADR-014).
+
+Lab-iteration tip: pin images to an already-pushed tag with `GIT_TAG=<tag>` for
+`./tests/e2e.sh setup <context>` (run setup once, then re-run `test`). See
+`docs/BACKUP.md` for the full feature guide.
 
 ---
 
