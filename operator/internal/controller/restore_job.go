@@ -139,19 +139,22 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 	}
 
 	backoff := int32(2)
+	ttl := int32(3600) // finished restore Jobs auto-clean after 1h (native GC)
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      t.jobName,
 			Namespace: sc.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":              "slapd",
-				"app.kubernetes.io/instance":          sc.Name,
-				"app.kubernetes.io/component":         "restore",
-				"ldap.chuck-chuck-chuck.net/database": sd.Name,
+				"app.kubernetes.io/name":                "slapd",
+				"app.kubernetes.io/instance":            sc.Name,
+				"app.kubernetes.io/component":           "restore",
+				"ldap.chuck-chuck-chuck.net/database":   sd.Name,
+				"ldap.chuck-chuck-chuck.net/restore-id": sc.Status.Restore.ID,
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoff,
+			BackoffLimit:            &backoff,
+			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,

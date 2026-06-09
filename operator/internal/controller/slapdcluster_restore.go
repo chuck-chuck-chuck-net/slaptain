@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -93,6 +94,7 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 		now := metav1.Now()
 		sc.Status.Restore = &ldapv1alpha1.SlapdClusterRestoreStatus{
 			Phase:                ldapv1alpha1.RestorePreflight,
+			ID:                   rand.String(6),
 			OriginalReplicas:     sc.Spec.Replicas,
 			OriginalReadReplicas: sc.Spec.ReadReplicas,
 			Databases:            names,
@@ -282,16 +284,20 @@ func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1a
 // RW pod (load the artifact directly; mount the accesslog PVC when present) and
 // every RO pod (wipe-only).
 func restorePodTargets(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDatabase, rwN, roN int32) []restorePodTarget {
+	// Job names embed the per-restore id so a new restore never collides with a
+	// prior restore's Jobs: <db>-restore-<id>-rw-<i>. Cap the db base to keep the
+	// name within the 63-char limit.
 	base := sd.Name
-	if len(base) > 40 {
-		base = base[:40]
+	if len(base) > 24 {
+		base = base[:24]
 	}
+	id := sc.Status.Restore.ID
 	mountAccesslog := sc.NeedsAccesslogVolume()
 
 	targets := make([]restorePodTarget, 0, int(rwN+roN))
 	for i := range rwN {
 		t := restorePodTarget{
-			jobName:   fmt.Sprintf("%s-restore-rw-%d", base, i),
+			jobName:   fmt.Sprintf("%s-restore-%s-rw-%d", base, id, i),
 			dataPVC:   fmt.Sprintf("data-%s-%d", sc.Name, i),
 			configPVC: fmt.Sprintf("config-%s-%d", sc.Name, i),
 			loadData:  true,
@@ -303,7 +309,7 @@ func restorePodTargets(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdData
 	}
 	for j := range roN {
 		targets = append(targets, restorePodTarget{
-			jobName:  fmt.Sprintf("%s-restore-ro-%d", base, j),
+			jobName:  fmt.Sprintf("%s-restore-%s-ro-%d", base, id, j),
 			dataPVC:  fmt.Sprintf("data-%s-readonly-%d", sc.Name, j),
 			loadData: false,
 		})

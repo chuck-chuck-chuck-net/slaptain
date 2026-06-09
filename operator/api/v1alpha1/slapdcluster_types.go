@@ -527,6 +527,13 @@ type SlapdClusterRestoreStatus struct {
 	// phase is the restore sub-state.
 	// +optional
 	Phase SlapdClusterRestorePhase `json:"phase,omitempty"`
+	// id is a short token unique to this restore window, generated when the
+	// restore starts. It is woven into the per-pod restore Job names
+	// (<db>-restore-<id>-rw-<i>) and labels so each restore waits only for its
+	// own Jobs — a prior restore's Jobs (different id) are never mistaken for
+	// this one's. See ADR-014 amendment.
+	// +optional
+	ID string `json:"id,omitempty"`
 	// originalReplicas is spec.replicas captured before scaling down, restored on completion.
 	// +optional
 	OriginalReplicas int32 `json:"originalReplicas,omitempty"`
