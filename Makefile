@@ -106,7 +106,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator deliver deliver-operator deploy-operator clean show-tag
+.PHONY: all build-init build-slapd build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator deliver deliver-operator deploy-operator clean show-tag
 
 all: build-init build-slapd build-toolkit build-operator build-slctl
 
@@ -195,6 +195,15 @@ operator-manifests:
 operator-sync-crd:
 	cp operator/config/crd/bases/*.yaml charts/operator/crds/
 
+## operator-crd-apply: install/update the operator CRDs directly via kubectl.
+## Helm installs the chart's crds/ ONLY on the first `helm install` and NEVER on
+## `helm upgrade` (by design — it refuses to own CRD lifecycle). So a new or
+## changed CRD must be applied out-of-band, or the upgraded operator can't see
+## it. Server-side apply sidesteps the client-side last-applied-configuration
+## annotation size limit that large CRDs (e.g. slapdclusters) would otherwise hit.
+operator-crd-apply:
+	$(KUBECTL) apply --server-side --force-conflicts -f operator/config/crd/bases/
+
 gencert:
 	$(KUBECTL) get namespace $(NAMESPACE_TESTING) >/dev/null 2>&1 || $(KUBECTL) create namespace $(NAMESPACE_TESTING)
 	cd tests && ./gencert.sh $(if $(CONTEXT),-c $(CONTEXT)) -n $(NAMESPACE_TESTING) -t slapd -s slapd -H slapd-headless slapd-tls
@@ -232,7 +241,12 @@ cluster-helm-install:
 cluster-helm-uninstall:
 	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
 
-operator-helm-install:
+## operator-helm-install: deploy/upgrade the operator. Depends on
+## operator-crd-apply so CRDs are always current — `helm upgrade` won't do it
+## (see operator-crd-apply), which otherwise leaves a new/changed CRD missing or
+## stale after an upgrade. This is the t3e iteration-loop command:
+##   make operator-helm-install CONTEXT=t3e GIT_TAG=<pushed-tag>
+operator-helm-install: operator-crd-apply
 	$(HELM) upgrade --install slaptain-operator ./charts/operator \
 		--namespace $(NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(PROJECT)/operator \

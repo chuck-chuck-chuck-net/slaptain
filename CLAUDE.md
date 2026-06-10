@@ -295,7 +295,8 @@ runs without readpw configuration but skips those test cases.
 | `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |
 | `make operator-manifests` | Run `make manifests` in `operator/`, then sync CRD to `charts/operator/crds/` |
 | `make operator-sync-crd` | Copy CRD from `operator/config/crd/bases/` to `charts/operator/crds/` |
-| `make operator-helm-install` | `helm upgrade --install slaptain-operator ./charts/operator` |
+| `make operator-crd-apply` | `kubectl apply --server-side` the CRDs from `operator/config/crd/bases/` (Helm only installs `crds/` on first `install`, never on `upgrade`) |
+| `make operator-helm-install` | `helm upgrade --install slaptain-operator ./charts/operator` (depends on `operator-crd-apply`, so a new/changed CRD lands on upgrade too). t3e loop: `make operator-helm-install CONTEXT=t3e GIT_TAG=<tag>` |
 | `make operator-helm-uninstall` | Uninstall the operator Helm release |
 | `make gencert` | Generate self-signed TLS cert via `tests/gencert.sh` |
 | `make helm-install` | Bare `helm upgrade --install slapd ./charts/slapd` |
@@ -352,6 +353,7 @@ kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
 ### Important Notes
 - **No kustomize.** All deployment is via Helm. The `operator/config/` tree is kubebuilder scaffolding only — used to generate code/CRDs, not applied directly to clusters.
 - **CRD sync:** `charts/operator/crds/` is populated from `operator/config/crd/bases/` by `make operator-manifests`. Always run `make operator-manifests` after changing types and commit both the generated CRD and the chart copy together.
+- **CRDs on upgrade:** Helm installs a chart's `crds/` **only on the first `helm install`**, never on `helm upgrade`. So a new or changed CRD will be missing/stale after an operator upgrade. `make operator-helm-install` depends on `make operator-crd-apply` to handle this; if you upgrade with a raw `helm upgrade`, also run `make operator-crd-apply` (or `kubectl apply --server-side -f operator/config/crd/bases/`).
 
 ---
 
