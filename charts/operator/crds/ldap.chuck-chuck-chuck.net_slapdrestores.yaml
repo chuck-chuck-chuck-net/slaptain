@@ -1,0 +1,239 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: slapdrestores.ldap.chuck-chuck-chuck.net
+spec:
+  group: ldap.chuck-chuck-chuck.net
+  names:
+    kind: SlapdRestore
+    listKind: SlapdRestoreList
+    plural: slapdrestores
+    shortNames:
+    - sr
+    singular: slapdrestore
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.databaseRef
+      name: Database
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.completedAt
+      name: Completed
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SlapdRestore is the Schema for the slapdrestores API. Each instance is one
+          imperative in-place restore of a SlapdDatabase's data tree from S3. The
+          SlapdCluster controller watches it and drives the same preflight →
+          slapadd-all-pods machine as bootstrapFrom (ADR-014, Architecture A).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the requested restore.
+            properties:
+              databaseRef:
+                description: |-
+                  databaseRef is the name of the SlapdDatabase to restore into. Must be in
+                  the same namespace and already exist (a SlapdRestore does not create it).
+                type: string
+              skipReplicationPasswordCheck:
+                description: |-
+                  skipReplicationPasswordCheck disables the preflight verification that the
+                  cluster's replication-password matches the backup's cn=replication entry.
+                  The check is default-deny (mismatch or unverifiable hash scheme fails). Set
+                  true only when you accept that intra-cluster syncrepl may fail to
+                  authenticate after the restore and you will repair cn=replication yourself.
+                  See SlapdDatabase.spec.bootstrapFrom.skipReplicationPasswordCheck.
+                type: boolean
+              source:
+                description: source is the backup artifact to load.
+                properties:
+                  backupRef:
+                    description: backupRef is the name of a SlapdBackup (same namespace)
+                      to restore from.
+                    type: string
+                  s3:
+                    description: |-
+                      s3 points directly at a backup artifact in object storage — for restoring
+                      from a backup with no SlapdBackup object (a legacy slapcat dump or a backup
+                      produced by another cluster).
+                    properties:
+                      key:
+                        description: |-
+                          key is the object key (within storage.prefix) of the gzipped LDIF
+                          artifact to restore.
+                        type: string
+                      storage:
+                        description: storage configures the S3 bucket, endpoint, region,
+                          and credentials.
+                        properties:
+                          bucket:
+                            description: bucket is the S3 bucket name.
+                            type: string
+                          credentialsSecretName:
+                            description: |-
+                              credentialsSecretName references a Secret holding the S3 credentials.
+                              Required keys (plaintext): "access-key-id" and "secret-access-key".
+                              (IRSA / workload-identity credentials are a future addition; the MVP is
+                              static key-based only.)
+                            type: string
+                          endpoint:
+                            description: |-
+                              endpoint is the S3 endpoint URL. Leave empty for AWS S3; set it for an
+                              S3-compatible store (MinIO, Ceph RGW), e.g. "https://minio.example:9000".
+                            type: string
+                          insecureTLS:
+                            default: false
+                            description: |-
+                              insecureTLS disables TLS certificate verification against the endpoint.
+                              Use only for testing against a self-signed MinIO. Default false.
+                            type: boolean
+                          prefix:
+                            description: |-
+                              prefix is an optional key prefix within the bucket. Backup objects are
+                              written under "<prefix>/<cluster>/<database>/<timestamp>.ldif.gz".
+                            type: string
+                          region:
+                            description: region is the S3 region. Some S3-compatible
+                              stores ignore it.
+                            type: string
+                        required:
+                        - bucket
+                        - credentialsSecretName
+                        type: object
+                    required:
+                    - key
+                    - storage
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: source requires exactly one of backupRef or s3.
+                  rule: has(self.backupRef) != has(self.s3)
+            required:
+            - databaseRef
+            - source
+            type: object
+            x-kubernetes-validations:
+            - message: SlapdRestore spec is immutable; create a new SlapdRestore to
+                run another restore.
+              rule: self == oldSelf
+          status:
+            description: status defines the observed state of the restore.
+            properties:
+              completedAt:
+                description: completedAt is when the restore finished (success or
+                  failure).
+                format: date-time
+                type: string
+              conditions:
+                description: conditions holds standard Kubernetes condition entries.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              message:
+                description: message is a human-readable status detail (e.g. the failure
+                  reason).
+                type: string
+              observedGeneration:
+                description: observedGeneration is the .metadata.generation the controller
+                  last reconciled.
+                format: int64
+                type: integer
+              phase:
+                description: phase summarises the restore's lifecycle state.
+                type: string
+              startedAt:
+                description: startedAt is when the restore was picked up (preflight
+                  began).
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

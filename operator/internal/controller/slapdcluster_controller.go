@@ -104,6 +104,8 @@ func (r *SlapdClusterReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig) str
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdbackups,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdrestores,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdrestores/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 
 func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -1289,6 +1291,27 @@ func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					NamespacedName: client.ObjectKey{
 						Name:      db.Spec.ClusterRef,
 						Namespace: db.Namespace,
+					},
+				}}
+			},
+		)).
+		// SlapdRestore drives an in-place restore through this controller
+		// (ADR-014 Architecture A): enqueue the cluster that owns the target
+		// database whenever a SlapdRestore changes.
+		Watches(&ldapv1alpha1.SlapdRestore{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrl.Request {
+				sr, ok := obj.(*ldapv1alpha1.SlapdRestore)
+				if !ok {
+					return nil
+				}
+				db := &ldapv1alpha1.SlapdDatabase{}
+				if err := r.Get(ctx, client.ObjectKey{Name: sr.Spec.DatabaseRef, Namespace: sr.Namespace}, db); err != nil {
+					return nil
+				}
+				return []ctrl.Request{{
+					NamespacedName: client.ObjectKey{
+						Name:      db.Spec.ClusterRef,
+						Namespace: sr.Namespace,
 					},
 				}}
 			},

@@ -1064,6 +1064,14 @@ spec:
                   phase:
                     description: phase is the restore sub-state.
                     type: string
+                  requestRef:
+                    description: |-
+                      requestRef is the name of the SlapdRestore that triggered this restore, or
+                      empty for a bootstrapFrom-driven restore. When set, the restore source is
+                      the SlapdRestore's spec.source (not the database's bootstrapFrom), and the
+                      machine reports completion on the SlapdRestore rather than setting the
+                      database's restoreApplied. See ADR-014 amendment.
+                    type: string
                   startedAt:
                     description: startedAt is when the restore window began.
                     format: date-time

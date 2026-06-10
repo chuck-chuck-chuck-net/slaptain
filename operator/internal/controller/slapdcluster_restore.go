@@ -92,7 +92,9 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 			return false, ctrl.Result{}, err
 		}
 		if len(dbs) == 0 {
-			return false, ctrl.Result{}, nil
+			// No bootstrapFrom restore pending — check for an imperative
+			// SlapdRestore request (in-place rollback) instead.
+			return r.maybeStartRequestedRestore(ctx, sc)
 		}
 		if r.OperatorImage == "" {
 			// Can't run the restore Job's download container without our image.
@@ -137,49 +139,7 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 
 	switch rst.Phase {
 	case ldapv1alpha1.RestorePreflight:
-		// Destroy-last: validate every source is fetchable + valid BEFORE any
-		// scale-down. A failure here costs neither downtime nor data — retry.
-		for _, name := range rst.Databases {
-			sd := &ldapv1alpha1.SlapdDatabase{}
-			if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, sd); err != nil {
-				return true, ctrl.Result{}, err
-			}
-			st, key, err := r.resolveBootstrapSource(ctx, sc, sd)
-			if err != nil {
-				rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
-				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-			cfg, err := s3ConfigFromStorage(ctx, r.Client, sc.Namespace, st)
-			if err != nil {
-				rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
-				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-			// Verify the provided replication-password matches the backup only
-			// when this DB actually participates in replication — and unless the
-			// operator was told to skip the check (foreign/legacy dump, or a
-			// deliberate mismatch the user owns; see BootstrapSource).
-			replPW := ""
-			switch {
-			case sd.Spec.BootstrapFrom != nil && sd.Spec.BootstrapFrom.SkipReplicationPasswordCheck:
-				log.Info("restore preflight: skipping replication-password verification per spec.bootstrapFrom.skipReplicationPasswordCheck",
-					"database", name)
-			case sc.Spec.Replication.Enabled && sd.ReplicationEnabled():
-				replPW, err = r.databaseReplPassword(ctx, sd)
-				if err != nil {
-					rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
-					return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-				}
-			}
-			if err := backup.Preflight(ctx, cfg, key, sd.Spec.Suffix, replPW); err != nil {
-				rst.Message = fmt.Sprintf("preflight failed for %s: %v", name, err)
-				log.Info("restore preflight failed; cluster stays up, will retry", "database", name, "err", err)
-				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-		}
-		rst.Phase = ldapv1alpha1.RestoreScalingDown
-		rst.Message = "preflight passed; scaling down for offline restore"
-		log.Info("restore preflight passed; scaling down", "databases", rst.Databases)
-		return true, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		return r.reconcileRestorePreflight(ctx, sc, rst)
 
 	case ldapv1alpha1.RestoreScalingDown:
 		// buildStatefulSetSpec has forced replicas to 0; wait for pod-0 (and all
@@ -201,13 +161,22 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 			rst.Phase = ldapv1alpha1.RestoreFailed
 			rst.Message = "a restore Job failed; cluster held at 0 replicas for inspection"
 			log.Info("restore failed; holding cluster down")
+			if err := r.updateRestoreRequest(ctx, sc.Namespace, rst.RequestRef,
+				ldapv1alpha1.RestoreRequestFailed, rst.Message); err != nil {
+				return true, ctrl.Result{}, err
+			}
 			return true, ctrl.Result{}, nil
 		}
 		if !allDone {
 			return true, ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
-		if err := r.markRestored(ctx, sc, rst.Databases); err != nil {
-			return true, ctrl.Result{}, err
+		// restoreApplied is the bootstrapFrom one-shot guard; an in-place
+		// SlapdRestore must not set it (the DB has no bootstrapFrom, and the
+		// restore may be repeated by creating another SlapdRestore).
+		if rst.RequestRef == "" {
+			if err := r.markRestored(ctx, sc, rst.Databases); err != nil {
+				return true, ctrl.Result{}, err
+			}
 		}
 		rst.Phase = ldapv1alpha1.RestoreScalingUp
 		rst.Message = "scaling back up"
@@ -226,6 +195,10 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 			return true, ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		log.Info("restore complete", "databases", rst.Databases)
+		if err := r.updateRestoreRequest(ctx, sc.Namespace, rst.RequestRef,
+			ldapv1alpha1.RestoreRequestCompleted, "restore complete; cluster scaled back up"); err != nil {
+			return true, ctrl.Result{}, err
+		}
 		sc.Status.Restore = nil
 		return false, ctrl.Result{}, nil
 
@@ -236,6 +209,175 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 	}
 
 	return true, ctrl.Result{}, nil
+}
+
+// reconcileRestorePreflight runs the destroy-last validation for every database
+// in the restore window BEFORE any scale-down: resolve the source, verify the
+// replication-password (default-deny) when the DB replicates, and confirm the
+// artifact is fetchable + valid. A failure costs neither downtime nor data, so
+// it stays in Preflight and retries. On success it advances to ScalingDown.
+func (r *SlapdClusterReconciler) reconcileRestorePreflight(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, rst *ldapv1alpha1.SlapdClusterRestoreStatus) (bool, ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	for _, name := range rst.Databases {
+		sd := &ldapv1alpha1.SlapdDatabase{}
+		if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, sd); err != nil {
+			return true, ctrl.Result{}, err
+		}
+		st, key, skipReplCheck, err := r.resolveRestoreSource(ctx, sc, sd)
+		if err != nil {
+			rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
+			return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		cfg, err := s3ConfigFromStorage(ctx, r.Client, sc.Namespace, st)
+		if err != nil {
+			rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
+			return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		// Verify the provided replication-password matches the backup only when
+		// this DB actually participates in replication — and unless the operator
+		// was told to skip the check (foreign/legacy dump, or a deliberate
+		// mismatch the user owns; see BootstrapSource /
+		// SlapdRestore.spec.skipReplicationPasswordCheck).
+		replPW := ""
+		switch {
+		case skipReplCheck:
+			log.Info("restore preflight: skipping replication-password verification per skipReplicationPasswordCheck",
+				"database", name)
+		case sc.Spec.Replication.Enabled && sd.ReplicationEnabled():
+			replPW, err = r.databaseReplPassword(ctx, sd)
+			if err != nil {
+				rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
+				return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+		}
+		if err := backup.Preflight(ctx, cfg, key, sd.Spec.Suffix, replPW); err != nil {
+			rst.Message = fmt.Sprintf("preflight failed for %s: %v", name, err)
+			log.Info("restore preflight failed; cluster stays up, will retry", "database", name, "err", err)
+			return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+	}
+	rst.Phase = ldapv1alpha1.RestoreScalingDown
+	rst.Message = "preflight passed; scaling down for offline restore"
+	log.Info("restore preflight passed; scaling down", "databases", rst.Databases)
+	if err := r.updateRestoreRequest(ctx, sc.Namespace, rst.RequestRef,
+		ldapv1alpha1.RestoreRequestRestoring, "preflight passed; scaling down for offline restore"); err != nil {
+		return true, ctrl.Result{}, err
+	}
+	return true, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// maybeStartRequestedRestore looks for a non-terminal SlapdRestore targeting a
+// Running database in this cluster and, if found, begins an in-place restore.
+// Only one restore runs at a time (this is reached only when sc.Status.Restore
+// is nil), so concurrent SlapdRestores serialise: extra requests stay Pending
+// until the current one clears and a later reconcile picks the next-oldest.
+// Returns handled=true when a restore was started.
+func (r *SlapdClusterReconciler) maybeStartRequestedRestore(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (bool, ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	sr, sd, err := r.pendingRestoreRequest(ctx, sc)
+	if err != nil {
+		return false, ctrl.Result{}, err
+	}
+	if sr == nil {
+		return false, ctrl.Result{}, nil
+	}
+	if r.OperatorImage == "" {
+		log.Info("SlapdRestore pending but OPERATOR_IMAGE unset; staying Running", "request", sr.Name)
+		_ = r.setRestoreRequestPhase(ctx, sr, ldapv1alpha1.RestoreRequestPending, "waiting: operator image unset")
+		return false, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	now := metav1.Now()
+	sc.Status.Restore = &ldapv1alpha1.SlapdClusterRestoreStatus{
+		Phase:                ldapv1alpha1.RestorePreflight,
+		ID:                   rand.String(6),
+		OriginalReplicas:     sc.Spec.Replicas,
+		OriginalReadReplicas: sc.Spec.ReadReplicas,
+		Databases:            []string{sd.Name},
+		RequestRef:           sr.Name,
+		StartedAt:            &now,
+		Message:              fmt.Sprintf("validating backup source for SlapdRestore %q before scaling down", sr.Name),
+	}
+	// Preflight runs while the cluster is still serving — phase stays Running.
+	sc.Status.Phase = ldapv1alpha1.PhaseRunning
+	_ = r.setRestoreRequestPhase(ctx, sr, ldapv1alpha1.RestoreRequestPreflight, "validating backup source")
+	log.Info("entering in-place restore (preflight)", "database", sd.Name, "request", sr.Name)
+	return true, ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+}
+
+// pendingRestoreRequest returns the oldest non-terminal SlapdRestore whose target
+// database belongs to this cluster and is Running, plus that database. Returns
+// (nil, nil, nil) when there is none. SlapdRestores whose database is missing,
+// not yet Running, or in another cluster are skipped — a later reconcile (driven
+// by the SlapdRestore / SlapdDatabase watches) re-evaluates them.
+func (r *SlapdClusterReconciler) pendingRestoreRequest(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (*ldapv1alpha1.SlapdRestore, *ldapv1alpha1.SlapdDatabase, error) {
+	var list ldapv1alpha1.SlapdRestoreList
+	if err := r.List(ctx, &list, client.InNamespace(sc.Namespace)); err != nil {
+		return nil, nil, fmt.Errorf("list SlapdRestores: %w", err)
+	}
+	var chosen *ldapv1alpha1.SlapdRestore
+	var chosenDB *ldapv1alpha1.SlapdDatabase
+	for i := range list.Items {
+		sr := &list.Items[i]
+		if sr.IsTerminal() {
+			continue
+		}
+		sd := &ldapv1alpha1.SlapdDatabase{}
+		if err := r.Get(ctx, client.ObjectKey{Name: sr.Spec.DatabaseRef, Namespace: sc.Namespace}, sd); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, nil, err
+		}
+		if sd.Spec.ClusterRef != sc.Name || sd.Status.Phase != ldapv1alpha1.DatabasePhaseRunning {
+			continue
+		}
+		if chosen == nil || sr.CreationTimestamp.Before(&chosen.CreationTimestamp) {
+			chosen = sr
+			chosenDB = sd
+		}
+	}
+	return chosen, chosenDB, nil
+}
+
+// updateRestoreRequest fetches the named SlapdRestore (if any) and advances its
+// status phase. A no-op when name is empty (a bootstrapFrom-driven restore) or
+// the SlapdRestore was deleted mid-restore (the machine continues regardless).
+func (r *SlapdClusterReconciler) updateRestoreRequest(ctx context.Context, ns, name string, phase ldapv1alpha1.SlapdRestorePhase, msg string) error {
+	if name == "" {
+		return nil
+	}
+	sr := &ldapv1alpha1.SlapdRestore{}
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, sr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get SlapdRestore %q: %w", name, err)
+	}
+	return r.setRestoreRequestPhase(ctx, sr, phase, msg)
+}
+
+// setRestoreRequestPhase writes a SlapdRestore's status phase/message, stamping
+// startedAt/completedAt on the relevant transitions. The SlapdCluster controller
+// is the sole writer of SlapdRestore status (ADR-014 Architecture A).
+func (r *SlapdClusterReconciler) setRestoreRequestPhase(ctx context.Context, sr *ldapv1alpha1.SlapdRestore, phase ldapv1alpha1.SlapdRestorePhase, msg string) error {
+	if sr.Status.Phase == phase && sr.Status.Message == msg {
+		return nil
+	}
+	now := metav1.Now()
+	sr.Status.Phase = phase
+	sr.Status.Message = msg
+	sr.Status.ObservedGeneration = sr.Generation
+	if phase == ldapv1alpha1.RestoreRequestPreflight && sr.Status.StartedAt == nil {
+		sr.Status.StartedAt = &now
+	}
+	if (phase == ldapv1alpha1.RestoreRequestCompleted || phase == ldapv1alpha1.RestoreRequestFailed) && sr.Status.CompletedAt == nil {
+		sr.Status.CompletedAt = &now
+	}
+	if err := r.Status().Update(ctx, sr); err != nil {
+		return fmt.Errorf("update SlapdRestore %q status: %w", sr.Name, err)
+	}
+	return nil
 }
 
 // databasesNeedingRestore returns the SlapdDatabases in this cluster that have
@@ -279,9 +421,9 @@ func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1a
 		if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, sd); err != nil {
 			return false, false, fmt.Errorf("get SlapdDatabase %q: %w", name, err)
 		}
-		st, key, err := r.resolveBootstrapSource(ctx, sc, sd)
+		st, key, _, err := r.resolveRestoreSource(ctx, sc, sd)
 		if err != nil {
-			return false, false, fmt.Errorf("resolve bootstrapFrom for %q: %w", name, err)
+			return false, false, fmt.Errorf("resolve restore source for %q: %w", name, err)
 		}
 
 		for _, t := range restorePodTargets(sc, sd, rwN, roN) {
@@ -351,26 +493,51 @@ func restorePodTargets(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdData
 	return targets
 }
 
+// resolveRestoreSource derives the S3 storage, object key, and
+// skip-replication-password-check flag for a database in the current restore
+// window — from the triggering SlapdRestore (in-place) when RequestRef is set,
+// otherwise from the database's bootstrapFrom.
+func (r *SlapdClusterReconciler) resolveRestoreSource(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDatabase) (ldapv1alpha1.S3StorageSpec, string, bool, error) {
+	if req := sc.Status.Restore.RequestRef; req != "" {
+		sr := &ldapv1alpha1.SlapdRestore{}
+		if err := r.Get(ctx, client.ObjectKey{Name: req, Namespace: sc.Namespace}, sr); err != nil {
+			return ldapv1alpha1.S3StorageSpec{}, "", false, fmt.Errorf("get SlapdRestore %q: %w", req, err)
+		}
+		st, key, err := r.resolveSourceObject(ctx, sc.Namespace, sr.Spec.Source.BackupRef, sr.Spec.Source.S3)
+		return st, key, sr.Spec.SkipReplicationPasswordCheck, err
+	}
+	st, key, err := r.resolveBootstrapSource(ctx, sc, sd)
+	skip := sd.Spec.BootstrapFrom != nil && sd.Spec.BootstrapFrom.SkipReplicationPasswordCheck
+	return st, key, skip, err
+}
+
 // resolveBootstrapSource derives the S3 storage config and object key for a
 // database's bootstrapFrom source (a SlapdBackup reference or a direct S3 path).
 func (r *SlapdClusterReconciler) resolveBootstrapSource(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDatabase) (ldapv1alpha1.S3StorageSpec, string, error) {
-	bf := sd.Spec.BootstrapFrom
-	switch {
-	case bf == nil:
+	if sd.Spec.BootstrapFrom == nil {
 		return ldapv1alpha1.S3StorageSpec{}, "", fmt.Errorf("bootstrapFrom is nil")
-	case bf.S3 != nil:
-		return bf.S3.Storage, bf.S3.Key, nil
-	case bf.BackupRef != "":
+	}
+	return r.resolveSourceObject(ctx, sc.Namespace, sd.Spec.BootstrapFrom.BackupRef, sd.Spec.BootstrapFrom.S3)
+}
+
+// resolveSourceObject derives the S3 storage config and object key from a backup
+// reference (a SlapdBackup name) or a direct S3 source. Shared by bootstrapFrom
+// and SlapdRestore (they carry the same backupRef/s3 shape).
+func (r *SlapdClusterReconciler) resolveSourceObject(ctx context.Context, ns, backupRef string, s3src *ldapv1alpha1.BootstrapS3Source) (ldapv1alpha1.S3StorageSpec, string, error) {
+	switch {
+	case s3src != nil:
+		return s3src.Storage, s3src.Key, nil
+	case backupRef != "":
 		sb := &ldapv1alpha1.SlapdBackup{}
-		if err := r.Get(ctx, client.ObjectKey{Name: bf.BackupRef, Namespace: sc.Namespace}, sb); err != nil {
-			return ldapv1alpha1.S3StorageSpec{}, "", fmt.Errorf("get SlapdBackup %q: %w", bf.BackupRef, err)
+		if err := r.Get(ctx, client.ObjectKey{Name: backupRef, Namespace: ns}, sb); err != nil {
+			return ldapv1alpha1.S3StorageSpec{}, "", fmt.Errorf("get SlapdBackup %q: %w", backupRef, err)
 		}
 		if sb.Status.Phase != ldapv1alpha1.BackupPhaseCompleted || sb.Status.Path == "" {
-			return ldapv1alpha1.S3StorageSpec{}, "", fmt.Errorf("SlapdBackup %q is not Completed", bf.BackupRef)
+			return ldapv1alpha1.S3StorageSpec{}, "", fmt.Errorf("SlapdBackup %q is not Completed", backupRef)
 		}
 		return sb.Spec.Storage, sb.Status.Path, nil
 	default:
-		return ldapv1alpha1.S3StorageSpec{}, "", fmt.Errorf("bootstrapFrom has neither backupRef nor s3")
+		return ldapv1alpha1.S3StorageSpec{}, "", fmt.Errorf("restore source has neither backupRef nor s3")
 	}
 }
 

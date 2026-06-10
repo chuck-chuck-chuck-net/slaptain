@@ -144,9 +144,10 @@ just driven by the operator. The cluster, while restoring, reports
 5. If a restore Job fails, the cluster is **held at 0 replicas** with a loud
    status for inspection rather than scaling up a half-restored directory.
 
-Restore populates a *new* database only — it never overwrites a populated one.
-A no-downtime online (`ldapadd`-based) restore mode for small databases is
-planned (see ADR-014).
+`bootstrapFrom` populates a *new* database only — it never overwrites a
+populated one. To roll back an **existing** database to a backup, use a
+`SlapdRestore` (below). A no-downtime online (`ldapadd`-based) restore mode for
+small databases is planned (see ADR-014).
 
 ### Replication-password verification
 
@@ -175,6 +176,44 @@ target's `<db>-credentials` Secret with the *source's* `replication-password`
 (copy it from the source's `<db>-credentials`) before the database is created —
 otherwise the operator generates a fresh random one that won't match the backup,
 and preflight will (correctly) default-deny.
+
+## In-place restore — `SlapdRestore`
+
+A `SlapdRestore` rolls an **existing, populated** database back to a backup
+("someone broke the directory; restore yesterday's backup"). It is imperative
+and immutable — a command, not desired state — so to restore again you create
+another `SlapdRestore`.
+
+```yaml
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdRestore
+metadata:
+  name: rollback-2026-06-09
+spec:
+  databaseRef: my-database          # an existing SlapdDatabase in this namespace
+  source:
+    backupRef: nightly-2026-06-08   # a SlapdBackup, or:
+    # s3:                           # a direct object (e.g. a legacy dump)
+    #   storage: { bucket: my-ldap-backups, region: eu-central-1, credentialsSecretName: my-s3-creds }
+    #   key: prod/legacy/2026-06-08.ldif.gz
+  # skipReplicationPasswordCheck: true   # same escape hatch as bootstrapFrom
+```
+
+The SlapdCluster controller picks it up and drives the **same machine** as
+`bootstrapFrom`: preflight (cluster stays up) → scale the cluster to 0 → offline
+`slapadd` of the artifact into **every** pod (so all replicas come up identical,
+no syncrepl refresh) → scale back up. Watch `status.phase`
+(`Pending`→`Preflight`→`Restoring`→`Completed`, or `Failed`).
+
+- It is the **same cluster-wide downtime** as a `bootstrapFrom` restore —
+  `slapadd` is offline.
+- Only **one restore runs per cluster at a time**; additional `SlapdRestore`s (or
+  a `bootstrapFrom`) queue behind the active one.
+- The same replication-password verification applies. For an in-cluster rollback
+  the backup's `cn=replication` password matches the cluster's own, so preflight
+  passes; for a backup from another cluster, the cross-cluster note above applies.
+- On `Failed` (a `slapadd` Job failed) the cluster is **held at 0 replicas** for
+  inspection rather than scaling up a half-restored directory.
 
 ## Testing locally
 

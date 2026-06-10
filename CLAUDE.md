@@ -156,13 +156,24 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - Group: `ldap.chuck-chuck-chuck.net`
 - Version: `v1alpha1`, Scope: Namespaced
 - Kinds: `SlapdCluster` (`sc`), `SlapdDatabase` (`sd`), `SlapdSchema` (`ss`),
-  `SlapdBackup` (`sb`), `SlapdScheduledBackup` (`ssb`)
+  `SlapdBackup` (`sb`), `SlapdScheduledBackup` (`ssb`), `SlapdRestore` (`sr`)
 - Backup/restore (ADR-014, `docs/BACKUP.md`): `SlapdBackup` runs an on-demand
   `slapcat`→gzip→S3 backup via a co-located Job; `SlapdScheduledBackup` emits
   them on a cron schedule with `retention{maxCount,maxAge}`; `SlapdDatabase.spec.bootstrapFrom`
   restores a backup into a fresh DB (cluster enters `status.phase=Restoring`,
   scales to 0, runs offline `slapadd`, scales back up). S3 creds via a Secret
   with keys `access-key-id`/`secret-access-key`.
+- In-place restore (ADR-014 amendment): `SlapdRestore` is an imperative,
+  immutable-once-created request to restore a backup into an **existing**
+  (possibly populated) `SlapdDatabase` — a rollback. The **SlapdCluster
+  controller** watches it (no separate reconciler) and drives the *same*
+  preflight → scale-to-0 → slapadd-all-pods → scale-up machine as `bootstrapFrom`,
+  branching only on source resolution and completion bookkeeping
+  (`status.restore.requestRef` names the driving `SlapdRestore`). Spec:
+  `databaseRef` + `source.{backupRef|s3}` + `skipReplicationPasswordCheck`;
+  status `phase` (Pending/Preflight/Restoring/Completed/Failed). Concurrent
+  requests serialise (one restore per cluster at a time); does NOT set the DB's
+  `restoreApplied` (that is the bootstrapFrom one-shot guard).
 
 **CRD spec fields** (SlapdCluster manages infrastructure; database-level config lives on SlapdDatabase/SlapdSchema CRs — see ADR-004):
 

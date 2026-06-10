@@ -223,6 +223,16 @@ DB). `spec.databaseRef` + `spec.source.{backupRef|s3}`; immutable once terminal;
 status `phase`. The SlapdCluster controller watches it (Architecture A) and
 drives the same preflight → slapadd-all-pods machine against the named DB.
 Guard: refuse a second concurrent restore.
+- **Done (2026-06-09):** `SlapdRestore` CRD (`sr`) + `slapdrestore_types.go`
+  (spec immutable via `self == oldSelf` CEL, `skipReplicationPasswordCheck`
+  mirrors bootstrapFrom). No separate reconciler — the SlapdCluster controller
+  `Watches` it (maps SlapdRestore→database→cluster) and drives the existing
+  machine. `status.restore.requestRef` records the driving request; source
+  resolution and completion branch on it (`resolveRestoreSource`,
+  `updateRestoreRequest`). In-place restores do NOT set the DB's `restoreApplied`
+  (bootstrapFrom-only guard); re-running = create another `SlapdRestore`.
+  Concurrency: one restore per cluster (extra requests stay Pending; oldest
+  first). Preflight extracted to `reconcileRestorePreflight` to keep gocyclo ≤30.
 
 **7.4 — e2e** (gated, multi-replica): rollback via `SlapdRestore`, and
 delete+recreate `bootstrapFrom`, both on N≥2 — assert restored DIT on every pod,

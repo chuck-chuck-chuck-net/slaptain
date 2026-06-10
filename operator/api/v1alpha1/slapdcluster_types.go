@@ -543,6 +543,13 @@ type SlapdClusterRestoreStatus struct {
 	// databases lists the SlapdDatabase names being restored in this window.
 	// +optional
 	Databases []string `json:"databases,omitempty"`
+	// requestRef is the name of the SlapdRestore that triggered this restore, or
+	// empty for a bootstrapFrom-driven restore. When set, the restore source is
+	// the SlapdRestore's spec.source (not the database's bootstrapFrom), and the
+	// machine reports completion on the SlapdRestore rather than setting the
+	// database's restoreApplied. See ADR-014 amendment.
+	// +optional
+	RequestRef string `json:"requestRef,omitempty"`
 	// startedAt is when the restore window began.
 	// +optional
 	StartedAt *metav1.Time `json:"startedAt,omitempty"`
