@@ -245,7 +245,13 @@ no divergence, and (ideally) that no syncrepl refresh occurred.
   convergence (the target reuses the source TLS cert, whose SANs don't cover it,
   so cross-pod replication intentionally doesn't converge; preflight runs before
   scale-down and slapadd loads each pod independently, so neither assertion needs
-  it). The `SlapdRestore` rollback variant waits on 7.3.
+  it).
+- **Done (2026-06-09):** the `SlapdRestore` rollback variant
+  (`restore_inplace_test.go`, gated `E2E_BACKUP=1`): bootstrap a fresh cluster
+  from a known backup → write a "mistake" entry → `SlapdRestore` back to that
+  backup → assert the mistake is gone, the DIT matches the known-good count, and
+  the DB's `restoreApplied` was NOT flipped by the in-place restore. Pending t3e
+  validation (needs the 7.3 operator image pushed).
 
 **Outcome:** `bootstrapFrom` is correct at any replica count (delete+recreate
 rollback "is gonna be fine"), and there is an explicit, non-destructive,
