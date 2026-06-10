@@ -5,6 +5,22 @@ a freshly created database. The design rationale and rejected alternatives are
 in [ADR-014](adrs/adr-014-s3-backup-restore.md); this document is the user-facing
 how-to.
 
+## At a glance
+
+| You want to… | Use | Notes |
+|---|---|---|
+| Back up a database now | `SlapdBackup` | one-shot; `slapcat`→gzip→S3 |
+| Back up on a schedule | `SlapdScheduledBackup` | cron + retention (`maxCount`/`maxAge`) |
+| Restore into a **new** database | `SlapdDatabase.spec.bootstrapFrom` | one-shot, mutually exclusive with `seed` |
+| Roll back an **existing** database | `SlapdRestore` | imperative, in-place, repeatable |
+
+All four use the same S3 `storage` block (bucket / endpoint / region /
+`credentialsSecretName`) and the same gzipped-`slapcat`-LDIF artifact format,
+which is interchangeable with stock `slapcat`/`slapadd`. Restores are
+*destroy-last* (validated before any data is touched) and load every pod
+directly, so a multi-replica restore needs no syncrepl refresh. Requires the
+operator running with `OPERATOR_IMAGE` set (it is, in the shipped Helm chart).
+
 ## What is and isn't backed up
 
 Only the **data DIT** under each `SlapdDatabase` suffix is backed up. Everything

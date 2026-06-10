@@ -154,6 +154,7 @@ kubectl get slapdschema
 - **Multi-database support**: run multiple independent databases (each with its own suffix, credentials, ACLs, replication config) in one cluster.
 - **Security**: rootless execution (UID 1024), no privilege escalation, read-only root filesystem, distroless runtime images, TLS encryption.
 - **Database lifecycle**: cleanup policy (Retain/Delete) controls what happens when a `SlapdDatabase` CR is deleted. Default: Retain (database stays in slapd, becomes unmanaged).
+- **Backup & restore**: on-demand and scheduled `slapcat`→S3 backups with retention (`SlapdBackup` / `SlapdScheduledBackup`); restore into a fresh database (`SlapdDatabase.spec.bootstrapFrom`) or roll back an existing one in place (`SlapdRestore`). See [Backup & Restore](docs/BACKUP.md).
 - **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts.
 
 ## Cross-Cluster Replication
@@ -173,6 +174,33 @@ replication:
 ```
 
 RID scheme: each `SlapdDatabase` declares a `ridBase`. In-cluster peers use RIDs `ridBase+1..ridBase+49`, external peers use `ridBase+51..ridBase+99`. See [ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md).
+
+## Backup & Restore
+
+Slaptain backs up each database's data tree to S3 (or any S3-compatible store) and restores it back. Artifacts are gzipped `slapcat` LDIF — interchangeable with stock `slapcat`/`slapadd`. Everything else (schemas, ACLs, replication topology) is reconstructed from the CRs, so a restore is "recreate the CRs, load the DIT."
+
+```yaml
+# On-demand backup of one database to S3
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdBackup
+metadata:
+  name: nightly
+spec:
+  databaseRef: myapp
+  storage:
+    bucket: my-ldap-backups
+    region: eu-central-1
+    credentialsSecretName: my-s3-creds   # keys: access-key-id, secret-access-key
+```
+
+| CRD | Purpose |
+|---|---|
+| `SlapdBackup` | One-shot, on-demand backup to S3 |
+| `SlapdScheduledBackup` | Cron-scheduled backups with retention (`maxCount` / `maxAge`) |
+| `SlapdDatabase.spec.bootstrapFrom` | Restore a backup into a **fresh** database (one-shot, mutually exclusive with `seed`) |
+| `SlapdRestore` | Imperative **in-place** rollback of an existing, populated database |
+
+Restores are *destroy-last* — the backup is validated (reachable, decompresses, correct suffix, replication-password matches) **before** any data is touched — and load every pod directly via offline `slapadd`, so a multi-replica restore needs no syncrepl refresh. Full guide: **[Backup & Restore](docs/BACKUP.md)**.
 
 ## Architecture
 
@@ -200,7 +228,8 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 
 - [Team Onboarding](docs/ONBOARDING.md) — LDAP concepts, OpenLDAP specifics, operator model
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
-- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-006
+- [Backup & Restore](docs/BACKUP.md) — S3 backup, scheduled backups + retention, restore into a fresh DB, in-place rollback
+- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-014
 - [Development Guide](docs/DEVELOPMENT.md) — local dev workflow, building, testing
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 
