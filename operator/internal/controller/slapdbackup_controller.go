@@ -33,6 +33,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/backup"
 )
 
 const backupFieldManager = "slapdbackup-controller"
@@ -148,6 +149,16 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		case batchv1.JobComplete:
 			now := metav1.Now()
 			sb.Status.CompletedAt = &now
+			// Record the artifact size (HEAD the object). Best-effort: a HEAD
+			// failure must not flip a successful backup to Failed, so we log and
+			// leave sizeBytes unset rather than erroring.
+			if cfg, err := s3ConfigFromStorage(ctx, r.Client, sb.Namespace, sb.Spec.Storage); err != nil {
+				log.Info("backup completed but reading S3 credentials for size failed; sizeBytes unset", "err", err)
+			} else if size, err := backup.ObjectSize(ctx, cfg, objectKey); err != nil {
+				log.Info("backup completed but object HEAD failed; sizeBytes unset", "err", err)
+			} else {
+				sb.Status.SizeBytes = size
+			}
 			r.setTerminal(ctx, sb, ldapv1alpha1.BackupPhaseCompleted, jobName, objectKey, "BackupCompleted", "backup uploaded to S3")
 			return ctrl.Result{}, nil
 		case batchv1.JobFailed:

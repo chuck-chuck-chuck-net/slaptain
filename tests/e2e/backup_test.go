@@ -80,8 +80,9 @@ var _ = Describe("backup", Label("backup"), Ordered, func() {
 		}).WithTimeout(5*time.Minute).WithPolling(5*time.Second).Should(Equal(ldapv1alpha1.BackupPhaseCompleted),
 			"backup did not complete; check the %s-backup Job logs", backupName)
 
-		By("asserting the artifact path was recorded")
+		By("asserting the artifact path and size were recorded")
 		Expect(got.Status.Path).NotTo(BeEmpty(), "status.path should be the S3 object key")
 		Expect(got.Status.Path).To(HaveSuffix(".ldif.gz"))
+		Expect(got.Status.SizeBytes).To(BeNumerically(">", 0), "status.sizeBytes should be the uploaded artifact size")
 	})
 })

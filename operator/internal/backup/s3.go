@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package backup implements the S3 transfer primitives used by the backup and
 // restore Jobs (ADR-014). It uses aws-sdk-go-v2 (deliberately not minio-go) and
-// works against AWS S3 and any S3-compatible store (MinIO, Ceph RGW).
+// works against AWS S3 and any S3-compatible store (Ceph RGW, versitygw).
 package backup
 
 import (
@@ -90,7 +90,7 @@ func newClient(ctx context.Context, cfg S3Config) (*s3.Client, error) {
 	return s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
-			o.UsePathStyle = true // MinIO/Ceph need path-style addressing
+			o.UsePathStyle = true // most S3-compatible stores need path-style addressing
 		}
 	}), nil
 }
@@ -322,4 +322,25 @@ func Delete(ctx context.Context, cfg S3Config, key string) error {
 		return fmt.Errorf("delete s3://%s/%s: %w", cfg.Bucket, key, err)
 	}
 	return nil
+}
+
+// ObjectSize returns the size in bytes of s3://<bucket>/<key> via a HeadObject.
+// The backup controller calls it once, when a backup Job completes, to record
+// status.sizeBytes — a small control-plane call, run inline like Delete.
+func ObjectSize(ctx context.Context, cfg S3Config, key string) (int64, error) {
+	client, err := newClient(ctx, cfg)
+	if err != nil {
+		return 0, err
+	}
+	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(cfg.Bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("head s3://%s/%s: %w", cfg.Bucket, key, err)
+	}
+	if head.ContentLength == nil {
+		return 0, nil
+	}
+	return *head.ContentLength, nil
 }

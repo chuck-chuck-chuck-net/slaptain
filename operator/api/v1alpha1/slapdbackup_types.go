@@ -32,7 +32,7 @@ type S3StorageSpec struct {
 	// +optional
 	Prefix string `json:"prefix,omitempty"`
 	// endpoint is the S3 endpoint URL. Leave empty for AWS S3; set it for an
-	// S3-compatible store (MinIO, Ceph RGW), e.g. "https://minio.example:9000".
+	// S3-compatible store (Ceph RGW, versitygw), e.g. "https://s3.example:9000".
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 	// region is the S3 region. Some S3-compatible stores ignore it.
@@ -45,7 +45,7 @@ type S3StorageSpec struct {
 	// +required
 	CredentialsSecretName string `json:"credentialsSecretName"`
 	// insecureTLS disables TLS certificate verification against the endpoint.
-	// Use only for testing against a self-signed MinIO. Default false.
+	// Use only for testing against a self-signed S3-compatible server. Default false.
 	// +kubebuilder:default=false
 	// +optional
 	InsecureTLS bool `json:"insecureTLS,omitempty"`
