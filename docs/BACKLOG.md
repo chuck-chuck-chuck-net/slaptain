@@ -52,3 +52,27 @@ top-level README is explicitly *not* wanted.
 knobs + image/CRD notes, linking back to the repo docs rather than duplicating
 them), then keep it from drifting (helm-docs in `make operator-manifests`, or a
 CI check).
+
+## Remove the `foreignRIDs` field + its overlap validation (RIDs are consumer-local)
+
+**What:** `SlapdDatabase.spec.replication.foreignRIDs` (and the validation that
+rejects a DB whose computed RID range overlaps it) lets a deployer declare RIDs
+"in use on the other side" of an external-peer relationship, to avoid a
+cross-cluster RID collision. Remove it — the collision it guards against cannot
+happen. A `rid` is the *consumer's* local handle for a syncrepl directive: it
+keys that consumer's own replication cookie state and is never exchanged on the
+wire. slaptain and any peer/source each number their own stanzas independently,
+in disjoint per-node namespaces, so cross-cluster RID coordination is meaningless.
+
+**Why deferred / why it's inconsistent right now:** ADR-011 was rewritten to drop
+the cross-cluster RID discussion (RIDs are invisible across clusters), but that
+rewrite deliberately did **not** touch the operator code. So the `foreignRIDs`
+field + webhook currently outlive the ADR that justified them — no ADR endorses
+the field anymore. This entry is the reconciliation reminder. (Contrast:
+`foreignServerIDs` **stays** — ServerIDs *are* global, embedded in the CSN and
+tracked in `contextCSN`, so cross-cluster ServerID collision is real.)
+
+**How:** drop `foreignRIDs` from `SlapdDatabase` types + deepcopy + CRD; delete
+the RID-overlap validation; keep `ridBase` (that's slaptain's *own* intra-cluster
+RID uniqueness — still valid and still needed). Regenerate manifests; `grep -r
+foreignRIDs` → 0. Update any docs/tests that referenced it.
