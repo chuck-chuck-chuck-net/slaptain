@@ -410,8 +410,8 @@ setup_slapd_clusters() {
     for ctx in "${CONTEXTS[@]}"; do
         # Per-site serverIDBase keeps slapd's multimaster CSN tracking
         # collision-free across sites. With base=site_idx*100 each cluster
-        # gets its own decade (siteA: 1-99, siteB: 101-199, ...) — matches
-        # the convention codified in ADR-011.
+        # gets its own decade (siteA: 1-99, siteB: 101-199, ...) — the
+        # per-site ServerID convention from ADR-011 §"Assumed source".
         # Required for cross-cluster syncrepl to converge.
         local server_id_base=$((site_idx * 100))
         log "[$ctx] Installing SlapdCluster (serverIDBase=${server_id_base})..."
