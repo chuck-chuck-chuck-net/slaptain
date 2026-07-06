@@ -62,7 +62,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-011-hot-migration-topology.md
 │       ├── adr-012-seed-and-lifecycle.md
 │       ├── adr-013-defer-hot-database-management.md
-│       └── adr-014-s3-backup-restore.md
+│       ├── adr-014-s3-backup-restore.md
+│       ├── adr-015-cluster-dns-domain.md
+│       └── adr-016-pod-routed-cross-cluster-replication.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -260,6 +262,17 @@ make testing-delete cluster-helm-uninstall
 
 Or all-in-one: `./tests/e2e.sh all <context> [more-contexts...]` (single-site with N=1, multi-site with N≥2)
 
+**Node access (NodePort reachability):** the runner reaches slapd via NodePorts on
+a per-context *node access IP*, defaulting to each node's k8s `InternalIP`. On
+dual-homed clusters that default is wrong when the `InternalIP` is on a network the
+runner can't reach north-south (e.g. a routed replication network chosen as the
+primary node network) — and the reachable NIC isn't k8s-registered, so it can't be
+auto-discovered. Override it: `E2E_NODE_ACCESS_IP=<ip>`
+(single-site) or `E2E_NODE_ACCESS_IPS="ctx=ip ..."` (multi-site). This drives
+`LDAP_ADDR`/`E2E_REMOTE_LDAP_ADDR`, the suite's `E2E_NODE_IP`, and the TLS cert
+SAN; cross-site peer URIs keep the `InternalIP` (they must ride the replication
+network). See `tests/README.md`.
+
 **Backup/restore e2e** (gated `E2E_BACKUP=1`): `E2E_BACKUP=1 ./tests/e2e.sh test <ctx>`
 deploys `tests/resources/versitygw.yaml` (lean Apache-2.0 S3 server — NOT minio)
 and runs `backup_test.go` + `restore_test.go`. The restore spec stands up a
@@ -357,6 +370,35 @@ kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
 
 ---
 
+### References
+
+This repository is published as a stand-alone open-source project, so every
+reference must point to something publicly available (upstream projects, RFCs,
+public docs and URLs). Do not add references to unpublished or private resources:
+internal repos, internal design docs, ticket IDs, cluster/host/domain names, IPs,
+or absolute local paths — they are meaningless to an external reader. Use neutral
+placeholders or RFC-reserved examples instead (`<context>`, `<reachable-node-ip>`,
+`k8s.example`). When unsure whether something is public, ask before adding it.
+
+### Fix Discipline
+
+Do not fix bugs quickly or lightheartedly. A fix lands only after:
+
+1. **Full root-cause understanding** — the actual mechanism, demonstrated (logs, live
+   cluster state, a reproduction), not a plausible-sounding theory. Prefer the explanation
+   that also accounts for why it *used* to work. If a first theory doesn't, keep digging;
+   e.g. the ADR-015 bug looked like a readiness/DNS-publishing issue until `/etc/hosts`
+   showed the real cause was a hardcoded cluster domain.
+2. **Regression & side-effect analysis** — check the relevant ADRs (follow them; if the fix
+   conflicts with one, discuss before proceeding) and `docs/reconcile-loop-fixes.md` for
+   prior art. Map the full blast radius, not just the first symptom. Confirm the default
+   path stays unchanged.
+3. **e2e coverage** — either an existing e2e exercises the fix, or one is added alongside it.
+   Build + `go vet` + unit tests are necessary but not sufficient.
+
+Record the outcome: an ADR when the fix establishes a pattern future code must follow, and a
+`docs/reconcile-loop-fixes.md` entry for any reconcile/replication bug.
+
 ### Architecture Decision Records (ADRs)
 
 ADRs in `docs/adrs/` record significant design decisions. They are a first-class artifact —
@@ -398,6 +440,8 @@ the original decision — the history of reasoning matters.
 - ADR-012: Seed is one-shot; cluster wipe is a Kubernetes resource lifecycle operation (replaces removed `forceRebootstrap` + reverted `verifySeedExists`)
 - ADR-013: Defer hot SlapdDatabase add/remove; require persistent storage (rolling restart on DB add/remove accepted as UX wart on persistent storage)
 - ADR-014: S3 backup/restore (slapcat→gzip→S3 via co-located Job; bootstrapFrom restore into a fresh DB) — *Accepted (impl + e2e green on t3e 2026-06-09)*
+- ADR-015: Cluster DNS domain is resolved (CLUSTER_DOMAIN env → resolv.conf → cluster.local), never hardcoded — *Accepted 2026-07-05*
+- ADR-016: Direct native pod-IP routing as a cross-cluster replication transport (alongside Multus/NodePort; `network.mode: pod-routed`) — *Proposed*
 
 ---
 
