@@ -291,19 +291,60 @@ type KubeconfigSecretRef struct {
 	Key string `json:"key,omitempty"`
 }
 
-// ReplicationNetworkConfig configures a dedicated replication network via Multus CNI.
-// See ADR-007.
+// Replication network modes. See ADR-007 (multus) and ADR-016 (pod-routed).
+const (
+	// NetworkModeMultus addresses cross-cluster peers via a dedicated Multus
+	// secondary network; peer IPs come from the net1 interface (ADR-007).
+	NetworkModeMultus = "multus"
+	// NetworkModePodRouted addresses cross-cluster peers via their primary pod IP,
+	// on clusters whose pod network is natively routed across sites (ADR-016).
+	NetworkModePodRouted = "pod-routed"
+)
+
+// ReplicationNetworkConfig configures how cross-cluster replication peers are
+// addressed. See ADR-007 (Multus) and ADR-016 (pod-routed native pod IPs).
 type ReplicationNetworkConfig struct {
-	// multusNetwork is the NetworkAttachmentDefinition reference.
+	// mode selects how cross-cluster peer IPs are obtained:
+	//   "pod-routed" — the primary pod network is natively routed across sites; peer
+	//                  IPs are the pods' primary IPs (needs no multusNetwork/NAD, and
+	//                  no Multus attachment on the operator). Requires routed pod CIDRs.
+	//   "multus"     — a dedicated Multus secondary network; peer IPs come from the
+	//                  net1 interface (requires multusNetwork).
+	// When unset, defaults to pod-routed — unless multusNetwork is set, which infers
+	// multus. See ADR-016.
+	// +kubebuilder:validation:Enum=multus;pod-routed
+	// +optional
+	Mode string `json:"mode,omitempty"`
+	// multusNetwork is the NetworkAttachmentDefinition reference. Required when
+	// mode is "multus"; leave empty for "pod-routed".
 	// Supports cross-namespace format "namespace/name" (recommended) or plain "name"
 	// (same namespace as SlapdCluster). The NAD must already exist.
-	// +required
-	MultusNetwork string `json:"multusNetwork"`
+	// +optional
+	MultusNetwork string `json:"multusNetwork,omitempty"`
 	// useForInCluster controls whether in-cluster syncrepl uses discovered Multus IPs
 	// instead of headless DNS. Default false — cross-site always uses Multus when configured.
+	// Only meaningful in "multus" mode; ignored in "pod-routed" (in-cluster stays on DNS).
 	// +kubebuilder:default=false
 	// +optional
 	UseForInCluster bool `json:"useForInCluster,omitempty"`
+}
+
+// NetworkMode returns the effective replication network mode
+// (NetworkModeMultus or NetworkModePodRouted). Returns "" when no replication
+// network is configured. When mode is unset it defaults to pod-routed, unless a
+// multusNetwork is named (which infers multus). See ADR-016.
+func (s *SlapdCluster) NetworkMode() string {
+	n := s.Spec.Replication.Network
+	if n == nil {
+		return ""
+	}
+	if n.Mode != "" {
+		return n.Mode
+	}
+	if n.MultusNetwork != "" {
+		return NetworkModeMultus
+	}
+	return NetworkModePodRouted
 }
 
 // SlapdReplicationConfig holds cluster-level replication configuration.

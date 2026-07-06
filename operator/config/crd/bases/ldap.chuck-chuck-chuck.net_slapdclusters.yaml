@@ -453,9 +453,24 @@ spec:
                       the operator adds Multus annotations to slapd pods and discovers assigned IPs
                       from pod network-status annotations. See ADR-007.
                     properties:
+                      mode:
+                        description: |-
+                          mode selects how cross-cluster peer IPs are obtained:
+                            "pod-routed" — the primary pod network is natively routed across sites; peer
+                                           IPs are the pods' primary IPs (needs no multusNetwork/NAD, and
+                                           no Multus attachment on the operator). Requires routed pod CIDRs.
+                            "multus"     — a dedicated Multus secondary network; peer IPs come from the
+                                           net1 interface (requires multusNetwork).
+                          When unset, defaults to pod-routed — unless multusNetwork is set, which infers
+                          multus. See ADR-016.
+                        enum:
+                        - multus
+                        - pod-routed
+                        type: string
                       multusNetwork:
                         description: |-
-                          multusNetwork is the NetworkAttachmentDefinition reference.
+                          multusNetwork is the NetworkAttachmentDefinition reference. Required when
+                          mode is "multus"; leave empty for "pod-routed".
                           Supports cross-namespace format "namespace/name" (recommended) or plain "name"
                           (same namespace as SlapdCluster). The NAD must already exist.
                         type: string
@@ -464,9 +479,8 @@ spec:
                         description: |-
                           useForInCluster controls whether in-cluster syncrepl uses discovered Multus IPs
                           instead of headless DNS. Default false — cross-site always uses Multus when configured.
+                          Only meaningful in "multus" mode; ignored in "pod-routed" (in-cluster stays on DNS).
                         type: boolean
-                    required:
-                    - multusNetwork
                     type: object
                   retry:
                     default: 10 +

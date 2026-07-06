@@ -192,8 +192,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.resources` | `corev1.ResourceRequirements` | Container resource requests/limits |
 | `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
 | `spec.replication.{enabled,externalPeers}` | `SlapdReplicationConfig` | N-way multi-master delta-syncrepl; active when `enabled=true` and `replicas > 1` |
-| `spec.replication.network.multusNetwork` | string | NAD reference for dedicated replication network (e.g. `infra/replication-net`). See ADR-007 |
-| `spec.replication.network.useForInCluster` | bool | Use Multus IPs for in-cluster syncrepl too (default false) |
+| `spec.replication.network.mode` | string | Cross-cluster transport: `pod-routed` (default; primary pod IPs on a natively cross-site-routed pod network, no NAD/operator-NIC, ADR-016) or `multus` (net1 IPs, ADR-007). When unset, defaults to pod-routed unless `multusNetwork` is set (then multus) |
+| `spec.replication.network.multusNetwork` | string | NAD reference for dedicated replication network (e.g. `infra/replication-net`). Required for `mode: multus`; omit for `pod-routed`. See ADR-007 |
+| `spec.replication.network.useForInCluster` | bool | Use Multus IPs for in-cluster syncrepl too (default false; multus mode only) |
 | `spec.replication.keepalive` | string | TCP keepalive for syncrepl connections (e.g. `idle:probes:interval`) |
 | `spec.replication.retry` | string | Retry interval for syncrepl connections (e.g. `60 +`) |
 | `externalPeers[].discovery` | `*ExternalPeerDiscovery` | Dynamic peer discovery via remote k8s API (ADR-007 amendment). Mutually exclusive with `uri` and `podAddresses` |

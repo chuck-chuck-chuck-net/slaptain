@@ -233,9 +233,10 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		sc.Status.ReadOnlyReadyReplicas = 0
 	}
 
-	// Discover replication network IPs from Multus annotations.
+	// Discover replication network IPs from Multus annotations (multus mode only;
+	// pod-routed uses primary pod IPs discovered per-peer and headless DNS in-cluster).
 	sc.Status.ReplicationNetworkIPs = nil
-	if sc.Spec.Replication.Network != nil {
+	if sc.NetworkMode() == ldapv1alpha1.NetworkModeMultus {
 		podList := &corev1.PodList{}
 		if err := r.List(ctx, podList,
 			client.InNamespace(sc.Namespace),
@@ -1488,13 +1489,15 @@ func testExternalPeerConnectivity(uri string) error {
 }
 
 // buildMultusAnnotations returns pod template annotations for Multus network attachment.
-// Returns nil when no replication network is configured.
+// Returns nil when no Multus network is configured — including pod-routed mode
+// (ADR-016), where there is no NAD and pods use only the primary network.
 func buildMultusAnnotations(sc *ldapv1alpha1.SlapdCluster) map[string]string {
-	if sc.Spec.Replication.Network == nil {
+	n := sc.Spec.Replication.Network
+	if n == nil || n.MultusNetwork == "" {
 		return nil
 	}
 	return map[string]string{
-		"k8s.v1.cni.cncf.io/networks": sc.Spec.Replication.Network.MultusNetwork,
+		"k8s.v1.cni.cncf.io/networks": n.MultusNetwork,
 	}
 }
 
@@ -1610,7 +1613,10 @@ func (r *SlapdClusterReconciler) discoverRemotePeerAddresses(
 		return nil, fmt.Errorf("list remote pods (ns=%s, labels=%s): %w", remoteNS, labelSelector, err)
 	}
 
-	// Extract Multus IPs from remote pods' network-status annotations.
+	// Extract each remote pod's replication address. In multus mode this is the
+	// net1 IP from the pod's network-status annotation; in pod-routed mode (ADR-016)
+	// it is the pod's primary IP, reachable via cross-site pod-CIDR routing.
+	podRouted := sc.NetworkMode() == ldapv1alpha1.NetworkModePodRouted
 	nadName := sc.Spec.Replication.Network.MultusNetwork
 	var addresses []string
 	for i := range podList.Items {
@@ -1619,7 +1625,12 @@ func (r *SlapdClusterReconciler) discoverRemotePeerAddresses(
 		if pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
-		ip := extractMultusIP(pod, nadName)
+		var ip string
+		if podRouted {
+			ip = pod.Status.PodIP
+		} else {
+			ip = extractMultusIP(pod, nadName)
+		}
 		if ip != "" {
 			addresses = append(addresses, ip)
 		}

@@ -24,9 +24,15 @@ Everything downstream is unchanged.
 
 `spec.replication.network` gains a mode:
 
-- `mode: multus` (default when `multusNetwork` is set) — existing behavior.
-- `mode: pod-routed` — reads the primary pod IP; needs no `multusNetwork`, no NAD,
-  and no operator secondary NIC. Prerequisite: pod CIDRs routed between sites.
+- `mode: pod-routed` (**default**) — reads the primary pod IP; needs no
+  `multusNetwork`, no NAD, and no operator secondary NIC. Prerequisite: pod CIDRs
+  routed between sites.
+- `mode: multus` — a dedicated Multus secondary network; requires `multusNetwork`,
+  and is the inferred default when `multusNetwork` is set.
+
+Multus is niche at this stage, so pod-routed is the default; naming a
+`multusNetwork` (without an explicit mode) still selects multus, so existing
+Multus configs keep working unchanged.
 
 `useForInCluster` does not apply to `pod-routed`; in-cluster syncrepl stays on
 headless DNS, only cross-cluster stanzas use pod IPs.
