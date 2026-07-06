@@ -87,6 +87,28 @@ in-cluster runner Job — both were retired in favour of NodePorts.
 The script auto-discovers the LDAP base DN from the server's rootDSE — no
 domain env var needed.
 
+### Node access (NodePort reachability)
+
+The runner reaches those NodePorts at an address the script calls the *node
+access IP*, which defaults to each node's Kubernetes `InternalIP`. On dual-homed
+clusters that default can be wrong: if the `InternalIP` sits on a network with no
+north-south path to the runner (e.g. a routed replication network chosen as the
+primary node network), the reachable address is a secondary NIC that Kubernetes
+does not register and therefore cannot be auto-discovered. Supply it explicitly:
+
+```bash
+# single-site
+E2E_NODE_ACCESS_IP=<reachable-node-ip> ./tests/e2e.sh test <context>
+
+# multi-site (one entry per context)
+E2E_NODE_ACCESS_IPS="<ctx1>=<ip1> <ctx2>=<ip2>" ./tests/e2e.sh all <ctx1> <ctx2>
+```
+
+This affects only how the *runner* reaches NodePorts (and the IPs the TLS cert is
+SAN'd for). Cross-site replication peer URIs keep using the node `InternalIP`,
+since they must ride the (cross-site-routed) replication network, not the
+site-local internal one.
+
 ### Fixture
 
 `e2e.sh` deploys a single SlapdCluster in the testing namespace
@@ -104,7 +126,9 @@ loses its volumes, syncrepl restores the DIT from surviving peers).
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
-| `LDAP_ADDR` | *(set by script)* | `<node-ip>:<nodeport>` — required when invoking `go test` directly |
+| `E2E_NODE_ACCESS_IP` | *(node `InternalIP`)* | Single-site override for the address the runner uses to reach NodePorts (+ cert SAN). Set when the `InternalIP` isn't reachable from the runner. |
+| `E2E_NODE_ACCESS_IPS` | *(node `InternalIP`)* | Multi-site map, e.g. `"<ctx1>=<ip1> <ctx2>=<ip2>"`. Per-context form of `E2E_NODE_ACCESS_IP`. |
+| `LDAP_ADDR` | *(set by script)* | `<node-access-ip>:<nodeport>` — required when invoking `go test` directly |
 | `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable the warm-restart resilience test |
 | `E2E_BACKUP` | *(unset)* | Set to `1` to enable the S3 backup/restore tests. `e2e.sh test` then deploys `tests/resources/versitygw.yaml` (a lean Apache-2.0 S3 server — not minio) and runs `backup_test.go` + `restore_test.go`. The restore spec spins up a second single-replica `slapd-restore` cluster and exercises the scale-to-0 restore machine. See `docs/BACKUP.md`. |
 

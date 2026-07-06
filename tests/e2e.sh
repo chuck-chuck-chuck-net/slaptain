@@ -129,6 +129,12 @@ Environment variables (with defaults):
   PROJECT              = $PROJECT
   TEST_RESOURCES       = $TEST_RESOURCES  (example or lab)
 
+Node access (NodePort reachability + cert SAN; defaults to the k8s InternalIP):
+  E2E_NODE_ACCESS_IP   = single-site override, e.g. <reachable-node-ip>
+  E2E_NODE_ACCESS_IPS  = multi-site map, e.g. "<ctx1>=<ip1> <ctx2>=<ip2>"
+                         Use when the InternalIP isn't reachable from the runner
+                         (dual-homed nodes; the reachable NIC isn't k8s-registered).
+
 Multus replication network (ADR-007):
   MULTUS_NETWORK       = NAD reference (e.g. "infra/replication-net")
                          When set, cross-site replication uses Multus pod-to-pod.
@@ -289,7 +295,38 @@ discover_node_ips() {
             -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
         [[ -z "$ip" ]] && die "Could not discover node IP for context $ctx"
         NODE_IPS[$ctx]="$ip"
-        log "  $ctx → ${NODE_IPS[$ctx]}"
+
+        # NODE_ACCESS_IPS[ctx] is the address used to reach the node's NodePorts
+        # (from the test runner) and to SAN the TLS cert. It defaults to the k8s
+        # InternalIP but can differ: on dual-homed clusters the InternalIP may sit
+        # on a network with no north-south access to the runner (e.g. a routed
+        # replication network chosen as the primary node network); the reachable
+        # address is then a secondary NIC that k8s does not register, so it can't
+        # be auto-discovered. Supply it explicitly:
+        #   single-site:  E2E_NODE_ACCESS_IP=<reachable-node-ip>
+        #   multi-site:   E2E_NODE_ACCESS_IPS="<ctx1>=<ip1> <ctx2>=<ip2>"
+        # An override is used verbatim (not validated against the node object).
+        # NODE_IPS keeps the InternalIP because cross-site peer URIs must ride the
+        # (cross-site-routed) replication network, not the site-local internal one.
+        local access_ip="$ip"
+        if [[ -n "${E2E_NODE_ACCESS_IPS:-}" ]]; then
+            local pair
+            for pair in $E2E_NODE_ACCESS_IPS; do
+                if [[ "$pair" == "$ctx="* ]]; then
+                    access_ip="${pair#*=}"
+                fi
+            done
+        fi
+        if [[ -n "${E2E_NODE_ACCESS_IP:-}" && "${#CONTEXTS[@]}" -eq 1 ]]; then
+            access_ip="$E2E_NODE_ACCESS_IP"
+        fi
+        NODE_ACCESS_IPS[$ctx]="$access_ip"
+
+        if [[ "$access_ip" == "$ip" ]]; then
+            log "  $ctx → $ip"
+        else
+            log "  $ctx → $ip (NodePort access via $access_ip)"
+        fi
     done
 }
 
@@ -345,10 +382,17 @@ setup_foundation() {
             --dry-run=client -o yaml \
             | kctl "$ctx" apply -f -
 
-        # TLS certificate: node IP for NodePort test access. Multus IPs are NOT
-        # needed as SANs — the operator sets tls_reqcert=allow on syncrepl stanzas
-        # for IP-based providers, so CA verification suffices (ADR-007).
-        log "[$ctx] Generating TLS certificate (IP SAN: ${NODE_IPS[$ctx]})..."
+        # TLS certificate: node IPs for NodePort access. SAN both the runner-facing
+        # address (internal NIC, for the test runner's ldaps) and the InternalIP
+        # (replication net, for cross-site peers' ldaps); they coincide unless a
+        # runner override is set. Multus IPs are NOT needed as SANs — the operator
+        # sets tls_reqcert=allow on syncrepl stanzas for IP-based providers, so CA
+        # verification suffices (ADR-007).
+        local cert_ips="${NODE_IPS[$ctx]}"
+        if [[ "${NODE_ACCESS_IPS[$ctx]}" != "${NODE_IPS[$ctx]}" ]]; then
+            cert_ips="${NODE_ACCESS_IPS[$ctx]},${NODE_IPS[$ctx]}"
+        fi
+        log "[$ctx] Generating TLS certificate (IP SANs: ${cert_ips})..."
         (
             cd "$SCRIPT_DIR"
             ./gencert.sh \
@@ -357,7 +401,7 @@ setup_foundation() {
                 -t slapd \
                 -s slapd \
                 -H slapd-headless \
-                -i "${NODE_IPS[$ctx]}" \
+                -i "${cert_ips}" \
                 slapd-tls
         )
 
@@ -630,7 +674,7 @@ wait_test_resources_ready() {
 
 run_tests() {
     local ctx0="${CONTEXTS[0]}"
-    local local_ip="${NODE_IPS[$ctx0]}"
+    local local_ip="${NODE_ACCESS_IPS[$ctx0]}"
 
     log "Reading admin password from $ctx0..."
     local admin_pw
@@ -647,6 +691,9 @@ run_tests() {
     # Build the test-env block. Multi-site adds external-replication env vars
     # pointing at the second context. The Go suite gates external-replication
     # specs on E2E_EXTERNAL_REPL=1.
+    # E2E_NODE_IP is the Go suite's contract (helpers_test.go, restore_inplace_test.go)
+    # for the node address to dial per-pod NodePorts — the resolved access IP, not
+    # the E2E_NODE_ACCESS_IP override the deployer may have set above.
     local test_env=(
         "KUBECONFIG=$tmp_kubeconfig"
         "NAMESPACE_TESTING=$NAMESPACE_TESTING"
@@ -670,7 +717,7 @@ run_tests() {
 
     if [[ "$MULTISITE" -eq 1 ]]; then
         local ctx1="${CONTEXTS[1]}"
-        local remote_ip="${NODE_IPS[$ctx1]}"
+        local remote_ip="${NODE_ACCESS_IPS[$ctx1]}"
         log "Test target: local=$ctx0 ($local_ip:$NODEPORT_LDAP), remote=$ctx1 ($remote_ip:$NODEPORT_LDAP)"
         test_env+=(
             "E2E_EXTERNAL_REPL=1"
@@ -778,7 +825,8 @@ if [[ ${#CONTEXTS[@]} -ge 2 ]]; then
     MULTISITE=1
 fi
 
-declare -A NODE_IPS
+declare -A NODE_IPS          # node k8s InternalIP — used for cross-site peer URIs
+declare -A NODE_ACCESS_IPS   # address used to reach node NodePorts + cert SAN (override: E2E_NODE_ACCESS_IP[S])
 
 do_setup() {
     setup_foundation
