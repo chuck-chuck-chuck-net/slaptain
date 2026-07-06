@@ -59,6 +59,27 @@ TEST_RESOURCES="${TEST_RESOURCES:-example}"
 MULTUS_NETWORK="${MULTUS_NETWORK:-}"
 STATIC_PODADDRESSES="${STATIC_PODADDRESSES:-}"
 
+# Pod-routed cross-cluster replication (ADR-016). When POD_ROUTED=1, cross-site
+# peers are addressed by their primary pod IP (no Multus, no NAD, no operator
+# secondary NIC) — for clusters whose pod network is natively routed across sites.
+# Uses the same remote-kubeconfig discovery as Multus dynamic mode; the operator's
+# network.mode=pod-routed makes discovery read pod.status.podIP. Mutually exclusive
+# with MULTUS_NETWORK.
+POD_ROUTED="${POD_ROUTED:-}"
+if [[ -n "$POD_ROUTED" && -n "$MULTUS_NETWORK" ]]; then
+    echo "ERROR: POD_ROUTED and MULTUS_NETWORK are mutually exclusive" >&2
+    exit 1
+fi
+
+# discovery_mode: cross-site peers are discovered via the remote k8s API
+# (kubeconfig Secret) rather than a static URI. True for Multus dynamic discovery
+# and for pod-routed. Static Multus podAddresses and NodePort-URI mode are not.
+discovery_mode() {
+    [[ -n "$POD_ROUTED" ]] && return 0
+    [[ -n "$MULTUS_NETWORK" && -z "$STATIC_PODADDRESSES" ]] && return 0
+    return 1
+}
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -135,11 +156,16 @@ Node access (NodePort reachability + cert SAN; defaults to the k8s InternalIP):
                          Use when the InternalIP isn't reachable from the runner
                          (dual-homed nodes; the reachable NIC isn't k8s-registered).
 
-Multus replication network (ADR-007):
-  MULTUS_NETWORK       = NAD reference (e.g. "infra/replication-net")
-                         When set, cross-site replication uses Multus pod-to-pod.
-  STATIC_PODADDRESSES  = Set to 1 for legacy static podAddresses mode.
-                         Default (unset): dynamic discovery via remote kubeconfig.
+Cross-site replication transport (multi-site only):
+  (default)            = NodePort URIs, one per remote site.
+  POD_ROUTED           = Set to 1 for pod-routed: peers addressed by primary pod IP
+                         via remote-kubeconfig discovery (ADR-016). No Multus/NAD.
+                         Requires pod CIDRs routed between sites.
+  MULTUS_NETWORK       = NAD reference (e.g. "infra/replication-net"); cross-site
+                         over a dedicated Multus network (ADR-007). Mutually
+                         exclusive with POD_ROUTED.
+  STATIC_PODADDRESSES  = With MULTUS_NETWORK, use legacy static podAddresses instead
+                         of dynamic discovery.
 EOF
     exit 1
 }
@@ -242,8 +268,7 @@ configure_multus_external_peers_static() {
 # Uses scripts/create-remote-kubeconfig.sh to create RBAC + kubeconfig Secrets.
 setup_remote_kubeconfigs() {
     [[ "$MULTISITE" -eq 0 ]] && return
-    [[ -z "$MULTUS_NETWORK" ]] && return
-    [[ -n "$STATIC_PODADDRESSES" ]] && return
+    discovery_mode || return
 
     log "Setting up cross-site kubeconfig Secrets for dynamic discovery..."
 
@@ -465,11 +490,13 @@ setup_slapd_clusters() {
         for other in "${CONTEXTS[@]}"; do
             [[ "$other" == "$ctx" ]] && continue
 
-            if [[ -n "$MULTUS_NETWORK" && -z "$STATIC_PODADDRESSES" ]]; then
-                # Dynamic discovery: configure externalPeers with kubeconfigSecret
-                # in the initial install. Cross-trust secrets and kubeconfig secrets
-                # are already created, so the pod template gets the CA volumes right
-                # away — no second Helm upgrade needed.
+            if discovery_mode; then
+                # Dynamic discovery (Multus or pod-routed): configure externalPeers
+                # with kubeconfigSecret in the initial install. Cross-trust secrets
+                # and kubeconfig secrets are already created, so the pod template gets
+                # the CA volumes right away — no second Helm upgrade needed. The
+                # operator's network.mode decides whether discovery reads the net1 IP
+                # (multus) or the primary pod IP (pod-routed) — the peer spec is the same.
                 peer_sets+=(
                     --set "replication.externalPeers[$peer_idx].name=site-${other}"
                     --set "replication.externalPeers[$peer_idx].port=1025"
@@ -493,9 +520,11 @@ setup_slapd_clusters() {
             ((peer_idx++)) || true
         done
 
-        local multus_sets=()
-        if [[ -n "$MULTUS_NETWORK" ]]; then
-            multus_sets=(--set "replication.network.multusNetwork=$MULTUS_NETWORK")
+        local network_sets=()
+        if [[ -n "$POD_ROUTED" ]]; then
+            network_sets=(--set "replication.network.mode=pod-routed")
+        elif [[ -n "$MULTUS_NETWORK" ]]; then
+            network_sets=(--set "replication.network.multusNetwork=$MULTUS_NETWORK")
         fi
 
         hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-cluster" \
@@ -508,7 +537,7 @@ setup_slapd_clusters() {
             --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \
-            "${multus_sets[@]}"
+            "${network_sets[@]}"
         ((site_idx++)) || true
     done
 }
@@ -854,12 +883,16 @@ case "$subcommand" in
         log ""
         log "Setup complete."
         log "  Contexts: ${CONTEXTS[*]}"
-        if [[ -n "$MULTUS_NETWORK" ]]; then
+        if [[ -n "$POD_ROUTED" ]]; then
+            log "  Cross-site transport: pod-routed (primary pod IPs, discovery; ADR-016)"
+        elif [[ -n "$MULTUS_NETWORK" ]]; then
             if [[ -n "$STATIC_PODADDRESSES" ]]; then
                 log "  Replication network: $MULTUS_NETWORK (Multus, static podAddresses)"
             else
                 log "  Replication network: $MULTUS_NETWORK (Multus, dynamic discovery)"
             fi
+        elif [[ "$MULTISITE" -eq 1 ]]; then
+            log "  Cross-site transport: NodePort URIs (per-site)"
         fi
         ;;
     test)

@@ -68,11 +68,15 @@ replication:
   keepalive: ""
   # -- Syncrepl retry interval. Format: "<interval> <count>" pairs.
   retry: "10 +"
-  # -- Dedicated replication network via Multus (ADR-007).
-  # When set, slapd pods get a secondary network interface for replication traffic.
+  # -- Cross-cluster replication network. Selects how remote peers are addressed.
   # network:
+  #   mode: pod-routed          # ADR-016: peers via primary pod IP; no NAD/secondary NIC.
+  #                             # Requires pod CIDRs routed between sites.
+  #   # -- or Multus (ADR-007); slapd pods get a secondary NIC for replication:
+  #   mode: multus              # (inferred when multusNetwork is set)
   #   multusNetwork: "infra/replication-net"  # NAD reference (namespace/name recommended)
   #   useForInCluster: false                  # Use Multus IPs for in-cluster syncrepl too
+  # When mode is unset it defaults to pod-routed, unless multusNetwork is set (then multus).
 
   # -- Cross-cluster external peers.
   # Each peer requires a name and either uri (single-endpoint) or podAddresses (per-pod Multus).

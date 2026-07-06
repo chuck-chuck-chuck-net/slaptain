@@ -73,7 +73,12 @@ spec:
     {{- end }}
     {{- with .Values.replication.network }}
     network:
+      {{- if .mode }}
+      mode: {{ .mode | quote }}
+      {{- end }}
+      {{- if .multusNetwork }}
       multusNetwork: {{ .multusNetwork | quote }}
+      {{- end }}
       {{- if .useForInCluster }}
       useForInCluster: {{ .useForInCluster }}
       {{- end }}

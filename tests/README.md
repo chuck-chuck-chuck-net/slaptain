@@ -198,13 +198,28 @@ The test runner runs on your workstation. It connects to siteA via `LDAP_ADDR`
 (NodePort, set by `e2e.sh`) and to siteB via `E2E_REMOTE_LDAP_ADDR`
 (also a NodePort).
 
-Three cross-site connectivity modes are supported:
+Cross-site connectivity modes:
 
 | Mode | ExternalPeer config | When to use |
 |---|---|---|
-| **Dynamic discovery** | `discovery.kubeconfigSecret` | Default with Multus. Operator queries remote k8s API over replication network |
+| **Pod-routed** (ADR-016) | `discovery.kubeconfigSecret` + `network.mode: pod-routed` | Pod network natively routed across sites. Peers via primary pod IP; no Multus/NAD |
+| **Dynamic discovery** (Multus) | `discovery.kubeconfigSecret` + `network.multusNetwork` | Dedicated Multus network. Operator queries remote k8s API for net1 IPs |
 | **Static podAddresses** | `podAddresses: [IPs]` | Multus without remote API access. Manual IP management |
 | **URI (NodePort/LB)** | `uri: ldaps://host:port` | No Multus. Single endpoint per site |
+
+**Selecting the transport in `e2e.sh`** (multi-site, i.e. ≥2 contexts):
+
+```bash
+# Pod-routed (ADR-016) — 3-site example. E2E_NODE_ACCESS_IPS gives the runner a
+# reachable node IP per site (see "Node access" above); cross-site peers are
+# discovered as primary pod IPs automatically.
+POD_ROUTED=1 \
+  E2E_NODE_ACCESS_IPS="<ctx1>=<ip1> <ctx2>=<ip2> <ctx3>=<ip3>" \
+  ./tests/e2e.sh all <ctx1> <ctx2> <ctx3>
+
+# Multus:   MULTUS_NETWORK=infra/replication-net ./tests/e2e.sh all <ctx1> <ctx2>
+# NodePort: (default, neither set)               ./tests/e2e.sh all <ctx1> <ctx2>
+```
 
 ### Prerequisites
 
