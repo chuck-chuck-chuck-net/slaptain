@@ -1,6 +1,6 @@
 # ADR-016: Direct native pod-IP routing for cross-cluster replication
 
-**Status:** Proposed
+**Status:** Accepted (impl + e2e green across three routed-pod-CIDR sites 2026-07-06)
 **Date:** 2026-07-06
 
 ## Context
@@ -56,3 +56,31 @@ multi-master must address each specific peer pod (per serverID/RID).
 - ADR-003: Operator owns all syncrepl configuration
 - ADR-007: Multus dedicated replication network (discovery machinery reused here)
 - ADR-011: Hot migration topology (serverID/RID coordination, transport-independent)
+
+## Amendment (2026-07-06): discovery depends on node-network reachability, not just pod routing
+
+First green run of the full cross-cluster suite on real cross-site infrastructure
+confirms the transport works. Debugging the initial bring-up surfaced a dependency
+worth recording explicitly:
+
+Peer **discovery** and the replication **data path** have *different* routability
+requirements. The data path is pod-to-pod (`ldaps://<remote-podIP>:1025`) and is
+what "routed pod CIDRs" in the Decision refers to. Discovery, however, reuses
+ADR-007's remote-kubeconfig machinery, which reaches the **remote Kubernetes API
+server** — published on the remote node/management network, *not* the pod network.
+So pod-routed replication needs the remote API endpoint reachable from the operator
+pod as a separate prerequisite; routed pod CIDRs alone are not sufficient.
+
+In practice both usually ride the same cross-site fabric and succeed or fail
+together. A fabric fault during bring-up blackholed transit for both networks
+simultaneously (BGP control-plane routes present and symmetric in both node
+kernels, but the site router forwarded nothing beyond itself) — presenting as the
+operator's `remote peer discovery failed: context deadline exceeded` reaching the
+remote API server, and downstream `no remote addresses available` /
+`replicationState: Unreachable`. The failure was entirely in the underlay, not in
+slaptain, Cilium's datapath, or the kubeconfig — a reminder that those operator
+statuses faithfully report an unroutable environment rather than an operator bug.
+
+Prerequisites for `mode: pod-routed`, restated:
+1. Pod CIDRs routed between sites (data path).
+2. Each remote cluster's API server reachable from the operator pod (discovery path).

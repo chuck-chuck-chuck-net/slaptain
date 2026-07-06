@@ -442,7 +442,7 @@ the original decision — the history of reasoning matters.
 - ADR-013: Defer hot SlapdDatabase add/remove; require persistent storage (rolling restart on DB add/remove accepted as UX wart on persistent storage)
 - ADR-014: S3 backup/restore (slapcat→gzip→S3 via co-located Job; bootstrapFrom restore into a fresh DB) — *Accepted (impl + e2e green on t3e 2026-06-09)*
 - ADR-015: Cluster DNS domain is resolved (CLUSTER_DOMAIN env → resolv.conf → cluster.local), never hardcoded — *Accepted 2026-07-05*
-- ADR-016: Direct native pod-IP routing as a cross-cluster replication transport (alongside Multus/NodePort; `network.mode: pod-routed`) — *Proposed*
+- ADR-016: Direct native pod-IP routing as a cross-cluster replication transport (alongside Multus/NodePort; `network.mode: pod-routed`) — *Accepted (impl + e2e green across three routed-pod-CIDR sites 2026-07-06)*
 
 ---
 
