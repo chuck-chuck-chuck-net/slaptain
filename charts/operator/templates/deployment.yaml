@@ -51,6 +51,12 @@ spec:
             # Jobs (ADR-014). The Job runs `/manager backup-upload` from this image.
             - name: OPERATOR_IMAGE
               value: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+            {{- with .Values.clusterDomain }}
+            # Override cluster DNS domain (ADR-015). Leave unset to auto-discover
+            # from the operator pod's /etc/resolv.conf; defaults to cluster.local.
+            - name: CLUSTER_DOMAIN
+              value: {{ . | quote }}
+            {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

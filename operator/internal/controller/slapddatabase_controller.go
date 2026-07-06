@@ -54,6 +54,9 @@ const (
 type SlapdDatabaseReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// ClusterDomain is the Kubernetes DNS domain used to build pod FQDNs for
+	// per-pod LDAP connections and syncrepl provider URIs. See ADR-015.
+	ClusterDomain string
 }
 
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases,verbs=get;list;watch;create;update;patch;delete
@@ -149,8 +152,8 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
-		host := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
-			podName, headlessSvc, sc.Namespace)
+		host := fmt.Sprintf("%s.%s.%s.svc.%s",
+			podName, headlessSvc, sc.Namespace, r.ClusterDomain)
 		if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false); err != nil {
 			log.Info("database reconcile skipped for pod (will retry)",
 				"pod", podName, "err", err)
@@ -165,8 +168,8 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		roHeadless := sc.Name + "-readonly-headless"
 		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
 			podName := fmt.Sprintf("%s-readonly-%d", sc.Name, i)
-			host := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
-				podName, roHeadless, sc.Namespace)
+			host := fmt.Sprintf("%s.%s.%s.svc.%s",
+				podName, roHeadless, sc.Namespace, r.ClusterDomain)
 			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true); err != nil {
 				log.Info("database reconcile skipped for read-only pod (will retry)",
 					"pod", podName, "err", err)
@@ -1075,8 +1078,8 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 
 	// Try each RW pod.
 	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
-			sc.Name, i, headlessSvc, sc.Namespace)
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s",
+			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
 		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
 
 		conn, err := ldap.DialURL("ldap://"+addr,
@@ -1151,8 +1154,8 @@ func (r *SlapdDatabaseReconciler) applySeedData(
 	log := logf.FromContext(ctx)
 
 	headlessSvc := sc.Name + "-headless"
-	host := fmt.Sprintf("%s-0.%s.%s.svc.cluster.local",
-		sc.Name, headlessSvc, sc.Namespace)
+	host := fmt.Sprintf("%s-0.%s.%s.svc.%s",
+		sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain)
 	addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
 
 	rootDN := sd.Spec.RootDN
@@ -1242,8 +1245,8 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 
 	reachedAny := false
 	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
-			sc.Name, i, headlessSvc, sc.Namespace)
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s",
+			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
 		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
 
 		conn, err := ldap.DialURL("ldap://"+addr,
@@ -1517,11 +1520,11 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 
 	// Apply to RW pods.
 	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local",
-			sc.Name, i, headlessSvc, sc.Namespace)
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s",
+			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
 
 		desired := buildDatabaseSyncRepl(
-			sc.Name, headlessSvc, sc.Namespace, sd.Spec.Suffix,
+			sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix,
 			replicas, i, replPassword,
 			tlsEnabled, ridBase,
 			retryInterval, keepalive,
@@ -1542,11 +1545,11 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	if sc.Spec.ReadReplicas > 0 {
 		roHeadless := sc.Name + "-readonly-headless"
 		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
-			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.cluster.local",
-				sc.Name, i, roHeadless, sc.Namespace)
+			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.%s",
+				sc.Name, i, roHeadless, sc.Namespace, r.ClusterDomain)
 
 			desired := buildDatabaseSyncReplRO(
-				sc.Name, headlessSvc, sc.Namespace, sd.Spec.Suffix,
+				sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix,
 				replicas, replPassword,
 				tlsEnabled, ridBase,
 				retryInterval, keepalive,
@@ -1592,7 +1595,7 @@ type resolvedExternalPeer struct {
 // When replNetIPs is non-nil and contains an IP for a peer pod, that IP is used instead of
 // the headless DNS name (Multus replication network mode, see ADR-007).
 func buildDatabaseSyncRepl(
-	clusterName, headlessSvc, namespace, suffix string,
+	clusterName, headlessSvc, namespace, clusterDomain, suffix string,
 	replicas, ordinal int32,
 	replPassword string,
 	tlsEnabled bool,
@@ -1639,7 +1642,7 @@ func buildDatabaseSyncRepl(
 		}
 		rid := fmt.Sprintf("%03d", ridBase+i+1)
 		peerPodName := fmt.Sprintf("%s-%d", clusterName, i)
-		peerHost := fmt.Sprintf("%s.%s.%s.svc.cluster.local", peerPodName, headlessSvc, namespace)
+		peerHost := fmt.Sprintf("%s.%s.%s.svc.%s", peerPodName, headlessSvc, namespace, clusterDomain)
 		peerTLSOpt := tlsOpt
 		// Use Multus replication network IP when available (ADR-007).
 		// IP-based provider URIs won't match DNS SANs in the TLS cert, so
@@ -1732,7 +1735,7 @@ func buildDatabaseSyncRepl(
 // buildDatabaseSyncReplRO computes syncrepl stanzas for a read-only replica.
 // When replNetIPs is non-nil, uses Multus IPs for RW peer addresses.
 func buildDatabaseSyncReplRO(
-	clusterName, headlessSvc, namespace, suffix string,
+	clusterName, headlessSvc, namespace, clusterDomain, suffix string,
 	rwReplicas int32,
 	replPassword string,
 	tlsEnabled bool,
@@ -1767,7 +1770,7 @@ func buildDatabaseSyncReplRO(
 	for i := int32(0); i < rwReplicas; i++ {
 		rid := fmt.Sprintf("%03d", ridBase+i+1)
 		peerPodName := fmt.Sprintf("%s-%d", clusterName, i)
-		peerHost := fmt.Sprintf("%s.%s.%s.svc.cluster.local", peerPodName, headlessSvc, namespace)
+		peerHost := fmt.Sprintf("%s.%s.%s.svc.%s", peerPodName, headlessSvc, namespace, clusterDomain)
 		peerTLSOpt := tlsOpt
 		if ip, ok := replNetIPs[peerPodName]; ok {
 			peerHost = ip
@@ -1963,8 +1966,8 @@ func (r *SlapdDatabaseReconciler) deleteFromAllPods(
 	headlessSvc := sc.Name + "-headless"
 
 	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local:%d",
-			sc.Name, i, headlessSvc, sc.Namespace, ldapContainerPort)
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s:%d",
+			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain, ldapContainerPort)
 		if err := r.deleteDatabaseFromPod(host, configPW, sd.Spec.Suffix); err != nil {
 			log.Info("failed to delete database from pod (best effort)", "ordinal", i, "err", err)
 		}

@@ -56,10 +56,11 @@ func filterExternal(stanzas []string, externalURIPrefix string) []string {
 
 func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 	const (
-		clusterName = "slapd"
-		headlessSvc = "slapd-headless"
-		namespace   = "ns"
-		suffix      = "dc=ex,dc=com"
+		clusterName   = "slapd"
+		headlessSvc   = "slapd-headless"
+		namespace     = "ns"
+		clusterDomain = "cluster.local"
+		suffix        = "dc=ex,dc=com"
 		replicas    = int32(3)
 		replPW      = "pw"
 		ridBase     = int32(0)
@@ -86,7 +87,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 
 	build := func(ordinal int32, peers []resolvedExternalPeer) []string {
 		return buildDatabaseSyncRepl(
-			clusterName, headlessSvc, namespace, suffix,
+			clusterName, headlessSvc, namespace, clusterDomain, suffix,
 			replicas, ordinal, replPW,
 			true, ridBase, retry, keepalive, deltaSync,
 			peers, nil, false,
@@ -205,7 +206,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 			PlainSyncRepl:   true,
 		}}
 		stanzas := buildDatabaseSyncRepl(
-			clusterName, headlessSvc, namespace, suffix,
+			clusterName, headlessSvc, namespace, clusterDomain, suffix,
 			replicas, 0, replPW,
 			true, ridBase, retry, keepalive, deltaSync,
 			peers, nil, true, // consumerOnly=true

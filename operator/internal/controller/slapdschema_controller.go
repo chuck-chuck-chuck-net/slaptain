@@ -48,6 +48,9 @@ const (
 type SlapdSchemaReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// ClusterDomain is the Kubernetes DNS domain used to build pod FQDNs for
+	// per-pod LDAP connections. See ADR-015.
+	ClusterDomain string
 }
 
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdschemas,verbs=get;list;watch;create;update;patch;delete
@@ -119,8 +122,8 @@ func (r *SlapdSchemaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
-		host := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
-			podName, headlessSvc, sc.Namespace)
+		host := fmt.Sprintf("%s.%s.%s.svc.%s",
+			podName, headlessSvc, sc.Namespace, r.ClusterDomain)
 		if err := r.applySchemaToPod(ctx, host, configPW, ss); err != nil {
 			log.Info("schema apply skipped for pod (will retry)",
 				"pod", podName, "err", err)
@@ -135,8 +138,8 @@ func (r *SlapdSchemaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		roHeadless := sc.Name + "-readonly-headless"
 		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
 			podName := fmt.Sprintf("%s-readonly-%d", sc.Name, i)
-			host := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
-				podName, roHeadless, sc.Namespace)
+			host := fmt.Sprintf("%s.%s.%s.svc.%s",
+				podName, roHeadless, sc.Namespace, r.ClusterDomain)
 			if err := r.applySchemaToPod(ctx, host, configPW, ss); err != nil {
 				log.Info("schema apply skipped for read-only pod (will retry)",
 					"pod", podName, "err", err)

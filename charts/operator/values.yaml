@@ -1,3 +1,9 @@
+# -- Kubernetes cluster DNS domain used to build pod FQDNs (serverID URLs,
+# syncrepl provider URIs, operator→pod connections). Leave empty to auto-discover
+# from the operator pod's /etc/resolv.conf; set explicitly for clusters with a
+# non-standard domain or when running the operator off-cluster. See ADR-015.
+clusterDomain: ""
+
 image:
   repository: ghcr.io/chuck-chuck-chuck-net/slaptain/operator
   # -- Image tag. Empty string falls back to the chart's appVersion, which is

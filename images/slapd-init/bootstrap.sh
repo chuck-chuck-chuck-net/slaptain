@@ -96,7 +96,7 @@ EOF
         echo "" >> "$TMP_CONF"
         for ((i=0; i<LDAP_REPLICAS; i++)); do
             sid=$((sid_base + i + 1))
-            url="${scheme}://${LDAP_CLUSTER_NAME}-${i}.${LDAP_CLUSTER_HEADLESS_SVC}.${LDAP_NAMESPACE}.svc.cluster.local:${port}"
+            url="${scheme}://${LDAP_CLUSTER_NAME}-${i}.${LDAP_CLUSTER_HEADLESS_SVC}.${LDAP_NAMESPACE}.svc.${LDAP_CLUSTER_DOMAIN:-cluster.local}:${port}"
             echo "serverID ${sid} ${url}" >> "$TMP_CONF"
         done
     fi

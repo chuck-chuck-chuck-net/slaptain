@@ -5,6 +5,27 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-07-05: hardcoded `cluster.local` breaks every pod FQDN on non-default-domain clusters
+
+**Symptom:** On a fresh multi-replica cluster whose Kubernetes DNS domain is *not* `cluster.local` (e.g. `k8s.example`), every slapd pod crashloops at startup:
+
+```
+read_config: no serverID / URL match found. Check slapd -h arguments.
+slapd stopped.
+```
+
+StatefulSet never reaches ready; `e2e.sh setup` times out. The hardcoded domain is long-standing — it stays invisible on `cluster.local` clusters and only surfaces on a non-default domain, so it is not a recent regression.
+
+**Root cause:** `bootstrap.sh` and 14 operator call sites built pod FQDNs with a literal `svc.cluster.local`. That is only the *default* cluster DNS domain. `bootstrap.sh` writes `olcServerID <id> ldaps://<pod>.<headless>.<ns>.svc.cluster.local:1025`; at startup slapd self-matches that URL against its listeners. The match normally succeeds off `/etc/hosts` alone (kubelet writes the pod's own FQDN there, so no DNS/readiness is needed) — but here `/etc/hosts` holds `…svc.k8s.example`, and CoreDNS is authoritative for `k8s.example` (forwards `cluster.local` upstream → NXDOMAIN). No match → exit. The operator's per-pod LDAP connections and syncrepl provider URIs had the same bug, so even past serverID nothing would have worked; TLS SANs (minted for the real domain by `gencert.sh`) wouldn't have matched a `cluster.local` name either.
+
+**Fix (ADR-015):** Resolve the domain once at operator startup — `CLUSTER_DOMAIN` env → `svc.<domain>` from `/etc/resolv.conf` → `cluster.local` — inject it into all three reconcilers, and pass `LDAP_CLUSTER_DOMAIN` to the init container. `bootstrap.sh` defaults `${LDAP_CLUSTER_DOMAIN:-cluster.local}`. Never hardcode the domain again; use `r.ClusterDomain`.
+
+**Why it hid so long:** every prior multi-replica e2e ran on a default-domain cluster (all the Multus multi-site runs), where the hardcoded value was accidentally correct. The single-cluster/no-Multus path on a non-default domain was the first to exercise the assumption. The Multus "we used plain IPs" recollection was real but tangential — that substitution only affects syncrepl provider URIs, never serverID.
+
+**Lesson:** Kubernetes clusters do not all use `cluster.local`. Any FQDN the operator emits must use the resolved cluster domain. When debugging a slapd startup crash, check `/etc/hosts` and `/etc/resolv.conf` in the pod first — the self-FQDN and search domain reveal a domain mismatch immediately, and rule out readiness/DNS-publishing theories (self-match needs neither).
+
+---
+
 ## 2026-04-16: go-ldap attribute name case sensitivity
 
 **Symptom:** `syncreplChanged: true` and `mirrorModeChanged: true` on every reconcile cycle, causing the operator to rewrite identical syncrepl stanzas every 10 seconds.

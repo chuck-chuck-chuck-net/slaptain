@@ -185,25 +185,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Resolve the cluster DNS domain once at startup; every pod FQDN slaptain
+	// builds depends on it. CLUSTER_DOMAIN env overrides auto-discovery. ADR-015.
+	clusterDomain := controller.ResolveClusterDomain()
+	setupLog.Info("resolved cluster DNS domain", "clusterDomain", clusterDomain)
+
 	if err := (&controller.SlapdClusterReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
+		ClusterDomain:   clusterDomain,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdCluster")
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdSchemaReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdSchema")
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdDatabaseReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdDatabase")
 		os.Exit(1)

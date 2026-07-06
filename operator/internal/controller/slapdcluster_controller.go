@@ -79,6 +79,10 @@ type SlapdClusterReconciler struct {
 	// OperatorImage is the operator's own image reference, used for the download
 	// container of restore Jobs (ADR-014). Wired from the OPERATOR_IMAGE env.
 	OperatorImage string
+	// ClusterDomain is the Kubernetes DNS domain (e.g. "cluster.local" or
+	// "k8s.example") used to build every pod FQDN. Resolved once at startup
+	// via ResolveClusterDomain and injected from main. See ADR-015.
+	ClusterDomain string
 }
 
 // imageRef builds the "repository:tag" image reference for a data-plane image,
@@ -862,6 +866,9 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			corev1.EnvVar{Name: "LDAP_CLUSTER_NAME", Value: sc.Name},
 			corev1.EnvVar{Name: "LDAP_CLUSTER_HEADLESS_SVC", Value: sc.Name + "-headless"},
 			corev1.EnvVar{Name: "LDAP_NAMESPACE", Value: sc.Namespace},
+			// serverID URLs must use the real cluster DNS domain so slapd can
+			// self-match against its /etc/hosts FQDN at startup. ADR-015.
+			corev1.EnvVar{Name: "LDAP_CLUSTER_DOMAIN", Value: r.ClusterDomain},
 		)
 	}
 
@@ -1100,7 +1107,7 @@ func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
 	var queryErrors []string
 
 	for i := int32(0); i < sc.Spec.Replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.cluster.local", sc.Name, i, headlessSvc, sc.Namespace)
+		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s", sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
 		for _, db := range dbInfos {
 			csns, err := queryContextCSN(host, port, tlsEnabled, db.suffix, db.bindDN, db.bindPW)
 			if err != nil {
