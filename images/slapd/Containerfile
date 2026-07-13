@@ -44,7 +44,10 @@ RUN set -e; arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
         [ "$lib" != "$real" ] && cp -P "$lib" /staging/usr/lib/$arch/ 2>/dev/null || true; \
     done; \
     # SASL plugin directory (loaded at runtime, not via ldd)
-    cp -r /usr/lib/$arch/sasl2 /staging/usr/lib/$arch/ 2>/dev/null || true
+    cp -r /usr/lib/$arch/sasl2 /staging/usr/lib/$arch/ 2>/dev/null || true; \
+    # libgcc_s.so.1 is dlopen'd lazily by glibc for pthread_exit stack
+    # unwinding — it never appears in ldd output, so copy it explicitly.
+    cp -a /usr/lib/$arch/libgcc_s.so.1 /staging/usr/lib/$arch/
 
 # Minimal /etc/passwd and /etc/group — distroless/base only ships root+nobody
 RUN printf \
