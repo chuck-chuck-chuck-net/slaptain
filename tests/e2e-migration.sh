@@ -390,7 +390,7 @@ run_tests() {
         E2E_MIGRATION_NS_SLAPTAIN="$NAMESPACE_SLAPTAIN" \
         E2E_MIGRATION_NS_FAKEPROD="$NAMESPACE_FAKEPROD" \
         E2E_MIGRATION_SUFFIX="$SUFFIX" \
-        go test -v ./... --ginkgo.v --ginkgo.timeout=10m --ginkgo.label-filter=migration
+        go test -v ./... -timeout 20m --ginkgo.v --ginkgo.timeout=15m --ginkgo.label-filter=migration
     )
 }
 

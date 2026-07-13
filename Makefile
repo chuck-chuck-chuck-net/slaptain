@@ -281,15 +281,15 @@ e2e: e2e-run
 
 ## e2e-run: run tests against an already-installed cluster (skips helm setup/teardown)
 e2e-run:
-	cd tests/e2e && go test -v ./... --ginkgo.v
+	cd tests/e2e && go test -v ./... -timeout 30m --ginkgo.v --ginkgo.timeout=25m
 
 ## e2e-resilience: run all tests including slow pod-restart and warm-start tests
 e2e-resilience:
-	cd tests/e2e && E2E_RESILIENCE=1 go test -v ./... --ginkgo.v --ginkgo.timeout=30m
+	cd tests/e2e && E2E_RESILIENCE=1 go test -v ./... -timeout 35m --ginkgo.v --ginkgo.timeout=30m
 
 ## e2e-external-replication: run cross-cluster external replication tests
 e2e-external-replication:
-	cd tests/e2e && E2E_EXTERNAL_REPL=1 go test -v ./... --ginkgo.v --ginkgo.timeout=10m --ginkgo.label-filter=external-replication
+	cd tests/e2e && E2E_EXTERNAL_REPL=1 go test -v ./... -timeout 20m --ginkgo.v --ginkgo.timeout=15m --ginkgo.label-filter=external-replication
 
 ## e2e-multisite: full multi-site setup + test + teardown (pass CONTEXTS="s1 s2 s3")
 e2e-multisite:

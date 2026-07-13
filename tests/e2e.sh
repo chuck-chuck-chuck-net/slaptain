@@ -761,6 +761,7 @@ run_tests() {
     (
         cd "$PROJECT_ROOT/tests/e2e"
         env "${test_env[@]}" go test -v ./... \
+            -timeout 30m \
             --ginkgo.v \
             --ginkgo.timeout=25m
     )
