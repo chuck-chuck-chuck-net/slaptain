@@ -526,10 +526,21 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 	allPods := append(rwPods, roPods...)
 	var csnSets []string
 	csnPodMap := make(map[string][]string)
+	// Pods that are reachable but report NO contextCSN at all. When other pods
+	// DO report one, this is not "no data yet" — it is a pod that never
+	// completed an initial sync (e.g. the provider it consumes from has no
+	// working syncprov). Treating these as skippable once green-lit a cluster
+	// where 2 of 3 RW pods had never synced ("all 1 pods report identical
+	// CSN") — see reconcile-loop-fixes.md 2026-07-15.
+	var csnMissing []string
 	// Track newest CSN timestamp per pod for lag calculation
 	podNewest := make(map[string]time.Time)
 	for _, ps := range allPods {
-		if ps.err != "" || len(ps.contextCSN) == 0 {
+		if ps.err != "" {
+			continue
+		}
+		if len(ps.contextCSN) == 0 {
+			csnMissing = append(csnMissing, ps.name)
 			continue
 		}
 		normalized := normalizeCSN(ps.contextCSN)
@@ -547,7 +558,15 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 		}
 	}
 	if len(csnSets) == 0 {
+		// Nobody reports a contextCSN: legitimate for a fresh/empty database.
 		check("csn-convergence", "warn", "no contextCSN data available")
+	} else if len(csnMissing) > 0 {
+		// Some pods report, some don't: the data exists but never reached the
+		// silent pods. Broken replication, not an empty cluster.
+		sort.Strings(csnMissing)
+		check("csn-convergence", "fail",
+			fmt.Sprintf("%d of %d pods report no contextCSN at all (never synced?): %s",
+				len(csnMissing), len(csnMissing)+len(csnSets), strings.Join(csnMissing, ", ")))
 	} else {
 		unique := uniqueStrings(csnSets)
 		if len(unique) == 1 {
