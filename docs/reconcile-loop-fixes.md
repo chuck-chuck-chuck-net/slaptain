@@ -5,6 +5,75 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-07-15: standalone → HA transition leaves pre-existing pods without modules, schema, and serverID
+
+**Symptom:** A cluster deployed standalone (replicas=1, replication off) and later
+flipped to HA (replicas=3, readReplicas=1, `replication.enabled=true` — the demo's
+Act-6 walk) never converges. `slctl inspect` shows `naming-contexts FAIL: slapd-0:
+missing cn=accesslog` while everything else looks green — pod-0 has syncrepl
+stanzas and `multiProvider: TRUE`. Operator logs show, every 10s:
+
+```
+ensure syncprov overlay at slapd-0...: add syncprov overlay:
+LDAP Result Code 21 "Invalid Attribute Syntax": objectClass: value #1 invalid per syntax
+```
+
+Consumers additionally log `syncrepl_message_to_entry: rid=101 mods check
+(objectClass: value #0 invalid per syntax)` / `do_syncrepl: rid=101 rc 21 retrying`
+for entries that use a custom schema, and pod-0's contextCSN carries sid `#000#`.
+
+**Root cause — three instances of one mechanism:** bootstrap.sh's entire config
+generation is guarded by `if [[ ! -d "$CONFIG_DIR/slapd.d/cn=config" ]]` and the
+config dir lives on a PVC — so it runs exactly once per volume lifetime. Anything
+replication-related that only that block writes is a function of the cluster's
+shape *at first boot*, and cn=config is node-local (ADR-002), so no peer supplies
+it later. Pod-0 (bootstrapped standalone) was restarted at scale-up — the init
+container ran again and skipped everything. Concretely missing on pod-0:
+
+1. **Modules** (`moduleload accesslog/syncprov` gated on replication-at-boot):
+   without them slapd doesn't know `olcSyncProvConfig`/`olcAccessLogConfig`, every
+   overlay add fails with error 21, `reconcilePodDatabase` aborts before
+   `ensureAccesslogDB` → pod-0 never becomes a provider → writes on pod-0 don't
+   replicate out, consumers can't initial-sync.
+2. **Custom schemas**: the SlapdSchema controller only watched its own CR — schema
+   reached `Applied` when the cluster had one pod, and nothing re-triggered it when
+   pods 1/2/RO appeared. Entries using the custom objectClass then failed syncrepl
+   on the consumers (rc 21).
+3. **olcServerID** (`serverID` directives gated on replicas>1 at boot): pod-0
+   stamped CSNs as sid 0, outside the ADR-011 scheme (peers believed pod-0 was
+   sid 1). Also implied: plain N→M scale-out leaves every pre-existing pod with a
+   stale N-entry list.
+
+**Fix (ADR-003 amendment):** the operator owns all replication-related cn=config
+state at runtime, per-pod: `ensureModulesLoaded` (additive, desired-minimum — live
+`ldapmodify` on `cn=module{0}`, no restart; surplus modules are never removed since
+slapd cannot unload live), `ensureServerIDs` (exact-match Replace of the full list;
+**sid-1-per-default**: every RW pod carries `serverID <base+ordinal+1> <url>` from
+birth, even standalone, so no transition ever changes a pod's own sid), and a
+`Watches(SlapdCluster)` on the SlapdSchema controller (same map-func pattern as the
+2026-04-20 SlapdDatabase fix). bootstrap.sh keeps writing all of it at fresh
+bootstrap as a fast path; values are byte-compatible so healthy clusters reconcile
+to a no-op. e2e: `tests/e2e/scaleup_test.go` (gated `E2E_SCALEUP=1`) walks the full
+transition with a custom-schema entry written pre-scale-up.
+
+**Why it was hard to spot:** the pod looks healthy from every angle that doesn't
+compare against topology-derived desired state: 1/1 Running, stanzas present
+(applied by a later step that doesn't depend on the failed one), multiProvider
+TRUE, and `slctl inspect`'s csn-convergence check passed on "all **1** pods report
+identical CSN" — the two pods with no contextCSN at all simply weren't counted.
+Every prior e2e deployed with replication enabled from the start; the demo was the
+first thing to walk the upgrade path.
+
+**Lesson:** bootstrap.sh is a one-shot seeding mechanism, not a reconciled
+artifact — any cn=config state it writes conditionally WILL go stale across a
+lifecycle transition that changes the condition. When adding replication-related
+cn=config state, add it to the operator's per-pod runtime reconcile first and to
+bootstrap.sh second (fast path only). And: controllers whose applied state depends
+on cluster topology must watch SlapdCluster, not just their own CR — this is the
+second controller caught by that (SlapdDatabase/externalPeers was 2026-04-20).
+
+---
+
 ## 2026-07-05: hardcoded `cluster.local` breaks every pod FQDN on non-default-domain clusters
 
 **Symptom:** On a fresh multi-replica cluster whose Kubernetes DNS domain is *not* `cluster.local` (e.g. `k8s.example`), every slapd pod crashloops at startup:

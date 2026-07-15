@@ -744,6 +744,14 @@ run_tests() {
         test_env+=("E2E_BACKUP=1")
     fi
 
+    # Scale-up e2e: standalone → HA transition (replicas 1→2 + replication
+    # flip) on a second, self-contained cluster. Needs no extra infrastructure.
+    # Opt-in via E2E_SCALEUP=1 in the environment.
+    if [[ "${E2E_SCALEUP:-}" == "1" ]]; then
+        log "[$ctx0] E2E_SCALEUP=1 — enabling scale-up transition specs"
+        test_env+=("E2E_SCALEUP=1")
+    fi
+
     if [[ "$MULTISITE" -eq 1 ]]; then
         local ctx1="${CONTEXTS[1]}"
         local remote_ip="${NODE_ACCESS_IPS[$ctx1]}"

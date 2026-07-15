@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
@@ -270,7 +271,6 @@ func stripOrderingPrefix(cn string) string {
 	return cn
 }
 
-
 // getConfigPassword reads the cn=config admin password from the cluster's secret.
 func (r *SlapdSchemaReconciler) getConfigPassword(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
 	secretName := sc.Name + "-config-password"
@@ -337,9 +337,43 @@ func (r *SlapdSchemaReconciler) setStatus(
 }
 
 // SetupWithManager sets up the controller with the Manager.
+//
+// Besides its own CR, the controller watches SlapdCluster: schemas are
+// per-pod state (cn=config is node-local, ADR-002), so any topology change —
+// scale-up, readReplicas, a cluster reaching Running — must re-trigger schema
+// application, or pods created after the schema reached Applied never receive
+// it and syncrepl to them fails with rc 21 on entries using the custom
+// schema. Same pattern (and same bug class) as the SlapdDatabase controller's
+// externalPeers watch — see docs/reconcile-loop-fixes.md (2026-04-20 and
+// 2026-07-15).
 func (r *SlapdSchemaReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ldapv1alpha1.SlapdSchema{}).
+		Watches(&ldapv1alpha1.SlapdCluster{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrl.Request {
+				sc, ok := obj.(*ldapv1alpha1.SlapdCluster)
+				if !ok {
+					return nil
+				}
+				// Find all SlapdSchemas that reference this cluster.
+				var ssList ldapv1alpha1.SlapdSchemaList
+				if err := r.List(ctx, &ssList, client.InNamespace(sc.Namespace)); err != nil {
+					return nil
+				}
+				var reqs []ctrl.Request
+				for _, ss := range ssList.Items {
+					if ss.Spec.ClusterRef == sc.Name {
+						reqs = append(reqs, ctrl.Request{
+							NamespacedName: client.ObjectKey{
+								Name:      ss.Name,
+								Namespace: ss.Namespace,
+							},
+						})
+					}
+				}
+				return reqs
+			},
+		)).
 		Named("slapdschema").
 		Complete(r)
 }

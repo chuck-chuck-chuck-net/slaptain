@@ -81,13 +81,17 @@ include /etc/ldap/schema/inetorgperson.schema
 include /etc/ldap/schema/nis.schema
 EOF
 
-    # ── ServerID directives (multi-master only, ADR-011) ───────────────────────
-    # When this cluster runs >1 RW replica, emit one "serverID <id> <url>" per
-    # peer pod. Slapd matches its own pod URL against this list to identify
-    # itself; this is the standard mechanism for unique CSN attribution across
-    # a multi-master mesh.
-    if [[ "$REPLICATION_ENABLED" == "true" ]] && [[ "$READONLY_REPLICA" != "true" ]] && \
-       [[ -n "${LDAP_REPLICAS:-}" ]] && [[ "$LDAP_REPLICAS" -gt 1 ]]; then
+    # ── ServerID directives (ADR-011, sid-1-per-default) ───────────────────────
+    # Emit one "serverID <id> <url>" per RW pod — unconditionally, even for a
+    # standalone single-replica cluster ("serverID 1 <url>"). Slapd matches its
+    # own pod URL against this list to identify itself; this is the standard
+    # mechanism for unique CSN attribution across a multi-master mesh. Carrying
+    # the sid from birth keeps CSN history uniform (no sid-0 epoch) and makes a
+    # later scale-up a pure list extension. This block is only the
+    # fresh-bootstrap fast path: the operator reconciles olcServerID to the
+    # live topology at runtime (ensureServerIDs), because this script never
+    # touches an existing config again.
+    if [[ "$READONLY_REPLICA" != "true" ]] && [[ -n "${LDAP_REPLICAS:-}" ]]; then
         sid_base="${LDAP_SERVER_ID_BASE:-0}"
         scheme="ldap"; port=1024
         if [[ "${LDAP_TLS_ENABLED^^}" == "TRUE" ]]; then

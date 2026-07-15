@@ -130,7 +130,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── migration_test.go       # Migration scenario (gated at registration time: E2E_MIGRATION=1)
         ├── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
         ├── backup_test.go          # SlapdBackup → S3 round-trip (gated: E2E_BACKUP=1, deploys versitygw)
-        └── restore_test.go         # bootstrapFrom restore into a fresh cluster (gated: E2E_BACKUP=1)
+        ├── restore_test.go         # bootstrapFrom restore into a fresh cluster (gated: E2E_BACKUP=1)
+        └── scaleup_test.go         # standalone → HA transition: schema/modules/serverID runtime convergence (gated: E2E_SCALEUP=1)
 ```
 
 ---

@@ -131,6 +131,7 @@ loses its volumes, syncrepl restores the DIT from surviving peers).
 | `LDAP_ADDR` | *(set by script)* | `<node-access-ip>:<nodeport>` — required when invoking `go test` directly |
 | `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable the warm-restart resilience test |
 | `E2E_BACKUP` | *(unset)* | Set to `1` to enable the S3 backup/restore tests. `e2e.sh test` then deploys `tests/resources/versitygw.yaml` (a lean Apache-2.0 S3 server — not minio) and runs `backup_test.go` + `restore_test.go`. The restore spec spins up a second single-replica `slapd-restore` cluster and exercises the scale-to-0 restore machine. See `docs/BACKUP.md`. |
+| `E2E_SCALEUP` | *(unset)* | Set to `1` to enable the standalone → HA transition test (`scaleup_test.go`). Spins up a second `slapd-scaleup` cluster (replicas=1, replication off, custom schema, seeded entry), then flips it to replicas=2 + `replication.enabled=true` and asserts runtime convergence: schema on the new pod, pod-0 becomes a provider (modules/overlays added live), replication both directions, `olcServerID` `[1]` → `[1 2]`. No extra infrastructure needed. See `docs/reconcile-loop-fixes.md` (2026-07-15) and the ADR-003 amendment. |
 
 **Readpw ACL tests** require plaintext passwords for the readpw service accounts. The suite
 reads them from the `slapd-test-passwords` Secret (`readpw-*` keys), which is provided by

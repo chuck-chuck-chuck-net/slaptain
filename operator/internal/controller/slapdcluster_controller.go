@@ -733,17 +733,16 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	//     way (provider, consumer, or both). Triggers
 	//     LDAP_REPLICATION_ENABLED=true on the init container, which loads
 	//     syncprov + accesslog modules so slapd recognizes their objectClasses
-	//     at runtime ldapadd time. Modules MUST be loaded at boot — they
-	//     can't be loaded dynamically — so the gate is broad: any cluster
-	//     with replication.enabled=true, regardless of topology specifics.
-	//     Without this, consumer-only → peer promotion would require a pod
-	//     restart to load the modules (ADR-010 3e is moot otherwise).
-	//
-	//   serverIDsNeeded — in-cluster multi-master CSN attribution. Only true
-	//     for multi-pod RW clusters (replicas > 1).
+	//     at runtime ldapadd time. Boot-time loading is only the fast path:
+	//     modules CAN be loaded into a running slapd via ldapmodify on
+	//     cn=module, and the SlapdDatabase controller does exactly that
+	//     (ensureModulesLoaded) for pods bootstrapped before replication was
+	//     enabled — see docs/reconcile-loop-fixes.md (2026-07-15). The boot
+	//     gate stays broad (any cluster with replication.enabled=true,
+	//     regardless of topology) so fresh pods don't depend on a reconcile
+	//     pass for their modules.
 	accesslogMountNeeded := sc.NeedsAccesslogVolume()
 	replicationActive := sc.Spec.Replication.Enabled
-	serverIDsNeeded := replicationActive && sc.Spec.Replicas > 1
 
 	// Pod security context. PSA "restricted" profile is the floor: even when
 	// the user supplies their own SecurityContext, we layer RunAsNonRoot and
@@ -910,11 +909,16 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		)
 	}
 
-	// ServerID coordination (ADR-011): emit per-pod serverID directives so
-	// multi-master mesh has a deterministic, conflict-free ID per pod. Needed
-	// in-cluster only (replicas > 1). External-peer ID coordination during hot
-	// migration is handled separately via ExternalPeer config.
-	if serverIDsNeeded && !readOnly {
+	// ServerID coordination (ADR-011, sid-1-per-default): emit per-pod
+	// serverID directives on EVERY RW pod, including standalone clusters
+	// ("serverID 1 <url>"). A pod's sid is identity, not capability — carrying
+	// it from birth keeps the CSN history uniform (no sid-0 epoch) and makes
+	// scale-up a pure list-extension instead of a 0→1 identity switch. The
+	// SlapdDatabase controller reconciles the same list at runtime
+	// (ensureServerIDs), so this is only the fresh-bootstrap fast path.
+	// External-peer ID coordination during hot migration is handled
+	// separately via ExternalPeer config.
+	if !readOnly {
 		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(sc.Spec.Replicas))},
 			corev1.EnvVar{Name: "LDAP_SERVER_ID_BASE", Value: strconv.Itoa(int(sc.Spec.Replication.ServerIDBase))},

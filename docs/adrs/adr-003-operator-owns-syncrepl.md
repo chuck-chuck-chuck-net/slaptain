@@ -140,3 +140,82 @@ The global replication settings (keepalive, retry, externalPeers) still come fro
 - ADR-004: Multi-resource CRD architecture — introduces `SlapdDatabase` with per-database
   replication config.
 - ADR-005: SlapdDatabase cleanup policy — syncrepl stanzas are removed on CR deletion.
+
+---
+
+## Amendment (2026-07-15): Operator owns ALL replication-related cn=config state at runtime
+
+### Context
+
+The original Decision split ownership: init container generates "global config, TLS,
+modules" plus the accesslog DB and overlays; the operator owns `olcSyncRepl` and
+`olcMirrorMode`. That boundary has eroded twice already (accesslog DB and data-DB
+overlays moved operator-side for ADR-010 3e promotion), and the standalone → HA
+transition bug class (reconcile-loop-fixes.md 2026-07-15) demonstrated why it must
+erode fully: **bootstrap.sh's config generation runs exactly once per config-volume
+lifetime** (`if [[ ! -d slapd.d/cn=config ]]`). Any replication state that only the
+init container writes is therefore a function of the cluster's shape *at first boot*,
+not of its current spec. A cluster bootstrapped standalone and later scaled up was
+left without the accesslog/syncprov modules (every overlay add failing with
+"objectClass invalid per syntax") and without `olcServerID` (stamping CSNs as sid 0,
+outside the ADR-011 scheme). cn=config is node-local (ADR-002), so no peer can
+supply the missing state.
+
+### Decision
+
+The operator (SlapdDatabase controller, which holds the per-pod cn=config
+connections) owns ALL replication-related cn=config state at runtime, reconciled
+per-pod on every pass:
+
+| State | Mechanism | Reconciliation model |
+|---|---|---|
+| Dynamic modules (`olcModuleLoad`: accesslog, syncprov) | `ensureModulesLoaded` | **Desired-minimum, additive-only** (like ADR-006 schemas): missing modules are loaded via ldapmodify on `cn=module{0}` (live, no restart); surplus modules are never removed — slapd cannot unload a live module, and forcing the config value out would create config-vs-runtime skew |
+| `olcServerID` (global, on `cn=config`) | `ensureServerIDs` | **Exact-match**: full list replaced when it differs from the topology-derived list (sid = serverIDBase + ordinal + 1, per ADR-011); grows on scale-up, shrinks on scale-down |
+| Accesslog DB + overlays (syncprov, accesslog) | `ensureAccesslogDB` / `ensure*Overlay` / `remove*` (pre-existing) | **Exact-match** per replication mode |
+| `olcSyncRepl`, `olcMultiProvider` | `applySyncreplToPod` (pre-existing) | **Exact-match** (atomic Replace) |
+
+bootstrap.sh keeps writing all of this at fresh bootstrap — but that is now
+explicitly a **fast path only**, an optimization so fresh pods don't wait a
+reconcile pass. The operator's runtime reconciliation is the source of truth; the
+two must generate identical values (the serverID URL format and module names are
+deliberately byte-compatible so a healthy fresh cluster reconciles to a no-op).
+
+**sid-1-per-default.** Every RW pod carries the full `olcServerID` list for the
+current replica count from birth — including standalone, non-replicating clusters
+(`serverID 1 <pod-url>`). Rationale: a pod's sid is *identity*, not *capability*.
+The "replication capabilities off by default" posture (no overlays, no accesslog
+journaling on standalone clusters) is about runtime cost and surface; a serverID has
+neither. Carrying it from birth keeps the CSN history uniform (no sid-0 epoch baked
+into pre-scale-up entryCSNs), turns scale-up into a pure roster extension (the
+self-sid is ordinal-keyed and never changes across any transition), and makes
+scale-down a natural list shrink.
+
+### Consequences
+
+- Standalone → HA, N → M scale-out, and scale-down transitions converge without any
+  init-container involvement or pod restart. The e2e suite exercises the full
+  transition (`tests/e2e/scaleup_test.go`, gated `E2E_SCALEUP=1`).
+- Existing clusters bootstrapped before this amendment self-heal at operator
+  upgrade: missing modules are loaded and `olcServerID` lists aligned on the next
+  reconcile. A standalone cluster's sid moves 0 → 1 at a moment when it has zero
+  consumers, which is the safest possible time for an identity change; historical
+  sid-0 entryCSNs are immutable history and replicate fine.
+- A scaled-down pod retains loaded modules (dormant, no journaling, no provider
+  surface). This capability-layer asymmetry versus a never-scaled pod is accepted
+  and intentional — it is the same additive-only posture as ADR-006 schemas.
+  Behavioral state (overlays, stanzas, accesslog DB, multiProvider) remains
+  symmetric in both directions.
+- The SlapdSchema controller watches SlapdCluster (same map-func pattern as the
+  SlapdDatabase controller's 2026-04-20 fix) so per-pod schema state follows
+  topology changes; without it, pods created after a schema reached Applied never
+  receive it and syncrepl to them fails (rc 21) on entries using custom classes.
+
+### Related (amendment)
+
+- ADR-002: cn=config is node-local — why missing per-pod state cannot replicate in.
+- ADR-006: additive-only, desired-minimum schema lifecycle — the model modules follow.
+- ADR-010 3e: promotion/demotion — first mover of accesslog state to runtime.
+- ADR-011: ServerID scheme (sid = serverIDBase + ordinal + 1) — now enforced at
+  runtime for the pod's whole life, not just at bootstrap.
+- ADR-013: persistent storage requirement — the config PVC's persistence is exactly
+  why bootstrap-time-only writes go stale.

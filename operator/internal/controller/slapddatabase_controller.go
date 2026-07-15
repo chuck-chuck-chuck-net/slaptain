@@ -471,6 +471,40 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	wantsAccesslog := wantsSyncProv && sd.DeltaSyncEnabled()
 
 	if !readOnly {
+		// Ensure the dynamic modules backing the overlays are loaded BEFORE
+		// any ensure call below. Fresh bootstraps load them via slapd.conf
+		// (bootstrap.sh), but only when replication was enabled at first-boot
+		// time — a pod bootstrapped standalone and later transitioned to
+		// replication (replicas 1→N + replication.enabled flip) still has a
+		// cn=config without them, and every overlay add then fails with
+		// "objectClass: value #N invalid per syntax" (the olcSyncProvConfig /
+		// olcAccessLogConfig classes come from the modules). slapd loads
+		// modules dynamically via cn=module ldapmodify, no restart needed.
+		// See docs/reconcile-loop-fixes.md (2026-07-15).
+		var wantModules []string
+		if wantsAccesslog {
+			wantModules = append(wantModules, "accesslog")
+		}
+		if wantsSyncProv {
+			wantModules = append(wantModules, "syncprov")
+		}
+		if len(wantModules) > 0 {
+			if err := r.ensureModulesLoaded(ctx, conn, host, wantModules); err != nil {
+				return fmt.Errorf("ensure modules at %s: %w", host, err)
+			}
+		}
+
+		// Ensure olcServerID matches the current topology. Same transition
+		// hole as the modules: bootstrap.sh emits serverID directives only at
+		// fresh bootstrap, so any topology change afterwards (scale-up,
+		// scale-down, N→M) leaves pre-existing pods with a stale list — or,
+		// for pods bootstrapped by an operator version predating
+		// sid-1-per-default, with none at all (sid 0). olcServerID is
+		// dynamic; slapd re-selects its sid immediately, no restart.
+		if err := r.ensureServerIDs(ctx, conn, host, sc); err != nil {
+			return fmt.Errorf("ensure serverIDs at %s: %w", host, err)
+		}
+
 		if !wantsAccesslog {
 			if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "accesslog"); err != nil {
 				return fmt.Errorf("remove accesslog overlay at %s: %w", host, err)
@@ -855,6 +889,201 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 	return nil
 }
 
+// moduleBaseName normalises one olcModuleLoad value to a bare module name:
+// strips the cn=config {n} ordering prefix, any directory path, and a
+// trailing .la/.so[.N] extension. "{1}accesslog", "accesslog.la" and
+// "/usr/lib/ldap/accesslog.so.2" all normalise to "accesslog".
+func moduleBaseName(v string) string {
+	if i := strings.Index(v, "}"); strings.HasPrefix(v, "{") && i > 0 {
+		v = v[i+1:]
+	}
+	if i := strings.LastIndex(v, "/"); i >= 0 {
+		v = v[i+1:]
+	}
+	if i := strings.Index(v, ".la"); i > 0 {
+		v = v[:i]
+	} else if i := strings.Index(v, ".so"); i > 0 {
+		v = v[:i]
+	}
+	return v
+}
+
+// missingModules returns the wanted modules (in order) that are not present
+// in the given olcModuleLoad values, comparing normalised base names.
+func missingModules(loaded, wanted []string) []string {
+	have := make(map[string]bool, len(loaded))
+	for _, v := range loaded {
+		have[moduleBaseName(v)] = true
+	}
+	var out []string
+	for _, w := range wanted {
+		if !have[moduleBaseName(w)] {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// ensureModulesLoaded adds any of the wanted dynamic modules missing from the
+// pod's olcModuleList entry. Runtime counterpart to bootstrap.sh's moduleload
+// lines: those only run on a FRESH bootstrap with replication enabled at that
+// moment, so a standalone→replicated transition leaves already-bootstrapped
+// pods without accesslog/syncprov — and cn=config is node-local (ADR-002), so
+// no peer can supply them. slapd supports dynamic module loading via
+// ldapmodify on cn=module{0},cn=config; no restart required.
+//
+// Idempotent: searches first, adds only what's missing, and tolerates
+// AttributeOrValueExists from a concurrent reconcile (ADR-001).
+func (r *SlapdDatabaseReconciler) ensureModulesLoaded(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host string,
+	wanted []string,
+) error {
+	log := logf.FromContext(ctx)
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcModuleList)",
+		[]string{"olcModuleLoad"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search olcModuleList: %w", err)
+	}
+
+	// bootstrap.sh always converts a slapd.conf with at least "moduleload
+	// back_mdb", so exactly one olcModuleList entry exists on every pod this
+	// operator bootstrapped. No entry at all means a foreign/hand-rolled
+	// config — refuse to guess an olcModulePath and surface it instead.
+	if len(sr.Entries) == 0 {
+		return fmt.Errorf("no olcModuleList entry under cn=config on %s", host)
+	}
+	entry := sr.Entries[0]
+
+	missing := missingModules(entry.GetAttributeValues("olcModuleLoad"), wanted)
+	if len(missing) == 0 {
+		return nil
+	}
+
+	log.Info("loading missing slapd modules", "host", host,
+		"dn", entry.DN, "modules", missing)
+	modReq := ldap.NewModifyRequest(entry.DN, nil)
+	modReq.Add("olcModuleLoad", missing)
+	if err := conn.Modify(modReq); err != nil {
+		if !ldap.IsErrorWithCode(err, ldap.LDAPResultAttributeOrValueExists) {
+			return fmt.Errorf("add olcModuleLoad %v: %w", missing, err)
+		}
+	}
+	return nil
+}
+
+// desiredServerIDs computes the olcServerID value list for a cluster:
+// one "sid url" pair per RW pod, sid = serverIDBase + ordinal + 1 (ADR-011),
+// URL = the pod's headless-service FQDN on the LDAP(S) port. Byte-identical
+// to the serverID directives bootstrap.sh emits at fresh bootstrap, so a
+// healthy fresh cluster reconciles to a no-op.
+//
+// sid-1-per-default: the list is unconditional for RW pods — a standalone,
+// non-replicating cluster carries "1 <url>" too. A pod's sid is identity,
+// not capability: stamping sid 1 from birth keeps the CSN history uniform
+// (no sid-0 epoch baked into pre-scale-up entryCSNs), turns scale-up into a
+// pure list-extension (the self-sid is ordinal-keyed and never changes), and
+// makes scale-down a natural list-shrink via Replace.
+func desiredServerIDs(sc *ldapv1alpha1.SlapdCluster, clusterDomain string) []string {
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	scheme, port := "ldap", 1024
+	if sc.Spec.LDAP.TLS.Enabled {
+		scheme, port = "ldaps", 1025
+	}
+	out := make([]string, 0, replicas)
+	for i := int32(0); i < replicas; i++ {
+		sid := sc.Spec.Replication.ServerIDBase + i + 1
+		url := fmt.Sprintf("%s://%s-%d.%s-headless.%s.svc.%s:%d",
+			scheme, sc.Name, i, sc.Name, sc.Namespace, clusterDomain, port)
+		out = append(out, fmt.Sprintf("%d %s", sid, url))
+	}
+	return out
+}
+
+// serverIDSetsEqual compares two olcServerID value lists as sets, tolerant of
+// whitespace-run differences within a value (slapd stores what it was given,
+// but be liberal in what we accept).
+func serverIDSetsEqual(a, b []string) bool {
+	norm := func(vs []string) map[string]bool {
+		m := make(map[string]bool, len(vs))
+		for _, v := range vs {
+			m[strings.Join(strings.Fields(v), " ")] = true
+		}
+		return m
+	}
+	na, nb := norm(a), norm(b)
+	if len(na) != len(nb) {
+		return false
+	}
+	for k := range na {
+		if !nb[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// ensureServerIDs aligns the pod's global olcServerID list (on cn=config)
+// with the cluster's current topology. The list is identical on every RW pod;
+// slapd self-selects its sid by matching a URL against its own listeners, so
+// no per-pod variation is needed — exactly how the bootstrap-written
+// directives work. Operator-owned at runtime per ADR-003 (amended): the
+// bootstrap copy is only the fresh-bootstrap fast path and never changes
+// afterwards, which is precisely what breaks standalone→HA transitions and
+// N→M scale-out.
+//
+// The desired list is exact-match in both directions: scale-up extends it,
+// scale-down shrinks it (Replace handles both). The self-sid is ordinal-keyed
+// (sid-1-per-default), so no transition ever changes a pod's own identity —
+// only the roster around it. Idempotent: read-compare-replace only on
+// difference.
+func (r *SlapdDatabaseReconciler) ensureServerIDs(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host string,
+	sc *ldapv1alpha1.SlapdCluster,
+) error {
+	log := logf.FromContext(ctx)
+
+	desired := desiredServerIDs(sc, r.ClusterDomain)
+	if len(desired) == 0 {
+		return nil
+	}
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		"cn=config", ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=*)", []string{"olcServerID"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("read olcServerID: %w", err)
+	}
+	if len(sr.Entries) == 0 {
+		return fmt.Errorf("cn=config not found on %s", host)
+	}
+	current := sr.Entries[0].GetAttributeValues("olcServerID")
+
+	if serverIDSetsEqual(current, desired) {
+		return nil
+	}
+
+	log.Info("aligning olcServerID list", "host", host,
+		"current", current, "desired", desired)
+	modReq := ldap.NewModifyRequest("cn=config", nil)
+	modReq.Replace("olcServerID", desired)
+	if err := conn.Modify(modReq); err != nil {
+		return fmt.Errorf("replace olcServerID: %w", err)
+	}
+	return nil
+}
+
 // ensureAccesslogDB creates the cluster-shared cn=accesslog database in
 // cn=config when missing. This is the runtime counterpart to the accesslog
 // configuration the init container used to write at first boot (ADR-010 3e) —
@@ -1207,13 +1436,13 @@ func (r *SlapdDatabaseReconciler) applySeedData(
 // one reconcile interval instead of waiting for a user to report failing
 // queries. The reason field distinguishes:
 //
-//   NotSeeded         — Status.SeedApplied=false. Bootstrap hasn't finished;
-//                       absence is expected. ConditionUnknown.
-//   RootEntryVisible  — root entry found on at least one pod. ConditionTrue.
-//   NoReachablePod    — could not bind on any pod (cluster churning, all
-//                       pods crash-looping). ConditionUnknown.
-//   DataMissing       — SeedApplied=true, bound successfully somewhere, root
-//                       entry not visible anywhere. ConditionFalse — alert.
+//	NotSeeded         — Status.SeedApplied=false. Bootstrap hasn't finished;
+//	                    absence is expected. ConditionUnknown.
+//	RootEntryVisible  — root entry found on at least one pod. ConditionTrue.
+//	NoReachablePod    — could not bind on any pod (cluster churning, all
+//	                    pods crash-looping). ConditionUnknown.
+//	DataMissing       — SeedApplied=true, bound successfully somewhere, root
+//	                    entry not visible anywhere. ConditionFalse — alert.
 func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
