@@ -14,18 +14,18 @@ import (
 )
 
 type statusJSON struct {
-	Name                  string                    `json:"name"`
-	Namespace             string                    `json:"namespace"`
-	Phase                 string                    `json:"phase"`
-	Replicas              int32                     `json:"replicas"`
-	ReadyReplicas         int32                     `json:"readyReplicas"`
-	ReadOnlyReplicas      int32                     `json:"readOnlyReplicas,omitempty"`
-	ReadOnlyReadyReplicas int32                     `json:"readOnlyReadyReplicas,omitempty"`
-	ReplicationEnabled    bool                      `json:"replicationEnabled"`
-	TLSEnabled            bool                      `json:"tlsEnabled"`
-	Age                   string                    `json:"age"`
-	ExternalPeers         []externalPeerStatusJSON  `json:"externalPeers,omitempty"`
-	Conditions            []conditionJSON           `json:"conditions,omitempty"`
+	Name                  string                   `json:"name"`
+	Namespace             string                   `json:"namespace"`
+	Phase                 string                   `json:"phase"`
+	Replicas              int32                    `json:"replicas"`
+	ReadyReplicas         int32                    `json:"readyReplicas"`
+	ReadOnlyReplicas      int32                    `json:"readOnlyReplicas,omitempty"`
+	ReadOnlyReadyReplicas int32                    `json:"readOnlyReadyReplicas,omitempty"`
+	ReplicationEnabled    bool                     `json:"replicationEnabled"`
+	TLSEnabled            bool                     `json:"tlsEnabled"`
+	Age                   string                   `json:"age"`
+	ExternalPeers         []externalPeerStatusJSON `json:"externalPeers,omitempty"`
+	Conditions            []conditionJSON          `json:"conditions,omitempty"`
 }
 
 type externalPeerStatusJSON struct {
@@ -42,11 +42,11 @@ type conditionJSON struct {
 }
 
 var statusCmd = &cobra.Command{
-	Use:   "status [name]",
-	Short: "Show SlapdCluster status",
-	Long:  "Display status overview of one or all SlapdCluster resources: phase, replicas, replication, conditions.",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runStatus,
+	Use:               "status [name]",
+	Short:             "Show SlapdCluster status",
+	Long:              "Display status overview of one or all SlapdCluster resources: phase, replicas, replication, conditions.",
+	Args:              cobra.MaximumNArgs(1),
+	RunE:              runStatus,
 	ValidArgsFunction: completeSlapdClusterNames,
 }
 

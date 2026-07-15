@@ -13,8 +13,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-
-	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
 var (
@@ -70,8 +68,9 @@ How much power you get is auto-detected from the namespace's PodSecurity level
 To get full power in a locked-down namespace, raise its PodSecurity level:
   kubectl label ns <ns> pod-security.kubernetes.io/enforce=privileged --overwrite
 
-The toolkit image is derived from the cluster's slapd image (…/slapd:<tag> →
-…/slapd-toolkit:<tag>); override with --image.
+The toolkit image is derived from the target pod's running slapd image
+(…/slapd:<tag> → …/slapd-toolkit:<tag>) — so it works even when spec.images is
+omitted and the operator defaults the image; override with --image.
 
 Examples:
   slctl debug -n slaptain-demo                          # pod-0, auto-detected power
@@ -122,7 +121,7 @@ func runDebug(cmd *cobra.Command, args []string) error {
 
 	image := debugImage
 	if image == "" {
-		image = toolkitImageFor(sc)
+		image = toolkitImageFor(pod, debugTarget)
 	}
 
 	// Detect what the namespace's PodSecurity level actually admits, then build
@@ -312,13 +311,16 @@ func mountPaths(mounts []debugVolumeMount) string {
 	return strings.Join(paths, " ")
 }
 
-// toolkitImageFor derives the slapd-toolkit image reference from the cluster's
-// slapd image: the trailing `/slapd` path segment becomes `/slapd-toolkit`,
-// keeping the registry and tag. Falls back to the canonical public image if the
-// slapd repository doesn't follow the convention.
-func toolkitImageFor(sc *ldapv1alpha1.SlapdCluster) string {
-	repo := sc.Spec.Images.Slapd.Repository
-	tag := sc.Spec.Images.Slapd.Tag
+// toolkitImageFor derives the slapd-toolkit image reference from the pod's
+// actual running slapd container image: the trailing `slapd` path segment
+// becomes `slapd-toolkit`, keeping the registry and tag. Reading the resolved
+// pod image (rather than the CR spec) is deliberate — the operator defaults
+// spec.images at runtime, so an omitted spec.images block leaves the CR empty
+// while the pod still carries the real, tagged image. Falls back to the
+// canonical public image when the pod image can't be resolved or doesn't follow
+// the naming convention.
+func toolkitImageFor(pod *corev1.Pod, containerName string) string {
+	repo, tag := splitImageRef(slapdContainerImage(pod, containerName))
 	if tag == "" {
 		tag = "latest"
 	}
@@ -331,6 +333,38 @@ func toolkitImageFor(sc *ldapv1alpha1.SlapdCluster) string {
 		repo = "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit"
 	}
 	return repo + ":" + tag
+}
+
+// slapdContainerImage returns the image of the named container (the slapd
+// container by default), falling back to the first container's image.
+func slapdContainerImage(pod *corev1.Pod, containerName string) string {
+	for _, c := range pod.Spec.Containers {
+		if c.Name == containerName {
+			return c.Image
+		}
+	}
+	if len(pod.Spec.Containers) > 0 {
+		return pod.Spec.Containers[0].Image
+	}
+	return ""
+}
+
+// splitImageRef splits an image reference into (repository, tag). A colon only
+// separates a tag when it appears after the last slash, so registry ports
+// (host:5000/path) are preserved. A digest-pinned reference (repo@sha256:...)
+// yields an empty tag — the toolkit can't share the slapd digest.
+func splitImageRef(imageRef string) (string, string) {
+	if imageRef == "" {
+		return "", ""
+	}
+	if i := strings.Index(imageRef, "@"); i >= 0 {
+		return imageRef[:i], ""
+	}
+	slash := strings.LastIndex(imageRef, "/")
+	if colon := strings.LastIndex(imageRef, ":"); colon > slash {
+		return imageRef[:colon], imageRef[colon+1:]
+	}
+	return imageRef, ""
 }
 
 func ptrI64(v int64) *int64 { return &v }

@@ -368,4 +368,3 @@ func pickNodeIP(ctx context.Context, coreClient kubernetes.Interface) (string, e
 	}
 	return "", fmt.Errorf("no node with InternalIP found")
 }
-

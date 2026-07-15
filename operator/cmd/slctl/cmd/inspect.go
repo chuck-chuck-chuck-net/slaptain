@@ -45,7 +45,7 @@ type externalPeerInfo struct {
 	ReplicasPerPeer     int32    `json:"replicasPerPeer,omitempty"`
 	Connected           *bool    `json:"connected,omitempty"` // nil = not tested (Multus/discovery)
 	LastError           string   `json:"lastError,omitempty"`
-	Multus              bool     `json:"multus,omitempty"`    // true = podAddresses or discovery peer
+	Multus              bool     `json:"multus,omitempty"` // true = podAddresses or discovery peer
 	ReplicationState    string   `json:"replicationState,omitempty"`
 	LagSeconds          string   `json:"lagSeconds,omitempty"`
 }
@@ -99,9 +99,9 @@ func (ps podState) toJSON() podJSON {
 // ── Command ───────────────────────────────────────────────────────────────────
 
 var inspectCmd = &cobra.Command{
-	Use:           "inspect [name]",
-	Short:         "Inspect and verify a SlapdCluster",
-	SilenceUsage:  true,
+	Use:          "inspect [name]",
+	Short:        "Inspect and verify a SlapdCluster",
+	SilenceUsage: true,
 	Long: `Query each pod's LDAP instance and run consistency checks.
 
 Shows per-pod detail (namingContexts, contextCSN, syncRepl, multiProvider)

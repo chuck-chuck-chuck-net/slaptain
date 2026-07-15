@@ -61,12 +61,12 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 		namespace     = "ns"
 		clusterDomain = "cluster.local"
 		suffix        = "dc=ex,dc=com"
-		replicas    = int32(3)
-		replPW      = "pw"
-		ridBase     = int32(0)
-		retry       = "10 +"
-		keepalive   = ""
-		deltaSync   = true
+		replicas      = int32(3)
+		replPW        = "pw"
+		ridBase       = int32(0)
+		retry         = "10 +"
+		keepalive     = ""
+		deltaSync     = true
 	)
 
 	// 3 remote pods, identifiable by the IP fragment.

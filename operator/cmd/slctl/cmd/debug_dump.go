@@ -25,11 +25,11 @@ import (
 )
 
 var debugDumpCmd = &cobra.Command{
-	Use:   "debug-dump <name>",
-	Short: "Collect debug artifacts for a SlapdCluster",
-	Long:  "Gather CR YAML, pod logs, LDAP state, and Kubernetes resources into a timestamped directory.",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runDebugDump,
+	Use:               "debug-dump <name>",
+	Short:             "Collect debug artifacts for a SlapdCluster",
+	Long:              "Gather CR YAML, pod logs, LDAP state, and Kubernetes resources into a timestamped directory.",
+	Args:              cobra.ExactArgs(1),
+	RunE:              runDebugDump,
 	ValidArgsFunction: completeSlapdClusterNames,
 }
 
