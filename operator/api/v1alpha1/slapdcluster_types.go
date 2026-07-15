@@ -61,8 +61,12 @@ const (
 // SlapdImageConfig defines the image repository, tag, and pull policy for one image.
 type SlapdImageConfig struct {
 	// repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
-	// +required
-	Repository string `json:"repository"`
+	// When empty, the operator derives it from its own image reference
+	// (OPERATOR_IMAGE) by swapping the trailing path segment for "slapd"/"slapd-init",
+	// so unpinned operand images live in the same registry/path as the operator.
+	// Falls back to the canonical upstream location when OPERATOR_IMAGE is unset.
+	// +optional
+	Repository string `json:"repository,omitempty"`
 	// tag is the image tag. When empty, the operator substitutes its own image
 	// tag at reconcile time — so "I want slapd/init at the version that shipped
 	// with this operator" is the implicit default. Set this explicitly only when
@@ -75,13 +79,19 @@ type SlapdImageConfig struct {
 }
 
 // SlapdImages defines the images used by the slapd cluster.
+//
+// The whole block is optional: when omitted, the operator defaults both images
+// to its own registry/path at its own tag (see SlapdImageConfig.repository and
+// SlapdImageConfig.tag). This mirrors CloudNativePG-style operator-side image
+// defaulting — the operand image tracks the operator release, and a fork/mirror
+// only needs to set the operator's own image. Set fields here to override.
 type SlapdImages struct {
 	// slapd is the main slapd runtime image.
-	// +required
-	Slapd SlapdImageConfig `json:"slapd"`
+	// +optional
+	Slapd SlapdImageConfig `json:"slapd,omitempty"`
 	// init is the slapd-init bootstrap container image.
-	// +required
-	Init SlapdImageConfig `json:"init"`
+	// +optional
+	Init SlapdImageConfig `json:"init,omitempty"`
 }
 
 // SlapdTLSConfig configures TLS for slapd.
@@ -456,9 +466,11 @@ type SlapdClusterSpec struct {
 	// +kubebuilder:default=false
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
-	// images specifies the container images to use.
-	// +required
-	Images SlapdImages `json:"images"`
+	// images specifies the container images to use. Optional: when omitted, the
+	// operator defaults both slapd and slapd-init to its own registry/path at its
+	// own tag (see SlapdImages). Set to override the repository, tag, or pull policy.
+	// +optional
+	Images SlapdImages `json:"images,omitempty"`
 	// ldap contains LDAP-specific configuration (TLS, cn=config credentials).
 	// +optional
 	LDAP SlapdLDAPConfig `json:"ldap,omitempty"`

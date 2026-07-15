@@ -181,7 +181,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 
 | Field | Type | Notes |
 |---|---|---|
-| `spec.images.{slapd,init}.{repository,tag,pullPolicy}` | `SlapdImages` | Image config for both containers |
+| `spec.images.{slapd,init}.{repository,tag,pullPolicy}` | `SlapdImages` | Image config for both containers. **Optional** — when omitted, the operator defaults each image to its own registry/path at its own tag (repository derived from `OPERATOR_IMAGE` by swapping the trailing path segment for `slapd`/`slapd-init`; tag from `OPERATOR_IMAGE_TAG`; canonical upstream fallback when unset). CloudNativePG-style operator-side defaulting, no CRD-baked default. Set fields to override |
 | `spec.ldap.cnConfigCredentials.secretName` | string | Optional: reference an existing Secret with `root-password` key for cn=config admin; suppresses auto-generation of `<name>-config-password` |
 | `spec.ldap.tls.{enabled,secretName}` | `SlapdTLSConfig` | TLS Secret must contain `tls.crt` and `tls.key`; `ca.crt` optional (public-CA certs skip it and use OpenSSL system trust) |
 | `spec.replicas` | int32 | Default 1; replication is only active when `replicas > 1` AND `replication.enabled=true` |

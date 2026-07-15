@@ -86,16 +86,70 @@ type SlapdClusterReconciler struct {
 }
 
 // imageRef builds the "repository:tag" image reference for a data-plane image,
-// falling back to the operator's running tag (then "latest") when unpinned.
-func (r *SlapdClusterReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig) string {
+// falling back to the operator's running tag (then "latest") when the tag is
+// unpinned and to the operator-derived default repository when the repository
+// is unset. defaultRepo is the repository to use when img.Repository is empty
+// (see defaultDataPlaneRepo).
+func (r *SlapdClusterReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig, defaultRepo string) string {
+	return resolveImageRef(img, defaultRepo, r.DefaultImageTag)
+}
+
+// canonicalRegistryPath is the upstream registry/path under which the slaptain
+// images are published. Used only as a last-resort fallback when the operator's
+// own image reference (OPERATOR_IMAGE) is unset (e.g. `make run` locally).
+const canonicalRegistryPath = "ghcr.io/chuck-chuck-chuck-net/slaptain"
+
+// resolveImageRef builds "repository:tag" for a data-plane image, applying the
+// repository and tag defaults. Empty repository → defaultRepo; empty tag →
+// defaultTag, then "latest".
+func resolveImageRef(img ldapv1alpha1.SlapdImageConfig, defaultRepo, defaultTag string) string {
+	repo := img.Repository
+	if repo == "" {
+		repo = defaultRepo
+	}
 	tag := img.Tag
 	if tag == "" {
-		tag = r.DefaultImageTag
+		tag = defaultTag
 	}
 	if tag == "" {
 		tag = "latest"
 	}
-	return img.Repository + ":" + tag
+	return repo + ":" + tag
+}
+
+// defaultDataPlaneRepo derives the default repository for a data-plane image
+// (component "slapd" or "slapd-init") from the operator's own image reference,
+// so unpinned operand images live in the same registry/path as the operator.
+// It swaps the trailing path segment of the operator repository (e.g.
+// ".../slaptain/operator") for the component name (".../slaptain/slapd"). Falls
+// back to the canonical upstream path when operatorImage is unset (`make run`).
+func defaultDataPlaneRepo(operatorImage, component string) string {
+	base := stripImageTag(operatorImage)
+	if base == "" {
+		return canonicalRegistryPath + "/" + component
+	}
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		return base[:i+1] + component
+	}
+	return component
+}
+
+// stripImageTag returns the repository portion of an "repository:tag" or
+// "repository@sha256:..." image reference. It only treats a colon as a tag
+// separator when it appears after the last slash, so registry ports
+// (host:5000/path) are preserved.
+func stripImageTag(imageRef string) string {
+	if imageRef == "" {
+		return ""
+	}
+	if i := strings.Index(imageRef, "@"); i >= 0 {
+		imageRef = imageRef[:i]
+	}
+	slash := strings.LastIndex(imageRef, "/")
+	if colon := strings.LastIndex(imageRef, ":"); colon > slash {
+		imageRef = imageRef[:colon]
+	}
+	return imageRef
 }
 
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdclusters,verbs=get;list;watch;create;update;patch;delete
@@ -892,7 +946,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		})
 	}
 
-	initImage := r.imageRef(sc.Spec.Images.Init)
+	initImage := r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init"))
 
 	// Init container hardening for PSA "restricted". readOnlyRootFilesystem is
 	// enabled because bootstrap.sh's $TMP_CONF=/tmp/slapd.conf write target is
@@ -960,7 +1014,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		},
 	}
 
-	mainImage := r.imageRef(sc.Spec.Images.Slapd)
+	mainImage := r.imageRef(sc.Spec.Images.Slapd, defaultDataPlaneRepo(r.OperatorImage, "slapd"))
 
 	mainContainer := corev1.Container{
 		Name:            "slapd",

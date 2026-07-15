@@ -53,16 +53,11 @@ type SlapdBackupReconciler struct {
 }
 
 // imageRef builds "repository:tag", falling back to the operator's running tag
-// (then "latest") when unpinned.
-func (r *SlapdBackupReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig) string {
-	tag := img.Tag
-	if tag == "" {
-		tag = r.DefaultImageTag
-	}
-	if tag == "" {
-		tag = "latest"
-	}
-	return img.Repository + ":" + tag
+// (then "latest") when the tag is unpinned and to the operator-derived default
+// repository (defaultRepo) when the repository is unset. Mirrors the SlapdCluster
+// controller's resolution.
+func (r *SlapdBackupReconciler) imageRef(img ldapv1alpha1.SlapdImageConfig, defaultRepo string) string {
+	return resolveImageRef(img, defaultRepo, r.DefaultImageTag)
 }
 
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdbackups,verbs=get;list;watch;create;update;patch;delete
@@ -124,7 +119,7 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: sb.Namespace}, job)
 	switch {
 	case apierrors.IsNotFound(err):
-		job = buildBackupJob(sb, sd, sc, r.imageRef(sc.Spec.Images.Init), r.OperatorImage, objectKey)
+		job = buildBackupJob(sb, sd, sc, r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")), r.OperatorImage, objectKey)
 		if err := controllerutil.SetControllerReference(sb, job, r.Scheme); err != nil {
 			return ctrl.Result{}, err
 		}

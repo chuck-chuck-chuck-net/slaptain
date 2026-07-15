@@ -86,7 +86,10 @@ spec:
                   x-kubernetes-map-type: atomic
                 type: array
               images:
-                description: images specifies the container images to use.
+                description: |-
+                  images specifies the container images to use. Optional: when omitted, the
+                  operator defaults both slapd and slapd-init to its own registry/path at its
+                  own tag (see SlapdImages). Set to override the repository, tag, or pull policy.
                 properties:
                   init:
                     description: init is the slapd-init bootstrap container image.
@@ -96,7 +99,12 @@ spec:
                         description: pullPolicy is the image pull policy.
                         type: string
                       repository:
-                        description: repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
+                        description: |-
+                          repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
+                          When empty, the operator derives it from its own image reference
+                          (OPERATOR_IMAGE) by swapping the trailing path segment for "slapd"/"slapd-init",
+                          so unpinned operand images live in the same registry/path as the operator.
+                          Falls back to the canonical upstream location when OPERATOR_IMAGE is unset.
                         type: string
                       tag:
                         description: |-
@@ -105,8 +113,6 @@ spec:
                           with this operator" is the implicit default. Set this explicitly only when
                           you need to pin slapd/init to a different version than the operator.
                         type: string
-                    required:
-                    - repository
                     type: object
                   slapd:
                     description: slapd is the main slapd runtime image.
@@ -116,7 +122,12 @@ spec:
                         description: pullPolicy is the image pull policy.
                         type: string
                       repository:
-                        description: repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
+                        description: |-
+                          repository is the image repository (e.g. "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd").
+                          When empty, the operator derives it from its own image reference
+                          (OPERATOR_IMAGE) by swapping the trailing path segment for "slapd"/"slapd-init",
+                          so unpinned operand images live in the same registry/path as the operator.
+                          Falls back to the canonical upstream location when OPERATOR_IMAGE is unset.
                         type: string
                       tag:
                         description: |-
@@ -125,12 +136,7 @@ spec:
                           with this operator" is the implicit default. Set this explicitly only when
                           you need to pin slapd/init to a different version than the operator.
                         type: string
-                    required:
-                    - repository
                     type: object
-                required:
-                - init
-                - slapd
                 type: object
               ldap:
                 description: ldap contains LDAP-specific configuration (TLS, cn=config
@@ -867,8 +873,6 @@ spec:
                   slapadd against the data PVC, hand-editing cn=config) where operator
                   reconciliation would fight your changes. Resume by setting back to false.
                 type: boolean
-            required:
-            - images
             type: object
             x-kubernetes-validations:
             - message: replication.mode=consumer-only requires at least one replication.externalPeers

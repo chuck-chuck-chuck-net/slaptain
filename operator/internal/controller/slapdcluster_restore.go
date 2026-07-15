@@ -431,7 +431,7 @@ func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1a
 			getErr := r.Get(ctx, client.ObjectKey{Name: t.jobName, Namespace: sc.Namespace}, job)
 			switch {
 			case apierrors.IsNotFound(getErr):
-				job = buildRestoreJob(sc, sd, st, key, r.imageRef(sc.Spec.Images.Init), r.OperatorImage, t)
+				job = buildRestoreJob(sc, sd, st, key, r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")), r.OperatorImage, t)
 				if err := controllerutil.SetControllerReference(sc, job, r.Scheme); err != nil {
 					return false, false, err
 				}
