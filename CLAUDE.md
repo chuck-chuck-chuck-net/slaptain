@@ -402,6 +402,36 @@ Do not fix bugs quickly or lightheartedly. A fix lands only after:
 Record the outcome: an ADR when the fix establishes a pattern future code must follow, and a
 `docs/reconcile-loop-fixes.md` entry for any reconcile/replication bug.
 
+### Test Discipline
+
+Test-first, red-first. The prior habit — authoring tests in the same pass as the
+implementation — produces tests that only mirror the code's assumptions (bugs included):
+they pass, but were never shown to catch anything.
+
+**The rule:** every test must be observed to FAIL, for the right reason, at least once
+before it counts as coverage. A test that never went red is a mirror, not a check. Author
+the check *before* the implementation and show the failing run first; then make it pass.
+This matters most under agentic coding — an agent testing its own just-written code tends to
+codify its own mistakes and report green, so the red is the only thing that proves the test
+has teeth.
+
+Applied per tier:
+
+1. **Bugs → failing repro first.** Write the reproduction as a committed test, watch it go
+   red, then fix to green. (This is Fix Discipline §1's "reproduction" promoted to a test,
+   with the red shown before the fix.)
+2. **New pure/unit-testable logic → assertion first.** Write the assertion straight from the
+   ADR/spec, see it fail, implement to green. Fast red-green lives here.
+3. **e2e-only behavior (reconcile/replication) → target assertion first.** Adjust the e2e to
+   the intended behavior, confirm it is red against current code, then implement (slow loop
+   accepted). Design corollary: push the *decision* into a thin pure function (e.g.
+   `desiredServerID`) so it is unit-TDD-able fast, leaving e2e a thin integration shell.
+
+**Not dogmatic:** behavior-preserving refactors under already-green tests need no new red —
+the existing tests are the guard. Red-first applies to new behavior and bug fixes. If a test
+will not go red for the intended reason, treat it as a broken test and say so — do not paper
+over it.
+
 ### Architecture Decision Records (ADRs)
 
 ADRs in `docs/adrs/` record significant design decisions. They are a first-class artifact —
