@@ -282,3 +282,17 @@ investigate.
   exist on the slaptain side too, per `tests/resources/example-multidb/`)
 - ADR-010: SlapdCluster replication modes (consumes this ADR's stage definitions for
   promotion/demotion semantics)
+- ADR-017: bare-integer `olcServerID` representation (changes how the
+  `serverIDBase + ordinal + 1` value defined here is written, not the value or
+  the migration contract)
+
+## Amendment (2026-07-17): serverID representation
+
+The `serverIDBase + ordinal + 1` scheme and sid-1-per-default are unchanged, but
+the *representation* moved from the URL-list form (`serverID <id> <url>`, one
+list per pod, self-matched by FQDN) to a **bare integer** (`serverID <id>`, this
+pod's own ID only). cn=config is node-local (ADR-002) and the operator assigns
+identity per-pod, so the shared-list self-match bought nothing and coupled boot
+to correct FQDN construction (the ADR-015 crash). `foreignServerIDs` is
+unaffected — it was always collision-validation only and never appeared in
+`olcServerID`. See ADR-017.

@@ -11,7 +11,6 @@ You may obtain a copy of the License at
 package controller
 
 import (
-	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,63 +34,41 @@ func scForServerIDs(name, ns string, replicas int32, replEnabled, tls bool, sidB
 	}
 }
 
-func TestDesiredServerIDs(t *testing.T) {
-	const domain = "cluster.local"
-
-	t.Run("standalone replication-off cluster carries sid 1 (sid-1-per-default)", func(t *testing.T) {
-		want := []string{"1 ldaps://slapd-0.slapd-headless.ns.svc.cluster.local:1025"}
-		got := desiredServerIDs(scForServerIDs("slapd", "ns", 1, false, true, 0), domain)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("got %v, want %v", got, want)
+func TestDesiredServerID(t *testing.T) {
+	// ADR-017: a pod's olcServerID is the bare integer serverIDBase+ordinal+1,
+	// independent of TLS, cluster name, namespace, and DNS domain — none of
+	// which appear in the value any more.
+	t.Run("standalone replication-off pod carries sid 1 (sid-1-per-default)", func(t *testing.T) {
+		got := desiredServerID(scForServerIDs("slapd", "ns", 1, false, true, 0), 0)
+		if got != "1" {
+			t.Errorf("got %q, want %q", got, "1")
 		}
 	})
 
-	t.Run("replicas unset defaults to 1", func(t *testing.T) {
-		want := []string{"1 ldaps://slapd-0.slapd-headless.ns.svc.cluster.local:1025"}
-		got := desiredServerIDs(scForServerIDs("slapd", "ns", 0, false, true, 0), domain)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("got %v, want %v", got, want)
+	t.Run("ordinal maps to base+ordinal+1", func(t *testing.T) {
+		sc := scForServerIDs("slapd", "ns", 3, true, true, 0)
+		for ordinal, want := range map[int32]string{0: "1", 1: "2", 2: "3"} {
+			if got := desiredServerID(sc, ordinal); got != want {
+				t.Errorf("ordinal %d: got %q, want %q", ordinal, got, want)
+			}
 		}
 	})
 
-	t.Run("scale-down shrinks the list (replicas 3→2 desired state)", func(t *testing.T) {
-		got := desiredServerIDs(scForServerIDs("slapd", "ns", 2, true, true, 0), domain)
-		if len(got) != 2 {
-			t.Errorf("want 2 entries after scale-down, got %v", got)
-		}
-	})
-
-	t.Run("3 replicas TLS", func(t *testing.T) {
-		want := []string{
-			"1 ldaps://slapd-0.slapd-headless.ns.svc.cluster.local:1025",
-			"2 ldaps://slapd-1.slapd-headless.ns.svc.cluster.local:1025",
-			"3 ldaps://slapd-2.slapd-headless.ns.svc.cluster.local:1025",
-		}
-		got := desiredServerIDs(scForServerIDs("slapd", "ns", 3, true, true, 0), domain)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("got %v, want %v", got, want)
-		}
-	})
-
-	t.Run("2 replicas no TLS, non-default domain", func(t *testing.T) {
-		want := []string{
-			"1 ldap://sl-0.sl-headless.ns2.svc.k8s.example:1024",
-			"2 ldap://sl-1.sl-headless.ns2.svc.k8s.example:1024",
-		}
-		got := desiredServerIDs(scForServerIDs("sl", "ns2", 2, true, false, 0), "k8s.example")
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("got %v, want %v", got, want)
+	t.Run("value is independent of TLS/name/namespace/domain", func(t *testing.T) {
+		a := desiredServerID(scForServerIDs("slapd", "ns", 2, true, true, 0), 1)
+		b := desiredServerID(scForServerIDs("sl", "ns2", 2, true, false, 0), 1)
+		if a != "2" || b != "2" {
+			t.Errorf("expected both %q, got a=%q b=%q", "2", a, b)
 		}
 	})
 
 	t.Run("serverIDBase shifts the range (ADR-011)", func(t *testing.T) {
-		got := desiredServerIDs(scForServerIDs("slapd", "ns", 2, true, true, 100), domain)
-		want := []string{
-			"101 ldaps://slapd-0.slapd-headless.ns.svc.cluster.local:1025",
-			"102 ldaps://slapd-1.slapd-headless.ns.svc.cluster.local:1025",
+		sc := scForServerIDs("slapd", "ns", 2, true, true, 100)
+		if got := desiredServerID(sc, 0); got != "101" {
+			t.Errorf("ordinal 0: got %q, want %q", got, "101")
 		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("got %v, want %v", got, want)
+		if got := desiredServerID(sc, 1); got != "102" {
+			t.Errorf("ordinal 1: got %q, want %q", got, "102")
 		}
 	})
 }

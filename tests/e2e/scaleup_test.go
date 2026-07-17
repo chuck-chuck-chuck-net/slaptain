@@ -31,7 +31,8 @@ import (
 //     when the cluster had one pod; pod-1 must still receive it, or entries
 //     using the custom objectClass fail syncrepl on the consumer (rc 21).
 //  3. ensureServerIDs — pod-0 has no olcServerID (stamps CSNs as sid 0,
-//     outside the ADR-011 scheme); both pods must converge on the full list.
+//     outside the ADR-011 scheme); each pod must converge on its own bare
+//     serverID (ADR-017: pod-N → base+N+1, no peer list).
 //
 // The assertions are behavioural where possible: an entry carrying the
 // custom objectClass written on pod-0 BEFORE the scale-up must arrive on
@@ -239,22 +240,24 @@ var _ = Describe("scale-up", Label("scaleup"), Ordered, func() {
 			return ldapExists(conn0, "uid=scaletest2,ou=People,"+scaleSuffix)
 		}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue())
 
-		By("verifying olcServerID extended to [1 2] on BOTH pods (including the pre-existing one)")
+		By("verifying each pod carries only its OWN bare serverID (ADR-017): pod-0→[1], pod-1→[2]")
 		configPW := readSecretKey(ctx, scaleCluster+"-config-password", "root-password")
 		for _, ordinal := range []int{0, 1} {
+			wantSid := ordinal + 1 // serverIDBase 0 → sid = ordinal + 1
 			Eventually(ctx, func() []int {
 				return readServerIDSids(ctx, nodeIP, scaleCluster, ordinal, configPW)
 			}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(
-				ConsistOf(1, 2),
-				"pod-%d must carry the full ADR-011 serverID list", ordinal)
+				ConsistOf(wantSid),
+				"pod-%d must carry exactly its own bare serverID %d (ADR-017), not a peer list", ordinal, wantSid)
 		}
 	})
 })
 
 // readServerIDSids binds as cn=admin,cn=config on one pod of the scale-up
 // cluster (via its per-pod NodePort service) and returns the numeric sids
-// from the global olcServerID list. Returns nil on any error so callers can
-// poll with Eventually.
+// present in olcServerID (one bare integer per pod under ADR-017; scans the
+// leading int, so it also tolerates a legacy "sid url" value). Returns nil on
+// any error so callers can poll with Eventually.
 func readServerIDSids(ctx SpecContext, nodeIP, cluster string, ordinal int, configPW string) []int {
 	svc, err := k8sClient.CoreV1().Services(namespace).Get(ctx,
 		fmt.Sprintf("%s-np-%d", cluster, ordinal), metav1.GetOptions{})

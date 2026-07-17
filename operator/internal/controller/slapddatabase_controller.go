@@ -154,7 +154,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
 		host := fmt.Sprintf("%s.%s.%s.svc.%s",
 			podName, headlessSvc, sc.Namespace, r.ClusterDomain)
-		if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false); err != nil {
+		if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false, i); err != nil {
 			log.Info("database reconcile skipped for pod (will retry)",
 				"pod", podName, "err", err)
 			failedPods = append(failedPods, podName)
@@ -170,7 +170,9 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			podName := fmt.Sprintf("%s-readonly-%d", sc.Name, i)
 			host := fmt.Sprintf("%s.%s.%s.svc.%s",
 				podName, roHeadless, sc.Namespace, r.ClusterDomain)
-			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true); err != nil {
+			// ordinal is unused for RO pods (serverID is RW-only), but the
+			// signature requires it.
+			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true, i); err != nil {
 				log.Info("database reconcile skipped for read-only pod (will retry)",
 					"pod", podName, "err", err)
 				failedPods = append(failedPods, podName)
@@ -390,6 +392,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	sd *ldapv1alpha1.SlapdDatabase,
 	sc *ldapv1alpha1.SlapdCluster,
 	readOnly bool,
+	ordinal int32,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -494,14 +497,14 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 			}
 		}
 
-		// Ensure olcServerID matches the current topology. Same transition
-		// hole as the modules: bootstrap.sh emits serverID directives only at
-		// fresh bootstrap, so any topology change afterwards (scale-up,
-		// scale-down, N→M) leaves pre-existing pods with a stale list — or,
-		// for pods bootstrapped by an operator version predating
-		// sid-1-per-default, with none at all (sid 0). olcServerID is
-		// dynamic; slapd re-selects its sid immediately, no restart.
-		if err := r.ensureServerIDs(ctx, conn, host, sc); err != nil {
+		// Ensure olcServerID matches this pod's ordinal-derived identity
+		// (ADR-017, bare integer). bootstrap.sh emits it only at fresh
+		// bootstrap, so a pod bootstrapped by an operator predating
+		// sid-1-per-default (sid 0) or carrying the pre-ADR-017 URL list needs
+		// reconciling. The desired value is ordinal-keyed and equals the live
+		// sid of any correctly-booted pod, so a Replace here never changes a
+		// running identity — only its stored representation.
+		if err := r.ensureServerIDs(ctx, conn, host, sc, ordinal); err != nil {
 			return fmt.Errorf("ensure serverIDs at %s: %w", host, err)
 		}
 
@@ -977,40 +980,33 @@ func (r *SlapdDatabaseReconciler) ensureModulesLoaded(
 	return nil
 }
 
-// desiredServerIDs computes the olcServerID value list for a cluster:
-// one "sid url" pair per RW pod, sid = serverIDBase + ordinal + 1 (ADR-011),
-// URL = the pod's headless-service FQDN on the LDAP(S) port. Byte-identical
-// to the serverID directives bootstrap.sh emits at fresh bootstrap, so a
-// healthy fresh cluster reconciles to a no-op.
+// desiredServerID computes this pod's OWN olcServerID value: the bare integer
+// serverIDBase + ordinal + 1 (ADR-011, ADR-017). cn=config is node-local
+// (ADR-002), so a pod only ever needs its own ID — the integer stamped into
+// every CSN it writes. No URL, no peer list: the bare form drops the
+// FQDN/cluster-domain self-match that made serverID a boot-time crash surface
+// (ADR-015). Byte-identical to what bootstrap.sh emits at fresh bootstrap, so
+// a healthy fresh cluster reconciles to a no-op.
 //
-// sid-1-per-default: the list is unconditional for RW pods — a standalone,
-// non-replicating cluster carries "1 <url>" too. A pod's sid is identity,
-// not capability: stamping sid 1 from birth keeps the CSN history uniform
-// (no sid-0 epoch baked into pre-scale-up entryCSNs), turns scale-up into a
-// pure list-extension (the self-sid is ordinal-keyed and never changes), and
-// makes scale-down a natural list-shrink via Replace.
-func desiredServerIDs(sc *ldapv1alpha1.SlapdCluster, clusterDomain string) []string {
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-	scheme, port := "ldap", 1024
-	if sc.Spec.LDAP.TLS.Enabled {
-		scheme, port = "ldaps", 1025
-	}
-	out := make([]string, 0, replicas)
-	for i := int32(0); i < replicas; i++ {
-		sid := sc.Spec.Replication.ServerIDBase + i + 1
-		url := fmt.Sprintf("%s://%s-%d.%s-headless.%s.svc.%s:%d",
-			scheme, sc.Name, i, sc.Name, sc.Namespace, clusterDomain, port)
-		out = append(out, fmt.Sprintf("%d %s", sid, url))
-	}
-	return out
+// sid-1-per-default: unconditional for RW pods — a standalone, non-replicating
+// cluster carries "1" too. Stamping the sid from birth keeps CSN history
+// uniform (no sid-0 epoch baked into pre-scale-up entryCSNs). The value is
+// ordinal-keyed and never changes for a given pod, so no topology transition
+// (scale-up, scale-down, N→M) ever alters a pod's own identity — only which
+// pods exist. That invariant is what lets ensureServerIDs Replace safely: for
+// any correctly-booted pod (bare OR the pre-ADR-017 URL-list form) the desired
+// bare value equals its live sid, so the Replace only rewrites the textual
+// representation, never the running identity.
+func desiredServerID(sc *ldapv1alpha1.SlapdCluster, ordinal int32) string {
+	sid := sc.Spec.Replication.ServerIDBase + ordinal + 1
+	return strconv.Itoa(int(sid))
 }
 
 // serverIDSetsEqual compares two olcServerID value lists as sets, tolerant of
 // whitespace-run differences within a value (slapd stores what it was given,
-// but be liberal in what we accept).
+// but be liberal in what we accept). Under the bare-integer scheme (ADR-017) a
+// healthy pod holds a single value; the set comparison still cleanly detects a
+// pod carrying a stale pre-ADR-017 multi-value URL list (len differs → Replace).
 func serverIDSetsEqual(a, b []string) bool {
 	norm := func(vs []string) map[string]bool {
 		m := make(map[string]bool, len(vs))
@@ -1031,32 +1027,30 @@ func serverIDSetsEqual(a, b []string) bool {
 	return true
 }
 
-// ensureServerIDs aligns the pod's global olcServerID list (on cn=config)
-// with the cluster's current topology. The list is identical on every RW pod;
-// slapd self-selects its sid by matching a URL against its own listeners, so
-// no per-pod variation is needed — exactly how the bootstrap-written
-// directives work. Operator-owned at runtime per ADR-003 (amended): the
-// bootstrap copy is only the fresh-bootstrap fast path and never changes
-// afterwards, which is precisely what breaks standalone→HA transitions and
-// N→M scale-out.
+// ensureServerIDs aligns this pod's olcServerID (on cn=config) with its
+// ordinal-derived identity: the bare integer serverIDBase + ordinal + 1
+// (ADR-017). cn=config is node-local (ADR-002), so each pod holds only its own
+// ID — no peer list, no URL self-match. Operator-owned at runtime per ADR-003
+// (amended): the bootstrap copy is only the fresh-bootstrap fast path and
+// never changes afterwards, which is precisely what breaks standalone→HA
+// transitions and N→M scale-out.
 //
-// The desired list is exact-match in both directions: scale-up extends it,
-// scale-down shrinks it (Replace handles both). The self-sid is ordinal-keyed
-// (sid-1-per-default), so no transition ever changes a pod's own identity —
-// only the roster around it. Idempotent: read-compare-replace only on
-// difference.
+// The self-sid is ordinal-keyed (sid-1-per-default), so no topology transition
+// ever changes a pod's own identity. In the healthy case desired == current
+// and this is a no-op; the one case that Replaces is a pod still carrying the
+// pre-ADR-017 multi-value URL list, whose matched sid equals the bare desired
+// value — so the Replace swaps representation, not identity. Idempotent:
+// read-compare-replace only on difference.
 func (r *SlapdDatabaseReconciler) ensureServerIDs(
 	ctx context.Context,
 	conn *ldap.Conn,
 	host string,
 	sc *ldapv1alpha1.SlapdCluster,
+	ordinal int32,
 ) error {
 	log := logf.FromContext(ctx)
 
-	desired := desiredServerIDs(sc, r.ClusterDomain)
-	if len(desired) == 0 {
-		return nil
-	}
+	desired := []string{desiredServerID(sc, ordinal)}
 
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		"cn=config", ldap.ScopeBaseObject, ldap.NeverDerefAliases,

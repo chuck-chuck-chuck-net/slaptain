@@ -93,6 +93,8 @@ StatefulSet never reaches ready; `e2e.sh setup` times out. The hardcoded domain 
 
 **Lesson:** Kubernetes clusters do not all use `cluster.local`. Any FQDN the operator emits must use the resolved cluster domain. When debugging a slapd startup crash, check `/etc/hosts` and `/etc/resolv.conf` in the pod first — the self-FQDN and search domain reveal a domain mismatch immediately, and rule out readiness/DNS-publishing theories (self-match needs neither).
 
+**Follow-up (ADR-017, 2026-07-17):** the `serverID … <url>` self-match — the *first* thing this bug crashed — no longer exists. `olcServerID` is now a bare integer derived from the pod ordinal, so serverID depends on no FQDN or domain. The domain still matters for the syncrepl provider URIs and per-pod LDAP connections, so the lesson stands for those; serverID is simply no longer one of them.
+
 ---
 
 ## 2026-04-16: go-ldap attribute name case sensitivity

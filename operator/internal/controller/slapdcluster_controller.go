@@ -909,25 +909,22 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		)
 	}
 
-	// ServerID coordination (ADR-011, sid-1-per-default): emit per-pod
-	// serverID directives on EVERY RW pod, including standalone clusters
-	// ("serverID 1 <url>"). A pod's sid is identity, not capability — carrying
-	// it from birth keeps the CSN history uniform (no sid-0 epoch) and makes
-	// scale-up a pure list-extension instead of a 0→1 identity switch. The
-	// SlapdDatabase controller reconciles the same list at runtime
-	// (ensureServerIDs), so this is only the fresh-bootstrap fast path.
-	// External-peer ID coordination during hot migration is handled
-	// separately via ExternalPeer config.
+	// ServerID coordination (ADR-011 sid-1-per-default; ADR-017 bare form):
+	// emit this pod's own serverID as a bare integer on EVERY RW pod, including
+	// standalone clusters ("serverID 1"). A pod's sid is identity, not
+	// capability — carrying it from birth keeps the CSN history uniform (no
+	// sid-0 epoch). cn=config is node-local (ADR-002), so the pod needs only
+	// its own ID; bootstrap.sh derives the ordinal from $HOSTNAME, needing just
+	// the base (no FQDN/domain — that self-match was the ADR-015 crash surface).
+	// LDAP_REPLICAS stays as the "operator-managed RW pod" gate. The
+	// SlapdDatabase controller reconciles the value at runtime (ensureServerIDs),
+	// so this is only the fresh-bootstrap fast path. External-peer ID
+	// coordination during hot migration is handled separately via ExternalPeer
+	// config.
 	if !readOnly {
 		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "LDAP_REPLICAS", Value: strconv.Itoa(int(sc.Spec.Replicas))},
 			corev1.EnvVar{Name: "LDAP_SERVER_ID_BASE", Value: strconv.Itoa(int(sc.Spec.Replication.ServerIDBase))},
-			corev1.EnvVar{Name: "LDAP_CLUSTER_NAME", Value: sc.Name},
-			corev1.EnvVar{Name: "LDAP_CLUSTER_HEADLESS_SVC", Value: sc.Name + "-headless"},
-			corev1.EnvVar{Name: "LDAP_NAMESPACE", Value: sc.Namespace},
-			// serverID URLs must use the real cluster DNS domain so slapd can
-			// self-match against its /etc/hosts FQDN at startup. ADR-015.
-			corev1.EnvVar{Name: "LDAP_CLUSTER_DOMAIN", Value: r.ClusterDomain},
 		)
 	}
 

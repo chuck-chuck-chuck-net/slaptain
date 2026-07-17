@@ -81,28 +81,29 @@ include /etc/ldap/schema/inetorgperson.schema
 include /etc/ldap/schema/nis.schema
 EOF
 
-    # ── ServerID directives (ADR-011, sid-1-per-default) ───────────────────────
-    # Emit one "serverID <id> <url>" per RW pod — unconditionally, even for a
-    # standalone single-replica cluster ("serverID 1 <url>"). Slapd matches its
-    # own pod URL against this list to identify itself; this is the standard
-    # mechanism for unique CSN attribution across a multi-master mesh. Carrying
-    # the sid from birth keeps CSN history uniform (no sid-0 epoch) and makes a
-    # later scale-up a pure list extension. This block is only the
-    # fresh-bootstrap fast path: the operator reconciles olcServerID to the
-    # live topology at runtime (ensureServerIDs), because this script never
-    # touches an existing config again.
+    # ── ServerID directive (ADR-011, sid-1-per-default; ADR-017, bare form) ────
+    # Emit this pod's OWN serverID as a bare integer — unconditionally for every
+    # RW pod, even a standalone single-replica cluster ("serverID 1"). cn=config
+    # is node-local (ADR-002), so a pod only ever needs its own ID: the integer
+    # is the identity stamped into every CSN this pod writes. sid = base +
+    # ordinal + 1; the ordinal is the last segment of the StatefulSet pod name
+    # ($HOSTNAME, e.g. "slapd-2" → 2). No URL, no peer list — the bare form
+    # sheds the FQDN/cluster-domain self-match that made serverID a boot-time
+    # crash surface (ADR-015). Carrying the sid from birth keeps CSN history
+    # uniform (no sid-0 epoch). This block is only the fresh-bootstrap fast
+    # path: the operator reconciles olcServerID to the ordinal-derived value at
+    # runtime (ensureServerIDs), because this script never touches an existing
+    # config again.
     if [[ "$READONLY_REPLICA" != "true" ]] && [[ -n "${LDAP_REPLICAS:-}" ]]; then
         sid_base="${LDAP_SERVER_ID_BASE:-0}"
-        scheme="ldap"; port=1024
-        if [[ "${LDAP_TLS_ENABLED^^}" == "TRUE" ]]; then
-            scheme="ldaps"; port=1025
+        ordinal="${HOSTNAME##*-}"
+        if ! [[ "$ordinal" =~ ^[0-9]+$ ]]; then
+            echo "FATAL: cannot derive pod ordinal from HOSTNAME='$HOSTNAME'" >&2
+            exit 1
         fi
+        sid=$((sid_base + ordinal + 1))
         echo "" >> "$TMP_CONF"
-        for ((i=0; i<LDAP_REPLICAS; i++)); do
-            sid=$((sid_base + i + 1))
-            url="${scheme}://${LDAP_CLUSTER_NAME}-${i}.${LDAP_CLUSTER_HEADLESS_SVC}.${LDAP_NAMESPACE}.svc.${LDAP_CLUSTER_DOMAIN:-cluster.local}:${port}"
-            echo "serverID ${sid} ${url}" >> "$TMP_CONF"
-        done
+        echo "serverID ${sid}" >> "$TMP_CONF"
     fi
 
     if [[ "${LDAP_TLS_ENABLED^^}" == "TRUE" ]]; then
