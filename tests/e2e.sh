@@ -12,13 +12,12 @@
 # case naturally falls out of the multi-site loop with empty peer arrays.
 #
 # Usage:
-#   ./tests/e2e.sh setup    ctx1 [ctx2 ...]
-#   ./tests/e2e.sh test     ctx1 [ctx2 ...]
-#   ./tests/e2e.sh teardown ctx1 [ctx2 ...]
-#   ./tests/e2e.sh all      ctx1 [ctx2 ...]
+#   ./tests/e2e.sh setup    [ctx1 [ctx2 ...]]
+#   ./tests/e2e.sh test     [ctx1 [ctx2 ...]]
+#   ./tests/e2e.sh teardown [ctx1 [ctx2 ...]]
+#   ./tests/e2e.sh all      [ctx1 [ctx2 ...]]
 #
-# The legacy tests/e2e-singlesite.sh and tests/e2e-multisite.sh are now
-# thin wrappers around this script — see their source.
+# With no context, the current kubectl context is used (single-site).
 #
 # Prerequisites: kubectl contexts that reach each cluster. Container images
 # must be available in a registry reachable from every cluster.
@@ -130,9 +129,10 @@ hctl() {
 
 usage() {
     cat >&2 <<EOF
-Usage: $0 <setup|test|teardown|all> ctx1 [ctx2 ...]
+Usage: $0 <setup|test|teardown|all> [ctx1 [ctx2 ...]]
 
-One context = single-site mode; two or more = multi-site mode with full
+No context = single-site mode on the current kubectl context; one context =
+single-site mode on that context; two or more = multi-site mode with full
 external-peer mesh. The script auto-detects N from the argument count.
 
 Subcommands:
@@ -845,13 +845,17 @@ teardown_all() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-[[ $# -lt 2 ]] && usage
+[[ $# -lt 1 ]] && usage
 
 subcommand="$1"; shift
 CONTEXTS=("$@")
 
+# No context given → single-site on the current kubectl context.
 if [[ ${#CONTEXTS[@]} -lt 1 ]]; then
-    die "At least 1 kubectl context required"
+    current_ctx=$(kubectl config current-context 2>/dev/null || true)
+    [[ -z "$current_ctx" ]] && die "No context given and no current kubectl context is set"
+    CONTEXTS=("$current_ctx")
+    log "No context given — using current context: $current_ctx"
 fi
 
 # MULTISITE=1 when running the cross-cluster path. Used to gate external-peer

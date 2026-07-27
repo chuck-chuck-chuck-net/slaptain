@@ -254,8 +254,9 @@ make cluster-helm-install testing-apply
 # Run e2e tests
 make e2e-run
 
-# Or: full setup/test/teardown via NodePort (single command)
-./tests/e2e-singlesite.sh all <kubectl-context>
+# Or: full setup/test/teardown via NodePort (single command; omit the
+# context to use the current kubectl context)
+./tests/e2e.sh all [kubectl-context]
 ```
 
 Full CRD type definitions: [`operator/api/v1alpha1/`](operator/api/v1alpha1/).

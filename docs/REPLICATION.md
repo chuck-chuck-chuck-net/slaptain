@@ -181,7 +181,7 @@ it transfers more data.
 
 ## Cross-cluster access via NodePort
 
-For Kubernetes-based deployments, the `e2e-multisite.sh` setup script creates a
+For Kubernetes-based deployments, the `e2e.sh` setup script creates a
 `slapd-external` NodePort service on each cluster:
 
 | Port | NodePort (default) | Target | Purpose |

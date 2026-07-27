@@ -108,9 +108,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 └── tests/
     ├── gencert.sh                  # TLS cert generation helper
     ├── values.slapd-persistent.yaml # SlapdCluster values for the PVC-backed fixture (the only supported config per ADR-013)
-    ├── e2e.sh                      # Unified e2e orchestration (N=1 → single-site; N≥2 → multi-site)
-    ├── e2e-singlesite.sh           # Backward-compat wrapper around e2e.sh
-    ├── e2e-multisite.sh            # Backward-compat wrapper around e2e.sh
+    ├── e2e.sh                      # Unified e2e orchestration (no ctx / N=1 → single-site; N≥2 → multi-site)
     ├── e2e-migration.sh            # Migration-scenario e2e (independent: slaptain + fake-prod topology)
     ├── resources/
     │   ├── example/                # Open-source test fixtures (SlapdDatabase, SlapdSchema, Secrets)

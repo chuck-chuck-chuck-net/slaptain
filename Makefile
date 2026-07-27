@@ -293,19 +293,19 @@ e2e-external-replication:
 
 ## e2e-multisite: full multi-site setup + test + teardown (pass CONTEXTS="s1 s2 s3")
 e2e-multisite:
-	./tests/e2e-multisite.sh all $(CONTEXTS)
+	./tests/e2e.sh all $(CONTEXTS)
 
 ## e2e-multisite-setup: deploy multi-site infrastructure
 e2e-multisite-setup:
-	./tests/e2e-multisite.sh setup $(CONTEXTS)
+	./tests/e2e.sh setup $(CONTEXTS)
 
 ## e2e-multisite-test: run tests against existing multi-site deployment
 e2e-multisite-test:
-	./tests/e2e-multisite.sh test $(CONTEXTS)
+	./tests/e2e.sh test $(CONTEXTS)
 
 ## e2e-multisite-teardown: remove multi-site infrastructure
 e2e-multisite-teardown:
-	./tests/e2e-multisite.sh teardown $(CONTEXTS)
+	./tests/e2e.sh teardown $(CONTEXTS)
 
 ## e2e-migration: full migration-scenario setup + test + teardown (ADR-010 3f).
 ## Stands up a "fake-prod" SlapdCluster (peer, plain syncrepl) and a slaptain
