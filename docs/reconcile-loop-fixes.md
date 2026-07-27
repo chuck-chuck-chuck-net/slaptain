@@ -5,6 +5,51 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-07-27: in-place SlapdRestore under replication undone by stale accesslog replay
+
+**Symptom:** On a replicated cluster (multi-master delta-syncrepl), an in-place
+`SlapdRestore` (or a `bootstrapFrom` into a non-empty accesslog) reports
+`Completed`, yet entries that were *deleted between the backup and the restore*
+stay deleted — the restore is silently, partially undone. Entries with no
+competing post-backup delta survive, so it looks like a partial restore. Evidence
+from a live 3-way HA cluster: the restored entry reappears, then the accesslog
+shows a *second* delete of it a few seconds after the restore completed, and the
+main DB's contextCSN is pinned at the pre-restore delete's CSN, not the backup's.
+
+**Root cause:** `restore_job.go` wiped only the main DB
+(`rm -f /data/$DATADIR/{data,lock}.mdb`) before the offline `slapadd`. Under
+replication each RW pod also has an accesslog DB (`olcDbDirectory /accesslog`, its
+own PVC), which the restore Job mounts **only** so `slapadd -F` doesn't abort at
+config-load — its `/accesslog/*.mdb` was never cleared. After `slapadd` reloads
+the entry and the cluster scales up, delta-syncrepl reads the surviving accesslog,
+finds the delete at a CSN newer than the restored contextCSN, and re-applies it
+across the mesh. The design comment "RW pods … no syncrepl refresh, so no
+ITS#9580" held for the offline load but overlooked that the *persistent accesslog
+replays through the normal syncrepl mesh once pods are back up*.
+
+**Fix:** Extend the RW-pod wipe to also drop `/accesslog/{data,lock}.mdb` whenever
+the accesslog PVC is mounted (`restore_job.go`, guarded on `t.accesslogPVC != ""`).
+Safe because the accesslog is a transient journal: slapd recreates it empty on
+start, and after a full identical reload there are no pending changes to ship.
+This mirrors the RO-pod rationale ("dropping the data and its contextCSN forces a
+clean state") and the promotion-path hazard already noted in
+`slapddatabase_controller.go` ("wipe /accesslog manually before promoting").
+
+**Why it was hard to spot:** the CR reports success, and entries with no competing
+delta survive, so the restore looks like it worked. Only a delete/modify made
+between backup and restore reverts. The single-replica in-place restore e2e never
+had an accesslog, and the replicated restore e2e reuses the source TLS cert so its
+syncrepl mesh deliberately does not converge — neither exercised the replay.
+
+**Lesson:** a restore under replication must reset *every* CSN-bearing store the
+pod owns, not just the main DB. A surviving change journal is a time bomb: it is
+inert offline and replays the instant the syncrepl mesh comes back up. Regression:
+`tests/e2e/restore_replay_test.go` (delete-between-backup-and-restore on the
+replicated primary, with a syncrepl settle window) + unit coverage in
+`restore_job_test.go`.
+
+---
+
 ## 2026-07-15: standalone → HA transition leaves pre-existing pods without modules, schema, and serverID
 
 **Symptom:** A cluster deployed standalone (replicas=1, replication off) and later

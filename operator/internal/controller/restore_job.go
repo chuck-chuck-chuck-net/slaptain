@@ -60,6 +60,17 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 	}
 	wipe := `rm -f "/data/$DATADIR/data.mdb" "/data/$DATADIR/lock.mdb"`
+	// Under replication the pod has an accesslog DB (olcDbDirectory /accesslog,
+	// its own PVC). Wipe its LMDB too: it is a transient change journal, and any
+	// pre-restore delta left behind — most damagingly a delete at a CSN newer
+	// than the restored contextCSN — is replayed by delta-syncrepl on scale-up,
+	// silently undoing the restore. slapd recreates an empty accesslog on start,
+	// and after a full identical reload there are no pending changes to ship.
+	// Mirrors the RO-pod rationale below and the promotion-path hazard noted in
+	// slapddatabase_controller.go ("wipe /accesslog manually"). See ADR-014.
+	if t.accesslogPVC != "" {
+		wipe += "\n" + `rm -f /accesslog/data.mdb /accesslog/lock.mdb`
+	}
 
 	volumes := []corev1.Volume{pvcVolume("data", t.dataPVC)}
 	var initContainers, containers []corev1.Container
