@@ -25,6 +25,14 @@ type ldapTargetFlags struct {
 	password  string // only honored when --as is a literal DN
 	pod       string // ordinal "0" or full pod name; forces port-forward
 	useTLS    bool   // ldaps:// instead of ldap://
+
+	// Endpoint overrides (labs / dual-homed clusters).
+	forcePortForward bool   // --port-forward: bypass Service discovery, forward to pod-0
+	nodeIP           string // --node-ip: override the node address for a NodePort endpoint
+
+	// Transparency.
+	verbose        bool // --verbose: print the reproducible kubectl/ldap* commands
+	redactPassword bool // --redact-password: mask the password in --verbose output
 }
 
 // ldapTarget is the resolved connection + bind information.
@@ -37,6 +45,12 @@ type ldapTarget struct {
 	// "never" when we cannot present a hostname that matches the cert (e.g.
 	// port-forwarded to localhost while using ldaps).
 	ReqCert string
+
+	// Port-forward provenance, for --verbose. PortForwardPod is non-empty only
+	// when the endpoint is reached through an active `kubectl port-forward`.
+	PortForwardPod string
+	LocalPort      int
+	RemotePort     int
 }
 
 func (t *ldapTarget) Close() {
@@ -71,18 +85,33 @@ func resolveLDAPTarget(
 		return nil, err
 	}
 
-	uri, cleanup, reqCert, err := resolveEndpoint(ctx, coreClient, restCfg, ns, sc, f)
+	ep, err := resolveEndpoint(ctx, coreClient, restCfg, ns, sc, f)
 	if err != nil {
 		return nil, err
 	}
 
 	return &ldapTarget{
-		URI:      uri,
-		BindDN:   bindDN,
-		Password: password,
-		cleanup:  cleanup,
-		ReqCert:  reqCert,
+		URI:            ep.uri,
+		BindDN:         bindDN,
+		Password:       password,
+		cleanup:        ep.cleanup,
+		ReqCert:        ep.reqCert,
+		PortForwardPod: ep.pfPod,
+		LocalPort:      ep.localPort,
+		RemotePort:     ep.remotePort,
 	}, nil
+}
+
+// resolvedEndpoint is the outcome of endpoint resolution: the URI to dial, the
+// TLS reqcert mode, an optional port-forward teardown, and (when a port-forward
+// is active) enough provenance to reproduce it in --verbose output.
+type resolvedEndpoint struct {
+	uri        string
+	reqCert    string
+	cleanup    func()
+	pfPod      string // non-empty when reached via port-forward
+	localPort  int
+	remotePort int
 }
 
 // ── Cluster / Database selection ──────────────────────────────────────────────
@@ -212,16 +241,22 @@ func dbCredentialsSecret(db *ldapv1alpha1.SlapdDatabase) string {
 
 // ── Endpoint resolution ───────────────────────────────────────────────────────
 
-// resolveEndpoint returns the LDAP URI to use. Strategy:
+// resolveEndpoint returns the LDAP endpoint to use. Strategy:
 //   - --pod set                 → port-forward to that pod
+//   - --port-forward            → port-forward to pod-0 (bypasses Services)
 //   - any LoadBalancer Service  → external IP + service port
-//   - any NodePort Service      → node InternalIP + nodePort
+//   - any NodePort Service      → node IP (--node-ip or InternalIP) + nodePort
 //   - otherwise                 → port-forward to pod-0
 //
 // The Service search isn't restricted to the operator-owned `<name>` Service —
 // we look at every Service in the namespace whose selector targets this
 // cluster's RW pods. That picks up hand-applied NodePort/LB Services like
 // `<name>-external` that users commonly add for off-cluster access.
+//
+// --port-forward and --node-ip are the escape hatches for dual-homed clusters
+// where the auto-picked NodePort node IP (the k8s InternalIP) isn't reachable
+// from the runner — e.g. the InternalIP sits on a routed replication network
+// with no north-south access. Force a port-forward, or name the reachable IP.
 func resolveEndpoint(
 	ctx context.Context,
 	coreClient kubernetes.Interface,
@@ -229,7 +264,7 @@ func resolveEndpoint(
 	ns string,
 	sc *ldapv1alpha1.SlapdCluster,
 	f *ldapTargetFlags,
-) (uri string, cleanup func(), reqCert string, err error) {
+) (*resolvedEndpoint, error) {
 	scheme := "ldap"
 	remotePort := 1024
 	portName := "ldap"
@@ -247,19 +282,31 @@ func resolveEndpoint(
 		return ""
 	}
 
-	if f.pod != "" {
-		podName := resolvePodName(sc.Name, f.pod)
+	// Port-forward: an explicit --pod, or --port-forward (defaults to pod-0).
+	if f.pod != "" || f.forcePortForward {
+		podSpec := f.pod
+		if podSpec == "" {
+			podSpec = "0"
+		}
+		podName := resolvePodName(sc.Name, podSpec)
 		localPort, c, err := k8scli.PortForward(ctx, coreClient, restCfg, ns, podName, remotePort)
 		if err != nil {
-			return "", nil, "", fmt.Errorf("port-forward to pod %s: %w", podName, err)
+			return nil, fmt.Errorf("port-forward to pod %s: %w", podName, err)
 		}
-		return fmt.Sprintf("%s://localhost:%d", scheme, localPort), c, reqCertIfTLS(), nil
+		return &resolvedEndpoint{
+			uri:        fmt.Sprintf("%s://localhost:%d", scheme, localPort),
+			reqCert:    reqCertIfTLS(),
+			cleanup:    c,
+			pfPod:      podName,
+			localPort:  localPort,
+			remotePort: remotePort,
+		}, nil
 	}
 
 	// Find candidate Services targeting RW pods (instance label = cluster name).
 	svcList, err := coreClient.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return "", nil, "", fmt.Errorf("list Services in %s: %w", ns, err)
+		return nil, fmt.Errorf("list Services in %s: %w", ns, err)
 	}
 
 	var lbSvc, npSvc *corev1.Service
@@ -287,29 +334,36 @@ func resolveEndpoint(
 		addr := lbIngressAddr(lbSvc)
 		port := servicePortByName(lbSvc, portName)
 		if port == 0 {
-			return "", nil, "", fmt.Errorf("LoadBalancer Service %s has no port named %q", lbSvc.Name, portName)
+			return nil, fmt.Errorf("LoadBalancer Service %s has no port named %q", lbSvc.Name, portName)
 		}
-		return fmt.Sprintf("%s://%s:%d", scheme, addr, port), nil, reqCertIfTLS(), nil
+		return &resolvedEndpoint{uri: fmt.Sprintf("%s://%s:%d", scheme, addr, port), reqCert: reqCertIfTLS()}, nil
 	}
 	if npSvc != nil {
 		nodePort := nodePortByName(npSvc, portName)
 		if nodePort == 0 {
-			return "", nil, "", fmt.Errorf("NodePort Service %s has no NodePort named %q", npSvc.Name, portName)
+			return nil, fmt.Errorf("NodePort Service %s has no NodePort named %q", npSvc.Name, portName)
 		}
-		nodeIP, err := pickNodeIP(ctx, coreClient)
+		nodeIP, err := pickNodeIP(ctx, coreClient, f.nodeIP)
 		if err != nil {
-			return "", nil, "", err
+			return nil, err
 		}
-		return fmt.Sprintf("%s://%s:%d", scheme, nodeIP, nodePort), nil, reqCertIfTLS(), nil
+		return &resolvedEndpoint{uri: fmt.Sprintf("%s://%s:%d", scheme, nodeIP, nodePort), reqCert: reqCertIfTLS()}, nil
 	}
 
 	// Fallback: port-forward to pod-0.
 	podName := sc.Name + "-0"
 	localPort, c, err := k8scli.PortForward(ctx, coreClient, restCfg, ns, podName, remotePort)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("port-forward fallback to %s: %w", podName, err)
+		return nil, fmt.Errorf("port-forward fallback to %s: %w", podName, err)
 	}
-	return fmt.Sprintf("%s://localhost:%d", scheme, localPort), c, reqCertIfTLS(), nil
+	return &resolvedEndpoint{
+		uri:        fmt.Sprintf("%s://localhost:%d", scheme, localPort),
+		reqCert:    reqCertIfTLS(),
+		cleanup:    c,
+		pfPod:      podName,
+		localPort:  localPort,
+		remotePort: remotePort,
+	}, nil
 }
 
 func lbIngressAddr(svc *corev1.Service) string {
@@ -354,17 +408,33 @@ func resolvePodName(cluster, spec string) string {
 	return cluster + "-" + spec
 }
 
-func pickNodeIP(ctx context.Context, coreClient kubernetes.Interface) (string, error) {
+func pickNodeIP(ctx context.Context, coreClient kubernetes.Interface, override string) (string, error) {
+	if override != "" {
+		return override, nil // don't even list nodes; the caller knows better
+	}
 	nodes, err := coreClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list nodes: %w", err)
 	}
-	for _, n := range nodes.Items {
+	return chooseNodeIP(override, nodes.Items)
+}
+
+// chooseNodeIP resolves the address used to reach a NodePort. An explicit
+// override (--node-ip) always wins — the auto-picked InternalIP is wrong on
+// dual-homed clusters where the InternalIP is on a network the runner can't
+// reach (e.g. a routed replication network chosen as the primary node IP), and
+// the reachable NIC isn't k8s-registered so it can't be discovered. Otherwise
+// fall back to the first node's InternalIP.
+func chooseNodeIP(override string, nodes []corev1.Node) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	for _, n := range nodes {
 		for _, a := range n.Status.Addresses {
 			if a.Type == corev1.NodeInternalIP {
 				return a.Address, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("no node with InternalIP found")
+	return "", fmt.Errorf("no node with InternalIP found; supply a reachable address with --node-ip")
 }
