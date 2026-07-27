@@ -55,7 +55,7 @@ OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:$(GIT_TAG)
 
 # Helm chart OCI registry. Charts land under <registry>/<project>/charts/<name>.
 # Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/slaptain/charts/slaptain-operator --version X.Y.Z
-CHART_REGISTRY ?= oci://$(REGISTRY)/$(PROJECT)/charts
+CHART_REGISTRY ?= oci://$(REGISTRY)/charts
 CHART_OUT      := .charts
 
 # Chart version derived from GIT_TAG; must be SemVer-2 for Helm.

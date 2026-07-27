@@ -12,7 +12,7 @@ Slaptain manages the full lifecycle of multi-master OpenLDAP clusters on Kuberne
 ### 1. Install the Operator
 
 ```bash
-helm install slaptain-operator ./charts/operator \
+helm upgrade --install slaptain-operator oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain-operator \
   -n slaptain-system --create-namespace
 ```
 
