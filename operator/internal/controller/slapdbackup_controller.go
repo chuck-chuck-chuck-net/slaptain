@@ -76,8 +76,22 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Backups are immutable once finished — nothing more to do.
+	// Backups are immutable once finished — nothing more to do except release the
+	// Job's hold on the slapd PVCs.
+	//
+	// ADR-018: the finished Job's pod keeps `kubernetes.io/pvc-protection` on
+	// pod-0's config/data/accesslog PVCs for as long as the pod object exists, so
+	// a retained backup record would block ADR-012 case-2 recovery on pod-0
+	// indefinitely. Reaping from this early return is deliberate (R3): the
+	// terminal phase is already persisted and this branch precedes Job creation,
+	// so the reap can never re-trigger a backup. It is idempotent, so repeating
+	// it on every reconcile of a finished backup is harmless (ADR-001).
 	if sb.Status.Phase == ldapv1alpha1.BackupPhaseCompleted || sb.Status.Phase == ldapv1alpha1.BackupPhaseFailed {
+		if sb.Status.JobName != "" {
+			if err := reapJob(ctx, r.Client, sb.Namespace, sb.Status.JobName); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -159,10 +173,9 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		case batchv1.JobFailed:
 			now := metav1.Now()
 			sb.Status.CompletedAt = &now
-			msg := c.Message
-			if msg == "" {
-				msg = "backup Job failed"
-			}
+			// ADR-018 R2: the Job is reaped on the next reconcile, so capture the
+			// cause into status now, while its pods still exist.
+			msg := jobFailureSummary(job, jobPods(ctx, r.Client, sb.Namespace, jobName))
 			r.setTerminal(ctx, sb, ldapv1alpha1.BackupPhaseFailed, jobName, objectKey, "BackupFailed", msg)
 			return ctrl.Result{}, nil
 		}

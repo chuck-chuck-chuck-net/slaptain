@@ -150,17 +150,22 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 	}
 
 	backoff := int32(2)
-	ttl := int32(3600) // finished restore Jobs auto-clean after 1h (native GC)
+	// ADR-018 R4: the operator reaps its own Jobs as soon as the restore reaches
+	// a terminal phase; this TTL is only a backstop for the case where the
+	// operator dies between the Job finishing and the reap. It must stay short,
+	// because until it fires the Job's pod holds a deletion lease on this pod's
+	// config/data/accesslog PVCs.
+	ttl := int32(600)
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      t.jobName,
 			Namespace: sc.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":                "slapd",
-				"app.kubernetes.io/instance":            sc.Name,
-				"app.kubernetes.io/component":           "restore",
-				"ldap.chuck-chuck-chuck.net/database":   sd.Name,
-				"ldap.chuck-chuck-chuck.net/restore-id": sc.Status.Restore.ID,
+				"app.kubernetes.io/name":              "slapd",
+				"app.kubernetes.io/instance":          sc.Name,
+				"app.kubernetes.io/component":         "restore",
+				"ldap.chuck-chuck-chuck.net/database": sd.Name,
+				restoreIDLabel:                        sc.Status.Restore.ID,
 			},
 		},
 		Spec: batchv1.JobSpec{

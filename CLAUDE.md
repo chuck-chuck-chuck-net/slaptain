@@ -65,7 +65,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-014-s3-backup-restore.md
 │       ├── adr-015-cluster-dns-domain.md
 │       ├── adr-016-pod-routed-cross-cluster-replication.md
-│       └── adr-017-bare-integer-serverid.md
+│       ├── adr-017-bare-integer-serverid.md
+│       └── adr-018-pvc-deletion-leases.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -474,6 +475,7 @@ the original decision — the history of reasoning matters.
 - ADR-015: Cluster DNS domain is resolved (CLUSTER_DOMAIN env → resolv.conf → cluster.local), never hardcoded — *Accepted 2026-07-05*
 - ADR-016: Direct native pod-IP routing as a cross-cluster replication transport (alongside Multus/NodePort; `network.mode: pod-routed`) — *Accepted (impl + e2e green across three routed-pod-CIDR sites 2026-07-06)*
 - ADR-017: `olcServerID` is a bare integer (`serverIDBase + ordinal + 1`), not the URL-list self-match form — sheds the FQDN/cluster-domain coupling that made serverID the ADR-015 boot crash surface — *Accepted 2026-07-17*
+- ADR-018: Co-located PVC access — RWO is per-node, but any pod object naming a PVC (finished pods included) is a deletion lease that blocks pod re-roll; the operator reaps every Job it creates — *Accepted 2026-08-23*
 
 ---
 

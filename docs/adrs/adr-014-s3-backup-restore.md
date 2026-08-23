@@ -150,6 +150,13 @@ battle-tested. We copy it:
   `slapcat` is read-only at the data level but LMDB registers a reader slot in
   the lock file, so a read-only filesystem mount is avoided).
 
+**Extended by ADR-018.** The PVC analysis above covers *mount concurrency* and
+is correct: a co-located Job may co-mount RWO volumes that slapd holds. It does
+not cover *PVC lifecycle*. A pod object that names a PVC blocks that PVC's
+deletion for as long as the object exists — finished pods included — so every
+co-located Job is also a lease on PVC lifecycle. ADR-018 records the mechanism
+and the reaping rules that follow.
+
 ### Rejected: backup sidecar in every slapd pod
 
 A permanent sidecar sharing `/data` would avoid co-location entirely. Rejected

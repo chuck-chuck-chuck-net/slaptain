@@ -5,6 +5,75 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-08-23: finished backup/restore Job pods pin slapd PVCs, blocking pod re-roll
+
+**Symptom:** A multi-site e2e run left the primary cluster wedged at `2/3` with
+`phase: Degraded`, `Ready=False (NotReady)`, for as long as it was watched.
+`slapd-1` was simply absent. Its three PVCs sat in `Terminating` with
+`kubernetes.io/pvc-protection` still attached, and the StatefulSet controller
+logged, on a widening backoff and forever:
+
+```
+Error syncing StatefulSet, requeuing  err="[pvc config-slapd-1 is being deleted,
+  pvc data-slapd-1 is being deleted, pvc accesslog-slapd-1 is being deleted]"
+```
+
+Nothing was wrong storage-side: no VolumeAttachments remained, replication was
+`Synced` to both external peers, and the surviving pods had identical contextCSN.
+
+**Root cause:** A pod object that names a PVC blocks that PVC's deletion for as
+long as the object exists — **regardless of pod phase**. `Completed` and `Failed`
+pods hold it exactly as firmly as `Running` ones. Upstream
+`pvcprotection.podUsesPVCForDeletion` tests only `pod.Spec.NodeName != ""` plus a
+claim-name match; there is no phase check on the PVC branch. (`podIsShutDown`
+guards only the *ephemeral*-volume branch, and the `IsPodTerminated` skip one
+expects lives in `podUsesPVCForUnusedSince`, a different feature.)
+
+An in-place `SlapdRestore` had run minutes earlier, creating one Job per pod, each
+mounting *that pod's* config/data/accesslog PVCs. The Jobs completed but nothing
+reaped them: restore Jobs relied solely on `TTLSecondsAfterFinished: 3600`, and
+their owner is the SlapdCluster, so deleting the SlapdRestore CR did not GC them.
+When the ADR-012 case-2 spec then deleted `slapd-1` + its PVCs, the Completed
+restore Job pod for ordinal 1 kept the finalizer, and the STS could never
+recreate the pod. Backup Jobs were worse: no TTL at all, GC'd only with their
+`SlapdBackup` CR, always pinning pod-0 — so a *retained* backup record (the whole
+point of a backup) pinned pod-0's PVCs indefinitely.
+
+**Fix:** The operator now reaps every Job it creates, on success and on failure
+alike, from an already-persisted terminal phase so a re-entrant reconcile can
+never recreate a destructive Job. `job_reap.go` provides `reapJob` (backup) and
+`reapJobsByLabel` (restore's per-pod fan-out, selected by the shared restore-id
+label), both forcing background propagation — a Job deleted without an explicit
+policy can orphan its pods, and the pod is what holds the lease, so an orphaning
+delete would report success while releasing nothing. `TTLSecondsAfterFinished`
+is demoted to a crash backstop (restore 3600 → 600; backup gains 600).
+`jobFailureSummary` records the Job's failure condition and the failing
+container's exit code into the owning CR's status *before* the reap. See ADR-018
+for the rule and its derived constraints on future co-located Jobs.
+
+**Why it was hard to spot:** Every layer pointed somewhere else. The visible
+error was a StatefulSet event, so it read as a storage or scheduling problem; the
+PVC was `Terminating`, so it read as a stuck CSI driver — but no VolumeAttachment
+was left, exonerating storage. The pod holding the lease was `Completed` and had
+belonged to an unrelated, *successful* restore that finished minutes earlier, in a
+different spec. And it self-heals at the 1 h TTL, so re-running the suite later
+often passes: the two specs merely have to land inside the same hour. The
+strongest false lead is intuition — "a finished Job can't be holding anything" is
+what the upstream code looks like it should do, and the `IsPodTerminated` check
+that would implement it does exist in that very file, just in another function.
+
+**Lesson:** Co-mounting and PVC *lifecycle* are two different questions, and
+answering the first does not answer the second. ADR-014 correctly established
+that RWO is per-node so a co-located Job may co-mount volumes slapd holds — and
+that reasoning is untouched. What it missed is that the Job's pod remains a lease
+on those PVCs after it exits. Any pod the operator creates that mounts a slapd
+PVC is a lock on that PVC's lifecycle, held until the pod *object* is gone, so
+the operator must own reaping it. When a wait-for-deletion loop times out, report
+which pods still reference the object — a bare "timed out after 3 minutes" cost
+real debugging time here and would have been a one-line answer.
+
+---
+
 ## 2026-07-27: in-place SlapdRestore under replication undone by stale accesslog replay
 
 **Symptom:** On a replicated cluster (multi-master delta-syncrepl), an in-place

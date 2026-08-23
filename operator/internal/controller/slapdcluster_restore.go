@@ -153,14 +153,17 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 		return true, ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 
 	case ldapv1alpha1.RestoreInProgress:
-		allDone, anyFailed, err := r.runRestoreJobs(ctx, sc, rst.Databases)
+		allDone, failure, err := r.runRestoreJobs(ctx, sc, rst.Databases)
 		if err != nil {
 			return true, ctrl.Result{}, err
 		}
-		if anyFailed {
+		if failure != "" {
 			rst.Phase = ldapv1alpha1.RestoreFailed
-			rst.Message = "a restore Job failed; cluster held at 0 replicas for inspection"
-			log.Info("restore failed; holding cluster down")
+			// ADR-018 R2: the Jobs are reaped once this phase is persisted, so the
+			// cause is captured here rather than left for someone to read off a
+			// retained Job. Job *output* is the user's log stack's job.
+			rst.Message = failure + "; cluster held at 0 replicas"
+			log.Info("restore failed; holding cluster down", "cause", failure)
 			if err := r.updateRestoreRequest(ctx, sc.Namespace, rst.RequestRef,
 				ldapv1alpha1.RestoreRequestFailed, rst.Message); err != nil {
 				return true, ctrl.Result{}, err
@@ -195,6 +198,14 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 			return true, ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 		log.Info("restore complete", "databases", rst.Databases)
+		// ADR-018 R1/R2: release the restore Jobs' lease on every pod's PVCs now
+		// that the work is done. Must happen before status.restore is cleared —
+		// the restore id is the label that selects them. The phase machine is
+		// forward-only (it never re-enters RestoreInProgress), so this cannot
+		// re-trigger a destructive Job (R3).
+		if err := reapJobsByLabel(ctx, r.Client, sc.Namespace, restoreIDLabel, rst.ID); err != nil {
+			return true, ctrl.Result{}, err
+		}
 		if err := r.updateRestoreRequest(ctx, sc.Namespace, rst.RequestRef,
 			ldapv1alpha1.RestoreRequestCompleted, "restore complete; cluster scaled back up"); err != nil {
 			return true, ctrl.Result{}, err
@@ -203,8 +214,19 @@ func (r *SlapdClusterReconciler) reconcileRestore(ctx context.Context, sc *ldapv
 		return false, ctrl.Result{}, nil
 
 	case ldapv1alpha1.RestoreFailed:
-		// Terminal until a human intervenes (inspect/delete the failed Job, fix
-		// the source). Cluster stays held at 0 replicas.
+		// Terminal until a human intervenes (fix the source, issue a new
+		// SlapdRestore). Cluster stays held at 0 replicas.
+		//
+		// ADR-018 R2: reap on the failure path too, and for a sharper reason than
+		// on success. The cluster is down at 0 replicas, so PVC-level recovery is
+		// exactly what an admin reaches for next — and retained Job pods would be
+		// the only thing blocking it. The cause is already in status.restore.message
+		// (captured before this phase was persisted), and Job output belongs to the
+		// user's log aggregation, not to a Job object kept alive as a filing cabinet.
+		// Safe here per R3: the phase is persisted and this branch is terminal.
+		if err := reapJobsByLabel(ctx, r.Client, sc.Namespace, restoreIDLabel, rst.ID); err != nil {
+			return true, ctrl.Result{}, err
+		}
 		return true, ctrl.Result{}, nil
 	}
 
@@ -408,7 +430,10 @@ func (r *SlapdClusterReconciler) databasesNeedingRestore(ctx context.Context, sc
 // database — RW pods load the artifact directly (no syncrepl refresh), RO pods
 // are wiped and re-refresh on scale-up (ADR-014 amendment). Reports whether all
 // Jobs have completed and whether any failed.
-func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, dbNames []string) (allDone bool, anyFailed bool, err error) {
+// runRestoreJobs creates/observes the per-pod restore Jobs. On failure it returns
+// a human-readable cause (ADR-018 R2): the Jobs are reaped once the failure is
+// persisted, so the reason must be captured into status while they still exist.
+func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, dbNames []string) (allDone bool, failure string, err error) {
 	rwN := sc.Status.Restore.OriginalReplicas
 	if rwN == 0 {
 		rwN = 1
@@ -419,11 +444,11 @@ func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1a
 	for _, name := range dbNames {
 		sd := &ldapv1alpha1.SlapdDatabase{}
 		if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, sd); err != nil {
-			return false, false, fmt.Errorf("get SlapdDatabase %q: %w", name, err)
+			return false, "", fmt.Errorf("get SlapdDatabase %q: %w", name, err)
 		}
 		st, key, _, err := r.resolveRestoreSource(ctx, sc, sd)
 		if err != nil {
-			return false, false, fmt.Errorf("resolve restore source for %q: %w", name, err)
+			return false, "", fmt.Errorf("resolve restore source for %q: %w", name, err)
 		}
 
 		for _, t := range restorePodTargets(sc, sd, rwN, roN) {
@@ -433,27 +458,28 @@ func (r *SlapdClusterReconciler) runRestoreJobs(ctx context.Context, sc *ldapv1a
 			case apierrors.IsNotFound(getErr):
 				job = buildRestoreJob(sc, sd, st, key, r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")), r.OperatorImage, t)
 				if err := controllerutil.SetControllerReference(sc, job, r.Scheme); err != nil {
-					return false, false, err
+					return false, "", err
 				}
 				if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-					return false, false, fmt.Errorf("create restore Job %q: %w", t.jobName, err)
+					return false, "", fmt.Errorf("create restore Job %q: %w", t.jobName, err)
 				}
 				allDone = false
 				continue
 			case getErr != nil:
-				return false, false, getErr
+				return false, "", getErr
 			}
 
 			complete, failed := jobTerminalState(job)
 			if failed {
-				return false, true, nil
+				return false, fmt.Sprintf("restore Job %s failed: %s", t.jobName,
+					jobFailureSummary(job, jobPods(ctx, r.Client, sc.Namespace, t.jobName))), nil
 			}
 			if !complete {
 				allDone = false
 			}
 		}
 	}
-	return allDone, false, nil
+	return allDone, "", nil
 }
 
 // restorePodTargets enumerates the per-pod restore Jobs for one database: every

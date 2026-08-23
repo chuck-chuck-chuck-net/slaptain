@@ -131,6 +131,7 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 	}
 
 	backoff := int32(2)
+	ttl := int32(600)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sb.Name + "-backup",
@@ -143,7 +144,13 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoff,
+			// ADR-018 R4: backstop only. The SlapdBackup controller reaps this Job
+			// once the backup reaches a terminal phase; this bounds the lease its
+			// pod holds on pod-0's PVCs if the operator dies in between. Before
+			// ADR-018 there was no TTL at all, so a retained SlapdBackup pinned
+			// pod-0's PVCs for as long as the record was kept.
+			TTLSecondsAfterFinished: &ttl,
+			BackoffLimit:            &backoff,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,

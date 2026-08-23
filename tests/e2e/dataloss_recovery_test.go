@@ -15,6 +15,7 @@ package e2e_test
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
@@ -106,7 +107,12 @@ var _ = Describe("data loss recovery via replication",
 			To(Succeed())
 
 		By("waiting for the old PVCs to be fully gone (would block the new pod's volume mount)")
-		Eventually(ctx, func() bool {
+		// ADR-018 R6: report *which* pods still hold the PVC on timeout. Any pod
+		// object naming a PVC — a finished Job's pod included — keeps
+		// pvc-protection on it, and a bare "timed out after 3 min" gives no clue
+		// that a leaked backup/restore Job pod is the reason.
+		Eventually(ctx, func() []string {
+			var stuck []string
 			for _, tpl := range pvcTemplates {
 				pvcName := fmt.Sprintf("%s-%s", tpl, targetPod)
 				p, err := k8sClient.CoreV1().PersistentVolumeClaims(namespace).
@@ -115,18 +121,20 @@ var _ = Describe("data loss recovery via replication",
 					if kerrors.IsNotFound(err) {
 						continue
 					}
-					return false
+					stuck = append(stuck, fmt.Sprintf("%s: %v", pvcName, err))
+					continue
 				}
 				// Old PVC still present (either pre-deletion or stuck in
 				// terminating). New PVC has no DeletionTimestamp.
 				if p.DeletionTimestamp != nil {
-					return false
+					stuck = append(stuck, fmt.Sprintf("%s still terminating, held by: %s",
+						pvcName, strings.Join(podsReferencingPVC(ctx, pvcName), ", ")))
 				}
 				// PVC present without a deletion timestamp = it's been
 				// re-created by the STS controller. That's what we want.
 			}
-			return true
-		}).WithTimeout(3 * time.Minute).WithPolling(2 * time.Second).Should(BeTrue(),
+			return stuck
+		}).WithTimeout(3 * time.Minute).WithPolling(2 * time.Second).Should(BeEmpty(),
 			"old PVCs should garbage-collect and be replaced by fresh ones within 3 min")
 
 		By("waiting for the StatefulSet to recreate " + targetPod + " with a new UID + Ready")
