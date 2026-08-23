@@ -156,6 +156,17 @@ Node access (NodePort reachability + cert SAN; defaults to the k8s InternalIP):
                          Use when the InternalIP isn't reachable from the runner
                          (dual-homed nodes; the reachable NIC isn't k8s-registered).
 
+Reproducibility and triage:
+  E2E_SEED             = Pin Ginkgo's spec-order seed (default: a fresh timestamp,
+                         always logged). The suite shares one mutable slapd
+                         cluster, so cross-spec interference depends on spec
+                         order — replaying the logged seed reproduces it exactly.
+  FAIL_FAST            = Set to 1 to stop at the first failing spec instead of
+                         letting the cascade bury its cause. Nothing is torn down
+                         on failure ('test' never tears down; 'all' aborts before
+                         teardown), so the cluster is left ready for
+                         slctl inspect / slctl debug-dump.
+
 Cross-site replication transport (multi-site only):
   (default)            = NodePort URIs, one per remote site.
   POD_ROUTED           = Set to 1 for pod-routed: peers addressed by primary pod IP
@@ -765,13 +776,34 @@ run_tests() {
         log "Test target: single-site $ctx0 ($local_ip:$NODEPORT_LDAP)"
     fi
 
+    # Reproducibility + triage knobs. The suite mutates one shared `slapd`
+    # cluster across ~15 specs, three of them destructive to it (case-2 deletes
+    # its PVCs, resilience deletes its pods, restore-replay does an in-place
+    # restore on it). Cross-spec interference is therefore a function of spec
+    # order, which Ginkgo reshuffles every run.
+    #
+    #   E2E_SEED  — pin Ginkgo's spec-order seed. Defaulted here rather than left
+    #               to Ginkgo so that every run's seed is chosen and logged by
+    #               *us*: reproducing an interference failure then never depends
+    #               on still having Ginkgo's stdout.
+    #   FAIL_FAST — stop at the first failing spec. Without it one early failure
+    #               cascades and later specs bury its cause; `./e2e.sh test`
+    #               never tears down, and `all` aborts before teardown (set -e),
+    #               so the failed state is left standing either way.
+    local seed="${E2E_SEED:-$(date +%s)}"
+    local ginkgo_flags=(--ginkgo.v --ginkgo.timeout=25m "--ginkgo.seed=$seed")
+    if [[ "${FAIL_FAST:-}" == "1" ]]; then
+        ginkgo_flags+=(--ginkgo.fail-fast)
+        log "FAIL_FAST=1 — stopping at the first failing spec (state left standing)"
+    fi
+    log "Ginkgo seed: $seed  — replay this exact spec order with E2E_SEED=$seed"
+
     log "Running e2e tests..."
     (
         cd "$PROJECT_ROOT/tests/e2e"
         env "${test_env[@]}" go test -v ./... \
             -timeout 30m \
-            --ginkgo.v \
-            --ginkgo.timeout=25m
+            "${ginkgo_flags[@]}"
     )
 }
 
