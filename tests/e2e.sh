@@ -161,6 +161,12 @@ Reproducibility and triage:
                          always logged). The suite shares one mutable slapd
                          cluster, so cross-spec interference depends on spec
                          order — replaying the logged seed reproduces it exactly.
+  E2E_LABEL_FILTER     = Ginkgo label expression selecting which specs run, e.g.
+                         "restore-inplace" or "backup && !restore". Lets a single
+                         scenario be iterated without paying for the whole suite,
+                         and without FAIL_FAST aborting on an unrelated known
+                         failure first. Labels are the [bracketed] tags shown
+                         after each spec name in the output.
   FAIL_FAST            = Set to 1 to stop at the first failing spec instead of
                          letting the cascade bury its cause. Nothing is torn down
                          on failure ('test' never tears down; 'all' aborts before
@@ -792,6 +798,10 @@ run_tests() {
     #               so the failed state is left standing either way.
     local seed="${E2E_SEED:-$(date +%s)}"
     local ginkgo_flags=(--ginkgo.v --ginkgo.timeout=25m "--ginkgo.seed=$seed")
+    if [[ -n "${E2E_LABEL_FILTER:-}" ]]; then
+        ginkgo_flags+=("--ginkgo.label-filter=$E2E_LABEL_FILTER")
+        log "Label filter: $E2E_LABEL_FILTER (only matching specs run)"
+    fi
     if [[ "${FAIL_FAST:-}" == "1" ]]; then
         ginkgo_flags+=(--ginkgo.fail-fast)
         log "FAIL_FAST=1 — stopping at the first failing spec (state left standing)"
