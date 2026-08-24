@@ -554,3 +554,160 @@ databases on the cluster are untouched.
 2. Add the `SlapdRestore` CRD + controller wiring on top (same machine).
 3. e2e on a multi-replica cluster: rollback via `SlapdRestore`, and
    delete+recreate `bootstrapFrom`, both asserting no divergence and no refresh.
+
+## Amendment (2026-08-24): restore semantics under cross-cluster replication; rollback is mesh-wide
+
+**Status:** Accepted. Does not reverse the 2026-06-09 amendment — the machine it
+built is unchanged and still correct. What changes is what `SlapdRestore` is
+allowed to *promise*, and the addition of a mesh-wide rollback procedure that
+the operator does not (and for now will not) orchestrate.
+
+### Context
+
+The 2026-06-09 amendment made in-place restore safe at N≥2 *within one cluster*
+by loading every pod directly instead of letting syncrepl repopulate peers, and
+a later fix (`fix(restore): wipe the accesslog LMDB on restore under
+replication`) removed the local accesslog as a source of stale deltas. Both hold.
+
+A multi-site e2e run then failed the accesslog-replay spec: an in-place restore
+reported `Completed`, and the restored entry never appeared. The investigation
+produced this chain:
+
+1. The artifact was correct — the entry was present in the backup LDIF.
+2. The restore loaded it — after `slapadd` the entry existed on the pods.
+3. Every local pod then recorded a *delete* of it, staggered in StatefulSet
+   scale-up order (~1.5–2 s apart), i.e. as each pod rejoined the mesh.
+4. The remote sites still held the original `add` and `delete` in *their*
+   accesslogs, which no local wipe ever touched.
+5. The restored entry carried its original `entryCSN` from the artifact, some
+   seconds *older* than the peers' delete.
+
+**The mechanism, stated generally:** offline `slapadd` replays *historical* CSNs
+— that is precisely the property that makes a restored replica able to resume
+delta-syncrepl rather than force a full refresh. The restored `contextCSN` is
+therefore the backup's high-water mark, so peers ship every delta recorded since,
+and per-entry resolution takes the newest CSN. A restored entry is by
+construction older than any post-backup change that survives anywhere else in the
+mesh. **A single-site restore cannot win that comparison, ever.** This is not a
+race, a missed wipe, or a bug in the restore machine; it is the data model.
+
+It also cuts both ways: an entry *deleted* after the backup fails to come back
+(demonstrated), and an entry *added* after the backup is not removed (same
+mechanism; not separately demonstrated).
+
+This was invisible until now because a single-site deployment has no peers
+holding post-backup deltas — which is also why the earlier single-site runs of
+this spec were green.
+
+### The three recovery operations
+
+Conflating these is what produced the wrong expectation. They are distinct, and
+only the third is a rollback:
+
+| Operation | Tool | Semantics |
+|---|---|---|
+| Replace one pod / node | delete pod + its PVCs; syncrepl refills (ADR-012 case 2) | Local loss, healed from peers. `bootstrapFrom` is the *wrong* tool: it seeds stale data the mesh then heals anyway. |
+| Seed a site or database | `SlapdDatabase.spec.bootstrapFrom` | Loads an artifact into a *fresh* database. On a cluster with live peers it converges to the **mesh's** state — a fast seed that avoids a large initial sync, not a rollback. |
+| Roll back in time | mesh-wide destroy, then `bootstrapFrom` everywhere | The only true rollback. Works because no survivor is left holding a newer delta. |
+
+### Decisions
+
+1. **`SlapdRestore` is retained, with its promise restated per topology.** On a
+   cluster with no external peers it is a point-in-time rollback (verified green
+   on a standalone cluster — `replicas: 1`, replication disabled — 2026-08-24).
+   On a mesh member it is a **local re-seed**: the data is loaded locally and
+   peers then replay their newer changes as each pod rejoins, so the cluster
+   converges back to the mesh's current state. On a *healthy* mesh member that is
+   close to a no-op; its value is re-seeding a damaged site from a local artifact
+   so syncrepl need only carry the delta, instead of paying a full WAN sync.
+2. **Warn, do not refuse.** When a restore targets a cluster with
+   `spec.replication.externalPeers`, the operator emits an event and records it
+   in `SlapdRestore.status.message`: peers will replay newer changes into the
+   restored data, so this is a local re-seed and not a point-in-time rollback.
+   Refusing was rejected (below).
+3. **Rollback of a replicated deployment is a mesh-wide operation, performed by
+   a human runbook.** Quiesce or destroy *every* site first, then `bootstrapFrom`
+   the same artifact. The sequencing is the load-bearing part: no site may still
+   be serving post-backup data while another returns with restored data, or the
+   survivor re-propagates its deltas into it. The per-site wipes are already
+   handled (the restore Job clears `/data` and `/accesslog` on every RW pod), so
+   what the runbook must guarantee is the *global* ordering, not the local
+   cleaning. Documented in `docs/BACKUP.md`.
+4. **Cross-site orchestration is explicitly not decided here.** See below.
+
+### Options considered
+
+**Online diff-apply (`ldapadd`).** Compute the difference between the live DIT
+and the artifact and apply it as ordinary LDAP writes, which carry *fresh* CSNs
+and therefore win. Rejected: guaranteeing the consistency of that diff is a large
+burden of its own, and it is not what a competent human operator would do. This
+operator's job is to automate the sane manual procedure, not to invent a new one.
+
+**Restore one site, force the other sites to re-initialise.** Rejected: it makes
+the restored site a single point of failure during recovery, extends downtime by
+a full resync per site, and exercises rarely-used paths at precisely the moment
+one can least afford to discover defects in them.
+
+**Strip or bump CSNs before `slapadd`.** Rejected, and more firmly than first
+proposed. CSN stability is a *feature* of a `slapcat`/`slapadd` restore: with
+`entryUUID` and `entryCSN` preserved, a restored replica resumes delta-syncrepl
+instead of forcing a full refresh. Moreover the value that actually decides
+whether a peer's delta is applied is `contextCSN`, so stripping `entryCSN` would
+not even fix the symptom; bumping `contextCSN` past the mesh maximum would make
+the restored site silently *ignore* every peer change below it. That is not half
+a rollback, it is a rollback plus silent divergence.
+
+**Refuse in-place restore when `externalPeers` is configured.** Rejected. It
+would remove the feature from the topology this project exists to serve, and the
+behaviour it guards against is unremarkable for a replicated database: restoring
+one member of a replicated set does not roll the set back — the set heals the
+member. Postgres streaming replication, Galera SST/IST, MongoDB replica-set
+initial sync and Cassandra repair all behave this way, and all document the
+whole-cluster rollback as a separate fenced procedure. The defect was in our
+documentation promising otherwise, not in the behaviour.
+
+**Remove or park `SlapdRestore` entirely.** Considered seriously, and rejected on
+two grounds: it is verified working on a standalone cluster, and as an
+open-source project most users will not have a multi-cluster deployment at all,
+so the feature serves the majority case even though it does not serve this
+project's own primary one.
+
+### Not decided: hub-and-spoke orchestration
+
+Automating operation 3 means one actor driving *other* clusters: quiescing them,
+running restores there, and sequencing the result. Today the operator reaches
+across clusters only to **read** — discovering peer pod addresses through a
+remote kubeconfig (ADR-007 amendment, ADR-016). Driving another site is
+categorically different: it introduces a control plane, and with it hub failure,
+partition behaviour, and arbitration.
+
+That is in direct tension with this project's second architectural requirement,
+that each site be autonomous. It is therefore a fundamentals question and gets
+its own ADR if it is ever pursued — not a paragraph here. Until then, the
+mesh-wide rollback runbook is human-operated, which is a legitimate answer and
+is how comparable systems document the same operation.
+
+### Consequences
+
+- `docs/BACKUP.md` is restructured around the three operations above, including
+  the rollback runbook and its sequencing requirement. The section presenting
+  in-place restore as a rollback is replaced.
+- The operator gains the external-peers warning on `SlapdRestore` (decision 2).
+- The accesslog-replay e2e spec asserts rollback semantics, which are no longer
+  promised on a mesh member. It moves onto its own cluster with no external
+  peers, where it correctly guards the accesslog wipe. This also removes the most
+  destructive spec from the shared multi-site fixture.
+- Verified status, to be kept honest as it changes: rollback via `SlapdRestore`
+  is green on a standalone cluster; the replicated *single-site* path (N≥2, no
+  external peers) — the topology where the accesslog wipe actually matters — is
+  untested since v0.0.19 and is what the relocated spec will cover.
+- `docs/BACKLOG.md` carries hub-and-spoke cross-site orchestration as an
+  explicitly undecided item.
+
+### Related
+
+- ADR-012 — seed is one-shot; case 2 is operation 1 in the table above.
+- ADR-007 (amendment) / ADR-016 — the operator's existing *read-only* reach into
+  remote clusters, and the baseline that hub-and-spoke would change.
+- ADR-018 — co-located Job PVC leases; the lease bug was silently blocking
+  operation 1.
