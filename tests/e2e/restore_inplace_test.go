@@ -72,10 +72,6 @@ var _ = Describe("in-place restore", Label("restore"), Label("restore-inplace"),
 		Expect(restoreSuffix).NotTo(BeEmpty())
 		markerDN = "uid=rollback-marker,ou=People," + restoreSuffix
 
-		By("counting source DIT entries (the known-good state to roll back to)")
-		sourceCount = len(ldapSearch(ldapConn, restoreSuffix, "(objectClass=*)", "dn"))
-		Expect(sourceCount).To(BeNumerically(">", 0))
-
 		By("creating the known-good source backup and waiting for Completed")
 		Expect(crdClient.Create(ctx, &ldapv1alpha1.SlapdBackup{
 			ObjectMeta: metav1.ObjectMeta{Name: srcBackup, Namespace: namespace},
@@ -155,8 +151,20 @@ var _ = Describe("in-place restore", Label("restore"), Label("restore-inplace"),
 		addr := exposeRestoreNodePort(ctx, restoreCluster, restoreNPSvc, nodeIP)
 		adminPWip := readSecretKey(ctx, restoreDB+"-credentials", "root-password")
 
-		By("writing a 'mistake' entry to the populated database")
+		// The baseline has to be read from the restore cluster itself, after its
+		// bootstrap completed: that is the state this rollback must return to.
+		// Reading it from the shared source cluster instead compares two different
+		// DITs — the artifact is a slapcat of the source's pod-0, while a
+		// ClusterIP read lands on an arbitrary pod, so the two differ by any entry
+		// that has not yet converged. That made this spec fail on the
+		// "mistake entry landed" assertion, before the rollback ever ran, which
+		// says nothing about SlapdRestore either way.
+		By("counting the restored DIT on the restore cluster (the state to roll back to)")
 		conn := retryConnectLDAP(ctx, addr, restoreSuffix, adminPWip)
+		sourceCount = len(ldapSearch(conn, restoreSuffix, "(objectClass=*)", "dn"))
+		Expect(sourceCount).To(BeNumerically(">", 0))
+
+		By("writing a 'mistake' entry to the populated database")
 		add := ldap.NewAddRequest(markerDN, nil)
 		add.Attribute("objectClass", []string{"inetOrgPerson"})
 		add.Attribute("cn", []string{"rollback marker"})
