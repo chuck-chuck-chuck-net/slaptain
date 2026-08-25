@@ -142,84 +142,8 @@ var _ = Describe("per-database accesslog", Label("accesslog"), Ordered, Continue
 		for _, pod := range rwPods {
 			By("inspecting cn=config on " + pod)
 			conn := dialPodConfig(pod)
-			defer conn.Close() //nolint:gocritic // per-pod conn, released at spec end
-
-			mdbs := observedMdbDatabases(conn)
-			GinkgoLogr.Info("observed mdb databases", "pod", pod, "dbs", mdbs)
-
-			// No legacy cluster-shared log may remain (ADR-019 R8).
-			for _, db := range mdbs {
-				Expect(strings.EqualFold(db.suffix, "cn=accesslog")).To(BeFalse(),
-					"pod %s still carries the legacy cluster-shared accesslog %q at %q "+
-						"— ADR-019 R8 convergence did not happen", pod, db.dn, db.dir)
-			}
-
-			logOwners := map[string][]string{} // log suffix → databases referencing it
-
-			for _, dbName := range dbNames {
-				dataSuffix := dbSuffixes[dbName]
-				wantLog := ldapv1alpha1.AccesslogSuffix(dbName)
-				wantDir := ldapv1alpha1.AccesslogDir(dbName)
-
-				// (a) the log DB exists, with its own backing directory.
-				logDB, ok := findMdb(mdbs, wantLog)
-				Expect(ok).To(BeTrue(),
-					"pod %s has no accesslog database %q for %s; observed: %v",
-					pod, wantLog, dbName, mdbs)
-				Expect(logDB.dir).To(Equal(wantDir),
-					"accesslog DB %q on %s must be backed by its own directory", wantLog, pod)
-
-				// (b) the data DB's overlay names it.
-				dataDB, ok := findMdb(mdbs, dataSuffix)
-				Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, dataSuffix)
-				overlayLog := accesslogOverlayTarget(conn, dataDB.dn)
-				Expect(overlayLog).To(Equal(wantLog),
-					"olcAccessLogDB on %s (%s) must name %q", dataDB.dn, pod, wantLog)
-
-				// (c) every delta-syncrepl stanza on the data DB names it.
-				stanzas := syncreplStanzas(conn, dataDB.dn)
-				Expect(stanzas).NotTo(BeEmpty(),
-					"pod %s: database %s has no olcSyncRepl stanzas", pod, dbName)
-				for _, st := range stanzas {
-					lb := logbaseOf(st)
-					Expect(lb).To(Equal(wantLog),
-						"pod %s: stanza for %s must carry logbase=%q; stanza: %s",
-						pod, dbName, wantLog, st)
-				}
-
-				logOwners[strings.ToLower(wantLog)] = append(logOwners[strings.ToLower(wantLog)], dbName)
-			}
-
-			// (d) an accesslog overlay exists on the replicated data DBs and
-			// NOWHERE else. In particular a *log* DB must not carry one: a log
-			// journalling into another log re-creates the ADR-019 Fact 2
-			// mechanism (its consumers receive reqDNs under the foreign log's
-			// suffix and cannot apply them), and it is what an olcDatabase={N}
-			// DN going stale across a database delete looks like from outside.
-			overlays := allAccesslogOverlays(conn)
-			wantParents := map[string]bool{}
-			for _, dbName := range dbNames {
-				dataDB, ok := findMdb(mdbs, dbSuffixes[dbName])
-				Expect(ok).To(BeTrue())
-				wantParents[strings.ToLower(dataDB.dn)] = true
-			}
-			for _, ov := range overlays {
-				Expect(wantParents).To(HaveKey(strings.ToLower(ov.parentDN)),
-					"pod %s: accesslog overlay on %s (naming %q) does not belong to any "+
-						"replicated data database — a log DB journalling into another log "+
-						"reintroduces ADR-019 Fact 2", pod, ov.parentDN, ov.logDB)
-			}
-			Expect(overlays).To(HaveLen(len(dbNames)),
-				"pod %s: expected exactly one accesslog overlay per replicated database; got %v",
-				pod, overlays)
-
-			// (e) no two databases share a log — the exact condition ADR-019 forbids.
-			Expect(logOwners).To(HaveLen(len(dbNames)),
-				"pod %s: databases share accesslog DBs: %v", pod, logOwners)
-			for logSuffix, owners := range logOwners {
-				Expect(owners).To(HaveLen(1),
-					"pod %s: accesslog %q is shared by %v", pod, logSuffix, owners)
-			}
+			assertPerDatabaseAccesslogLayout(conn, pod, dbNames, dbSuffixes, true)
+			conn.Close()
 		}
 	}, NodeTimeout(5*time.Minute))
 
@@ -426,6 +350,135 @@ var _ = Describe("per-database accesslog", Label("accesslog"), Ordered, Continue
 		}
 	}, NodeTimeout(6*time.Minute))
 })
+
+
+// assertPerDatabaseAccesslogLayout is the ADR-019/ADR-020 end state, checked on
+// one pod. Shared by the standard structural spec and the gated legacy-migration
+// spec, which must converge to exactly this and nothing weaker.
+//
+// checkStanzas is false while a migration is still settling: olcSyncRepl is
+// rewritten by a different reconcile step than the accesslog layout, so the two
+// are not guaranteed to be observed in the same instant.
+func assertPerDatabaseAccesslogLayout(
+	conn *ldap.Conn,
+	pod string,
+	dbNames []string,
+	dbSuffixes map[string]string,
+	checkStanzas bool,
+) {
+	mdbs := observedMdbDatabases(conn)
+	GinkgoLogr.Info("observed mdb databases", "pod", pod, "dbs", mdbs)
+
+	// No legacy cluster-shared log may remain (ADR-019 R8).
+	for _, db := range mdbs {
+		Expect(strings.EqualFold(db.suffix, "cn=accesslog")).To(BeFalse(),
+			"pod %s still carries the legacy cluster-shared accesslog %q at %q "+
+				"— ADR-019 R8 convergence did not happen", pod, db.dn, db.dir)
+	}
+
+	logOwners := map[string][]string{} // log suffix → databases referencing it
+
+	for _, dbName := range dbNames {
+		dataSuffix := dbSuffixes[dbName]
+		wantLog := ldapv1alpha1.AccesslogSuffix(dbName)
+		wantDir := ldapv1alpha1.AccesslogDir(dbName)
+
+		// (a) the log DB exists, with its own backing directory.
+		logDB, ok := findMdb(mdbs, wantLog)
+		Expect(ok).To(BeTrue(),
+			"pod %s has no accesslog database %q for %s; observed: %v",
+			pod, wantLog, dbName, mdbs)
+		Expect(logDB.dir).To(Equal(wantDir),
+			"accesslog DB %q on %s must be backed by its own directory", wantLog, pod)
+
+		// (a2) with syncprov, and the ADR-020 ACL — the two attributes that must
+		// never lag behind the DB's own existence (ADR-020 R5).
+		Expect(logDBHasSyncprov(conn, logDB.dn)).To(BeTrue(),
+			"pod %s: accesslog DB %q has no syncprov overlay — consumers cannot pull it",
+			pod, wantLog)
+		Expect(logDBAccess(conn, logDB.dn)).To(ConsistOf(
+			MatchRegexp(`^(\{\d+\})?to \* by dn\.exact="cn=replication,`+regexp.QuoteMeta(dataSuffix)+`" read by \* none$`)),
+			"pod %s: accesslog DB %q must carry exactly the ADR-020 R1 rule for %q",
+			pod, wantLog, dataSuffix)
+
+		// (b) the data DB's overlay names it.
+		dataDB, ok := findMdb(mdbs, dataSuffix)
+		Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, dataSuffix)
+		overlayLog := accesslogOverlayTarget(conn, dataDB.dn)
+		Expect(overlayLog).To(Equal(wantLog),
+			"olcAccessLogDB on %s (%s) must name %q", dataDB.dn, pod, wantLog)
+
+		// (c) every delta-syncrepl stanza on the data DB names it.
+		if checkStanzas {
+			stanzas := syncreplStanzas(conn, dataDB.dn)
+			Expect(stanzas).NotTo(BeEmpty(),
+				"pod %s: database %s has no olcSyncRepl stanzas", pod, dbName)
+			for _, st := range stanzas {
+				lb := logbaseOf(st)
+				Expect(lb).To(Equal(wantLog),
+					"pod %s: stanza for %s must carry logbase=%q; stanza: %s",
+					pod, dbName, wantLog, st)
+			}
+		}
+
+		logOwners[strings.ToLower(wantLog)] = append(logOwners[strings.ToLower(wantLog)], dbName)
+	}
+
+	// (d) an accesslog overlay exists on the replicated data DBs and NOWHERE
+	// else. In particular a *log* DB must not carry one: a log journalling into
+	// another log re-creates the ADR-019 Fact 2 mechanism (its consumers receive
+	// reqDNs under the foreign log's suffix and cannot apply them), and it is
+	// what an olcDatabase={N} DN going stale across a database delete looks like
+	// from outside.
+	overlays := allAccesslogOverlays(conn)
+	wantParents := map[string]bool{}
+	for _, dbName := range dbNames {
+		dataDB, ok := findMdb(mdbs, dbSuffixes[dbName])
+		Expect(ok).To(BeTrue())
+		wantParents[strings.ToLower(dataDB.dn)] = true
+	}
+	for _, ov := range overlays {
+		Expect(wantParents).To(HaveKey(strings.ToLower(ov.parentDN)),
+			"pod %s: accesslog overlay on %s (naming %q) does not belong to any "+
+				"replicated data database — a log DB journalling into another log "+
+				"reintroduces ADR-019 Fact 2", pod, ov.parentDN, ov.logDB)
+	}
+	Expect(overlays).To(HaveLen(len(dbNames)),
+		"pod %s: expected exactly one accesslog overlay per replicated database; got %v",
+		pod, overlays)
+
+	// (e) no two databases share a log — the exact condition ADR-019 forbids.
+	Expect(logOwners).To(HaveLen(len(dbNames)),
+		"pod %s: databases share accesslog DBs: %v", pod, logOwners)
+	for logSuffix, owners := range logOwners {
+		Expect(owners).To(HaveLen(1),
+			"pod %s: accesslog %q is shared by %v", pod, logSuffix, owners)
+	}
+}
+
+// logDBHasSyncprov reports whether an accesslog DB carries a syncprov overlay.
+func logDBHasSyncprov(conn *ldap.Conn, logDN string) bool {
+	res, err := conn.Search(ldap.NewSearchRequest(
+		logDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcSyncProvConfig)", []string{"dn"}, nil))
+	Expect(err).NotTo(HaveOccurred(), "search syncprov under %s", logDN)
+	return len(res.Entries) > 0
+}
+
+// logDBAccess returns the olcAccess values on a database entry.
+func logDBAccess(conn *ldap.Conn, dn string) []string {
+	res, err := conn.Search(ldap.NewSearchRequest(
+		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=*)", []string{"olcAccess"}, nil))
+	Expect(err).NotTo(HaveOccurred(), "read olcAccess on %s", dn)
+	Expect(res.Entries).To(HaveLen(1))
+	return res.Entries[0].GetEqualFoldAttributeValues("olcAccess")
+}
+
+// nsName is a shorthand for the controller-runtime object key.
+func nsName(ns, name string) types.NamespacedName {
+	return types.NamespacedName{Namespace: ns, Name: name}
+}
 
 // ── Spec-local helpers ──────────────────────────────────────────────────────
 
