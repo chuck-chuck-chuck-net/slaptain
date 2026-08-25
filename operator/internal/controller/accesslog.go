@@ -184,3 +184,46 @@ func isChildDN(child, parent string) bool {
 		strings.EqualFold(child[len(child)-len(parent):], parent) &&
 		child[len(child)-len(parent)-1] == ','
 }
+
+// observedConfigEntry is one cn=config entry as read off a pod: its DN and its
+// objectClass values.
+type observedConfigEntry struct {
+	DN      string
+	Classes []string
+}
+
+// unwantedLogDBChildren returns the DNs of children of an accesslog database
+// that must not exist there.
+//
+// An accesslog database legitimately carries exactly one child: the syncprov
+// overlay that exposes its journal to consumers (ensureAccesslogDB adds it). An
+// **accesslog overlay** on an accesslog database is never legitimate: it makes
+// one journal journal into another, so a consumer of the second database
+// receives log entries whose reqDN lives under the first database's accesslog
+// suffix, submits them to its own backend, and gets NO_SUCH_OBJECT — ADR-019
+// Fact 2, with the journals themselves as the two databases.
+//
+// That state is not hypothetical. It is what a cn=config database delete plus a
+// cached olcDatabase={N} DN produces: slapd renumbers every database ordered
+// after a deleted one, so an operator that resolved a DN before the delete and
+// used it after would add the overlay to whatever database slid into that slot.
+// The staleness is fixed at its root in reconcilePodDatabase, but a cluster
+// migrated by a build that had the bug keeps the mis-attached overlay forever —
+// nothing else would ever remove it — so ensureAccesslogDB reaps it.
+//
+// Anything else found under a log DB is left alone. The rule is "delete what
+// this operator can positively attribute to its own bug", not "delete what this
+// operator did not put here": cn=config is node-local and hand-editable
+// (ADR-002), and a reaper that removes unrecognised entries is a footgun.
+func unwantedLogDBChildren(children []observedConfigEntry) []string {
+	var out []string
+	for _, c := range children {
+		for _, cls := range c.Classes {
+			if strings.EqualFold(cls, "olcAccessLogConfig") {
+				out = append(out, c.DN)
+				break
+			}
+		}
+	}
+	return out
+}
