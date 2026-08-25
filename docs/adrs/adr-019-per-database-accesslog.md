@@ -280,6 +280,42 @@ Derived rules, binding on all present and future accesslog handling:
      an accesslog. A pod where *every* database has been demoted keeps the
      orphan indefinitely; it is unreferenced and harmless.
 
+  *Amendment, 2026-08-25 (first live run).* Two defects the design above did not
+  anticipate, both found only by running the migration on a real cluster and both
+  now constraints on future code:
+
+  3. **Never reuse an `olcDatabase={N}` DN across a database delete.** slapd
+     renumbers every database ordered after a deleted one, so a DN resolved
+     before the delete may name a *different* database after it. This is ordinary
+     history, not an edge case: in a legacy cluster the shared log is created on
+     the first replicated database's reconcile, so a database added later sits
+     above the log and slides down when it is reaped. The first implementation
+     cached the data DB's DN and then added the accesslog overlay to whatever had
+     slid into that slot — attaching a journal to a *journal*, which reproduces
+     Fact 2 permanently between the two logs, on all pods, with nothing ever
+     removing it. Every step that can delete a database now reports it and the
+     caller re-resolves. The same staleness existed latently on the ADR-010
+     demotion path.
+
+     Because the mis-attached overlay is not self-correcting, `ensureAccesslogDB`
+     also reaps an accesslog overlay found on an accesslog database — narrowly:
+     only what is positively attributable to this bug, never "anything the
+     operator did not put here", since `cn=config` is node-local and hand-editable
+     (ADR-002).
+
+  4. **A syncrepl stanza must not be written to a pod whose accesslog DB does not
+     exist yet.** The stanza rewrite is per-database and sat outside the per-pod
+     loop, so a pod whose log add was still failing (no `/accesslog/<dbname>`
+     until it rolls) had its `logbase` repointed at a log it did not have — which
+     halts its replication outright, per the Consequences correction below. Pods
+     outside the healthy set now keep the stanzas they have and are retried. This
+     is the order ADR-010 already prescribes for consumer-only → peer promotion
+     (accesslog DB and overlays before in-cluster stanzas), and ADR-003 is
+     untouched: the operator remains the sole author of every stanza. Deferring is
+     the conservative direction — nothing is removed, and a graceful "fall back to
+     plain syncrepl" was rejected as a topology decision ADR-011 reserves for
+     humans.
+
   Detection requires `olcSuffix: cn=accesslog` **and**
   `olcDbDirectory: /accesslog` to match, exactly and case-folded. Suffix-only
   matching would delete a hand-made `cn=accesslog` this operator never created;
@@ -342,11 +378,32 @@ Derived rules, binding on all present and future accesslog handling:
   bounded by the old DB's `olcDbMaxSize` and reclaimed whenever the accesslog PVC
   is recycled, which is always safe: the accesslog holds only a journal.
 - **A new peer-facing failure mode to keep visible.** A `logbase` that names a
-  suffix the peer does not have is not a hard error — the remote search finds
-  nothing, the consumer falls back, and the peer degrades to full-refresh
-  syncrepl exactly as in Fact 2. R9's derivation plus the `slctl` check below are
-  what keep that from being silent; a mismatched mesh, or a migration source with
-  a `cn=log`-style suffix, must be diagnosable without reading provider logs.
+  suffix the provider does not have stops that consumer's replication outright.
+  R9's derivation plus the `slctl` check below are what keep it visible; a
+  mismatched mesh, or a migration source with a `cn=log`-style suffix, must be
+  diagnosable without reading provider logs.
+
+  *Correction, 2026-08-25 (observed live).* This bullet originally predicted a
+  graceful degradation — "the remote search finds nothing, the consumer falls
+  back, and the peer degrades to full-refresh syncrepl exactly as in Fact 2".
+  **That is wrong, and it is wrong in the dangerous direction.** A missing
+  `logbase` is a missing *search base*: the log-mode search returns
+  `noSuchObject` and the session aborts before any fallback can run —
+
+  ```
+  do_syncrep2: rid=101 LDAP_RES_SEARCH_RESULT (32) No such object
+  do_syncrepl: rid=101 rc -101 retrying
+  ```
+
+  — so replication **halts and retries indefinitely; no data moves at all**.
+  Fact 2's `SYNCLOG_FALLBACK` is reached only from the `logerr` switch, i.e. when
+  the log search *succeeds* and applying an entry fails; a base that does not
+  exist never gets there. Measured on a cluster in this state: an entry written
+  on pod-0 was still absent on the other two pods minutes later. Mechanically
+  this is louder than predicted, but it is still silent in `status.phase` terms,
+  which is why the `slctl` check matters. It is also why the operator must never
+  write a stanza to a pod whose accesslog DB it has not yet managed to create —
+  see the stanza-deferral note under R8.
 - **`SlapdDatabase` gains one optional field**,
   `spec.replication.externalAccesslogSuffix` (R9/R10). CRD regeneration and chart
   CRD sync follow; no defaulting webhook, no spec write-back.

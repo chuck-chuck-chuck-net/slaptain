@@ -133,6 +133,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
         ├── backup_test.go          # SlapdBackup → S3 round-trip (gated: E2E_BACKUP=1, deploys versitygw)
         ├── restore_test.go         # bootstrapFrom restore into a fresh cluster (gated: E2E_BACKUP=1)
+        ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
+        ├── accesslog_migration_test.go # ADR-019 R8 convergence off a hand-made legacy shared log (gated: E2E_ACCESSLOG_MIGRATION=1)
         └── scaleup_test.go         # standalone → HA transition: schema/modules/serverID runtime convergence (gated: E2E_SCALEUP=1)
 ```
 
@@ -146,7 +148,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532. Builder stage uses `golang:1.25`.
 - **User (slapd):** `openldap` (UID/GID 1024). Debian's slapd package creates this user; we `groupmod`/`usermod` to 1024.
 - **Ports:** 1024 (ldap), 1025 (ldaps) — non-privileged. Service maps 389→1024 and 636→1025.
-- **Mount Points:** `/config` (slapd.d config dir, PVC), `/data` (LMDB data, PVC), `/accesslog` (delta-syncrepl change journal, PVC), `/run/openldap` (socket, emptyDir), `/etc/openldap/tls` (TLS secret, optional).
+- **Mount Points:** `/config` (slapd.d config dir, PVC), `/data` (LMDB data, PVC), `/accesslog` (delta-syncrepl change journals, PVC — one `<dbname>` subdirectory per replicated database, ADR-019), `/run/openldap` (socket, emptyDir), `/etc/openldap/tls` (TLS secret, optional).
 - **Module path:** `/usr/lib/ldap` (Debian path). Modules loaded dynamically; plan to compile in statically later.
 - **Schema path:** `/etc/ldap/schema/` (Debian path).
 - **Init Container:** Sets up `cn=config` (admin credentials, modules, TLS). Creates per-database data directories from `DATABASE_DIRS` env var. Does NOT create data databases, schemas, or ACLs.
@@ -478,8 +480,8 @@ the original decision — the history of reasoning matters.
 - ADR-016: Direct native pod-IP routing as a cross-cluster replication transport (alongside Multus/NodePort; `network.mode: pod-routed`) — *Accepted (impl + e2e green across three routed-pod-CIDR sites 2026-07-06)*
 - ADR-017: `olcServerID` is a bare integer (`serverIDBase + ordinal + 1`), not the URL-list self-match form — sheds the FQDN/cluster-domain coupling that made serverID the ADR-015 boot crash surface — *Accepted 2026-07-17*
 - ADR-018: Co-located PVC access — RWO is per-node, but any pod object naming a PVC (finished pods included) is a deletion lease that blocks pod re-roll; the operator reaps every Job it creates — *Accepted 2026-08-23*
-- ADR-019: One accesslog DB per replicated data DB (`cn=accesslog-<dbname>` at `/accesslog/<dbname>`) — a shared log makes every write to one DB kick the other DB's consumers into full refresh; verified against slapd sources and upstream guidance — *Accepted 2026-08-25*
-- ADR-020: An accesslog DB is at least as restrictive as the database it journals — `to * by dn.exact="cn=replication,<suffix>" read by * none`; without it a data DB's ACLs are bypassable through its own change journal — *Accepted 2026-08-25*
+- ADR-019: One accesslog DB per replicated data DB (`cn=accesslog-<dbname>` at `/accesslog/<dbname>`) — a shared log makes every write to one DB kick the other DB's consumers into full refresh; verified against slapd sources and upstream guidance — *Accepted (impl + e2e green 2026-08-25; amended twice the same day from the first live run — R8 step order + reference-counted delete, then the "never reuse an olcDatabase={N} DN across a delete" rule and per-pod stanza deferral; Consequences corrected: a missing `logbase` **halts** replication, it does not degrade to full refresh)*
+- ADR-020: An accesslog DB is at least as restrictive as the database it journals — `to * by dn.exact="cn=replication,<suffix>" read by * none`; without it a data DB's ACLs are bypassable through its own change journal — *Accepted (impl + e2e green 2026-08-25; the bypass was captured live before the fix — an anonymous read of the shared journal returned `reqMod: userPassword:+ {SSHA}…` for a user whose `userPassword` the data DB denies)*
 
 ---
 
@@ -597,9 +599,9 @@ Each pod has three databases and two overlays:
 | Component | Path | Purpose |
 |---|---|---|
 | Data DB (`olcDatabase={1}mdb`) | `/data` (existing) | LDAP data; unchanged from Phase 1 |
-| Accesslog DB (`olcDatabase={2}mdb`) | `/accesslog` (**new PVC**) | Delta-syncrepl change journal |
-| `overlay accesslog` on data DB | — | Writes every change to accesslog DB |
-| `overlay syncprov` on accesslog DB | — | Exposes change journal to peers |
+| Accesslog DB, one per replicated data DB (`cn=accesslog-<dbname>`) | `/accesslog/<dbname>` | Delta-syncrepl change journal. **Never shared between databases** — ADR-019 |
+| `overlay accesslog` on data DB | — | Writes every change to *that database's own* accesslog DB |
+| `overlay syncprov` on each accesslog DB | — | Exposes that change journal to peers |
 | `overlay syncprov` on data DB | — | Required for initial full sync |
 | `olcMirrorMode: TRUE` on data DB | — | Enables N-way multi-master writes |
 | `olcSyncrepl` (N-1 entries) | — | One syncrepl entry per peer pod |
@@ -627,7 +629,7 @@ Phase 2 switches to **StatefulSet `volumeClaimTemplates`** for per-pod PVCs:
 |---|---|---|
 | `config` | `config-<name>-<N>` | `/config` |
 | `data` | `data-<name>-<N>` | `/data` |
-| `accesslog` | `accesslog-<name>-<N>` | `/accesslog` (**new**) |
+| `accesslog` | `accesslog-<name>-<N>` | `/accesslog` (**new**); per-database journals live in `/accesslog/<dbname>` |
 
 The `reconcilePVCs` controller step is **removed**; PVC lifecycle is managed entirely by the
 StatefulSet. Breaking change for Phase 1 deployments (PVC names change). Acceptable at v1alpha1.
@@ -666,9 +668,9 @@ controller's responsibility.
 
 Init container, gated on `LDAP_REPLICATION_ENABLED=true`:
 - Load `accesslog` and `syncprov` modules.
-- Create the accesslog DB (`olcDatabase={N}mdb cn=accesslog`) with its backing directory.
-- Add `overlay syncprov` to the accesslog DB so peers can pull incremental updates.
-- Accesslog DB ACLs granting `cn=replication,<suffix>` read access.
+- Create the per-database accesslog backing directories `/accesslog/<dbname>` from `DATABASE_DIRS`
+  (`back-mdb` does not create `olcDbDirectory`). The log **databases** themselves, their syncprov
+  overlay and their ACLs are the SlapdDatabase controller's job — see ADR-019 and ADR-020.
 - Skip accesslog setup entirely when `LDAP_READONLY_REPLICA=true` (RO pods don't produce changes).
 
 SlapdDatabase controller, per data database, when `spec.replication.deltaSync=true`:

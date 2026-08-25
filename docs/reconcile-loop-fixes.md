@@ -5,6 +5,126 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-08-25: a cached olcDatabase={N} DN attaches an accesslog overlay to the wrong database
+
+**Symptom:** after an in-place upgrade of a legacy shared-accesslog cluster to
+ADR-019 code, every pod carried an accesslog overlay on an *accesslog* database:
+
+```
+dn: olcOverlay={1}accesslog,olcDatabase={3}mdb,cn=config   # {3} is cn=accesslog-<dbA>
+olcAccessLogDB: cn=accesslog-<dbB>
+```
+
+One journal journalling into another. Writes to DB-A appeared as foreign entries
+in DB-B's journal, and the cluster went straight back to the Fact 2 signature it
+had just been migrated away from — 2466 `delta-sync lost sync … switching to
+REFRESH` lines, permanently, with nothing ever removing the overlay. On another
+run the same staleness produced the milder form: the data DB left with no
+accesslog overlay at all.
+
+**Root cause:** `reconcilePodDatabase` resolved the data DB's DN once, then ran
+the R8 migration — which *deletes* the legacy log database — and reused the
+cached DN afterwards. **slapd renumbers every `olcDatabase={N}` ordered after a
+deleted one**, so the cached DN then named whatever slid into that slot.
+
+**Why it is the normal case, not an edge case:** in a legacy cluster the shared
+log is created on the *first* replicated database's reconcile, so a second
+database added later sits at a **higher** index than the log and slides down when
+the log is reaped. That is ordinary history. It reproduced on all three pods,
+every time.
+
+**Why it was hard to spot:** the migration's own unit tests are on a pure
+predicate over observed state and cannot see DN lifetimes; the code reviews
+checked the migration's *ordering* (overlay before DB, which was correct) and not
+the *lifetime of the DN handed to the step after it*. Nothing fails loudly — the
+overlay add succeeds, against the wrong parent.
+
+**Fix:** every step that can delete a cn=config database reports whether it did
+(`migrateLegacyAccesslog`, `removeAccesslogDB` → `(bool, error)`), and the caller
+re-resolves the data DN on the spot. Fixed at the root rather than at the one
+known call site, because `ensureReadOnly` downstream had the same exposure (in
+consumer-only mode it would have set an accesslog DB read-only). The latent
+variant on the ADR-010 demotion path is fixed too — it had survived only on
+creation-order luck. Because the mis-attached overlay is not self-correcting,
+`ensureAccesslogDB` also reaps an accesslog overlay found on an accesslog DB,
+narrowly: only what is positively attributable to this bug (ADR-002 — cn=config
+is node-local and hand-editable, so a reaper that removes what it does not
+recognise is a footgun).
+
+**Coverage:** a gated e2e (`E2E_ACCESSLOG_MIGRATION=1`) manufactures the legacy
+shape on a current cluster — no old images needed — by inserting `cn=accesslog`
+**at the lowest data DB's `{N}` index** so the renumbering actually happens;
+appending it, the natural `ldapadd` result, renumbers nothing and the scenario
+proves nothing. The spec asserts that precondition explicitly so it cannot
+silently degrade into a weaker test. Red against the pre-fix build, green after,
+plus idempotence across a multi-reconcile window.
+
+**Lesson:** in `cn=config`, a DN is a positional handle, not an identity. Any
+delete invalidates every DN ordered after it, so a DN must not outlive a
+mutation — and "the step I audited was correctly ordered" says nothing about the
+arguments the next step receives.
+
+---
+
+## 2026-08-25: syncrepl stanzas written to a pod whose accesslog DB does not exist halt replication
+
+**Symptom:** during an upgrade of a legacy cluster whose pods had not yet rolled,
+replication stopped entirely — not degraded, stopped:
+
+```
+do_syncrep1: rid=101 starting refresh (sending cookie=...)
+do_syncrep2: rid=101 LDAP_RES_SEARCH_RESULT (32) No such object
+do_syncrepl: rid=101 rc -101 retrying
+```
+
+An entry written on pod-0 was still absent on the other two pods minutes later,
+and only replicated once the pods rolled. Unbounded window when `spec.images` is
+pinned.
+
+**Root cause:** the syncrepl stanza rewrite (`reconcileReplication`) is
+per-database and sits *outside* the per-pod loop — its inputs (replication
+password, `ridBase`, resolved external peers) are per-database, which is why the
+split exists. It never consulted whether the per-pod database reconcile had
+succeeded. On these pods `/accesslog/<dbname>` did not exist yet, so
+`ensureAccesslogDB` failed and retried (correctly, non-destructively) — but the
+stanzas had already been repointed at `logbase="cn=accesslog-<db>"`, a base the
+provider did not have.
+
+**Why it was hard to spot:** ADR-019 predicted this exact situation degrades to
+full-refresh syncrepl. It does not. A missing `logbase` is a missing *search
+base*: the search returns `noSuchObject` and the session aborts before any
+fallback. `SYNCLOG_FALLBACK` is reached only from the `logerr` switch, when the
+log search *succeeds* and applying an entry fails. The ADR text and slctl's
+wording were both corrected.
+
+**Fix:** defer per pod rather than degrade. A pod whose database reconcile did
+not complete keeps the stanzas it has — nothing is removed — and is retried, the
+same semantics as every other step of that reconcile. This is the order ADR-010
+already prescribes for consumer-only → peer promotion (accesslog DB and overlays
+before in-cluster stanzas), and ADR-003 is untouched: the operator remains the
+sole author of every stanza. A "fall back to plain syncrepl" alternative was
+rejected — it would flap delta↔plain across a mesh and make a topology decision
+ADR-011 reserves for humans. Cost: an unrelated per-pod failure also defers that
+pod's external stanza updates by one reconcile.
+
+**Verified live:** with the same legacy pods, `logbase` stayed on the legacy log
+for the whole window, a probe entry replicated to both peers *during* the
+migration, and `No such object` / `rc -101` counts were 0 on all three pods.
+
+**Not automatically covered.** A regression test needs pods whose init container
+predates the per-database directory creation, and the missing thing is a
+*directory on a PVC the operator cannot touch* (ADR-018) — not manufacturable
+from `cn=config`. Proven by two hand-run live scenarios; a permanent guard would
+need an e2e that pins an old init image, a fixture capability the suite does not
+have. Worth filing.
+
+**Lesson:** when a per-database step writes configuration that references
+per-pod state, it must consult whether that pod's own reconcile succeeded.
+"Failed pods are recorded for status" is not the same as "failed pods are
+excluded from writes".
+
+---
+
 ## 2026-08-25: one accesslog shared by two replicated databases destroys delta-syncrepl
 
 **Symptom (latent — found by reading, not by a field report):** with two
@@ -51,11 +171,12 @@ stanzas use `externalLogBase(sd)` because `logbase` is evaluated on the
 log with no `olcAccess` inherits the frontend default *read*, so `reqMod` leaked
 exactly the attributes the data DB's ACLs deny.
 
-**Verification:** the derivation is unit-covered red-first (reintroducing the
-shared suffix turns six assertions red). Legacy-cluster convergence off the old
-shared log (ADR-019 R8) and the two-database e2e that reproduces the mechanism
-behaviourally land in follow-up commits on this branch; until R8 is in, do not
-deploy this against a cluster that already carries a shared `cn=accesslog`.
+**Verification:** proven end to end on a three-pod cluster. Against images built
+before the fix, with two replicated databases, the behavioural e2e went red with
+2640 lines of the signature above — while the **data-convergence assertion passed
+on that same run**, both databases settling in ~2 s each. That is the invisibility,
+measured: a convergence-only suite signs this cluster off as healthy. All four
+assertions green after the fix; full suite 46/46.
 
 **Lesson:** delta-syncrepl's change journal is per-target-DIT infrastructure, not
 a cluster-level singleton. Anything a syncrepl stanza names is provider-side

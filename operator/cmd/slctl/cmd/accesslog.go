@@ -203,9 +203,10 @@ func checkNamingContexts(dbs []dbIdentity, pods []podAccesslogState) checkResult
 //     here at all, so it is surfaced as information and never fails: a
 //     correctly-configured cross-site mesh with a foreign log suffix must not
 //     turn slctl inspect red. It is reported precisely because a logbase the
-//     peer lacks is otherwise silent — the remote search finds nothing and the
-//     consumer degrades to full-refresh syncrepl with everything still looking
-//     healthy.
+//     peer lacks is otherwise silent in status terms while being severe in
+//     effect: the log-mode search returns noSuchObject, the session aborts
+//     before any fallback, and that consumer's replication halts outright
+//     (observed live, ADR-019 Consequences correction 2026-08-25).
 //
 // A value still naming the legacy cluster-shared log warns instead of failing
 // (mid-migration is legitimate — ADR-019 R8 — and one database on one log is
