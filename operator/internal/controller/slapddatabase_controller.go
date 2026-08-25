@@ -149,6 +149,11 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	var appliedPods, failedPods []string
 
+	// Pods whose per-pod database reconcile completed. reconcileReplication
+	// writes syncrepl stanzas only to these — see the comment on its healthyPods
+	// parameter.
+	healthyPods := map[string]bool{}
+
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
@@ -160,6 +165,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			failedPods = append(failedPods, podName)
 		} else {
 			appliedPods = append(appliedPods, podName)
+			healthyPods[podName] = true
 		}
 	}
 
@@ -178,6 +184,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				failedPods = append(failedPods, podName)
 			} else {
 				appliedPods = append(appliedPods, podName)
+				healthyPods[podName] = true
 			}
 		}
 	}
@@ -234,7 +241,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// 10. Configure replication stanzas if replication is enabled.
 	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() {
-		skipped, err := r.reconcileReplication(ctx, sc, sd, configPW)
+		skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
 		}
@@ -1891,11 +1898,42 @@ func ldapEntryExists(conn *ldap.Conn, dn string) (bool, error) {
 
 // reconcileReplication applies syncrepl stanzas for this database to each pod.
 // Uses the database's ridBase for RID assignment. See ADR-003 amendment.
+//
+// healthyPods names the pods whose per-pod database reconcile completed in this
+// pass; a pod outside the set is skipped and the caller requeues.
+//
+// Why a stanza must not be written to a pod whose database reconcile failed: a
+// delta-sync stanza carries `logbase`, and the log it names is created by that
+// very per-pod reconcile (ensureAccesslogDB). Writing the stanza first points
+// the consumer at a search base the provider does not have — and that does not
+// degrade gracefully. Observed live, upgrading a legacy cluster whose pods had
+// not yet rolled (so /accesslog/<db> did not exist and the log add kept
+// failing):
+//
+//	do_syncrep1: rid=101 starting refresh (sending cookie=...)
+//	do_syncrep2: rid=101 LDAP_RES_SEARCH_RESULT (32) No such object
+//	do_syncrepl: rid=101 rc -101 retrying
+//
+// Replication stopped outright for as long as the window lasted — an entry
+// written on pod-0 was still absent on the other two pods minutes later. It is
+// NOT the "falls back to full refresh" behaviour a missing logbase is often
+// assumed to produce: the consumer never gets past the log search.
+//
+// Skipping is the conservative direction: a pod that already has working stanzas
+// keeps them (nothing is removed), and a pod that has none simply waits, exactly
+// as it already does for every other step of its database reconcile. It also
+// matches the order ADR-010 prescribes for consumer-only → peer promotion, where
+// the accesslog DB and the overlays are added *before* the in-cluster stanzas.
+// The cost is that an unrelated per-pod failure also defers that pod's external
+// (including plain-syncrepl, ADR-011) stanza updates; deferring one pod's
+// external stanza by a reconcile is cheaper than the alternative, which is
+// halting its replication until a human notices.
 func (r *SlapdDatabaseReconciler) reconcileReplication(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	configPW string,
+	healthyPods map[string]bool,
 ) (bool, error) {
 	log := logf.FromContext(ctx)
 
@@ -2044,8 +2082,16 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 
 	// Apply to RW pods.
 	for i := int32(0); i < replicas; i++ {
+		podName := fmt.Sprintf("%s-%d", sc.Name, i)
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s",
 			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
+
+		if !healthyPods[podName] {
+			log.Info("replication stanzas deferred: the pod's database reconcile "+
+				"did not complete this pass (will retry)", "pod", podName)
+			skipped = true
+			continue
+		}
 
 		desired := buildDatabaseSyncRepl(
 			sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix, sd.Name,
@@ -2070,8 +2116,20 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	if sc.Spec.ReadReplicas > 0 {
 		roHeadless := sc.Name + "-readonly-headless"
 		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
+			podName := fmt.Sprintf("%s-readonly-%d", sc.Name, i)
 			host := fmt.Sprintf("%s-readonly-%d.%s.%s.svc.%s",
 				sc.Name, i, roHeadless, sc.Namespace, r.ClusterDomain)
+
+			// RO pods have no log of their own, but their stanzas still name the
+			// RW providers' logs (ADR-019 R3) — and the reason to defer is the
+			// same: their own database reconcile is what establishes the
+			// preconditions the stanza assumes.
+			if !healthyPods[podName] {
+				log.Info("replication stanzas deferred for read-only pod: its database "+
+					"reconcile did not complete this pass (will retry)", "pod", podName)
+				skipped = true
+				continue
+			}
 
 			desired := buildDatabaseSyncReplRO(
 				sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix, sd.Name,
