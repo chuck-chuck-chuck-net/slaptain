@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -60,16 +62,31 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 	}
 	wipe := `rm -f "/data/$DATADIR/data.mdb" "/data/$DATADIR/lock.mdb"`
-	// Under replication the pod has an accesslog DB (olcDbDirectory /accesslog,
-	// its own PVC). Wipe its LMDB too: it is a transient change journal, and any
-	// pre-restore delta left behind — most damagingly a delete at a CSN newer
-	// than the restored contextCSN — is replayed by delta-syncrepl on scale-up,
-	// silently undoing the restore. slapd recreates an empty accesslog on start,
-	// and after a full identical reload there are no pending changes to ship.
-	// Mirrors the RO-pod rationale below and the promotion-path hazard noted in
-	// slapddatabase_controller.go ("wipe /accesslog manually"). See ADR-014.
+	// Under replication the pod has an accesslog DB of its own (ADR-019:
+	// olcDbDirectory /accesslog/<db>, one directory per database inside the
+	// single accesslog PVC). Wipe its LMDB too: it is a transient change
+	// journal, and any pre-restore delta left behind — most damagingly a delete
+	// at a CSN newer than the restored contextCSN — is replayed by
+	// delta-syncrepl on scale-up, silently undoing the restore. slapd recreates
+	// an empty accesslog on start, and after a full identical reload there are
+	// no pending changes to ship. Mirrors the RO-pod rationale below and the
+	// promotion-path hazard noted in slapddatabase_controller.go ("wipe
+	// /accesslog/<db> manually"). See ADR-014 and docs/reconcile-loop-fixes.md
+	// (2026-07-27).
+	//
+	// Scoped to *this* database's directory. It used to be
+	// `rm -f /accesslog/{data,lock}.mdb` at the mount root, which under ADR-019
+	// wipes nothing at all, and under the pre-ADR-019 shared log wiped every
+	// database's journal while restoring one — kicking every consumer of the
+	// untouched databases into a full refresh for no reason. The wipe is
+	// unchanged in purpose, only in scope.
+	//
+	// The directory itself is left in place: back-mdb does not create
+	// olcDbDirectory, so removing it would leave slapd unable to open the log
+	// until the next init-container run.
 	if t.accesslogPVC != "" {
-		wipe += "\n" + `rm -f /accesslog/data.mdb /accesslog/lock.mdb`
+		logDir := ldapv1alpha1.AccesslogDir(sd.Name)
+		wipe += "\n" + fmt.Sprintf(`rm -f %q %q`, logDir+"/data.mdb", logDir+"/lock.mdb")
 	}
 
 	volumes := []corev1.Volume{pvcVolume("data", t.dataPVC)}
@@ -120,7 +137,7 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 		}
 		if t.accesslogPVC != "" {
 			volumes = append(volumes, pvcVolume("accesslog", t.accesslogPVC))
-			mounts = append(mounts, corev1.VolumeMount{Name: "accesslog", MountPath: "/accesslog"})
+			mounts = append(mounts, corev1.VolumeMount{Name: "accesslog", MountPath: ldapv1alpha1.AccesslogRoot})
 		}
 		containers = []corev1.Container{{
 			Name:            "restore",

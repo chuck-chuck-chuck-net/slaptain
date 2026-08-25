@@ -883,7 +883,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "LDAP_TLS_ENABLED", Value: strconv.FormatBool(sc.Spec.LDAP.TLS.Enabled)},
 		{Name: "CONFIG_DIR", Value: "/config"},
 		{Name: "DATA_DIR", Value: "/data"},
-		{Name: "ACCESSLOG_DIR", Value: "/accesslog"},
+		{Name: "ACCESSLOG_DIR", Value: ldapv1alpha1.AccesslogRoot},
 		{Name: "DATABASE_DIRS", Value: strings.Join(databaseNames, ",")},
 	}
 
@@ -936,7 +936,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	if accesslogMountNeeded && !readOnly {
 		initMounts = append(initMounts, corev1.VolumeMount{
 			Name:      "accesslog",
-			MountPath: "/accesslog",
+			MountPath: ldapv1alpha1.AccesslogRoot,
 		})
 	}
 	if sc.Spec.LDAP.TLS.Enabled {
@@ -980,7 +980,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	if accesslogMountNeeded && !readOnly {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
 			Name:      "accesslog",
-			MountPath: "/accesslog",
+			MountPath: ldapv1alpha1.AccesslogRoot,
 		})
 	}
 	if sc.Spec.LDAP.TLS.Enabled {

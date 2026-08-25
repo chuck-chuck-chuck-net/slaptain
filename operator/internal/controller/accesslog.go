@@ -11,52 +11,176 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"path"
+	"strings"
+
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
-// accesslogRoot is the mount path of the single accesslog PVC (ADR-019 R3).
-// It is the same value the SlapdCluster controller passes to the init container
-// as ACCESSLOG_DIR and mounts into the slapd container; per-database LMDB
-// directories live beneath it.
-const accesslogRoot = "/accesslog"
-
-// Accesslog naming — the single place the string "cn=accesslog" is spelled.
+// Convergence off the pre-ADR-019 cluster-shared accesslog (ADR-019 R8).
 //
-// ADR-019 R5: the accesslog DB's own olcSuffix, the data DB's overlay
-// olcAccessLogDB, and every delta-syncrepl stanza's logbase must never be able
-// to drift apart, so all three derive from one helper keyed on the
-// SlapdDatabase CR name (ADR-019 R1). Nothing else in the operator may spell
-// cn=accesslog literally.
+// How a per-database log is *named* lives in api/v1alpha1 (AccesslogSuffix /
+// AccesslogDir / ExternalLogBase) — it is part of the observable contract.
+// What lives here is genuinely controller-local: deciding, from one pod's
+// observed cn=config, which teardown steps a legacy cluster still needs.
 //
-// ADR-019 R10: these are computed at the point of use. Nothing is written back
-// into .spec.
+// olcSuffix and olcDbDirectory are not runtime-mutable, so there is no rename
+// path — the shared log has to go and a per-database one has to take its place.
+// The cost is one full refresh per consumer, which is the same SYNCLOG_FALLBACK
+// path slapd takes for a purged log, so it is self-healing (ADR-019 R8).
 
-// accesslogSuffix returns the LDAP suffix of the accesslog database that
-// journals the given SlapdDatabase: cn=accesslog-<dbname> (ADR-019 R1). Keyed
-// on the CR name, not on the data DB's LDAP suffix — the CR name is already
-// the identity used for <dbname>-credentials and DATABASE_DIRS, and an LDAP
-// suffix can carry characters that are awkward in the matching path.
-func accesslogSuffix(dbName string) string { return "cn=accesslog-" + dbName }
-
-// accesslogDir returns the LMDB backing directory of that database's accesslog:
-// /accesslog/<dbname> (ADR-019 R1). One shared accesslog PVC, one directory per
-// database beneath it (ADR-019 R3) — LMDB needs a directory, not a mount.
-func accesslogDir(dbName string) string { return accesslogRoot + "/" + dbName }
-
-// externalLogBase returns the accesslog suffix to use as `logbase` in the
-// delta-syncrepl stanzas aimed at external peers.
+// legacyAccesslogSuffix is the suffix of the single cluster-shared accesslog
+// database this operator created before ADR-019. Its backing directory was the
+// accesslog mount root itself (ldapv1alpha1.AccesslogRoot) rather than a
+// per-database subdirectory, and the two together are what identify it.
 //
-// ADR-019 R9: `logbase` is a search base evaluated on the *provider*, so an
-// external stanza must name the peer's accesslog suffix. The default — correct
-// whenever the peer is another slaptain cluster running a SlapdDatabase of the
-// same name — is this database's own derived suffix; spec.replication.
-// externalAccesslogSuffix overrides it for a foreign provider (ADR-011 supports
-// syncMode: delta against one, and its log need not be called cn=accesslog).
+// This is the ONE place the bare legacy suffix is spelled. ADR-019 R5's rule —
+// nothing spells cn=accesslog literally — is about the *live* naming; a
+// migration necessarily has to name the thing it is migrating away from.
+const legacyAccesslogSuffix = "cn=accesslog"
+
+// observedLogDB is one olcMdbConfig child of cn=config as read off a pod: its
+// DN (carrying slapd's {N} ordering prefix), its olcSuffix and its
+// olcDbDirectory.
+type observedLogDB struct {
+	DN     string
+	Suffix string
+	Dir    string
+}
+
+// observedAccesslogOverlay is one accesslog overlay found anywhere in this
+// pod's cn=config, together with the log suffix its olcAccessLogDB names.
+// Collected across *all* databases, not just the one being reconciled — which
+// database still references the shared log is exactly what decides whether it
+// is safe to delete.
+type observedAccesslogOverlay struct {
+	DN    string
+	LogDB string
+}
+
+// accesslogMigrationPlan is what one pod needs for one SlapdDatabase. The zero
+// value means "nothing to do", which is the answer on every cluster that has
+// only per-database logs.
+type accesslogMigrationPlan struct {
+	// DropOverlay: this data DB's accesslog overlay names the legacy shared
+	// log. Delete it, so ensureAccesslogOverlay re-adds it against this
+	// database's own log. slapd validates olcAccessLogDB against an existing
+	// database, which is why this is a delete-and-re-add rather than a modify —
+	// the same reason reconcilePodDatabase already orders DB before overlay on
+	// add and overlay before DB on remove.
+	DropOverlay bool
+	// DeleteLegacyDN: DN of the legacy shared log database to delete, or "" to
+	// leave it alone.
+	DeleteLegacyDN string
+}
+
+// Empty reports whether the plan requires no action at all.
+func (p accesslogMigrationPlan) Empty() bool { return !p.DropOverlay && p.DeleteLegacyDN == "" }
+
+// planAccesslogMigration decides the ADR-019 R8 convergence for one
+// SlapdDatabase on one pod.
 //
-// ADR-019 R10: computed at the point of use; never written back to .spec.
-func externalLogBase(sd *ldapv1alpha1.SlapdDatabase) string {
-	if s := sd.Spec.Replication.ExternalAccesslogSuffix; s != "" {
-		return s
+// dataDN is that database's own olcDatabase={N}mdb DN; mdbs and overlays are
+// everything of the respective kind observed under cn=config on this pod.
+//
+// Two independent decisions, deliberately:
+//
+//   - DropOverlay is about *our* database only, and fires only when our overlay
+//     names the legacy shared log exactly.
+//   - DeleteLegacyDN is about the shared database, and fires only when nothing
+//     will reference it once DropOverlay has been carried out.
+//
+// Keeping them independent is what makes the multi-database case safe and
+// order-free. With DB-A and DB-B both journalling into one shared log:
+//
+//	A reconciles first — it drops A's overlay, sees B's overlay still naming the
+//	shared log, and leaves the shared database alone. B keeps journalling
+//	throughout; nothing is yanked out from under a live overlay.
+//	B reconciles next — it drops B's overlay, sees no remaining reference, and
+//	reaps the shared database.
+//
+// The reverse order is symmetric, and if the two ever observe each other
+// concurrently and both decline to delete, the log is simply left orphaned and
+// the next reconcile of either database reaps it — because DeleteLegacyDN does
+// not depend on DropOverlay. It also reaps a shared log orphaned by a database
+// being demoted out of delta-sync — but only while some database on the pod
+// still wants an accesslog, because that is the only branch this runs under. A
+// pod whose every database has been demoted keeps the orphan indefinitely: it is
+// unreferenced and harmless, and reaping it would mean running this on the
+// no-accesslog path purely to tidy up. cn=config is node-local (ADR-002), so
+// pods converge independently with no cross-pod coordination.
+//
+// Idempotent by construction (ADR-001): after a successful migration the log DB
+// is gone and the overlay names the per-database suffix, so both decisions read
+// false on every subsequent reconcile.
+func planAccesslogMigration(
+	dataDN string,
+	mdbs []observedLogDB,
+	overlays []observedAccesslogOverlay,
+) accesslogMigrationPlan {
+	var plan accesslogMigrationPlan
+
+	// Find the legacy shared log. BOTH the suffix and the backing directory
+	// must match: cn=accesslog-<db> shares a prefix with the legacy suffix, so a
+	// substring test here would tear the log out of every healthy cluster, and a
+	// suffix-only test would delete a hand-made cn=accesslog living somewhere
+	// this operator never put one.
+	var legacyDN string
+	for _, db := range mdbs {
+		if isLegacyAccesslogDB(db) {
+			legacyDN = db.DN
+			break
+		}
 	}
-	return accesslogSuffix(sd.Name)
+	if legacyDN == "" {
+		// The overwhelmingly common case, including every cluster created at or
+		// after ADR-019 and every already-migrated one. Nothing is torn down
+		// when there is no legacy log to migrate away from.
+		return plan
+	}
+
+	remainingRefs := 0
+	for _, ov := range overlays {
+		if !namesLegacyAccesslog(ov.LogDB) {
+			continue
+		}
+		if isChildDN(ov.DN, dataDN) {
+			plan.DropOverlay = true
+			continue
+		}
+		remainingRefs++
+	}
+	if remainingRefs == 0 {
+		plan.DeleteLegacyDN = legacyDN
+	}
+	return plan
+}
+
+// isLegacyAccesslogDB reports whether an observed mdb database is the
+// pre-ADR-019 cluster-shared accesslog: suffix cn=accesslog backed by the
+// accesslog mount root itself.
+func isLegacyAccesslogDB(db observedLogDB) bool {
+	if !namesLegacyAccesslog(db.Suffix) {
+		return false
+	}
+	dir := path.Clean(strings.TrimSpace(db.Dir))
+	return dir == path.Clean(ldapv1alpha1.AccesslogRoot)
+}
+
+// namesLegacyAccesslog reports whether an olcSuffix or olcAccessLogDB value is
+// exactly the legacy shared suffix. Exact, case-folded, whitespace-trimmed:
+// cn=config DN values are case-insensitive and slapd normalises them on its own
+// schedule, but cn=accesslog-default must never match.
+func namesLegacyAccesslog(v string) bool {
+	return strings.EqualFold(strings.TrimSpace(v), legacyAccesslogSuffix)
+}
+
+// isChildDN reports whether child is a direct-or-deeper descendant of parent,
+// comparing case-insensitively. Used to attribute an accesslog overlay to the
+// data database it hangs under; slapd's {N} ordering prefixes make the overlay's
+// own RDN unpredictable, but its parent DN is not.
+func isChildDN(child, parent string) bool {
+	return len(child) > len(parent)+1 &&
+		strings.EqualFold(child[len(child)-len(parent):], parent) &&
+		child[len(child)-len(parent)-1] == ','
 }

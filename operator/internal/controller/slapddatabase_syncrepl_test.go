@@ -93,7 +93,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, ordinal, replPW,
 			true, ridBase, retry, keepalive, deltaSync,
-			accesslogSuffix(dbName),
+			ldapv1alpha1.AccesslogSuffix(dbName),
 			peers, nil, false,
 		)
 	}
@@ -213,7 +213,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
 			true, ridBase, retry, keepalive, deltaSync,
-			accesslogSuffix(dbName),
+			ldapv1alpha1.AccesslogSuffix(dbName),
 			peers, nil, true, // consumerOnly=true
 		)
 		// No in-cluster peers means no slapd-1 or slapd-2 references.
@@ -236,45 +236,10 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 }
 
 // ── ADR-019: per-database accesslog derivation ───────────────────────────────
-
-func TestAccesslogSuffixAndDir(t *testing.T) {
-	// ADR-019 R1: naming is keyed on the SlapdDatabase CR name; suffix
-	// cn=accesslog-<dbname>, backing directory /accesslog/<dbname>.
-	cases := []struct {
-		dbName  string
-		wantSfx string
-		wantDir string
-	}{
-		{"default", "cn=accesslog-default", "/accesslog/default"},
-		{"secondary", "cn=accesslog-secondary", "/accesslog/secondary"},
-	}
-	for _, c := range cases {
-		if got := accesslogSuffix(c.dbName); got != c.wantSfx {
-			t.Errorf("accesslogSuffix(%q) = %q, want %q", c.dbName, got, c.wantSfx)
-		}
-		if got := accesslogDir(c.dbName); got != c.wantDir {
-			t.Errorf("accesslogDir(%q) = %q, want %q", c.dbName, got, c.wantDir)
-		}
-	}
-}
-
-func TestExternalLogBase(t *testing.T) {
-	// ADR-019 R9/R10: default is derived from this database's own accesslog
-	// suffix; a non-empty spec override wins, and nothing is written back.
-	sd := &ldapv1alpha1.SlapdDatabase{}
-	sd.Name = "default"
-	if got, want := externalLogBase(sd), "cn=accesslog-default"; got != want {
-		t.Errorf("externalLogBase (derived) = %q, want %q", got, want)
-	}
-
-	sd.Spec.Replication.ExternalAccesslogSuffix = "cn=log"
-	if got, want := externalLogBase(sd), "cn=log"; got != want {
-		t.Errorf("externalLogBase (override) = %q, want %q", got, want)
-	}
-	if sd.Spec.Replication.ExternalAccesslogSuffix != "cn=log" {
-		t.Errorf("externalLogBase must not mutate .spec (ADR-019 R10)")
-	}
-}
+//
+// The naming helpers themselves (AccesslogSuffix / AccesslogDir /
+// ExternalLogBase) are unit-tested in api/v1alpha1, which owns them; what is
+// asserted here is that the stanza builders actually consume them.
 
 func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 	const (
@@ -300,7 +265,7 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
 			true, ridBase, retry, keepalive, true,
-			externalLogBase(sd),
+			ldapv1alpha1.ExternalLogBase(sd),
 			nil, nil, false,
 		)
 		if len(stanzas) == 0 {
@@ -345,7 +310,7 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
 			true, ridBase, retry, keepalive, true,
-			externalLogBase(sd),
+			ldapv1alpha1.ExternalLogBase(sd),
 			mkExternal(plain), nil, false,
 		), "10.9.9.9")
 	}

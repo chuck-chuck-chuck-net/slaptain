@@ -198,7 +198,7 @@ func pvcVolume(name, claim string) corev1.Volume {
 // so that path must exist even when only the data DB is dumped/loaded.
 func mountsWithAccesslog(sc *ldapv1alpha1.SlapdCluster, base []corev1.VolumeMount) []corev1.VolumeMount {
 	if sc.NeedsAccesslogVolume() {
-		base = append(base, corev1.VolumeMount{Name: "accesslog", MountPath: "/accesslog"})
+		base = append(base, corev1.VolumeMount{Name: "accesslog", MountPath: ldapv1alpha1.AccesslogRoot})
 	}
 	return base
 }

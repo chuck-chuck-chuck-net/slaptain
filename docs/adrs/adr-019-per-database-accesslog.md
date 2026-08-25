@@ -253,6 +253,40 @@ Derived rules, binding on all present and future accesslog handling:
   DB, re-add the overlay pointing at it. Losing a change journal is
   cheap and self-healing — it costs each consumer exactly one full refresh, which
   is the same `SYNCLOG_FALLBACK` path slapd takes for a purged log.
+
+  *Amendment, 2026-08-25 (implementation).* Two refinements found while building
+  this, both keeping the four steps and the constraint that forced their order
+  (slapd validates `olcAccessLogDB` against an existing database):
+
+  1. **Create the per-DB log first**, then drop the overlay, then delete the old
+     log, then re-add the overlay. Creating an as-yet-unreferenced database is
+     safe, and it changes the failure mode when `/accesslog/<dbname>` does not
+     exist yet — which happens on a pod whose init container predates the
+     per-database directory creation and has not restarted. `back-mdb` will not
+     create `olcDbDirectory`, so the add fails and the reconcile retries. Under
+     the original order the pod would already have lost its overlay and old log
+     and would sit journal-less until restarted; creating first means a failed
+     add changes nothing and the pod keeps journalling into the legacy log until
+     it rolls. Retry-and-converge, not wedging, and non-destructive.
+  2. **Deleting the old log is reference-counted, not per-database.** On a
+     cluster where two databases share the legacy log, an unconditional
+     per-database delete tears the log out from under the other database's live
+     overlay. The old log is deleted only once no accesslog overlay on that pod
+     still names it. This makes the operation order-free — whichever database
+     reconciles last reaps it — and self-healing: because the delete decision is
+     independent of the overlay-drop decision, a log left orphaned (by a
+     concurrent observation, or by a database demoted out of delta-sync) is
+     reaped by the next reconcile of any database on that pod that still wants
+     an accesslog. A pod where *every* database has been demoted keeps the
+     orphan indefinitely; it is unreferenced and harmless.
+
+  Detection requires `olcSuffix: cn=accesslog` **and**
+  `olcDbDirectory: /accesslog` to match, exactly and case-folded. Suffix-only
+  matching would delete a hand-made `cn=accesslog` this operator never created;
+  prefix matching would destroy `cn=accesslog-<dbname>` on every healthy
+  cluster. R5's "nothing spells `cn=accesslog` literally" governs *live* naming —
+  a migration must be able to name what it migrates away from, so the legacy
+  suffix is spelled once, in the migration code.
 - **R9 — `logbase` names the *remote* log, so it is peer-facing configuration,
   and it belongs to the database.** `logbase` is a search base sent to the
   provider (Fact 1), so an external-peer stanza must spell the *peer's* accesslog

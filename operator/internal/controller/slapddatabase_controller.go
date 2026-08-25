@@ -474,6 +474,20 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	//              same validation, reverse direction).
 	// syncprov has no dependencies; ordered freely relative to the others.
 	//
+	// Migrating a legacy cluster off its shared log (ADR-019 R8) obeys both
+	// halves at once, and runs BETWEEN the two ensure calls: create this
+	// database's own log first, then drop the overlay naming the shared one,
+	// then reap the shared DB, then re-add the overlay against the new log.
+	// ADR-019 R8 states the teardown first; creating the new log first is a
+	// strictly safer permutation of the same four steps, because until the new
+	// log exists there is nothing for the re-added overlay to point at. It
+	// matters on a pod whose /accesslog/<db> directory does not exist yet
+	// (back-mdb does not create olcDbDirectory): the DB add fails, this
+	// reconcile returns an error before touching anything, and the pod keeps
+	// journalling into the shared log until its init container has run again.
+	// With the teardown first, that same pod would be left with no journal at
+	// all.
+	//
 	// RO StatefulSet pods (readOnly=true) never carry any of this — they are
 	// consumers only, not providers, and have no accesslog volume; the logs
 	// they read live on the RW providers (ADR-019 R3).
@@ -536,6 +550,12 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		if wantsAccesslog {
 			if err := r.ensureAccesslogDB(ctx, conn, host, sd); err != nil {
 				return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
+			}
+			// ADR-019 R8: converge a cluster that still carries the legacy
+			// cluster-shared cn=accesslog. Sits between the two calls on
+			// purpose — see the ordering note above.
+			if err := r.migrateLegacyAccesslog(ctx, conn, host, dataDN, sd); err != nil {
+				return fmt.Errorf("converge legacy accesslog at %s: %w", host, err)
 			}
 			if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd); err != nil {
 				return fmt.Errorf("ensure accesslog overlay at %s: %w", host, err)
@@ -878,12 +898,13 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		return err
 	}
 	if hasAccesslog {
-		// TODO(ADR-019 R8): an existing overlay's olcAccessLogDB is not
-		// converged here, so a pod carrying the legacy cluster-shared
-		// cn=accesslog keeps pointing at it. Migration is a teardown, not a
-		// rename (olcSuffix / olcDbDirectory are not runtime-mutable): drop
-		// this overlay, delete the old log DB, create the per-DB log, re-add
-		// the overlay. Deliberately not implemented in this pass.
+		// An existing overlay's olcAccessLogDB is not modified here, and it
+		// cannot be: converging a legacy cluster-shared cn=accesslog is a
+		// teardown, not a rename, because olcSuffix and olcDbDirectory are not
+		// runtime-mutable (ADR-019 R8). migrateLegacyAccesslog runs immediately
+		// before this call and deletes an overlay that names the shared log, so
+		// by the time we get here an overlay that still exists is one already
+		// pointing at this database's own log.
 		return nil
 	}
 
@@ -892,7 +913,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 	addReq := ldap.NewAddRequest(accesslogDN, nil)
 	addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcAccessLogConfig"})
 	addReq.Attribute("olcOverlay", []string{"accesslog"})
-	addReq.Attribute("olcAccessLogDB", []string{accesslogSuffix(sd.Name)})
+	addReq.Attribute("olcAccessLogDB", []string{ldapv1alpha1.AccesslogSuffix(sd.Name)})
 	addReq.Attribute("olcAccessLogOps", []string{"writes"})
 	addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
 	if sd.Spec.Replication.AccesslogPurge != "" {
@@ -1136,7 +1157,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 ) error {
 	log := logf.FromContext(ctx)
 
-	logSuffix := accesslogSuffix(sd.Name)
+	logSuffix := ldapv1alpha1.AccesslogSuffix(sd.Name)
 	filter := fmt.Sprintf("(&(objectClass=olcMdbConfig)(olcSuffix=%s))", logSuffix)
 
 	// Check whether this database's log DB already exists. Without this we'd
@@ -1163,7 +1184,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		addReq.Attribute("olcRootDN", []string{"cn=admin,cn=config"})
 		// back-mdb does not create olcDbDirectory; the init container
 		// provisions /accesslog/<db> from DATABASE_DIRS (ADR-019 R3).
-		addReq.Attribute("olcDbDirectory", []string{accesslogDir(sd.Name)})
+		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AccesslogDir(sd.Name)})
 		addReq.Attribute("olcDbIndex", []string{
 			"default eq",
 			"reqEnd,reqResult,reqStart eq",
@@ -1269,6 +1290,103 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogACL(
 	return nil
 }
 
+// migrateLegacyAccesslog converges this pod off the pre-ADR-019 cluster-shared
+// cn=accesslog (ADR-019 R8). It is the live-LDAP half of
+// planAccesslogMigration, which owns the whole decision; everything here is
+// observation and execution.
+//
+// Called from reconcilePodDatabase between ensureAccesslogDB and
+// ensureAccesslogOverlay, so by the time a teardown happens this database's own
+// log already exists and the re-added overlay has something to point at (see
+// the ordering note in reconcilePodDatabase).
+//
+// Fast path: one narrow equality search that returns nothing on any cluster
+// created at or after ADR-019 and on any already-migrated one. No second
+// search, no teardown, no log line — a healthy cluster must be unable to
+// trigger this.
+//
+// Cost when it does fire, accepted by ADR-019 R8: each consumer of this
+// database takes exactly one full refresh, the same SYNCLOG_FALLBACK path slapd
+// takes for a purged log. The journal is deliberately not preserved. The stale
+// LMDB files at the accesslog mount root are left behind — the operator has no
+// filesystem access to that volume (ADR-018) and a co-located Job to delete two
+// files is not worth the PVC deletion lease; they are bounded by the old DB's
+// olcDbMaxSize and reclaimed whenever the accesslog PVC is recycled.
+func (r *SlapdDatabaseReconciler) migrateLegacyAccesslog(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	sd *ldapv1alpha1.SlapdDatabase,
+) error {
+	log := logf.FromContext(ctx)
+
+	// Equality on olcSuffix, so cn=accesslog-<db> does not match: slapd
+	// evaluates this with DN matching rules, and planAccesslogMigration
+	// re-checks the suffix anyway rather than trusting the filter.
+	candSR, err := conn.Search(ldap.NewSearchRequest(
+		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false,
+		fmt.Sprintf("(&(objectClass=olcMdbConfig)(olcSuffix=%s))", legacyAccesslogSuffix),
+		[]string{"olcSuffix", "olcDbDirectory"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search for a legacy shared accesslog DB: %w", err)
+	}
+	if len(candSR.Entries) == 0 {
+		return nil
+	}
+	candidates := make([]observedLogDB, 0, len(candSR.Entries))
+	for _, e := range candSR.Entries {
+		candidates = append(candidates, observedLogDB{
+			DN:     e.DN,
+			Suffix: e.GetEqualFoldAttributeValue("olcSuffix"),
+			Dir:    e.GetEqualFoldAttributeValue("olcDbDirectory"),
+		})
+	}
+
+	// Every accesslog overlay on this pod, across all databases: which
+	// databases still journal into the shared log is what decides whether it is
+	// safe to delete (see planAccesslogMigration on the multi-database case).
+	ovSR, err := conn.Search(ldap.NewSearchRequest(
+		"cn=config", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcAccessLogConfig)",
+		[]string{"olcAccessLogDB"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search accesslog overlays: %w", err)
+	}
+	overlays := make([]observedAccesslogOverlay, 0, len(ovSR.Entries))
+	for _, e := range ovSR.Entries {
+		overlays = append(overlays, observedAccesslogOverlay{
+			DN:    e.DN,
+			LogDB: e.GetEqualFoldAttributeValue("olcAccessLogDB"),
+		})
+	}
+
+	plan := planAccesslogMigration(dataDN, candidates, overlays)
+	if plan.Empty() {
+		return nil
+	}
+
+	log.Info("converging off the legacy cluster-shared accesslog (ADR-019 R8)",
+		"host", host, "database", sd.Name, "newLog", ldapv1alpha1.AccesslogSuffix(sd.Name),
+		"dropOverlay", plan.DropOverlay, "deleteLegacyDB", plan.DeleteLegacyDN)
+
+	// Overlay before DB: same reference, same slapd validation, same direction
+	// as the documented remove ordering.
+	if plan.DropOverlay {
+		if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "accesslog"); err != nil {
+			return fmt.Errorf("drop the accesslog overlay naming the shared log: %w", err)
+		}
+	}
+	if plan.DeleteLegacyDN != "" {
+		if err := r.removeAccesslogDBAt(ctx, conn, host, plan.DeleteLegacyDN); err != nil {
+			return fmt.Errorf("delete the legacy shared accesslog DB %s: %w", plan.DeleteLegacyDN, err)
+		}
+	}
+	return nil
+}
+
 // removeAccesslogDB tears down this database's accesslog DB during peer →
 // consumer-only demotion (ADR-010 3e). Removes the syncprov overlay first
 // (children must go before parents in slapd's cn=config), then the DB entry
@@ -1289,9 +1407,7 @@ func (r *SlapdDatabaseReconciler) removeAccesslogDB(
 	conn *ldap.Conn,
 	host, dbName string,
 ) error {
-	log := logf.FromContext(ctx)
-
-	logSuffix := accesslogSuffix(dbName)
+	logSuffix := ldapv1alpha1.AccesslogSuffix(dbName)
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
 		1, 0, false, fmt.Sprintf("(&(objectClass=olcMdbConfig)(olcSuffix=%s))", logSuffix),
@@ -1303,7 +1419,21 @@ func (r *SlapdDatabaseReconciler) removeAccesslogDB(
 	if len(sr.Entries) == 0 {
 		return nil
 	}
-	dbDN := sr.Entries[0].DN
+	return r.removeAccesslogDBAt(ctx, conn, host, sr.Entries[0].DN)
+}
+
+// removeAccesslogDBAt deletes one accesslog database by its cn=config DN,
+// children first (slapd does not cascade). Split out of removeAccesslogDB so the
+// ADR-019 R8 migration can delete the legacy shared log, whose suffix is not
+// derivable from any CR name.
+//
+// Idempotent: NoSuchObject is silently treated as success.
+func (r *SlapdDatabaseReconciler) removeAccesslogDBAt(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dbDN string,
+) error {
+	log := logf.FromContext(ctx)
 
 	// Remove children first — slapd doesn't cascade.
 	childSR, err := conn.Search(ldap.NewSearchRequest(
@@ -1852,7 +1982,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			tlsEnabled, ridBase,
 			retryInterval, keepalive,
 			useDeltaSync,
-			externalLogBase(sd),
+			ldapv1alpha1.ExternalLogBase(sd),
 			externalPeers,
 			replNetIPs,
 			consumerOnly,
@@ -1954,13 +2084,13 @@ func buildDatabaseSyncRepl(
 	// assertion and would mask a mis-derived logbase (ADR-019 R6).
 	deltaSyncOpts := ""
 	if deltaSync {
-		deltaSyncOpts = fmt.Sprintf(` logbase="%s"`, accesslogSuffix(dbName)) +
+		deltaSyncOpts = fmt.Sprintf(` logbase="%s"`, ldapv1alpha1.AccesslogSuffix(dbName)) +
 			` logfilter="(&(objectClass=auditWriteObject)(reqResult=0))"` +
 			` syncdata=accesslog`
 	}
 
 	// External peers evaluate logbase on *their* side (ADR-019 R9), so their
-	// stanzas name externalLogSuffix — the caller's externalLogBase(sd):
+	// stanzas name externalLogSuffix — the caller's ldapv1alpha1.ExternalLogBase(sd):
 	// this database's derived suffix by default, or the per-database override
 	// for a peer that is not slaptain / does not use the same CR name.
 	externalDeltaOpts := ""
@@ -2107,7 +2237,7 @@ func buildDatabaseSyncReplRO(
 	// log, which is that provider's per-database suffix (ADR-019 R5/R9).
 	deltaSyncOpts := ""
 	if deltaSync {
-		deltaSyncOpts = fmt.Sprintf(` logbase="%s"`, accesslogSuffix(dbName)) +
+		deltaSyncOpts = fmt.Sprintf(` logbase="%s"`, ldapv1alpha1.AccesslogSuffix(dbName)) +
 			` logfilter="(&(objectClass=auditWriteObject)(reqResult=0))"` +
 			` syncdata=accesslog`
 	}

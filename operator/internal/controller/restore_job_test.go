@@ -11,7 +11,7 @@ import (
 
 // newRestoreJobFixture builds a restore Job for the given pod target and returns
 // the bash script its main container (restore/wipe) runs.
-func newRestoreJobFixture(target restorePodTarget) string {
+func newRestoreJobFixture(target restorePodTarget) (string, *ldapv1alpha1.SlapdDatabase) {
 	sc := &ldapv1alpha1.SlapdCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "ns"},
 	}
@@ -25,10 +25,10 @@ func newRestoreJobFixture(target restorePodTarget) string {
 	// The main container is "restore" (loadData) or "wipe" (RO).
 	for _, c := range job.Spec.Template.Spec.Containers {
 		if c.Name == "restore" || c.Name == "wipe" {
-			return c.Command[len(c.Command)-1]
+			return c.Command[len(c.Command)-1], sd
 		}
 	}
-	return ""
+	return "", sd
 }
 
 // Regression: an in-place / bootstrap restore of a REPLICATED database must wipe
@@ -37,7 +37,7 @@ func newRestoreJobFixture(target restorePodTarget) string {
 // scale-up at a CSN newer than the restored contextCSN, silently undoing the
 // restore. Bug: restore_job.go only wiped /data/<dir>. See ADR-014.
 func TestBuildRestoreJobWipesAccesslogWhenReplicated(t *testing.T) {
-	script := newRestoreJobFixture(restorePodTarget{
+	script, sd := newRestoreJobFixture(restorePodTarget{
 		jobName:      "j",
 		dataPVC:      "data-slapd-0",
 		configPVC:    "config-slapd-0",
@@ -50,15 +50,26 @@ func TestBuildRestoreJobWipesAccesslogWhenReplicated(t *testing.T) {
 		t.Errorf("restore script missing the main-DB wipe:\n%s", script)
 	}
 	// The accesslog journal must be wiped too, or syncrepl replays stale deltas.
-	if !strings.Contains(script, "/accesslog/data.mdb") || !strings.Contains(script, "/accesslog/lock.mdb") {
-		t.Errorf("restore script does not wipe the accesslog LMDB (stale deltas will be replayed):\n%s", script)
+	// ADR-019: the journal is per-database (cn=accesslog-<db> at
+	// /accesslog/<db>), so the wipe is scoped to the restored database's own
+	// directory. Restoring one database must not truncate another database's
+	// journal — that would kick every consumer of the untouched database into a
+	// full refresh for no reason.
+	dir := ldapv1alpha1.AccesslogDir(sd.Name)
+	if !strings.Contains(script, dir+"/data.mdb") || !strings.Contains(script, dir+"/lock.mdb") {
+		t.Errorf("restore script does not wipe %s (stale deltas will be replayed):\n%s", dir, script)
+	}
+	// ...and it must NOT be the old cluster-wide wipe at the accesslog root.
+	if strings.Contains(script, ldapv1alpha1.AccesslogRoot+"/data.mdb") ||
+		strings.Contains(script, ldapv1alpha1.AccesslogRoot+"/lock.mdb") {
+		t.Errorf("restore script wipes EVERY database's journal, not just %s's:\n%s", sd.Name, script)
 	}
 }
 
 // A non-replicated RW restore has no accesslog PVC mounted, so the script must
 // not touch /accesslog (the path does not exist in that pod).
 func TestBuildRestoreJobNoAccesslogWipeWhenStandalone(t *testing.T) {
-	script := newRestoreJobFixture(restorePodTarget{
+	script, _ := newRestoreJobFixture(restorePodTarget{
 		jobName:   "j",
 		dataPVC:   "data-slapd-0",
 		configPVC: "config-slapd-0",
