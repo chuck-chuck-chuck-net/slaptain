@@ -125,6 +125,35 @@ type DatabaseReplicationConfig struct {
 	// than 2 days, checking every day. Empty means no purge (accesslog grows unbounded).
 	// +optional
 	AccesslogPurge string `json:"accesslogPurge,omitempty"`
+	// externalAccesslogSuffix overrides the accesslog suffix used as `logbase`
+	// in the delta-syncrepl stanzas pointing at spec.replication.externalPeers
+	// on the parent SlapdCluster.
+	//
+	// `logbase` is a search base sent to the *provider*, so an external stanza
+	// must spell the peer's accesslog suffix, not ours (ADR-019 R9). Empty —
+	// the normal case — means derive it from this database's own accesslog
+	// suffix (cn=accesslog-<name of this SlapdDatabase>), which is correct
+	// whenever the peer is another slaptain cluster running a SlapdDatabase of
+	// the same name. Set it only when the peer is not slaptain (ADR-011
+	// supports syncMode: delta against a foreign provider, whose log may be
+	// cn=log or anything else) or does not use the same SlapdDatabase name.
+	//
+	// Deliberately carries no CRD-level default (ADR-019 R10): a kubebuilder
+	// default marker is a constant, while the correct value depends on this
+	// CR's own name. The derivation happens at the point of use and is never
+	// written back into the spec.
+	//
+	// Accepted limitation (ADR-019 R9): one value per database, so a database
+	// consuming delta from two different foreign providers with differing log
+	// suffixes is not expressible. The escape, per-peer-per-database, is
+	// deliberately not pre-built — ExternalPeer lives on SlapdCluster and
+	// carries no database selector, so a field there would be one value across
+	// all databases, which is the wrong axis for a per-database journal.
+	//
+	// Ignored for peers with syncMode: plain — those stanzas emit no logbase
+	// at all.
+	// +optional
+	ExternalAccesslogSuffix string `json:"externalAccesslogSuffix,omitempty"`
 }
 
 // BootstrapSource selects where a SlapdDatabase's data tree is restored from

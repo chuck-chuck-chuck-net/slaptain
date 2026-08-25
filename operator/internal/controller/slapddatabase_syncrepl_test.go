@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
 // extractRIDs returns the set of rid=NNN values from a list of syncrepl stanzas.
@@ -61,6 +63,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 		namespace     = "ns"
 		clusterDomain = "cluster.local"
 		suffix        = "dc=ex,dc=com"
+		dbName        = "default"
 		replicas      = int32(3)
 		replPW        = "pw"
 		ridBase       = int32(0)
@@ -87,9 +90,10 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 
 	build := func(ordinal int32, peers []resolvedExternalPeer) []string {
 		return buildDatabaseSyncRepl(
-			clusterName, headlessSvc, namespace, clusterDomain, suffix,
+			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, ordinal, replPW,
 			true, ridBase, retry, keepalive, deltaSync,
+			accesslogSuffix(dbName),
 			peers, nil, false,
 		)
 	}
@@ -206,9 +210,10 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 			PlainSyncRepl:   true,
 		}}
 		stanzas := buildDatabaseSyncRepl(
-			clusterName, headlessSvc, namespace, clusterDomain, suffix,
+			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
 			replicas, 0, replPW,
 			true, ridBase, retry, keepalive, deltaSync,
+			accesslogSuffix(dbName),
 			peers, nil, true, // consumerOnly=true
 		)
 		// No in-cluster peers means no slapd-1 or slapd-2 references.
@@ -228,4 +233,179 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ── ADR-019: per-database accesslog derivation ───────────────────────────────
+
+func TestAccesslogSuffixAndDir(t *testing.T) {
+	// ADR-019 R1: naming is keyed on the SlapdDatabase CR name; suffix
+	// cn=accesslog-<dbname>, backing directory /accesslog/<dbname>.
+	cases := []struct {
+		dbName  string
+		wantSfx string
+		wantDir string
+	}{
+		{"default", "cn=accesslog-default", "/accesslog/default"},
+		{"secondary", "cn=accesslog-secondary", "/accesslog/secondary"},
+	}
+	for _, c := range cases {
+		if got := accesslogSuffix(c.dbName); got != c.wantSfx {
+			t.Errorf("accesslogSuffix(%q) = %q, want %q", c.dbName, got, c.wantSfx)
+		}
+		if got := accesslogDir(c.dbName); got != c.wantDir {
+			t.Errorf("accesslogDir(%q) = %q, want %q", c.dbName, got, c.wantDir)
+		}
+	}
+}
+
+func TestExternalLogBase(t *testing.T) {
+	// ADR-019 R9/R10: default is derived from this database's own accesslog
+	// suffix; a non-empty spec override wins, and nothing is written back.
+	sd := &ldapv1alpha1.SlapdDatabase{}
+	sd.Name = "default"
+	if got, want := externalLogBase(sd), "cn=accesslog-default"; got != want {
+		t.Errorf("externalLogBase (derived) = %q, want %q", got, want)
+	}
+
+	sd.Spec.Replication.ExternalAccesslogSuffix = "cn=log"
+	if got, want := externalLogBase(sd), "cn=log"; got != want {
+		t.Errorf("externalLogBase (override) = %q, want %q", got, want)
+	}
+	if sd.Spec.Replication.ExternalAccesslogSuffix != "cn=log" {
+		t.Errorf("externalLogBase must not mutate .spec (ADR-019 R10)")
+	}
+}
+
+func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
+	const (
+		clusterName   = "slapd"
+		headlessSvc   = "slapd-headless"
+		namespace     = "ns"
+		clusterDomain = "cluster.local"
+		suffix        = "dc=ex,dc=com"
+		dbName        = "secondary"
+		replicas      = int32(3)
+		replPW        = "pw"
+		ridBase       = int32(200)
+		retry         = "10 +"
+		keepalive     = ""
+	)
+
+	wantLogbase := `logbase="cn=accesslog-secondary"`
+
+	t.Run("in-cluster stanzas carry the per-database logbase", func(t *testing.T) {
+		sd := &ldapv1alpha1.SlapdDatabase{}
+		sd.Name = dbName
+		stanzas := buildDatabaseSyncRepl(
+			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
+			replicas, 0, replPW,
+			true, ridBase, retry, keepalive, true,
+			externalLogBase(sd),
+			nil, nil, false,
+		)
+		if len(stanzas) == 0 {
+			t.Fatalf("no stanzas emitted")
+		}
+		for _, s := range stanzas {
+			if !strings.Contains(s, wantLogbase) {
+				t.Errorf("in-cluster stanza missing %s: %s", wantLogbase, s)
+			}
+		}
+	})
+
+	t.Run("RO stanzas carry the same per-database logbase", func(t *testing.T) {
+		stanzas := buildDatabaseSyncReplRO(
+			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
+			replicas, replPW,
+			true, ridBase, retry, keepalive, true,
+			nil,
+		)
+		if len(stanzas) == 0 {
+			t.Fatalf("no stanzas emitted")
+		}
+		for _, s := range stanzas {
+			if !strings.Contains(s, wantLogbase) {
+				t.Errorf("RO stanza missing %s: %s", wantLogbase, s)
+			}
+		}
+	})
+
+	mkExternal := func(plain bool) []resolvedExternalPeer {
+		return []resolvedExternalPeer{{
+			Name:            "site-b",
+			URIs:            []string{"ldaps://10.9.9.9:1025"},
+			ReplicasPerPeer: 1,
+			BindDN:          "cn=replication," + suffix,
+			Password:        "epw",
+			PlainSyncRepl:   plain,
+		}}
+	}
+	buildExt := func(sd *ldapv1alpha1.SlapdDatabase, plain bool) []string {
+		return filterExternal(buildDatabaseSyncRepl(
+			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
+			replicas, 0, replPW,
+			true, ridBase, retry, keepalive, true,
+			externalLogBase(sd),
+			mkExternal(plain), nil, false,
+		), "10.9.9.9")
+	}
+
+	t.Run("delta external peer without override uses the derived suffix", func(t *testing.T) {
+		sd := &ldapv1alpha1.SlapdDatabase{}
+		sd.Name = dbName
+		ext := buildExt(sd, false)
+		if len(ext) != 1 {
+			t.Fatalf("got %d external stanzas, want 1", len(ext))
+		}
+		if !strings.Contains(ext[0], wantLogbase) {
+			t.Errorf("external stanza missing %s: %s", wantLogbase, ext[0])
+		}
+	})
+
+	t.Run("delta external peer honours externalAccesslogSuffix (ADR-019 R9)", func(t *testing.T) {
+		sd := &ldapv1alpha1.SlapdDatabase{}
+		sd.Name = dbName
+		sd.Spec.Replication.ExternalAccesslogSuffix = "cn=log"
+		ext := buildExt(sd, false)
+		if len(ext) != 1 {
+			t.Fatalf("got %d external stanzas, want 1", len(ext))
+		}
+		if !strings.Contains(ext[0], `logbase="cn=log"`) {
+			t.Errorf(`external stanza missing logbase="cn=log": %s`, ext[0])
+		}
+		if strings.Contains(ext[0], "accesslog-secondary") {
+			t.Errorf("override ignored, local suffix leaked: %s", ext[0])
+		}
+	})
+
+	t.Run("plain external peer emits no logbase at all (ADR-011)", func(t *testing.T) {
+		sd := &ldapv1alpha1.SlapdDatabase{}
+		sd.Name = dbName
+		ext := buildExt(sd, true)
+		if len(ext) != 1 {
+			t.Fatalf("got %d external stanzas, want 1", len(ext))
+		}
+		if strings.Contains(ext[0], "logbase") || strings.Contains(ext[0], "syncdata=accesslog") {
+			t.Errorf("plain-syncrepl peer carries delta opts: %s", ext[0])
+		}
+	})
+}
+
+func TestAccesslogACL(t *testing.T) {
+	// ADR-020 R1: exactly one rule, granting read to the journalled database's
+	// replication bind DN and nothing to anyone else. The DN is derived from
+	// the *data* DB's suffix, in the same dn.exact form applyACLs uses.
+	got := accesslogACL("dc=ex,dc=com")
+	want := `to * by dn.exact="cn=replication,dc=ex,dc=com" read by * none`
+	if got != want {
+		t.Fatalf("accesslogACL = %q, want %q", got, want)
+	}
+	// ADR-020 R3: no explicit rootDN grant — rootDN bypasses ACLs.
+	if strings.Contains(got, "cn=admin") {
+		t.Errorf("ACL restates a rootDN bypass (ADR-020 R3): %s", got)
+	}
+	// The ACL must name the data suffix, never the log's own suffix.
+	if strings.Contains(got, "accesslog") {
+		t.Errorf("ACL names the log suffix instead of the data suffix: %s", got)
+	}
 }

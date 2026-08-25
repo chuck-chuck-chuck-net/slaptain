@@ -5,6 +5,65 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-08-25: one accesslog shared by two replicated databases destroys delta-syncrepl
+
+**Symptom (latent — found by reading, not by a field report):** with two
+`SlapdDatabase` CRs both at `deltaSync: true` on a multi-replica cluster, every
+pod logs
+
+```
+do_syncrep2: rid=NNN delta-sync lost sync on (<dn>), switching to REFRESH
+```
+
+on writes to the *other* database, and both databases sit in permanent
+full-refresh syncrepl. `status.phase` stays `Running`, contextCSNs converge, and
+`slctl inspect` is clean. Invisible unless you read `-d sync` logs or notice the
+DIT-reload traffic.
+
+**Root cause:** the operator provisioned one cluster-shared `cn=accesslog` at
+`/accesslog` and pointed every data DB's `olcAccessLogDB` and every consumer
+stanza's `logbase` at it. A consumer's log-mode search (`syncrepl.c:741-770`) is
+`base=logbase`, subtree, `logfilter` verbatim — **no DN scoping** — so it
+receives the other database's entries; `syncrepl_message_to_op` (`:3229`) submits
+that `reqDN` to *its own* backend, and the resulting `NO_SUCH_OBJECT` is one of
+five codes in the `logerr` switch (`:1574-1592`) that set `SYNCLOG_FALLBACK`.
+Two further failure classes ride along: the refresh-completion cookie is the
+*log DB's* contextCSN (`syncprov.c:3081`), the maximum across all feeding
+databases, so a consumer can ratchet its own contextCSN past foreign CSNs and
+then discard legitimate later writes as "CSN too old"; and `olcAccessLogPurge`
+is configured on the overlay but purges the whole log, so the shortest per-CR
+retention wins cluster-wide.
+
+**Why it was hard to spot:** no fixture ever declared a second `SlapdDatabase`,
+the cluster reports itself healthy, and the failure is self-healing per cycle —
+it oscillates rather than sticking, so **data still converges, just by whole-DIT
+reload**. A convergence-only e2e assertion stays green. Upstream's regression
+suite does not exercise a shared log either.
+
+**Fix:** one accesslog DB per replicated data DB — `cn=accesslog-<dbname>` at
+`/accesslog/<dbname>`, one PVC with one directory each (ADR-019). Suffix, backing
+directory and `logbase` all derive from a single helper
+(`operator/internal/controller/accesslog.go`) so they cannot drift; external-peer
+stanzas use `externalLogBase(sd)` because `logbase` is evaluated on the
+*provider* (ADR-019 R9), overridable per database via
+`spec.replication.externalAccesslogSuffix`. Each log also gets
+`to * by dn.exact="cn=replication,<data suffix>" read by * none` (ADR-020) — a
+log with no `olcAccess` inherits the frontend default *read*, so `reqMod` leaked
+exactly the attributes the data DB's ACLs deny.
+
+**Verification:** the derivation is unit-covered red-first (reintroducing the
+shared suffix turns six assertions red). Legacy-cluster convergence off the old
+shared log (ADR-019 R8) and the two-database e2e that reproduces the mechanism
+behaviourally land in follow-up commits on this branch; until R8 is in, do not
+deploy this against a cluster that already carries a shared `cn=accesslog`.
+
+**Lesson:** delta-syncrepl's change journal is per-target-DIT infrastructure, not
+a cluster-level singleton. Anything a syncrepl stanza names is provider-side
+semantics — derive it once, and never let a cross-CR shared object into the
+replication path just because one CR is the only shape the fixtures exercise.
+
+---
+
 ## 2026-08-23: finished backup/restore Job pods pin slapd PVCs, blocking pod re-roll
 
 **Symptom:** A multi-site e2e run left the primary cluster wedged at `2/3` with

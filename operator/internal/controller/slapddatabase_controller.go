@@ -457,19 +457,26 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	//
 	//   wantsAccesslog — this DB participates in delta-syncrepl. Additive
 	//                    over syncprov: gated on syncprov being wanted AND
-	//                    the per-DB DeltaSync flag. Requires the cluster-
-	//                    shared cn=accesslog DB.
+	//                    the per-DB DeltaSync flag. Requires this database's
+	//                    own accesslog DB, cn=accesslog-<CR name> (ADR-019).
+	//                    It used to be one cluster-shared cn=accesslog; that
+	//                    is a correctness bug, not a simplification — a shared
+	//                    log makes every write to one DB kick the other DB's
+	//                    consumers into permanent full refresh (ADR-019
+	//                    Facts 1-2), silently falsifies contextCSN (Fact 3),
+	//                    and makes the per-CR accesslogPurge cluster-global
+	//                    (Fact 4). Do not re-share it.
 	//
 	// Order of operations matters for transitions:
 	//   adding   — accesslog DB before accesslog overlay (overlay references
-	//              cn=accesslog via olcAccessLogDB; slapd validates at add).
+	//              cn=accesslog-<db> via olcAccessLogDB; slapd validates at add).
 	//   removing — accesslog overlay before accesslog DB (same reference,
 	//              same validation, reverse direction).
 	// syncprov has no dependencies; ordered freely relative to the others.
 	//
 	// RO StatefulSet pods (readOnly=true) never carry any of this — they are
-	// consumers only, not providers; cluster-shared DBs were created on the
-	// RW path.
+	// consumers only, not providers, and have no accesslog volume; the logs
+	// they read live on the RW providers (ADR-019 R3).
 	wantsSyncProv := sc.Spec.Replication.Enabled && !readOnly && !sc.IsConsumerOnly()
 	wantsAccesslog := wantsSyncProv && sd.DeltaSyncEnabled()
 
@@ -512,7 +519,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 			if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "accesslog"); err != nil {
 				return fmt.Errorf("remove accesslog overlay at %s: %w", host, err)
 			}
-			if err := r.removeAccesslogDB(ctx, conn, host); err != nil {
+			if err := r.removeAccesslogDB(ctx, conn, host, sd.Name); err != nil {
 				return fmt.Errorf("remove accesslog DB at %s: %w", host, err)
 			}
 		}
@@ -527,7 +534,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 			}
 		}
 		if wantsAccesslog {
-			if err := r.ensureAccesslogDB(ctx, conn, host); err != nil {
+			if err := r.ensureAccesslogDB(ctx, conn, host, sd); err != nil {
 				return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
 			}
 			if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd); err != nil {
@@ -851,10 +858,11 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 
 // ensureAccesslogOverlay adds the accesslog overlay to the data DB's
 // cn=config entry. Required for **delta-syncrepl** specifically: the overlay
-// captures every write into the cluster-shared cn=accesslog DB, where
-// consumers pull change deltas instead of re-walking the full DIT on
-// reconnect. Strictly an add-on to ensureSyncProvOverlay — the cluster must
-// already be a syncrepl provider for the change journal to be useful.
+// captures every write into *this database's own* accesslog DB
+// (cn=accesslog-<CR name>, ADR-019 R1), where consumers pull change deltas
+// instead of re-walking the full DIT on reconnect. Strictly an add-on to
+// ensureSyncProvOverlay — the cluster must already be a syncrepl provider for
+// the change journal to be useful.
 //
 // Idempotent: checks for existing overlay before adding.
 func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
@@ -870,6 +878,12 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		return err
 	}
 	if hasAccesslog {
+		// TODO(ADR-019 R8): an existing overlay's olcAccessLogDB is not
+		// converged here, so a pod carrying the legacy cluster-shared
+		// cn=accesslog keeps pointing at it. Migration is a teardown, not a
+		// rename (olcSuffix / olcDbDirectory are not runtime-mutable): drop
+		// this overlay, delete the old log DB, create the per-DB log, re-add
+		// the overlay. Deliberately not implemented in this pass.
 		return nil
 	}
 
@@ -878,7 +892,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 	addReq := ldap.NewAddRequest(accesslogDN, nil)
 	addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcAccessLogConfig"})
 	addReq.Attribute("olcOverlay", []string{"accesslog"})
-	addReq.Attribute("olcAccessLogDB", []string{"cn=accesslog"})
+	addReq.Attribute("olcAccessLogDB", []string{accesslogSuffix(sd.Name)})
 	addReq.Attribute("olcAccessLogOps", []string{"writes"})
 	addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
 	if sd.Spec.Replication.AccesslogPurge != "" {
@@ -1078,7 +1092,7 @@ func (r *SlapdDatabaseReconciler) ensureServerIDs(
 	return nil
 }
 
-// ensureAccesslogDB creates the cluster-shared cn=accesslog database in
+// ensureAccesslogDB creates this database's own accesslog database in
 // cn=config when missing. This is the runtime counterpart to the accesslog
 // configuration the init container used to write at first boot (ADR-010 3e) —
 // moving it to the operator lets consumer-only → peer promotion happen
@@ -1086,65 +1100,96 @@ func (r *SlapdDatabaseReconciler) ensureServerIDs(
 // modules are always provisioned on peer-eligible pods (see
 // SlapdCluster.NeedsAccesslogVolume).
 //
-// Adds two cn=config entries:
+// The log is a **per-SlapdDatabase** resource, never cluster-shared (ADR-019).
+// A single cn=accesslog fed by two replicated data DBs destroys delta-syncrepl:
+// the consumer's log search carries no DN scoping, the foreign change is applied
+// to the wrong backend, and the resulting NO_SUCH_OBJECT is one of the five
+// result codes slapd treats as "log unusable" — so every write to one DB forces
+// the other DB's consumers into a full refresh, forever, on a cluster that
+// reports itself healthy (ADR-019 Facts 1-2). Re-sharing it is not a
+// simplification.
 //
-//	olcDatabase=mdb cn=accesslog       — the accesslog DB itself, backed by
-//	                                     /accesslog, indexed for replog ops
-//	olcOverlay=syncprov on accesslog DB — exposes the change journal to
+// Adds three cn=config surfaces, all keyed on the CR name (ADR-019 R1/R5):
+//
+//	olcDatabase=mdb cn=accesslog-<db>  — the log DB itself, backed by
+//	                                     /accesslog/<db>, indexed for replog ops
+//	olcAccess on that DB               — read for cn=replication,<data suffix>,
+//	                                     nothing for anyone else (ADR-020 R1)
+//	olcOverlay=syncprov on that DB     — exposes the change journal to
 //	                                     consumers via syncrepl
 //
-// Idempotent: each ldap.Add silently treats EntryAlreadyExists as success.
-// Called per-pod; the accesslog DB is shared across all SlapdDatabase CRs,
-// so multiple SlapdDatabase reconciles converge on the same DB.
+// The ACL is written in the same pass as the DB and the overlay, and converged
+// on every reconcile the way applyACLs converges the data DB's (ADR-020 R5): a
+// log with no olcAccess inherits the frontend default, which is *read*, so the
+// journal would hand anonymous readers exactly the attributes the data DB's own
+// ACLs deny them (a password change is a write, and reqMod carries the new
+// value).
+//
+// Idempotent: each ldap.Add silently treats EntryAlreadyExists as success, and
+// the ACL is only modified when it differs. Called per-pod; each SlapdDatabase
+// CR converges only its own log.
 func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	ctx context.Context,
 	conn *ldap.Conn,
 	host string,
+	sd *ldapv1alpha1.SlapdDatabase,
 ) error {
 	log := logf.FromContext(ctx)
 
-	// Check whether the accesslog DB already exists. Without this we'd ldapadd
-	// every reconcile and rely on EntryAlreadyExists — works, but pollutes the
-	// debug log. A single scope-children search is cheap.
+	logSuffix := accesslogSuffix(sd.Name)
+	filter := fmt.Sprintf("(&(objectClass=olcMdbConfig)(olcSuffix=%s))", logSuffix)
+
+	// Check whether this database's log DB already exists. Without this we'd
+	// ldapadd every reconcile and rely on EntryAlreadyExists — works, but
+	// pollutes the debug log. A single scope-children search is cheap.
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		0, 0, false, "(&(objectClass=olcMdbConfig)(olcSuffix=cn=accesslog))",
+		0, 0, false, filter,
 		[]string{"dn"}, nil,
 	))
 	if err != nil {
-		return fmt.Errorf("search for accesslog DB: %w", err)
+		return fmt.Errorf("search for accesslog DB %s: %w", logSuffix, err)
 	}
 
 	var dbDN string
 	if len(sr.Entries) > 0 {
 		dbDN = sr.Entries[0].DN
 	} else {
-		log.Info("creating accesslog DB", "host", host)
+		log.Info("creating accesslog DB", "host", host, "suffix", logSuffix)
 		addReq := ldap.NewAddRequest("olcDatabase=mdb,cn=config", nil)
 		addReq.Attribute("objectClass", []string{"olcDatabaseConfig", "olcMdbConfig"})
 		addReq.Attribute("olcDatabase", []string{"mdb"})
-		addReq.Attribute("olcSuffix", []string{"cn=accesslog"})
+		addReq.Attribute("olcSuffix", []string{logSuffix})
 		addReq.Attribute("olcRootDN", []string{"cn=admin,cn=config"})
-		addReq.Attribute("olcDbDirectory", []string{"/accesslog"})
+		// back-mdb does not create olcDbDirectory; the init container
+		// provisions /accesslog/<db> from DATABASE_DIRS (ADR-019 R3).
+		addReq.Attribute("olcDbDirectory", []string{accesslogDir(sd.Name)})
 		addReq.Attribute("olcDbIndex", []string{
 			"default eq",
 			"reqEnd,reqResult,reqStart eq",
 		})
+		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Spec.Suffix)})
 		if err := conn.Add(addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-				return fmt.Errorf("add accesslog DB: %w", err)
+				return fmt.Errorf("add accesslog DB %s: %w", logSuffix, err)
 			}
 		}
 		// Re-find to learn the assigned {N} prefix.
 		sr2, err := conn.Search(ldap.NewSearchRequest(
 			"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-			1, 0, false, "(&(objectClass=olcMdbConfig)(olcSuffix=cn=accesslog))",
+			1, 0, false, filter,
 			[]string{"dn"}, nil,
 		))
 		if err != nil || len(sr2.Entries) == 0 {
-			return fmt.Errorf("re-find accesslog DB after add: %w", err)
+			return fmt.Errorf("re-find accesslog DB %s after add: %w", logSuffix, err)
 		}
 		dbDN = sr2.Entries[0].DN
+	}
+
+	// Converge the ACL on every reconcile (ADR-020 R5). Covers a log created
+	// by an operator predating ADR-020, and any hand-edit.
+	if err := r.ensureAccesslogACL(ctx, conn, host, dbDN, sd.Spec.Suffix); err != nil {
+		return err
 	}
 
 	// Ensure syncprov overlay on the accesslog DB. Without it consumers can't
@@ -1158,7 +1203,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		return fmt.Errorf("search syncprov overlay on %s: %w", dbDN, err)
 	}
 	if len(overlaySR.Entries) == 0 {
-		log.Info("adding syncprov overlay to accesslog DB", "host", host)
+		log.Info("adding syncprov overlay to accesslog DB", "host", host, "suffix", logSuffix)
 		addReq := ldap.NewAddRequest("olcOverlay=syncprov,"+dbDN, nil)
 		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
 		addReq.Attribute("olcOverlay", []string{"syncprov"})
@@ -1173,32 +1218,87 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	return nil
 }
 
-// removeAccesslogDB tears down the accesslog DB during peer → consumer-only
-// demotion (ADR-010 3e). Removes the syncprov overlay first (children must go
-// before parents in slapd's cn=config), then the DB entry itself.
+// accesslogACL returns the single olcAccess rule an accesslog database carries
+// (ADR-020 R1): read for the replication bind DN of the database it journals,
+// nothing for anyone else. dataSuffix is the *data* DB's suffix — the same
+// identity and the same dn.exact form applyACLs grants on the data DB, so the
+// two stay in step by construction.
 //
-// The underlying /accesslog volume is left mounted and the LMDB data files
-// stay on disk — they're harmless when the DB entry isn't referenced. A
-// later promotion re-creates the DB pointed at the same directory, and slapd
-// re-attaches to whatever is there. (This is acceptable for the migration
-// rollback use case; if you want a clean accesslog history on re-promotion,
-// wipe /accesslog manually before promoting.)
+// No explicit rootDN grant (ADR-020 R3): the log's olcRootDN is
+// cn=admin,cn=config and a rootDN bypasses ACLs, so the operator's own
+// cn=config work is unaffected. An ACL line restating a bypass is noise later
+// readers mistake for a requirement.
+//
+// Offline paths are unaffected (ADR-020 R4): slapcat/slapadd in backup and
+// restore Jobs read the LMDB files directly and never evaluate ACLs.
+func accesslogACL(dataSuffix string) string {
+	return fmt.Sprintf(`to * by dn.exact="cn=replication,%s" read by * none`, dataSuffix)
+}
+
+// ensureAccesslogACL aligns the accesslog DB's olcAccess to accesslogACL,
+// modifying only when it differs. Same shape as applyACLs on the data DB.
+func (r *SlapdDatabaseReconciler) ensureAccesslogACL(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dbDN, dataSuffix string,
+) error {
+	log := logf.FromContext(ctx)
+
+	desired := []string{accesslogACL(dataSuffix)}
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dbDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		1, 0, false, "(objectClass=*)", []string{"olcAccess"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("read olcAccess on %s: %w", dbDN, err)
+	}
+	if len(sr.Entries) == 0 {
+		return fmt.Errorf("no entry at %s", dbDN)
+	}
+	if aclsMatch(sr.Entries[0].GetEqualFoldAttributeValues("olcAccess"), desired) {
+		return nil
+	}
+
+	log.Info("setting accesslog DB ACL", "host", host, "dn", dbDN)
+	modReq := ldap.NewModifyRequest(dbDN, nil)
+	modReq.Replace("olcAccess", desired)
+	if err := conn.Modify(modReq); err != nil {
+		return fmt.Errorf("set olcAccess on %s: %w", dbDN, err)
+	}
+	return nil
+}
+
+// removeAccesslogDB tears down this database's accesslog DB during peer →
+// consumer-only demotion (ADR-010 3e). Removes the syncprov overlay first
+// (children must go before parents in slapd's cn=config), then the DB entry
+// itself. Scoped to cn=accesslog-<dbName> (ADR-019): with per-database logs a
+// demotion of one SlapdDatabase can no longer remove a log another CR is still
+// using.
+//
+// The underlying /accesslog volume is left mounted and the LMDB data files in
+// /accesslog/<dbName> stay on disk — they're harmless when the DB entry isn't
+// referenced. A later promotion re-creates the DB pointed at the same
+// directory, and slapd re-attaches to whatever is there. (This is acceptable
+// for the migration rollback use case; if you want a clean accesslog history on
+// re-promotion, wipe /accesslog/<dbName> manually before promoting.)
 //
 // Idempotent: NoSuchObject is silently treated as success.
 func (r *SlapdDatabaseReconciler) removeAccesslogDB(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host string,
+	host, dbName string,
 ) error {
 	log := logf.FromContext(ctx)
 
+	logSuffix := accesslogSuffix(dbName)
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		1, 0, false, "(&(objectClass=olcMdbConfig)(olcSuffix=cn=accesslog))",
+		1, 0, false, fmt.Sprintf("(&(objectClass=olcMdbConfig)(olcSuffix=%s))", logSuffix),
 		[]string{"dn"}, nil,
 	))
 	if err != nil {
-		return fmt.Errorf("search accesslog DB: %w", err)
+		return fmt.Errorf("search accesslog DB %s: %w", logSuffix, err)
 	}
 	if len(sr.Entries) == 0 {
 		return nil
@@ -1747,11 +1847,12 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
 
 		desired := buildDatabaseSyncRepl(
-			sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix,
+			sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix, sd.Name,
 			replicas, i, replPassword,
 			tlsEnabled, ridBase,
 			retryInterval, keepalive,
 			useDeltaSync,
+			externalLogBase(sd),
 			externalPeers,
 			replNetIPs,
 			consumerOnly,
@@ -1772,7 +1873,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				sc.Name, i, roHeadless, sc.Namespace, r.ClusterDomain)
 
 			desired := buildDatabaseSyncReplRO(
-				sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix,
+				sc.Name, headlessSvc, sc.Namespace, r.ClusterDomain, sd.Spec.Suffix, sd.Name,
 				replicas, replPassword,
 				tlsEnabled, ridBase,
 				retryInterval, keepalive,
@@ -1818,13 +1919,14 @@ type resolvedExternalPeer struct {
 // When replNetIPs is non-nil and contains an IP for a peer pod, that IP is used instead of
 // the headless DNS name (Multus replication network mode, see ADR-007).
 func buildDatabaseSyncRepl(
-	clusterName, headlessSvc, namespace, clusterDomain, suffix string,
+	clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName string,
 	replicas, ordinal int32,
 	replPassword string,
 	tlsEnabled bool,
 	ridBase int32,
 	retryInterval, keepalive string,
 	deltaSync bool,
+	externalLogSuffix string,
 	externalPeers []resolvedExternalPeer,
 	replNetIPs map[string]string,
 	consumerOnly bool,
@@ -1845,9 +1947,25 @@ func buildDatabaseSyncRepl(
 		keepaliveOpt = fmt.Sprintf(" keepalive=%s", keepalive)
 	}
 
+	// In-cluster peers run our own layout, so logbase is this database's own
+	// per-DB accesslog suffix (ADR-019 R1/R5). logfilter stays the
+	// upstream-standard filter: with a per-database log the log is already
+	// scoped, so reqDN scoping would be dead weight on an unindexed attribute
+	// assertion and would mask a mis-derived logbase (ADR-019 R6).
 	deltaSyncOpts := ""
 	if deltaSync {
-		deltaSyncOpts = ` logbase="cn=accesslog"` +
+		deltaSyncOpts = fmt.Sprintf(` logbase="%s"`, accesslogSuffix(dbName)) +
+			` logfilter="(&(objectClass=auditWriteObject)(reqResult=0))"` +
+			` syncdata=accesslog`
+	}
+
+	// External peers evaluate logbase on *their* side (ADR-019 R9), so their
+	// stanzas name externalLogSuffix — the caller's externalLogBase(sd):
+	// this database's derived suffix by default, or the per-database override
+	// for a peer that is not slaptain / does not use the same CR name.
+	externalDeltaOpts := ""
+	if deltaSync {
+		externalDeltaOpts = fmt.Sprintf(` logbase="%s"`, externalLogSuffix) +
 			` logfilter="(&(objectClass=auditWriteObject)(reqResult=0))"` +
 			` syncdata=accesslog`
 	}
@@ -1920,7 +2038,7 @@ func buildDatabaseSyncRepl(
 		// Per-peer delta opts: omit logbase / syncdata=accesslog when the peer
 		// is configured for plain syncrepl (ADR-011) — typically a legacy
 		// non-slaptain source that doesn't advertise an accesslog DB.
-		epDeltaOpts := deltaSyncOpts
+		epDeltaOpts := externalDeltaOpts
 		if ep.PlainSyncRepl {
 			epDeltaOpts = ""
 		}
@@ -1958,7 +2076,7 @@ func buildDatabaseSyncRepl(
 // buildDatabaseSyncReplRO computes syncrepl stanzas for a read-only replica.
 // When replNetIPs is non-nil, uses Multus IPs for RW peer addresses.
 func buildDatabaseSyncReplRO(
-	clusterName, headlessSvc, namespace, clusterDomain, suffix string,
+	clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName string,
 	rwReplicas int32,
 	replPassword string,
 	tlsEnabled bool,
@@ -1983,9 +2101,13 @@ func buildDatabaseSyncReplRO(
 		keepaliveOpt = fmt.Sprintf(" keepalive=%s", keepalive)
 	}
 
+	// A read-only replica has no accesslog of its own — it produces no writes
+	// (ADR-019 R3 / the RO StatefulSet mounts no accesslog volume). Its
+	// stanzas nevertheless carry logbase, because it names the *RW provider's*
+	// log, which is that provider's per-database suffix (ADR-019 R5/R9).
 	deltaSyncOpts := ""
 	if deltaSync {
-		deltaSyncOpts = ` logbase="cn=accesslog"` +
+		deltaSyncOpts = fmt.Sprintf(` logbase="%s"`, accesslogSuffix(dbName)) +
 			` logfilter="(&(objectClass=auditWriteObject)(reqResult=0))"` +
 			` syncdata=accesslog`
 	}
