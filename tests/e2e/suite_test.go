@@ -10,8 +10,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
 // ── Suite-wide variables ──────────────────────────────────────────────────────
@@ -106,8 +109,21 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 
 	By("Using LDAP address: " + localLDAPAddr)
 
-	By("Discovering base DN from LDAP rootDSE")
+	// baseDN is the *primary* database's suffix, read off its own CR rather
+	// than picked out of the rootDSE. Picking the first dc= namingContext was
+	// unambiguous while one SlapdDatabase was the only shape any fixture
+	// declared; the ADR-019 fixture declares two (tests/resources/example/
+	// database2.yaml), and namingContexts order is slapd's business, not ours —
+	// so the whole suite's identity would have hinged on it. The rootDSE is
+	// still consulted, as an assertion that the suffix we resolved is actually
+	// served.
+	By("Resolving base DN from SlapdDatabase " + dbCRName)
 	{
+		sd := &ldapv1alpha1.SlapdDatabase{}
+		Expect(crdClient.Get(ctx, types.NamespacedName{Name: dbCRName, Namespace: namespace}, sd)).To(Succeed())
+		baseDN = sd.Spec.Suffix
+		Expect(baseDN).NotTo(BeEmpty(), "SlapdDatabase %s must declare spec.suffix", dbCRName)
+
 		conn, err := ldap.Dial("tcp", localLDAPAddr)
 		Expect(err).NotTo(HaveOccurred())
 		req := ldap.NewSearchRequest("",
@@ -119,15 +135,16 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		Expect(result.Entries).To(HaveLen(1))
 		contexts := result.Entries[0].GetAttributeValues("namingContexts")
 		Expect(contexts).NotTo(BeEmpty(), "rootDSE must advertise at least one namingContext")
-		// Skip internal cn= suffixes (cn=accesslog, cn=config); pick the user data tree.
-		for _, ctx := range contexts {
-			if strings.HasPrefix(strings.ToLower(ctx), "dc=") {
-				baseDN = ctx
+		served := false
+		for _, nc := range contexts {
+			if strings.EqualFold(nc, baseDN) {
+				served = true
 				break
 			}
 		}
-		Expect(baseDN).NotTo(BeEmpty(), "rootDSE must advertise a dc= naming context")
-		GinkgoLogr.Info("discovered base DN", "baseDN", baseDN)
+		Expect(served).To(BeTrue(),
+			"rootDSE must advertise the primary database's suffix %q; got %v", baseDN, contexts)
+		GinkgoLogr.Info("resolved base DN", "baseDN", baseDN, "namingContexts", contexts)
 	}
 
 	By("Connecting to LDAP as admin")

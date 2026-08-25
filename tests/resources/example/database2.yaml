@@ -1,0 +1,61 @@
+# Second replicated SlapdDatabase — the ADR-019 fixture.
+#
+# Two data databases, both at deltaSync: true, is the shape that reproduces the
+# pre-ADR-019 defect: with one cluster-shared cn=accesslog, every write to one
+# database kicks the *other* database's consumers into a full-DIT refresh
+# (ADR-019 Facts 1-2), permanently, on a cluster that reports itself healthy.
+# tests/e2e/accesslog_test.go is the behavioural assertion; this fixture is what
+# makes it expressible. Keep both databases replicated.
+#
+# Deliberately kept minimal next to database.yaml: its own suffix (NOT a subtree
+# of the primary's), its own ridBase (ADR-003 requires a unique one per
+# database; 100 is taken, the CRD caps at 949), a userPassword-restricting ACL
+# so ADR-020's "the journal hands out what the data DB denies" is a live concern
+# here too, and just enough seed to write into.
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdDatabase
+metadata:
+  name: example-db2
+spec:
+  clusterRef: slapd
+  suffix: "dc=second,dc=example,dc=net"
+
+  acls:
+    # userPassword: self-write + anonymous auth only. The ACL ADR-020 exists to
+    # keep un-bypassable through this database's own change journal.
+    - >-
+      to attrs=userPassword
+      by self write
+      by anonymous auth
+      by * none
+    - >-
+      to *
+      by * read
+
+  replication:
+    ridBase: 200
+    deltaSync: true
+    syncprovCheckpoint: "500 15"
+    accesslogPurge: "2+00:00 1+00:00"
+
+  indices:
+    - "objectClass eq"
+    - "uid eq,sub"
+    - "entryCSN eq"
+    - "entryUUID eq"
+
+  seed:
+    entries:
+      - |
+        dn: dc=second,dc=example,dc=net
+        objectClass: top
+        objectClass: dcObject
+        objectClass: organization
+        o: second
+        dc: second
+      - |
+        dn: ou=People,dc=second,dc=example,dc=net
+        objectClass: organizationalUnit
+        ou: People
+
+  cleanupPolicy: Retain

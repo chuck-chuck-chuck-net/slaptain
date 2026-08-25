@@ -392,6 +392,24 @@ resolve_cr_names() {
     DB_CREDENTIALS_SECRET="${DB_CR_NAME}-credentials"
     log "Database CR: $DB_CR_NAME (suffix: $DB_SUFFIX), Schema CR: $SCHEMA_CR_NAME"
     log "Credentials secret: $DB_CREDENTIALS_SECRET"
+
+    # Optional second SlapdDatabase (database2.yaml). The `example` fixture
+    # declares one so the standard suite covers the two-replicated-database
+    # shape ADR-019 is about; other resource sets need not. Empty when absent,
+    # and every consumer below is guarded on that.
+    DB2_CR_NAME=""
+    DB2_SUFFIX=""
+    DB2_CREDENTIALS_SECRET=""
+    if [[ -f "$resource_dir/database2.yaml" ]]; then
+        DB2_CR_NAME=$(awk '/^kind: SlapdDatabase/{found=1} found && /^  name:/{print $2; exit}' \
+            "$resource_dir/database2.yaml")
+        DB2_SUFFIX=$(awk '/^  suffix:/{gsub(/"/, "", $2); print $2; exit}' \
+            "$resource_dir/database2.yaml")
+        [[ -z "$DB2_CR_NAME" ]] && die "Could not extract SlapdDatabase name from $resource_dir/database2.yaml"
+        [[ -z "$DB2_SUFFIX" ]] && die "Could not extract suffix from $resource_dir/database2.yaml"
+        DB2_CREDENTIALS_SECRET="${DB2_CR_NAME}-credentials"
+        log "Second database CR: $DB2_CR_NAME (suffix: $DB2_SUFFIX), credentials secret: $DB2_CREDENTIALS_SECRET"
+    fi
 }
 
 # ── Setup phases ─────────────────────────────────────────────────────────────
@@ -671,9 +689,12 @@ wait_for_clusters_ready() {
 apply_test_resources() {
     # Apply SlapdDatabase + SlapdSchema BEFORE the SlapdCluster helm install
     # (see do_setup ordering). That way the SlapdCluster controller's first
-    # STS reconcile sees databaseNames=[example-db] and bakes the correct
+    # STS reconcile sees the full database list — every SlapdDatabase in the
+    # directory, including database2.yaml — and bakes the correct
     # DATABASE_DIRS into the initial pod template — no later template churn,
-    # no rolling restart on first apply. Documented in
+    # no rolling restart on first apply. Adding a database here therefore costs
+    # nothing at setup time; adding one to a *running* cluster is the rolling
+    # restart ADR-013 accepts. Documented in
     # docs/BUG-ANALYSIS-database-dirs-rolling-restart.md (option A).
     local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
     for ctx in "${CONTEXTS[@]}"; do
@@ -695,6 +716,20 @@ wait_test_resources_ready() {
             [[ $attempts -ge 180 ]] && die "[$ctx] SlapdDatabase did not reach Running within 180s (current: $phase)"
             sleep 1
         done
+
+        if [[ -n "$DB2_CR_NAME" ]]; then
+            log "[$ctx] Waiting for SlapdDatabase $DB2_CR_NAME to reach Running..."
+            attempts=0
+            while true; do
+                local phase2
+                phase2=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net "$DB2_CR_NAME" \
+                    -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+                [[ "$phase2" == "Running" ]] && break
+                ((attempts++)) || true
+                [[ $attempts -ge 180 ]] && die "[$ctx] SlapdDatabase $DB2_CR_NAME did not reach Running within 180s (current: $phase2)"
+                sleep 1
+            done
+        fi
 
         log "[$ctx] Waiting for SlapdSchema $SCHEMA_CR_NAME to be applied..."
         attempts=0
@@ -752,6 +787,16 @@ run_tests() {
         "SCHEMA_CR_NAME=$SCHEMA_CR_NAME"
         "READPW_OU=${READPW_OU:-ServiceAccounts}"
     )
+
+    # Second replicated database (ADR-019 fixture). Absent for resource sets
+    # that declare only one; the accesslog specs skip themselves then.
+    if [[ -n "$DB2_CR_NAME" ]]; then
+        test_env+=(
+            "DB2_CR_NAME=$DB2_CR_NAME"
+            "DB2_SUFFIX=$DB2_SUFFIX"
+            "DB2_CREDENTIALS_SECRET=$DB2_CREDENTIALS_SECRET"
+        )
+    fi
 
     # Backup e2e (ADR-014): deploy the versitygw S3 server and enable the gated
     # backup specs. Opt-in via E2E_BACKUP=1 in the environment.
@@ -856,8 +901,11 @@ teardown_all() {
         kctl "$ctx" delete secret slaptain-remote-reader-token -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
         kctl "$ctx" delete sa slaptain-remote-reader -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
 
-        # Database credentials secret.
+        # Database credentials secrets.
         kctl "$ctx" delete secret "$DB_CREDENTIALS_SECRET" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        if [[ -n "$DB2_CREDENTIALS_SECRET" ]]; then
+            kctl "$ctx" delete secret "$DB2_CREDENTIALS_SECRET" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+        fi
 
         # CSR (cluster-scoped) — name includes the namespace.
         kctl "$ctx" delete csr "slapd-${NAMESPACE_TESTING}-csr" --ignore-not-found 2>/dev/null || true

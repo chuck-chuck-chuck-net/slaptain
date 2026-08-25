@@ -84,8 +84,11 @@ pod, exports `LDAP_ADDR` / `E2E_NODE_IP` / `E2E_POD_NODEPORT_BASE` /
 then tears the NodePorts down. There is no `kubectl port-forward` and no
 in-cluster runner Job — both were retired in favour of NodePorts.
 
-The script auto-discovers the LDAP base DN from the server's rootDSE — no
-domain env var needed.
+The suite resolves the LDAP base DN from the primary `SlapdDatabase` CR's
+`spec.suffix` (and asserts the rootDSE advertises it) — no domain env var
+needed. It reads the CR rather than picking the first `dc=` naming context
+because the fixture declares two data databases, and `namingContexts` order is
+slapd's business.
 
 ### Node access (NodePort reachability)
 
@@ -121,6 +124,32 @@ The data-loss-recovery test simulates per-pod storage loss with
 `kubectl delete pod + pvc`, exercising ADR-012's case-2 contract (single pod
 loses its volumes, syncrepl restores the DIT from surviving peers).
 
+**Two replicated databases.** `tests/resources/example/` declares
+`database.yaml` (`example-db`) *and* `database2.yaml` (`example-db2`), both at
+`deltaSync: true` with distinct `ridBase`es. That is the shape ADR-019 is about:
+with one cluster-shared `cn=accesslog`, every write to one database kicks the
+other database's consumers into a permanent full-DIT refresh while the cluster
+reports itself healthy. `tests/e2e/accesslog_test.go` covers it in the standard
+suite (not gated, `--ginkgo.label-filter=accesslog` to run it alone):
+
+1. **structural** — one `cn=accesslog-<db>` per replicated database at
+   `/accesslog/<db>`; `logbase` ≡ `olcAccessLogDB` ≡ log `olcSuffix`; no two
+   databases share a log; no legacy `cn=accesslog` remains.
+2. **behavioural** — sustained writes to one database produce no
+   `delta-sync lost sync` in any pod's log while the other settles. Needs
+   slapd's sync debug (`spec.logLevel` bit 16384; the fixture's 16640 has it),
+   and is scoped to the write window by per-pod log byte offsets. **This is the
+   spec that proves the mechanism.**
+3. **convergence** on both databases across all RW pods — a guard only. It stays
+   green against a shared log, because a shared log still converges: by whole-DIT
+   reload. A green convergence run is not evidence that the defect is absent.
+4. **ADR-020** — anonymous read of a log is denied, `cn=replication,<suffix>`
+   read succeeds, and the rootDSE still advertises both logs.
+
+Specs skip themselves when the resource set declares a single database
+(`DB2_CR_NAME` unset). Adding the second database raises the default-suite
+runtime; that is expected.
+
 ### Env vars
 
 | Env var | Default | Description |
@@ -131,6 +160,7 @@ loses its volumes, syncrepl restores the DIT from surviving peers).
 | `LDAP_ADDR` | *(set by script)* | `<node-access-ip>:<nodeport>` — required when invoking `go test` directly |
 | `E2E_RESILIENCE` | *(unset)* | Set to `1` to enable the warm-restart resilience test |
 | `E2E_BACKUP` | *(unset)* | Set to `1` to enable the S3 backup/restore tests. `e2e.sh test` then deploys `tests/resources/versitygw.yaml` (a lean Apache-2.0 S3 server — not minio) and runs `backup_test.go` + `restore_test.go`. The restore spec spins up a second single-replica `slapd-restore` cluster and exercises the scale-to-0 restore machine. See `docs/BACKUP.md`. |
+| `DB2_CR_NAME` / `DB2_SUFFIX` / `DB2_CREDENTIALS_SECRET` | *(set by script from `database2.yaml`)* | Second replicated `SlapdDatabase`. Unset for resource sets with only one database, which makes `accesslog_test.go` skip. |
 | `E2E_SCALEUP` | *(unset)* | Set to `1` to enable the standalone → HA transition test (`scaleup_test.go`). Spins up a second `slapd-scaleup` cluster (replicas=1, replication off, custom schema, seeded entry), then flips it to replicas=2 + `replication.enabled=true` and asserts runtime convergence: schema on the new pod, pod-0 becomes a provider (modules/overlays added live), replication both directions, `olcServerID` `[1]` → `[1 2]`. No extra infrastructure needed. See `docs/reconcile-loop-fixes.md` (2026-07-15) and the ADR-003 amendment. |
 
 **Readpw ACL tests** require plaintext passwords for the readpw service accounts. The suite
