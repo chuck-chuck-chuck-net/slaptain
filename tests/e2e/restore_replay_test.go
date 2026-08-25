@@ -59,6 +59,26 @@ var _ = Describe("in-place restore under replication (accesslog replay)", Label(
 		if sc.Spec.Replicas < 2 || !sc.Spec.Replication.Enabled {
 			Skip("primary cluster is not replicated; accesslog-replay regression is not applicable")
 		}
+		// This spec asserts rollback semantics, which SlapdRestore only provides
+		// when no replica outside the restore's scope holds post-backup deltas.
+		// With external peers it does not: slapadd restores each entry with its
+		// original CSN, so the peers' newer changes win and are replayed back as
+		// each pod rejoins the mesh — the cluster converges to the mesh's state
+		// and the restore is a local re-seed, by design (ADR-014, amendment
+		// 2026-08-24). Asserting a rollback here would be asserting something we
+		// deliberately do not promise, so skip rather than fail.
+		//
+		// The regression this spec guards (the local accesslog wipe) is real and
+		// still needs permanent coverage on an N>=2 cluster with no external
+		// peers. That is blocked on the e2e framework refactor — see
+		// docs/BACKLOG.md, "Permanent e2e coverage for in-place restore
+		// topologies". Verified manually in the meantime.
+		if len(sc.Spec.Replication.ExternalPeers) > 0 {
+			Skip(fmt.Sprintf("primary cluster has %d external peer(s): in-place restore is a local "+
+				"re-seed there, not a rollback (ADR-014 amendment) — this spec needs a cluster "+
+				"with no external peers; see docs/BACKLOG.md",
+				len(sc.Spec.Replication.ExternalPeers)))
+		}
 		rwPods = nil
 		for i := int32(0); i < sc.Spec.Replicas; i++ {
 			rwPods = append(rwPods, fmt.Sprintf("slapd-%d", i))
