@@ -48,7 +48,12 @@ import (
 // (sync) + 256 (stats) provides it.
 var lostSyncRE = regexp.MustCompile(`delta-sync lost sync on`)
 
-var _ = Describe("per-database accesslog", Label("accesslog"), Ordered, func() {
+// Ordered for the BeforeAll (one credential/topology read for all four specs),
+// ContinueOnFailure because the four are independent: a structural failure must
+// not skip the behavioural one. On a shared-accesslog cluster that distinction
+// is the whole point — spec 1 fails, spec 2 fails with the `delta-sync lost
+// sync` evidence, and spec 3 passes anyway.
+var _ = Describe("per-database accesslog", Label("accesslog"), Ordered, ContinueOnFailure, func() {
 
 	var (
 		db2Name     string
@@ -273,10 +278,21 @@ var _ = Describe("per-database accesslog", Label("accesslog"), Ordered, func() {
 				}
 			}
 		}
-		Expect(offences).To(BeEmpty(),
-			"writes to DB-A (%s) drove delta-sync loss while DB-B (%s) was idle — the ADR-019 "+
-				"shared-accesslog mechanism (Facts 1-2). %d offending log line(s):\n%s",
-			baseDN, db2Suffix, len(offences), strings.Join(offences, "\n"))
+		if len(offences) > 0 {
+			// Report a sample, not the lot: against a shared log this runs into
+			// the thousands (the failure oscillates, one line per retry per rid)
+			// and Gomega truncates the dump mid-line, which is worse than a
+			// deliberate excerpt.
+			sample := offences
+			if len(sample) > 10 {
+				sample = sample[:10]
+			}
+			Fail(fmt.Sprintf(
+				"writes to DB-A (%s) drove delta-sync loss while DB-B (%s) was idle — the "+
+					"ADR-019 shared-accesslog mechanism (Facts 1-2). %d offending log line(s), "+
+					"first %d:\n%s",
+				baseDN, db2Suffix, len(offences), len(sample), strings.Join(sample, "\n")))
+		}
 	}, NodeTimeout(10*time.Minute))
 
 	// ── 3. Convergence — a guard, not the proof ─────────────────────────────
