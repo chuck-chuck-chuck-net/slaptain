@@ -190,7 +190,30 @@ var _ = Describe("per-database accesslog", Label("accesslog"), Ordered, Continue
 				logOwners[strings.ToLower(wantLog)] = append(logOwners[strings.ToLower(wantLog)], dbName)
 			}
 
-			// (d) no two databases share a log — the exact condition ADR-019 forbids.
+			// (d) an accesslog overlay exists on the replicated data DBs and
+			// NOWHERE else. In particular a *log* DB must not carry one: a log
+			// journalling into another log re-creates the ADR-019 Fact 2
+			// mechanism (its consumers receive reqDNs under the foreign log's
+			// suffix and cannot apply them), and it is what an olcDatabase={N}
+			// DN going stale across a database delete looks like from outside.
+			overlays := allAccesslogOverlays(conn)
+			wantParents := map[string]bool{}
+			for _, dbName := range dbNames {
+				dataDB, ok := findMdb(mdbs, dbSuffixes[dbName])
+				Expect(ok).To(BeTrue())
+				wantParents[strings.ToLower(dataDB.dn)] = true
+			}
+			for _, ov := range overlays {
+				Expect(wantParents).To(HaveKey(strings.ToLower(ov.parentDN)),
+					"pod %s: accesslog overlay on %s (naming %q) does not belong to any "+
+						"replicated data database — a log DB journalling into another log "+
+						"reintroduces ADR-019 Fact 2", pod, ov.parentDN, ov.logDB)
+			}
+			Expect(overlays).To(HaveLen(len(dbNames)),
+				"pod %s: expected exactly one accesslog overlay per replicated database; got %v",
+				pod, overlays)
+
+			// (e) no two databases share a log — the exact condition ADR-019 forbids.
 			Expect(logOwners).To(HaveLen(len(dbNames)),
 				"pod %s: databases share accesslog DBs: %v", pod, logOwners)
 			for logSuffix, owners := range logOwners {
@@ -489,6 +512,40 @@ func accesslogOverlayTarget(conn *ldap.Conn, dataDN string) string {
 		return ""
 	}
 	return strings.TrimSpace(res.Entries[0].GetEqualFoldAttributeValue("olcAccessLogDB"))
+}
+
+// observedAccesslogOverlay is one accesslog overlay anywhere under cn=config:
+// the DN of the database it hangs on, and the log suffix it names.
+type observedAccesslogOverlay struct {
+	parentDN string
+	logDB    string
+}
+
+func (o observedAccesslogOverlay) String() string {
+	return fmt.Sprintf("%s→%s", o.parentDN, o.logDB)
+}
+
+// allAccesslogOverlays lists every accesslog overlay on the pod, regardless of
+// which database it hangs on. Deliberately unscoped: the interesting failure is
+// an overlay on a database that should not have one.
+func allAccesslogOverlays(conn *ldap.Conn) []observedAccesslogOverlay {
+	res, err := conn.Search(ldap.NewSearchRequest(
+		"cn=config", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcAccessLogConfig)",
+		[]string{"olcAccessLogDB"}, nil))
+	Expect(err).NotTo(HaveOccurred(), "search accesslog overlays under cn=config")
+	var out []observedAccesslogOverlay
+	for _, e := range res.Entries {
+		parent := e.DN
+		if i := strings.Index(parent, ","); i >= 0 {
+			parent = parent[i+1:]
+		}
+		out = append(out, observedAccesslogOverlay{
+			parentDN: parent,
+			logDB:    strings.TrimSpace(e.GetEqualFoldAttributeValue("olcAccessLogDB")),
+		})
+	}
+	return out
 }
 
 // syncreplStanzas returns the olcSyncRepl values on a database entry.
