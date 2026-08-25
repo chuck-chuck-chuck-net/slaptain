@@ -137,6 +137,41 @@ not be read as a product regression.
 no-external-peers cluster. That restores its validity, closes the row-2 gap, and
 removes the most destructive spec from the shared fixture as a side effect.
 
+## Accesslog index set is incomplete
+
+The per-database accesslog DBs (ADR-019) are created with
+`olcDbIndex: default eq` + `reqEnd,reqResult,reqStart eq`. Upstream indexes
+`entryCSN,objectClass,reqEnd,reqResult,reqStart,reqDN`. Note `index default eq`
+indexes nothing on its own — it only sets the default *type*.
+
+`reqDN` is the one that matters: multi-provider out-of-order modify resolution
+searches the local log with `(&(entryCSN>=…)(reqDN=…)…)` on **every** conflicting
+write (`syncrepl.c`), so on a write-contended mesh that is an unindexed
+attribute assertion on a hot path. `entryCSN` and `objectClass` are cheap wins.
+
+Deliberately out of scope for ADR-019 (it changes performance, not correctness,
+and folding it in would have muddied that ADR's blast radius). Independent of it:
+the fix is a one-line change to the index list plus an e2e that asserts the
+resulting `olcDbIndex`.
+
+---
+
+## e2e cannot pin an old `slapd-init` image, so one migration failure mode has no guard
+
+The 2026-08-25 "syncrepl stanzas written to a pod whose accesslog DB does not
+exist" fix is proven only by hand-run live scenarios. A permanent regression test
+needs pods whose init container predates the per-database accesslog directory
+creation, because the missing thing is a *directory on a PVC the operator cannot
+touch* (ADR-018) — it is not manufacturable from `cn=config` the way the legacy
+shared log is (`E2E_ACCESSLOG_MIGRATION=1` does exactly that trick).
+
+What is missing is a fixture capability: deploying a cluster with `spec.images`
+pinned to a chosen older init tag, then upgrading the operator underneath it.
+That overlaps with "e2e framework: specs cannot provision their own topology"
+above and should probably be solved with it rather than separately.
+
+---
+
 ## Cross-site orchestration (hub-and-spoke) — explicitly undecided
 
 **What:** automating the mesh-wide rollback runbook (`docs/BACKUP.md`, "Rolling
