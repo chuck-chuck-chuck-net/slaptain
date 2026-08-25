@@ -136,3 +136,29 @@ not be read as a product regression.
 **How:** once the fixture helper exists, move the spec onto a dedicated N≥2,
 no-external-peers cluster. That restores its validity, closes the row-2 gap, and
 removes the most destructive spec from the shared fixture as a side effect.
+
+## Cross-site orchestration (hub-and-spoke) — explicitly undecided
+
+**What:** automating the mesh-wide rollback runbook (`docs/BACKUP.md`, "Rolling
+back a replicated deployment") so it becomes one declarative action instead of a
+careful manual sequence across N clusters.
+
+**Why this is not just a feature:** it requires one actor to drive *other*
+clusters — quiesce them, run restores there, and sequence the result. Today the
+operator reaches across clusters only to **read**: it discovers peer pod
+addresses through a remote kubeconfig (ADR-007 amendment, ADR-016). Driving a
+remote site is categorically different. It introduces a control plane, and with
+it hub failure, partition behaviour, and arbitration — and it stands in direct
+tension with this project's second architectural requirement, that each site be
+autonomous.
+
+**Why deferred, and deliberately undecided:** this is a fundamentals question,
+not a backlog chore. It is recorded here so the option is not lost, *not* as an
+agreed direction. The current answer — a human-operated distributed runbook — is
+legitimate and is how comparable systems document the same operation. Nothing
+about it is broken; it is manual.
+
+**If pursued:** it gets its own ADR, deciding the topology (a control-plane
+cluster? a peer-elected coordinator? a CLI-driven sequence with no new
+controller?) and the failure semantics before any code. See the ADR-014
+amendment (2026-08-24), section "Not decided: hub-and-spoke orchestration".
