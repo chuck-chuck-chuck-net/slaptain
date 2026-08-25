@@ -11,7 +11,7 @@ LDAP_REPLICATION_ENABLED="${LDAP_REPLICATION_ENABLED:-false}"
 LDAP_READONLY_REPLICA="${LDAP_READONLY_REPLICA:-false}"
 
 # DATABASE_DIRS: comma-separated list of SlapdDatabase CR names.
-# The init container creates /data/<name>/ for each.
+# The init container creates /data/<name>/ and /accesslog/<name>/ for each.
 DATABASE_DIRS="${DATABASE_DIRS:-}"
 
 echo "Bootstrapping OpenLDAP (cn=config infrastructure only)"
@@ -39,8 +39,15 @@ if [[ -d "$ACCESSLOG_DIR" ]]; then
     touch "$ACCESSLOG_DIR/.writable" && rm "$ACCESSLOG_DIR/.writable" || { echo "ERROR: $ACCESSLOG_DIR is not writable"; exit 1; }
 fi
 
-# ── Create per-database data directories ──────────────────────────────────────
-# Each SlapdDatabase CR gets its own subdirectory under /data/.
+# ── Create per-database data and accesslog directories ────────────────────────
+# Each SlapdDatabase CR gets its own subdirectory under /data/ and, when this pod
+# carries the accesslog volume, under /accesslog/ (ADR-019 R1/R3: one accesslog
+# DB per replicated data DB, backed by /accesslog/<dbname> inside the single
+# accesslog PVC — not a volume per database). back-mdb does NOT create
+# olcDbDirectory, so the directory must exist before the operator adds the DB.
+# The accesslog side is gated on the mount existing: read-only replicas never
+# get that volume (they produce no changes). ADR-013's rolling restart on DB
+# add/remove is what guarantees this loop sees the current set.
 # The SlapdCluster controller passes the list of database CR names.
 if [[ -n "$DATABASE_DIRS" ]]; then
     IFS=',' read -ra DIRS <<< "$DATABASE_DIRS"
@@ -49,6 +56,10 @@ if [[ -n "$DATABASE_DIRS" ]]; then
         if [[ -n "$dir" ]]; then
             echo "Ensuring data directory: $DATA_DIR/$dir"
             mkdir -p "$DATA_DIR/$dir"
+            if [[ -d "$ACCESSLOG_DIR" ]]; then
+                echo "Ensuring accesslog directory: $ACCESSLOG_DIR/$dir"
+                mkdir -p "$ACCESSLOG_DIR/$dir"
+            fi
         fi
     done
 fi

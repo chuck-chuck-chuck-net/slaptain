@@ -331,6 +331,15 @@ Derived rules, binding on all present and future accesslog handling:
   *read*, so a data DB's ACLs are bypassable through its own journal — is
   independent of this ADR, but per-database logs are what make "the ACL of *this*
   log" well-defined.
+- **The init container creates `/accesslog/<name>` for every database in
+  `DATABASE_DIRS`, replicated or not.** `back-mdb` does not create
+  `olcDbDirectory`, so the directory must exist before the operator adds the log
+  DB; the init container is the only component with filesystem access to that
+  volume (ADR-018). Filtering the set to replicated databases only would need a
+  second, replication-filtered env var, and would couple the init container to
+  per-DB replication state that can change without the pod restart ADR-013
+  guarantees for a DB add/remove. A non-replicated database therefore gets an
+  empty, unused directory — the cheaper and more robust contract.
 - **Out of scope, tracked separately:** the log DB's index set is `default eq` plus
   `reqEnd,reqResult,reqStart eq`, where upstream indexes
   `entryCSN,objectClass,reqEnd,reqResult,reqStart,reqDN`. `reqDN` in particular
