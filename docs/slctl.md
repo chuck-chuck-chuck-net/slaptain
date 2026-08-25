@@ -59,7 +59,7 @@ SlapdCluster: slaptain-testing/slapd
 ────────────────────────────────────────
 
   Pod: slapd-0  [Running, ready]
-    namingContexts: cn=accesslog, dc=chuck-chuck-chuck,dc=net
+    namingContexts: cn=accesslog-default, dc=chuck-chuck-chuck,dc=net
     contextCSN:
       20260416143539.536592Z#000000#000#000000
     syncRepl:
@@ -74,7 +74,8 @@ Checks:
   [OK  ] ro-replica-count           1/1 ready
   [OK  ] pod-readiness              all pods running and ready
   [OK  ] bootstrap                  complete
-  [OK  ] naming-contexts            RW: accesslog+data, RO: data only
+  [OK  ] naming-contexts            RW: data + 1 accesslog(s), RO: data only
+  [OK  ] accesslog-consistency      2 database/pod pair(s): logbase = olcAccessLogDB = log olcSuffix
   [OK  ] csn-convergence            all 4 pods report identical CSN
   [OK  ] syncrepl-stanza-count      RW: 2 each, RO: 3 each
   [OK  ] syncrepl-skip-self         no RW pod replicates from itself
@@ -98,7 +99,7 @@ slctl inspect --short -n slaptain slapd || echo "UNHEALTHY"
 
 | Field | Source | What it tells you |
 |---|---|---|
-| **namingContexts** | rootDSE (anonymous) | Which databases the pod serves. RW pods should have `cn=accesslog` + the data suffix. RO pods should have only the data suffix. |
+| **namingContexts** | rootDSE (anonymous) | Which databases the pod serves. RW pods should have the data suffix plus one `cn=accesslog-<database>` per replicated database (ADR-019). RO pods should have only the data suffix. |
 | **contextCSN** | Base entry (anonymous) | The replication state vector — see [Understanding contextCSN](#understanding-contextcsn). |
 | **syncRepl** | cn=config (config admin) | The `olcSyncRepl` stanzas — which peers this pod replicates from. |
 | **multiProvider** | cn=config (config admin) | `TRUE` on RW pods (N-way multi-master). Absent on RO pods. |
@@ -115,7 +116,8 @@ corresponding checks are skipped.
 | **ro-replica-count** | `status.readOnlyReadyReplicas == spec.readReplicas` | Mismatch | — |
 | **pod-readiness** | All pods Running + Ready condition True | Lists not-ready pods | — |
 | **bootstrap** | `status.bootstrapComplete == true` | Not complete | — |
-| **naming-contexts** | RW: `cn=accesslog` + data suffix. RO: data suffix only. | Missing or unexpected DB | — |
+| **naming-contexts** | RW: one `cn=accesslog-<database>` per replicated database + data suffix. RO: data suffix only. | Missing or unexpected DB | Legacy shared `cn=accesslog` still present (mid-migration), or an orphan log with no `SlapdDatabase` |
+| **accesslog-consistency** | Per replicated DB: `logbase` = `olcAccessLogDB` = log `olcSuffix`; no two DBs share a log | Local disagreement, missing overlay, absent log DB, or two DBs sharing one log (ADR-019) | Legacy shared `cn=accesslog` still in use by a single DB. External-peer `logbase` is reported as information — it is evaluated on the peer (ADR-019 R9) and never fails |
 | **csn-convergence** | All pods report identical contextCSN vectors | — | Shows divergent groups |
 | **syncrepl-stanza-count** | RW: `(replicas-1) + externalPeers` stanzas. RO: `replicas` stanzas. | Mismatch | — |
 | **syncrepl-skip-self** | No RW pod has a syncrepl stanza pointing to itself | Self-replication detected | — |

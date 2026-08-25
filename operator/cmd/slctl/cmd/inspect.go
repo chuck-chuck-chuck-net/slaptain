@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 	k8scli "github.com/chuck-chuck-chuck-net/slaptain/operator/internal/cli/k8s"
@@ -78,8 +79,14 @@ type podState struct {
 	contextCSN     []string
 	syncRepl       []string
 	multiProvider  string
-	configError    string
-	err            string
+	// dbs is every olcMdbConfig entry this pod serves — data and accesslog
+	// alike — with each data DB's accesslog overlay resolved onto it. The
+	// per-database accesslog checks need the whole set (ADR-019); syncRepl and
+	// multiProvider above stay as they are, the first data DB's values, because
+	// the per-pod display is written against them.
+	dbs         []observedDB
+	configError string
+	err         string
 }
 
 func (ps podState) toJSON() podJSON {
@@ -143,7 +150,15 @@ func runInspect(cmd *cobra.Command, args []string) error {
 		}
 
 		configPW, _ := readSecretKey(ctx, coreClient, key.Namespace, sc.Name+"-config-password", "root-password")
-		result := inspectAndVerify(ctx, coreClient, config, sc, configPW)
+
+		// SlapdDatabase CRs are the intent side of the per-database accesslog
+		// checks (ADR-019): which databases exist, and which use delta-syncrepl.
+		dbs, err := clusterDatabases(ctx, k8sClient, sc)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
+		}
+
+		result := inspectAndVerify(ctx, coreClient, config, sc, dbs, configPW)
 
 		if jsonOutput {
 			jsonResults = append(jsonResults, result)
@@ -174,7 +189,7 @@ func runInspect(cmd *cobra.Command, args []string) error {
 
 // ── Core logic ────────────────────────────────────────────────────────────────
 
-func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, configPW string) inspectJSON {
+func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, configPW string) inspectJSON {
 	result := inspectJSON{
 		Name:      sc.Name,
 		Namespace: sc.Namespace,
@@ -260,7 +275,7 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 	}
 
 	// Run checks against gathered state
-	result.Checks = runChecks(sc, rwPods, roPods)
+	result.Checks = runChecks(sc, dbs, rwPods, roPods)
 
 	pass, warn, fail := 0, 0, 0
 	for _, c := range result.Checks {
@@ -396,25 +411,58 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 				// Search for all olcMdbConfig entries to find syncRepl/multiProvider
 				dbResult, err := configConn.Search(ldap.NewSearchRequest(
 					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 0, false,
-					"(objectClass=olcMdbConfig)", []string{"olcSuffix", "olcSyncRepl", "olcMultiProvider"}, nil,
+					"(objectClass=olcMdbConfig)",
+					[]string{"olcSuffix", "olcSyncRepl", "olcMultiProvider", "olcDbDirectory"}, nil,
 				))
 				if err != nil {
 					ps.configError = fmt.Sprintf("cn=config search: %v", err)
 				} else {
-					// Find a data DB entry (skip cn=accesslog and other internal DBs)
+					multiProvider := make(map[string]string, len(dbResult.Entries))
 					for _, entry := range dbResult.Entries {
 						suffix := ""
 						if vals := entry.GetEqualFoldAttributeValues("olcSuffix"); len(vals) > 0 {
 							suffix = vals[0]
 						}
-						if strings.HasPrefix(suffix, "cn=") {
+						ps.dbs = append(ps.dbs, observedDB{
+							DN:       entry.DN,
+							Suffix:   suffix,
+							Dir:      entry.GetEqualFoldAttributeValue("olcDbDirectory"),
+							SyncRepl: entry.GetEqualFoldAttributeValues("olcSyncRepl"),
+						})
+						multiProvider[entry.DN] = entry.GetEqualFoldAttributeValue("olcMultiProvider")
+					}
+					// The per-pod display shows one data DB's stanzas and
+					// multiProvider; the accesslog DBs (and any other cn=…
+					// internal database) are not it.
+					for _, od := range ps.dbs {
+						if strings.HasPrefix(od.Suffix, "cn=") {
 							continue
 						}
-						ps.syncRepl = entry.GetEqualFoldAttributeValues("olcSyncRepl")
-						if vals := entry.GetEqualFoldAttributeValues("olcMultiProvider"); len(vals) > 0 {
-							ps.multiProvider = vals[0]
-						}
+						ps.syncRepl = od.SyncRepl
+						ps.multiProvider = multiProvider[od.DN]
 						break
+					}
+					// Resolve each data DB's accesslog overlay onto it. The
+					// overlay hangs under the database it logs, and slapd's {N}
+					// ordering prefix makes its own RDN unpredictable, so it is
+					// attributed by parent DN (ADR-019 R5: olcAccessLogDB must
+					// agree with logbase and the log's olcSuffix).
+					ovResult, err := configConn.Search(ldap.NewSearchRequest(
+						"cn=config", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+						"(objectClass=olcAccessLogConfig)", []string{"olcAccessLogDB"}, nil,
+					))
+					if err != nil {
+						ps.configError = fmt.Sprintf("cn=config accesslog overlay search: %v", err)
+					} else {
+						for _, ov := range ovResult.Entries {
+							logDB := ov.GetEqualFoldAttributeValue("olcAccessLogDB")
+							for i := range ps.dbs {
+								if dnHasParent(ov.DN, ps.dbs[i].DN) {
+									ps.dbs[i].AccessLogDB = logDB
+									break
+								}
+							}
+						}
 					}
 				}
 			}
@@ -426,7 +474,7 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 
 // ── Consistency checks ────────────────────────────────────────────────────────
 
-func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []checkResult {
+func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods []podState) []checkResult {
 	var checks []checkResult
 	check := func(name, status, detail string) {
 		checks = append(checks, checkResult{Name: name, Status: status, Detail: detail})
@@ -479,48 +527,14 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, rwPods, roPods []podState) []check
 		return checks
 	}
 
-	// ── namingContexts ──
-	ncOK := true
-	var ncIssues []string
-	for _, ps := range rwPods {
-		if ps.err != "" {
-			continue
-		}
-		hasAccesslog := false
-		hasData := false
-		for _, nc := range ps.namingContexts {
-			if nc == "cn=accesslog" {
-				hasAccesslog = true
-			}
-			if !strings.HasPrefix(nc, "cn=") {
-				hasData = true
-			}
-		}
-		if !hasAccesslog {
-			ncOK = false
-			ncIssues = append(ncIssues, fmt.Sprintf("%s: missing cn=accesslog", ps.name))
-		}
-		if !hasData {
-			ncOK = false
-			ncIssues = append(ncIssues, fmt.Sprintf("%s: missing data namingContext", ps.name))
-		}
-	}
-	for _, ps := range roPods {
-		if ps.err != "" {
-			continue
-		}
-		for _, nc := range ps.namingContexts {
-			if nc == "cn=accesslog" {
-				ncOK = false
-				ncIssues = append(ncIssues, fmt.Sprintf("%s: RO pod should not have cn=accesslog", ps.name))
-			}
-		}
-	}
-	if ncOK {
-		check("naming-contexts", "pass", "RW: accesslog+data, RO: data only")
-	} else {
-		check("naming-contexts", "fail", strings.Join(ncIssues, "; "))
-	}
+	// ── namingContexts + per-database accesslog consistency (ADR-019) ──
+	rwStates := accesslogStates(rwPods, false)
+	roStates := accesslogStates(roPods, true)
+	allStates := append(rwStates, roStates...)
+	checks = append(checks,
+		checkNamingContexts(dbs, allStates),
+		checkAccesslogConsistency(dbs, allStates, externalPeerNeedles(sc)),
+	)
 
 	// ── contextCSN convergence ──
 	allPods := append(rwPods, roPods...)
@@ -1137,4 +1151,81 @@ func formatDuration(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%.1fh", d.Hours())
 	}
+}
+
+// ── Per-database accesslog plumbing (ADR-019) ─────────────────────────────────
+
+// clusterDatabases reduces the cluster's SlapdDatabase CRs to the intent the
+// accesslog checks verify against. WantLog mirrors the operator's own gating:
+// the cluster needs an accesslog at all (NeedsAccesslog — false for a
+// single-pod cluster with no external peers, and for a consumer-only one) and
+// this database uses delta-syncrepl.
+func clusterDatabases(ctx context.Context, k8sClient client.Client, sc *ldapv1alpha1.SlapdCluster) ([]dbIdentity, error) {
+	list := &ldapv1alpha1.SlapdDatabaseList{}
+	if err := k8sClient.List(ctx, list, client.InNamespace(sc.Namespace)); err != nil {
+		return nil, fmt.Errorf("list SlapdDatabases in %s: %w", sc.Namespace, err)
+	}
+	var out []dbIdentity
+	for i := range list.Items {
+		sd := &list.Items[i]
+		if sd.Spec.ClusterRef != sc.Name {
+			continue
+		}
+		out = append(out, dbIdentity{
+			Name:            sd.Name,
+			Suffix:          sd.Spec.Suffix,
+			WantLog:         sc.NeedsAccesslog() && sd.DeltaSyncEnabled(),
+			ExternalLogBase: ldapv1alpha1.ExternalLogBase(sd),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// accesslogStates projects gathered pod state onto the pure checks' input.
+// A pod that could not be reached is marked Skip: pod-readiness reports it, and
+// the accesslog checks must not turn an unreachable pod into a config verdict.
+func accesslogStates(pods []podState, ro bool) []podAccesslogState {
+	out := make([]podAccesslogState, 0, len(pods))
+	for _, ps := range pods {
+		out = append(out, podAccesslogState{
+			Name:           ps.name,
+			RO:             ro,
+			Skip:           ps.err != "",
+			NamingContexts: ps.namingContexts,
+			DBs:            ps.dbs,
+		})
+	}
+	return out
+}
+
+// externalPeerNeedles returns the strings that identify a cross-site syncrepl
+// stanza — the peer's URI, its static Multus podAddresses, or its discovered
+// addresses. Same match the per-pod display uses to label stanzas cross-site.
+func externalPeerNeedles(sc *ldapv1alpha1.SlapdCluster) []string {
+	var needles []string
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		switch {
+		case ep.Discovery != nil:
+			for _, eps := range sc.Status.ExternalPeerStatuses {
+				if eps.Name == ep.Name {
+					needles = append(needles, eps.DiscoveredAddresses...)
+					break
+				}
+			}
+		case len(ep.PodAddresses) > 0:
+			needles = append(needles, ep.PodAddresses...)
+		case ep.URI != "":
+			needles = append(needles, ep.URI)
+		}
+	}
+	return needles
+}
+
+// dnHasParent reports whether child is a direct-or-deeper descendant of parent,
+// case-insensitively — DN comparison in cn=config is case-insensitive.
+func dnHasParent(child, parent string) bool {
+	return len(child) > len(parent)+1 &&
+		strings.EqualFold(child[len(child)-len(parent):], parent) &&
+		child[len(child)-len(parent)-1] == ','
 }

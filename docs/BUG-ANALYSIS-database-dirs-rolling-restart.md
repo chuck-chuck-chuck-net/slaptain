@@ -178,7 +178,14 @@ Fix: drop the `SeedApplied` gate entirely. `DataPresent` should be "is the root 
 
 ### 3. `slctl inspect` "missing cn=accesslog" in consumer-only mode
 
-Separate slctl false-positive (we have it in production homelab right now). Consumer-only mode legitimately has no accesslog DB; slctl's check is mode-unaware.
+Separate slctl false-positive. Consumer-only mode legitimately has no accesslog DB; slctl's check was mode-unaware.
+
+**Resolved 2026-08-25** (ADR-019 Phase 6). `slctl inspect` now computes the
+*expected* set of accesslog DBs from intent rather than assuming one per RW pod:
+`SlapdCluster.NeedsAccesslog()` gates whether any log is expected at all, and
+`SlapdDatabase.DeltaSyncEnabled()` selects which databases get one. A
+consumer-only cluster, and a single-replica cluster with no external peers, now
+expect none and pass.
 
 ---
 

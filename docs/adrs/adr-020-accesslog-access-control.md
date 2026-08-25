@@ -126,11 +126,13 @@ replication bind DN of the database it journals, and nothing to anyone else.**
   today, deliberately: the journal is operator-managed infrastructure, not part
   of the user's data surface, and there is no reading of "the user did not
   configure ACLs" that implies "the change journal should be public".
-- Diagnostics that need journal contents must bind as the config rootDN.
-  `slctl ldapsearch --as config` already does; `--as admin` (the *data* rootDN)
-  will now be denied on the log, which is correct — it is a different database
-  with a different rootDN. Worth a line in the `slctl` docs, since the failure
-  would otherwise look like a bug.
+- Diagnostics that need journal contents must bind as the config rootDN or as
+  the replication identity. `slctl ldapsearch --as config` works because that DN
+  is the log's own `olcRootDN`, so it is a rootDN bypass (R3); `--as replication`
+  works because it is the grantee. `--as admin` — the *data* rootDN, and slctl's
+  default — is denied on a log, which is correct: it is a different database with
+  a different rootDN. Documented in the `slctl` table and `docs/slctl.md`, since
+  the denial would otherwise read as a bug.
 - `slctl inspect`'s naming-context checks read `namingContexts` from the rootDSE,
   which is frontend-governed and unaffected by per-database ACLs. The e2e should
   assert that explicitly rather than assume it, since the check is load-bearing
