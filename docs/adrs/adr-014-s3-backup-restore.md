@@ -620,11 +620,15 @@ only the third is a rollback:
    converges back to the mesh's current state. On a *healthy* mesh member that is
    close to a no-op; its value is re-seeding a damaged site from a local artifact
    so syncrepl need only carry the delta, instead of paying a full WAN sync.
-2. **Warn, do not refuse.** When a restore targets a cluster with
-   `spec.replication.externalPeers`, the operator emits an event and records it
-   in `SlapdRestore.status.message`: peers will replay newer changes into the
-   restored data, so this is a local re-seed and not a point-in-time rollback.
-   Refusing was rejected (below).
+2. **Neither refuse nor warn — document.** An earlier draft of this amendment
+   had the operator emit a warning when the target cluster has
+   `spec.replication.externalPeers`. Dropped. The mesh-member behaviour is the
+   *defined contract* — a local re-seed that the mesh then repairs — not a
+   degraded outcome, and warning on correct usage is noise that teaches people to
+   ignore warnings. Restoring a replica in Postgres, Galera or MongoDB raises no
+   warning that it will subsequently follow the cluster, for exactly this reason.
+   The distinction is carried by `docs/BACKUP.md`, which is where someone
+   reaching for a rollback is looking. Refusing was rejected separately (below).
 3. **Rollback of a replicated deployment is a mesh-wide operation, performed by
    a human runbook.** Quiesce or destroy *every* site first, then `bootstrapFrom`
    the same artifact. The sequencing is the load-bearing part: no site may still
@@ -692,15 +696,22 @@ is how comparable systems document the same operation.
 - `docs/BACKUP.md` is restructured around the three operations above, including
   the rollback runbook and its sequencing requirement. The section presenting
   in-place restore as a rollback is replaced.
-- The operator gains the external-peers warning on `SlapdRestore` (decision 2).
+- No operator code change follows from this amendment (decision 2): the
+  behaviour is already correct, only its documented meaning changes.
 - The accesslog-replay e2e spec asserts rollback semantics, which are no longer
-  promised on a mesh member. It moves onto its own cluster with no external
-  peers, where it correctly guards the accesslog wipe. This also removes the most
-  destructive spec from the shared multi-site fixture.
+  promised on a mesh member, so on the shared multi-site fixture it fails
+  deterministically. Relocating it onto its own cluster with no external peers —
+  where it correctly guards the accesslog wipe, and where it would also stop
+  being the most destructive spec on the shared fixture — is **deferred to the
+  backlog**, blocked on an e2e framework refactor: today the suite's primary
+  fixture is provisioned by external shell scripting, and each spec needing a
+  different topology hand-rolls its own cluster. See `docs/BACKLOG.md`.
 - Verified status, to be kept honest as it changes: rollback via `SlapdRestore`
-  is green on a standalone cluster; the replicated *single-site* path (N≥2, no
-  external peers) — the topology where the accesslog wipe actually matters — is
-  untested since v0.0.19 and is what the relocated spec will cover.
+  is green on a standalone cluster (`replicas: 1`, replication disabled,
+  2026-08-24, automated). The replicated *single-site* path (N≥2, no external
+  peers) — the topology where the accesslog wipe actually matters — was verified
+  manually and is not under automated coverage; it is a backlog item pending the
+  e2e framework refactor.
 - `docs/BACKLOG.md` carries hub-and-spoke cross-site orchestration as an
   explicitly undecided item.
 

@@ -76,3 +76,63 @@ tracked in `contextCSN`, so cross-cluster ServerID collision is real.)
 the RID-overlap validation; keep `ridBase` (that's slaptain's *own* intra-cluster
 RID uniqueness — still valid and still needed). Regenerate manifests; `grep -r
 foreignRIDs` → 0. Update any docs/tests that referenced it.
+
+## e2e framework: specs cannot provision their own topology
+
+**What:** the Go e2e suite cannot stand up the environment it runs against. The
+primary fixture — namespace, operator install, TLS, NodePort services, node
+access IPs, cross-site kubeconfigs, versitygw — is provisioned by
+`tests/e2e.sh` before `go test` starts, and `BeforeSuite` simply assumes it is
+there. Specs *can* create `SlapdCluster` CRs (`restore_test.go`,
+`restore_inplace_test.go`, `restore_replication_test.go` each do), but there is
+no framework for "give me a cluster with topology X, reachable, with
+credentials": every such spec hand-rolls the same boilerplate — clone images and
+pull secrets from the source cluster, mirror the suffix, expose a NodePort,
+read the generated password, wait for readiness — and depends on `E2E_NODE_IP`
+being exported by the shell.
+
+**Why it matters:** any behaviour that only appears in a *particular topology*
+is effectively untestable without either bending the shared fixture or
+duplicating that boilerplate again. It is why the whole suite leans on one
+shared, mutable `slapd` cluster that ~15 specs read from and three actively
+damage, and why cross-spec interference is a recurring failure mode (see the
+`FAIL_FAST` / `E2E_SEED` knobs added for exactly this reason).
+
+**Why deferred:** it is a refactor of the test framework, not a change to the
+product, and doing it inline inside feature work would bury it. It wants a
+deliberate design pass: what a "cluster fixture" helper looks like, whether
+`e2e.sh` shrinks to bootstrapping only the operator and the S3 target, and how
+per-topology fixtures are torn down without leaking PVCs.
+
+**How:** introduce a fixture helper that provisions a `SlapdCluster` +
+`SlapdDatabase` of a requested shape (replica count, replication on/off,
+external peers or none, TLS or not), exposes it, returns a connected client, and
+registers its own cleanup. Port the three existing hand-rolled cases onto it
+first — they are the specification for what the helper must do.
+
+## Permanent e2e coverage for in-place restore topologies
+
+**What:** `SlapdRestore` has three topologies with different meanings (ADR-014,
+amendment 2026-08-24), and automated coverage exists for only one:
+
+| Topology | Meaning | Coverage |
+|---|---|---|
+| `replicas: 1`, replication off | true rollback | `restore_inplace_test.go` — green 2026-08-24 |
+| N≥2, no external peers | true rollback; the accesslog wipe matters here | **verified manually only** |
+| mesh member (external peers) | local re-seed, mesh repairs | none — and none is wanted as a *rollback* assertion |
+
+`restore_replay_test.go` is the spec for row 2 — it guards the accesslog-wipe fix
+(`fix(restore): wipe the accesslog LMDB on restore under replication`). It
+currently runs against the **shared** primary cluster, so on a multi-site
+deployment it asserts rollback semantics in the one topology where they are not
+promised, and fails deterministically. It needs its own N≥2 cluster with no
+external peers.
+
+**Why deferred:** blocked on the e2e framework item above — relocating it means
+hand-rolling a fourth bespoke cluster, which is the duplication that item exists
+to remove. Until then the spec's red on multi-site runs is *expected* and should
+not be read as a product regression.
+
+**How:** once the fixture helper exists, move the spec onto a dedicated N≥2,
+no-external-peers cluster. That restores its validity, closes the row-2 gap, and
+removes the most destructive spec from the shared fixture as a side effect.
