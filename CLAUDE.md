@@ -66,7 +66,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-015-cluster-dns-domain.md
 │       ├── adr-016-pod-routed-cross-cluster-replication.md
 │       ├── adr-017-bare-integer-serverid.md
-│       └── adr-018-pvc-deletion-leases.md
+│       ├── adr-018-pvc-deletion-leases.md
+│       ├── adr-019-per-database-accesslog.md
+│       └── adr-020-accesslog-access-control.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -476,6 +478,8 @@ the original decision — the history of reasoning matters.
 - ADR-016: Direct native pod-IP routing as a cross-cluster replication transport (alongside Multus/NodePort; `network.mode: pod-routed`) — *Accepted (impl + e2e green across three routed-pod-CIDR sites 2026-07-06)*
 - ADR-017: `olcServerID` is a bare integer (`serverIDBase + ordinal + 1`), not the URL-list self-match form — sheds the FQDN/cluster-domain coupling that made serverID the ADR-015 boot crash surface — *Accepted 2026-07-17*
 - ADR-018: Co-located PVC access — RWO is per-node, but any pod object naming a PVC (finished pods included) is a deletion lease that blocks pod re-roll; the operator reaps every Job it creates — *Accepted 2026-08-23*
+- ADR-019: One accesslog DB per replicated data DB (`cn=accesslog-<dbname>` at `/accesslog/<dbname>`) — a shared log makes every write to one DB kick the other DB's consumers into full refresh; verified against slapd sources and upstream guidance — *Accepted 2026-08-25*
+- ADR-020: An accesslog DB is at least as restrictive as the database it journals — `to * by dn.exact="cn=replication,<suffix>" read by * none`; without it a data DB's ACLs are bypassable through its own change journal — *Accepted 2026-08-25*
 
 ---
 
