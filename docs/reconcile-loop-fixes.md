@@ -5,6 +5,60 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-08-26: filtering the SlapdCluster watch stopped per-pod convergence — the churn was the resync
+
+**Not a shipped bug** — caught by the e2e suite during an optimisation attempt and
+reverted (`5dd5e3f`). Recorded because the trap is well disguised and the next person
+to profile this code will walk into it.
+
+**What was attempted:** the `SlapdDatabase` controller watches `SlapdCluster` with no
+predicate, so every `SlapdCluster` status write re-reconciles every database in the
+namespace, and each of those dials and binds LDAP on every pod. Since
+`checkPeerCSNConvergence` stamps `lastChecked` on every pass, that happens every 60 s
+whether or not anything the database controller consumes has changed. It reads as
+pure waste. The fix looked obvious: filter the watch to the fields the controller
+actually reads.
+
+**Symptom:** four specs failed —
+
+```
+[FAIL] legacy shared accesslog migration converges a hand-made legacy shared accesslog
+       Timed out after 300.003s ... pod slapd-0 still carries the legacy shared log
+[FAIL] resilience cluster recovers after slapd-1 is restarted
+[FAIL] data loss recovery via replication a pod that loses its PVCs recovers the full DIT
+[FAIL] readpw ACL enforcement a readpw user cannot read userPassword from ou=People
+```
+
+**Root cause:** the `SlapdDatabase` controller returns `ctrl.Result{}` with **no
+requeue** on its success path, so it has no periodic resync of its own. The 60 s
+status churn was not merely *delivering* the four fields it reads — it was the **only
+thing that periodically re-examined per-pod `cn=config` at all**. Everything that
+converges without a CR change depends on it: hand edits, drift, the ADR-019 R8 legacy
+accesslog migration, re-applied ACLs. Filter the churn and convergence stops.
+
+**Why it was hard to spot:** the enumeration of what the controller *reads* from the
+`SlapdCluster` was correct and complete — exactly three `sc.Status.` sites
+(`phase`, `externalPeerStatuses[].{name,discoveredAddresses}`,
+`replicationNetworkIPs`), verified twice. The predicate was faithful to it. The
+question that mattered was a different one: **what wakes this controller at all?** A
+watch event stream can carry a second, undocumented job — being a clock — and
+nothing about the field-level analysis reveals that.
+
+**Corollary, unfixed:** the same reasoning shows a cluster with
+`replication.enabled: false` has **no periodic resync whatsoever**, because the
+`SlapdCluster` controller only requeues periodically when replication is enabled. No
+e2e covers it. See the ADR-002 amendment of the same date and `docs/BACKLOG.md`.
+
+**Fix, when someone takes it:** make the resync explicit — give the `SlapdDatabase`
+and `SlapdSchema` controllers their own periodic requeue sized for drift correction —
+*then* filter the watch. Prerequisite, not alternative.
+
+**Lesson:** before filtering a watch, ask what else that event stream was doing. An
+enumeration of the fields a reconciler reads is necessary and not sufficient; the
+event's *timing* can be the contract.
+
+---
+
 ## 2026-08-25: a cached olcDatabase={N} DN attaches an accesslog overlay to the wrong database
 
 **Symptom:** after an in-place upgrade of a legacy shared-accesslog cluster to

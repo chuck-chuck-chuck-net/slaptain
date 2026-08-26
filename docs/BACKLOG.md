@@ -180,49 +180,83 @@ Retain default).
 
 ---
 
-## Peer address discovery has no vote in the requeue decision
+## Cross-site recovery after a pod-IP change: the bottleneck is downstream of discovery
 
-Under ADR-016 pod-routed transport, replacing a pod invalidates every peer's
-syncrepl addresses, and recovery is measured in minutes (147/140/268/130 s on a
-three-site lab — see the ADR-016 amendment of 2026-08-26). The cause is not that
-60 s is the wrong cadence for CSN monitoring. It is that **peer address discovery
-rides on the CSN-monitoring tick by accident**, and cannot ask for anything faster.
+Supersedes the earlier item "Peer address discovery has no vote in the requeue
+decision", whose premise **measurement refuted**.
 
-`SlapdCluster.Reconcile` has exactly two exits:
+Under ADR-016 pod-routed transport, replacing a pod invalidates every peer's syncrepl
+addresses and recovery takes minutes. The theory was that peer address discovery rides
+on the 60 s `csnCheckInterval` and cannot ask for anything faster. That was
+implemented — a 15 s discovery cadence decoupled from CSN monitoring, plus a 3 s
+settle-tightening while the observed address set is still changing — and measured on
+three pod-routed sites:
 
-    not Running                  → RequeueAfter 10s
-    Running + replication.enabled → RequeueAfter csnCheckInterval (60s)
+| build | full site restart | single pod |
+|---|---|---|
+| baseline | 146 s, 353 s, 308 s | 31 s, 6 s |
+| decoupled cadence | 189 s, 360 s, 145 s | 75 s, 34 s |
 
-Discovery runs earlier in the same pass and updates
-`status.externalPeerStatuses[].discoveredAddresses`, but there is no path by which
-"this peer's address set just changed under me" selects the faster exit. So a
-discovery tick landing mid-restart writes a partial address set and then waits a
-full 60 s to correct it — which is where the multi-minute outages come from.
+Indistinguishable, with the mechanism verifiably firing (15 s reconcile spacing,
+discovery-only passes logged). Reverted (`e692190`); implementation preserved in
+`11dc2c4` if it is ever wanted as a component of a real fix.
 
-**The fix is small, and the idiom already exists in this codebase.** "Tight requeue
-while a transition is in flight, loose once settled" is used throughout —
-`slapdcluster_restore.go` runs a 2 s/5 s/10 s/30 s ladder across its phases, and the
-database, schema and backup controllers all use a 10 s retry on unmet
-preconditions. This is a concern that is not wired into an existing decision, not a
-mechanism that needs inventing.
+A decomposition trace of one full-restart recovery:
 
-The state needed is **already persisted**: `discoveredAddresses` lives in status, so
-the reconcile can compare the previous set against the freshly-discovered one before
-overwriting it. No new field, no new watch, no extra remote connection — a changed
-set selects the 10 s exit, and it backs off to 60 s once the set stops changing.
+    t+7s    siteA Ready with new pod IPs
+    t+148s  siteB's status carries all the new IPs
+    t+289s  a siteA write is visible on siteB
+    t+432s  siteB's syncrepl stanzas name the new IPs
 
-Expected effect: the "landed badly two to four times" multiplier largely disappears,
-since a mid-restart tick then costs ~10 s of staleness rather than 60 s.
+**The dominant term is downstream of discovery and is still unidentified** —
+stanza-rewrite scheduling, or slapd's own consumer reconnect. The trace is also
+internally inconsistent (stanzas appearing to be rewritten *after* the write was
+already replicating), and the probe that produced the stanza timing was unreliable:
+siteB names one provider per peer, so an "all IPs present" check can never pass.
 
-Care needed on two points: do not let a flapping peer hold the cluster in a 10 s
-loop indefinitely (bound the fast phase, or require N stable observations before
-backing off), and keep CSN monitoring itself on its own 60 s cadence — the two
-concerns should be separated by this change, not merged harder.
+**Next step for whoever takes this: instrument the stanza-rewrite path, do not tune
+another interval.** Specifically, timestamp (a) the `SlapdCluster` status write
+carrying new addresses, (b) the `SlapdDatabase` reconcile that consumes it, (c) the
+`olcSyncRepl` modify landing on each pod, and (d) the consumer's first successful
+connection. Note the baseline spans 146-353 s, so any claim of improvement needs
+distributions rather than single samples.
 
-Also worth covering while in here: the same window opens on every
-`bootstrapFrom`/`SlapdRestore`, because the restore state machine scales to 0 and
-back up. A restore on a mesh member is currently also a multi-minute cross-site
-replication outage, and nothing says so at the API surface.
+Worth checking early, because it would explain the gap: the `SlapdDatabase`
+controller's requeue is 10 s only on *unmet preconditions*, and a pod whose database
+reconcile fails is skipped for stanza writes entirely (the ADR-019 R8 stanza-deferral
+fix). During a mass pod replacement, pods legitimately fail that reconcile for a
+while — so stanza rewrites may be deferred for reasons unrelated to discovery.
+
+---
+
+## SlapdDatabase and SlapdSchema need an explicit periodic resync
+
+Prerequisite for any watch filtering, and a gap in its own right. See the ADR-002
+amendment and `docs/reconcile-loop-fixes.md`, both 2026-08-26.
+
+Neither controller requeues on its success path, so neither re-examines per-pod
+`cn=config` on any schedule. The resync that exists today is **incidental**:
+`checkPeerCSNConvergence` stamps `lastChecked` every 60 s, that changes the
+`SlapdCluster` status, and the unfiltered watch re-reconciles every database in the
+namespace. Everything that converges without a CR change rides on it — drift, hand
+edits, the ADR-019 R8 migration, re-applied ACLs.
+
+Two things follow:
+
+- **Filtering that watch is unsafe until the resync is explicit.** Already attempted
+  and reverted: a predicate faithful to the four fields the controller reads failed
+  four e2e specs.
+- **A cluster with `replication.enabled: false` has no periodic resync at all**, since
+  the `SlapdCluster` controller only requeues periodically when replication is
+  enabled. Standalone-cluster drift is corrected only if some unrelated event fires.
+  Nobody intended this and no e2e covers it.
+
+The work: give both controllers their own `RequeueAfter` sized for drift correction
+(independent of `csnCheckInterval`, which exists for CSN monitoring), add an e2e that
+proves drift is corrected without any CR change — hand-edit an ACL on one pod, wait,
+assert it is restored — and only then revisit the watch predicate. That e2e is the
+piece with real value: it would have caught the reverted change directly rather than
+via four unrelated failures.
 
 ---
 

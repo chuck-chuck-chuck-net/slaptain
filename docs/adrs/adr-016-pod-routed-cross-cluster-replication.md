@@ -138,9 +138,23 @@ This is latency, not damage: it converges by itself, with no intervention and no
 data loss. Recorded because nothing stated it, because it is a property of *this*
 transport and not of `multus` mode with stable NAD addressing, and because an
 operator seeing a restore stall cross-site replication for four minutes should be
-able to find out why. Shortening it is tracked in `docs/BACKLOG.md` — the cause is
-that address discovery has no vote in the requeue decision, not that 60 s is wrong
-for CSN monitoring.
+able to find out why.
+
+*Correction, 2026-08-26.* This amendment originally asserted that the cause was
+"address discovery has no vote in the requeue decision". **Measurement refuted
+that.** Decoupling discovery from `csnCheckInterval` — a 15 s base cadence with a
+3 s settle-tightening on address churn — was implemented and measured on three
+pod-routed sites: full-restart recovery came out at 145-360 s against a 146-353 s
+baseline, i.e. indistinguishable, with the mechanism verifiably firing (15 s
+reconcile spacing, discovery-only passes logged). The requeue interval is **not**
+the dominant term. A decomposition trace put the peer's *status* carrying the new
+addresses at 12-148 s while the write became visible at 289 s, so the remaining
+minutes sit downstream of discovery — stanza-rewrite scheduling, or slapd's own
+consumer reconnect. That term is **unidentified**, so the change was reverted
+rather than tuned further on a guess (implementation preserved in `11dc2c4`).
+Anyone picking this up should instrument the stanza-rewrite path first; see
+`docs/BACKLOG.md`. Note also that the baseline itself spans 146-353 s, so any
+future claim of improvement needs distributions, not single samples.
 
 e2e note: whoever replaces a pod must wait for the peer sites to rediscover it
 before yielding to the next spec, or the next cross-site assertion inherits the

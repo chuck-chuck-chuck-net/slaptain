@@ -463,7 +463,7 @@ the original decision — the history of reasoning matters.
 
 **Current ADRs:**
 - ADR-001: Double reconciliation runs are harmless (idempotency requirement)
-- ADR-002: cn=config is node-local; the operator manages it per-pod
+- ADR-002: cn=config is node-local; the operator manages it per-pod — *amended 2026-08-26: per-pod convergence is event-driven and its only periodic trigger is incidental (the 60s `lastChecked` status churn); filtering the SlapdCluster watch stops convergence, and a non-replicated cluster has no periodic resync at all*
 - ADR-003: Operator owns all syncrepl configuration (RID scheme, single source of truth)
 - ADR-004: Multi-resource CRD architecture (SlapdCluster / SlapdSchema / SlapdDatabase)
 - ADR-005: SlapdDatabase cleanup policy (Retain default, Delete opt-in)

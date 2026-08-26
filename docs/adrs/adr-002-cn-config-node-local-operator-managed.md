@@ -157,6 +157,47 @@ suffix (found via `findDataDBDN()`). The `SlapdSchema` controller applies schema
 
 See ADR-004 for the full architecture and ADR-006 for schema-specific lifecycle semantics.
 
+## Amendment (2026-08-26): per-pod convergence is event-driven, and its only periodic trigger is incidental
+
+Discovered while attempting an unrelated optimisation, which it broke. Recording it
+because it is load-bearing, undesigned, and invisible.
+
+The per-pod `cn=config` convergence this ADR establishes is driven **entirely by
+controller events**. The `SlapdDatabase` and `SlapdSchema` controllers return
+`ctrl.Result{}` with **no requeue** on their success paths, so neither re-examines a
+pod's `cn=config` on any schedule of its own. Nothing periodically asks "does this
+pod still match desired state?"
+
+What has been supplying that resync is an accident. `checkPeerCSNConvergence` stamps
+`status.externalPeerStatuses[].lastChecked` on every pass, so the `SlapdCluster`
+status changes every `csnCheckInterval` (60 s); the `SlapdDatabase` controller
+watches `SlapdCluster` with no predicate, so that write re-reconciles every database
+in the namespace, against every pod. **The re-convergence of hand edits, drift, a
+legacy shared accesslog (ADR-019 R8) and re-applied ACLs all depend on a timestamp
+written for an unrelated purpose.**
+
+Two consequences:
+
+1. **It is a landmine for optimisation.** That churn reads as pure waste when
+   profiling — every database dialling every pod every 60 s with nothing to do — and
+   filtering it is the obvious fix. Filtering it stops convergence. This was
+   attempted: a watch predicate keyed on exactly the fields the controller reads
+   (verified complete: `status.phase`, `status.externalPeerStatuses[].{name,
+   discoveredAddresses}`, `status.replicationNetworkIPs`) failed four e2e specs —
+   the ADR-019 R8 migration never converged and ACL enforcement drifted. The
+   enumeration of *reads* was correct and complete; the load-bearing question was
+   *what wakes this controller at all*. Reverted in `5dd5e3f`.
+2. **A cluster with `replication.enabled: false` gets no periodic resync at all.**
+   The `SlapdCluster` controller only requeues periodically when replication is
+   enabled; otherwise it returns with no requeue. So on a standalone cluster, per-pod
+   `cn=config` drift is corrected only when some other event happens to fire. No
+   e2e covers this, and the behaviour is nobody's stated intent.
+
+The fix, when someone takes it, is to make the resync **explicit**: give the
+`SlapdDatabase` and `SlapdSchema` controllers their own periodic requeue, sized for
+drift correction rather than inherited from CSN monitoring. That is a prerequisite
+for filtering the watch, not an alternative to it. Tracked in `docs/BACKLOG.md`.
+
 ## Related
 
 - ADR-001: Double reconciliation runs are harmless — explains why concurrent/repeated
