@@ -84,3 +84,65 @@ statuses faithfully report an unroutable environment rather than an operator bug
 Prerequisites for `mode: pod-routed`, restated:
 1. Pod CIDRs routed between sites (data path).
 2. Each remote cluster's API server reachable from the operator pod (discovery path).
+
+## Amendment (2026-08-26): replacing a pod invalidates every peer's syncrepl addresses
+
+A consequence of naming pod IPs that the Decision above does not draw out, found by
+a multi-site e2e failure and then measured.
+
+Under this transport a peer's `olcSyncRepl` stanzas name our **pod IPs**. A pod IP
+is not stable across pod replacement, so **anything that replaces a pod silently
+breaks the "peer consumes from us" direction** until that peer's operator
+rediscovers the new address and rewrites its stanzas. Nothing local looks wrong
+while this lasts: the StatefulSet is Ready, the cluster is `Running`, local CSNs
+converge. The break is entirely in the peer's configuration, and the peer is the
+only party that can see it (ADR-008 amendment of the same date).
+
+The operations that do this are more numerous than "a pod crashed":
+
+- any pod restart, rolling or simultaneous;
+- a pod losing its PVCs and being recreated;
+- **the restore state machine** — `SlapdDatabase.spec.bootstrapFrom` and
+  `SlapdRestore` both scale the cluster to 0 and back up (ADR-014), which replaces
+  *every* pod and therefore invalidates *every* address a peer holds for us. A
+  restore on a mesh member is also a cross-site replication outage for the length
+  of the rediscovery window.
+
+### Recovery latency, measured
+
+Rediscovery runs inside the SlapdCluster reconcile, and for a `Running` cluster the
+only requeue available is `csnCheckInterval` — **60 s**
+(`slapdcluster_controller.go`). The stanza rewrite that follows is *not* a second
+60 s hop: the SlapdDatabase controller `Watches(&SlapdCluster{})`, so the status
+write enqueues it immediately. The consumer then reconnects on its syncrepl retry
+(`retry: "10 +"` → 10 s). One clean cycle is therefore ≈ 70 s.
+
+Observed recovery, deleting all of one site's pods and timing a write there until it
+appeared on a peer, on a three-site pod-routed lab: **147 s, 140 s, 268 s, 130 s**.
+
+The excess over 70 s is not distance or the number of sites — it is **repeated ticks
+against a moving target**. Discovery collects pods in `Status.Phase == PodRunning`
+with a non-empty `PodIP`; during a multi-pod restart the replacements come back
+sequentially, so a tick landing mid-restart observes a *partial* set, writes stanzas
+naming that partial set, and must then wait a full 60 s for the next tick to correct
+it. Land badly two to four times and the outage is minutes:
+
+    recovery ≈ (ticks needed to observe a stable, complete set) × 60 s + 10 s
+
+By contrast, replacing a **single** pod recovered in 5–10 s, because the peer still
+had a live provider among its other stanzas, and PVC loss on one pod in 5 s–1 m 22 s.
+The multi-minute case is specifically "every provider address a peer holds went
+stale at once".
+
+This is latency, not damage: it converges by itself, with no intervention and no
+data loss. Recorded because nothing stated it, because it is a property of *this*
+transport and not of `multus` mode with stable NAD addressing, and because an
+operator seeing a restore stall cross-site replication for four minutes should be
+able to find out why. Shortening it is tracked in `docs/BACKLOG.md` — the cause is
+that address discovery has no vote in the requeue decision, not that 60 s is wrong
+for CSN monitoring.
+
+e2e note: whoever replaces a pod must wait for the peer sites to rediscover it
+before yielding to the next spec, or the next cross-site assertion inherits the
+window. `tests/e2e/helpers_test.go` (`waitForCrossSiteReplication`) enforces that
+for all four pod-replacing specs.

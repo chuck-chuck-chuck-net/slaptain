@@ -137,6 +137,121 @@ not be read as a product regression.
 no-external-peers cluster. That restores its validity, closes the row-2 gap, and
 removes the most destructive spec from the shared fixture as a side effect.
 
+## Flake: bootstrapFrom restore intermittently never sets restoreApplied
+
+`restore [It] restores a backup into a fresh cluster via bootstrapFrom` has failed
+**2 of 5 observed runs** (2026-08-25/26), always the same way: timeout after 480 s
+waiting for `restoreApplied=true`.
+
+What is established:
+
+- `slapd-restore-0` refuses connections on 1024 for the entire window
+  (`dial ...:1024: connect: connection refused`, logged by the SlapdDatabase
+  controller every 10 s).
+- Because the cluster therefore never reaches `Running`, the restore state machine
+  **never enters preflight** — the SlapdCluster controller logs a single line for
+  that cluster for the whole run, where a healthy run shows
+  `entering restore (preflight)` → `preflight passed; scaling down`.
+- So `restoreApplied` was never going to flip. The timeout is a symptom; the pod
+  not starting is the fault.
+
+What is **not** established: why slapd does not start. An initial theory —
+orphaned PVCs from a previous run being rebound with populated `/config` and
+`/data` — is **refuted**: a later session cleared the orphans before every run and
+the failure still occurred once. The `slapd-ip` and `slapd-rr` restore clusters in
+the same runs start fine.
+
+Why it has resisted diagnosis: the spec's cleanup deletes the SlapdCluster and
+SlapdDatabase, so by the time anyone looks there is no pod, no CR, and no pod log
+left to inspect. **Anyone picking this up should first make the failure
+inspectable** — keep the cluster on failure (skip cleanup when the spec failed, or
+gate cleanup behind an env var) and capture the init-container and slapd logs from
+the pod that will not start. Without that, this is unfixable by inspection after
+the fact.
+
+Related but separate: the restore specs leak their PVCs. Their cleanup deletes the
+CRs but not the volumes, and StatefulSet `volumeClaimTemplates` PVCs are never
+garbage-collected (no `persistentVolumeClaimRetentionPolicy` is set anywhere).
+Orphaned `*-slapd-restore-0` PVCs accumulate across runs. That is not the cause of
+this flake, but it does make `e2e.sh test` re-runs dirty and should be fixed
+regardless — deleting the PVCs in the specs' cleanup, not by changing operator
+behaviour, since leaving PVCs on SlapdCluster deletion is defensible (ADR-005's
+Retain default).
+
+---
+
+## Peer address discovery has no vote in the requeue decision
+
+Under ADR-016 pod-routed transport, replacing a pod invalidates every peer's
+syncrepl addresses, and recovery is measured in minutes (147/140/268/130 s on a
+three-site lab — see the ADR-016 amendment of 2026-08-26). The cause is not that
+60 s is the wrong cadence for CSN monitoring. It is that **peer address discovery
+rides on the CSN-monitoring tick by accident**, and cannot ask for anything faster.
+
+`SlapdCluster.Reconcile` has exactly two exits:
+
+    not Running                  → RequeueAfter 10s
+    Running + replication.enabled → RequeueAfter csnCheckInterval (60s)
+
+Discovery runs earlier in the same pass and updates
+`status.externalPeerStatuses[].discoveredAddresses`, but there is no path by which
+"this peer's address set just changed under me" selects the faster exit. So a
+discovery tick landing mid-restart writes a partial address set and then waits a
+full 60 s to correct it — which is where the multi-minute outages come from.
+
+**The fix is small, and the idiom already exists in this codebase.** "Tight requeue
+while a transition is in flight, loose once settled" is used throughout —
+`slapdcluster_restore.go` runs a 2 s/5 s/10 s/30 s ladder across its phases, and the
+database, schema and backup controllers all use a 10 s retry on unmet
+preconditions. This is a concern that is not wired into an existing decision, not a
+mechanism that needs inventing.
+
+The state needed is **already persisted**: `discoveredAddresses` lives in status, so
+the reconcile can compare the previous set against the freshly-discovered one before
+overwriting it. No new field, no new watch, no extra remote connection — a changed
+set selects the 10 s exit, and it backs off to 60 s once the set stops changing.
+
+Expected effect: the "landed badly two to four times" multiplier largely disappears,
+since a mid-restart tick then costs ~10 s of staleness rather than 60 s.
+
+Care needed on two points: do not let a flapping peer hold the cluster in a 10 s
+loop indefinitely (bound the fast phase, or require N stable observations before
+backing off), and keep CSN monitoring itself on its own 60 s cadence — the two
+concerns should be separated by this change, not merged harder.
+
+Also worth covering while in here: the same window opens on every
+`bootstrapFrom`/`SlapdRestore`, because the restore state machine scales to 0 and
+back up. A restore on a mesh member is currently also a multi-minute cross-site
+replication outage, and nothing says so at the API surface.
+
+---
+
+## Cross-site replication health is not readable from one site
+
+Not a defect — a documentation and tooling gap, recorded so nobody builds
+monitoring on a false assumption. See the ADR-008 amendment of 2026-08-26.
+
+`status.externalPeerStatuses` is **consumer-side**: it describes this site's
+*inbound* links. Because delta-syncrepl is pull-based and a provider keeps no
+consumer registry, a provider cannot observe that a consumer stopped consuming from
+it. So if B stops consuming from A, that is visible on **B**, and A correctly reports
+`Synced` at the same time. Reading mesh health means reading every site's CR.
+
+Two follow-ups worth considering:
+
+- **`slctl` has no cross-site view.** `slctl inspect` is single-cluster. Something
+  that takes several contexts and joins each site's peer statuses into one mesh
+  verdict would turn "read four CRs and correlate by hand" into one command. This is
+  the natural home for the join, and it needs no operator change.
+- **Lag is only observable under traffic.** `csnSyncThreshold` is 5 s, so a broken
+  link shows as `Lagging` promptly *while writes flow*; on an idle database both
+  sides sit at the same CSN and the state reads `Synced` across an arbitrarily broken
+  link. Heartbeat writes would close that, and are deferred with reasons in the
+  ADR-008 amendment — the objection is that the operator would be writing into the
+  user's data tree, not that it wouldn't work.
+
+---
+
 ## Accesslog index set is incomplete
 
 The per-database accesslog DBs (ADR-019) are created with
