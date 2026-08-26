@@ -186,7 +186,12 @@ var _ = Describe("data loss recovery via replication",
 		}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(BeTrue(),
 			"%s should converge via syncrepl — confirms recovery is replication-driven, "+
 				"not a fake re-seed", addedUserDN)
-	}, NodeTimeout(10*time.Minute))
+
+		// The recovered pod came back with a new IP, which peer sites' syncrepl
+		// stanzas still do not know about (ADR-016). Same contract as the
+		// resilience specs: whoever moves an address waits for the peers.
+		waitForCrossSiteReplication(ctx, "the pod-loses-its-PVCs recovery")
+	}, NodeTimeout(15*time.Minute))
 
 	It("SlapdDatabase observedGeneration is unchanged across the recovery", func(ctx SpecContext) {
 		// Belt-and-braces check on the operator-side promise. ADR-012 says

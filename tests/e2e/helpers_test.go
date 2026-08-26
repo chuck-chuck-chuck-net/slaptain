@@ -318,3 +318,114 @@ func addReplTestUser(conn *ldap.Conn, uid string, uidNum int) string {
 	ldapAdd(conn, req)
 	return dn
 }
+
+// ── Cross-site replication recovery ──────────────────────────────────────────
+
+// crossSiteRecoveryBudget bounds how long a peer site may take to notice that
+// this site's pod IPs have changed and rewrite its syncrepl stanzas.
+//
+// Sized off a measurement, not a guess. Under ADR-016 pod-routed transport a
+// peer's stanzas name our *pod IPs*, so replacing a pod invalidates them until
+// the peer's operator rediscovers the new ones. Rediscovery happens inside a
+// SlapdCluster reconcile, and for a Running cluster that requeue is
+// csnCheckInterval = 60 s; the rewrite is then a further hop through the
+// SlapdDatabase controller, and the consumer picks it up on its next syncrepl
+// retry (retry="10 +" in the test fixture).
+//
+// Measured on a three-site pod-routed lab: deleting all of siteA's pods and then
+// timing a siteA write until it appeared on siteB took **147 s** end to end
+// (125 s from the first accepted write). Right after siteA's pods were Ready,
+// siteB was still naming siteA's previous pod IP as a provider — a dead address.
+// So the honest budget is well above the 60 s a steady-state cluster needs, and
+// this is deliberately ~2× the measurement: the point of this wait is to remove
+// a race from the specs that follow, and a wait that itself races is worse than
+// none. It is NOT an assertion about acceptable production recovery time — the
+// operator-side question of tying rediscovery to the CSN-monitoring requeue is
+// tracked separately.
+const crossSiteRecoveryBudget = 5 * time.Minute
+
+// waitForCrossSiteReplication blocks until a write made on this site is visible
+// on the remote peer site, then removes the probe entry.
+//
+// Call it from any spec that replaces a pod. Replacing a pod changes its IP,
+// and under pod-routed cross-cluster replication (ADR-016) the peer sites'
+// syncrepl stanzas name those IPs — so until every peer has rediscovered them,
+// cross-site replication is silently dead in the "peer consumes from us"
+// direction. Nothing in the peer's own state is wrong, so no local wait
+// (StatefulSet ready, CSN convergence, cluster phase Running) detects it: the
+// only honest signal available to the runner is a functional probe.
+//
+// This was a real cascade: `resilience data persists after simultaneous restart
+// of all pods` deleted all four siteA pods, and the next spec to write across
+// sites — `external replication a write on siteA propagates to siteB` — timed
+// out after 104 s waiting for a write that could not arrive, with siteB's
+// contextCSN for siteA's serverIDs frozen five seconds before the deletion. The
+// spec that invalidates the addresses is the one that must wait for them.
+//
+// No-op unless E2E_EXTERNAL_REPL=1, so single-site runs pay nothing.
+func waitForCrossSiteReplication(ctx SpecContext, why string) {
+	if os.Getenv("E2E_EXTERNAL_REPL") != "1" {
+		return // single-site: no peer holds our pod IPs
+	}
+	remoteAddr := os.Getenv("E2E_REMOTE_LDAP_ADDR")
+	if remoteAddr == "" {
+		GinkgoLogr.Info("skipping cross-site recovery wait: E2E_REMOTE_LDAP_ADDR unset")
+		return
+	}
+	remotePW := os.Getenv("E2E_REMOTE_ADMIN_PW")
+	if remotePW == "" {
+		remotePW = adminPW // e2e.sh pre-creates identical database credentials per site
+	}
+
+	By("waiting for cross-site replication to recover after " + why +
+		" (peer stanzas name our pod IPs — ADR-016)")
+
+	// The local connection may have been severed along with the pods.
+	local := retryConnectLDAP(ctx, localLDAPAddr, baseDN, adminPW)
+	defer local.Close()
+
+	uid := fmt.Sprintf("xsite-probe-%d-%d", GinkgoRandomSeed(), time.Now().UnixNano()%100000)
+	dn := addReplTestUser(local, uid, 65490)
+	defer local.Del(ldap.NewDelRequest(dn, nil)) //nolint:errcheck // best-effort; it replicates out
+
+	start := time.Now()
+	var remote *ldap.Conn
+	defer func() {
+		if remote != nil {
+			remote.Close()
+		}
+	}()
+	Eventually(ctx, func() bool {
+		// Re-dial on every failure: the peer drops client connections while its
+		// operator rewrites olcSyncRepl, which is exactly the window we are in.
+		if remote == nil {
+			c, err := ldap.Dial("tcp", remoteAddr)
+			if err != nil {
+				return false
+			}
+			if err := c.Bind(fmt.Sprintf("cn=admin,%s", baseDN), remotePW); err != nil {
+				c.Close()
+				return false
+			}
+			remote = c
+		}
+		if ldapExists(remote, dn) {
+			return true
+		}
+		// ldapExists folds errors into false; drop a possibly-dead connection so
+		// the next poll re-dials rather than polling a corpse.
+		if _, err := remote.Search(ldap.NewSearchRequest("", ldap.ScopeBaseObject,
+			ldap.NeverDerefAliases, 0, 0, false, "(objectClass=*)", []string{"1.1"}, nil)); err != nil {
+			remote.Close()
+			remote = nil
+		}
+		return false
+	}).WithTimeout(crossSiteRecoveryBudget).WithPolling(5*time.Second).Should(BeTrue(),
+		"cross-site replication did not recover within %s after %s: probe %s never reached %s. "+
+			"The peer site is most likely still pointing its syncrepl stanzas at pod IPs that "+
+			"no longer exist (ADR-016 pod-routed transport); check its olcSyncRepl providers "+
+			"against the current pod IPs.", crossSiteRecoveryBudget, why, dn, remoteAddr)
+
+	GinkgoLogr.Info("cross-site replication recovered",
+		"after", why, "elapsed", time.Since(start).Round(time.Second).String(), "probe", dn)
+}

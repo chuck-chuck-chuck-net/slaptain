@@ -111,7 +111,13 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 			return ldapExists(conn1, dn)
 		}).WithTimeout(30*time.Second).WithPolling(2*time.Second).Should(BeTrue(),
 			"new entry should replicate to the restarted slapd-1")
-	}, NodeTimeout(5*time.Minute))
+
+		// slapd-1's IP changed, so peer sites hold one stale provider address
+		// each. Less disruptive than the full restart — the peers can still
+		// reach the other pods — but a peer whose fan-out picked slapd-1 is
+		// stalled until rediscovery, so wait on the same contract.
+		waitForCrossSiteReplication(ctx, "the slapd-1 restart")
+	}, NodeTimeout(11*time.Minute))
 
 	// ── Seed pod restart ──────────────────────────────────────────────────────
 	//
@@ -155,7 +161,9 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 		By("verifying data is accessible after seed pod restart")
 		Expect(ldapExists(ldapConn, baseDN)).To(BeTrue())
 		Expect(ldapExists(ldapConn, fmt.Sprintf("ou=People,%s", baseDN))).To(BeTrue())
-	}, NodeTimeout(5*time.Minute))
+
+		waitForCrossSiteReplication(ctx, "the seed pod (slapd-0) restart")
+	}, NodeTimeout(11*time.Minute))
 
 	// ── All-pods simultaneous restart (warm start) ────────────────────────────
 	//
@@ -257,5 +265,12 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 			}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(BeTrue(),
 				"replication should be healthy after warm restart")
 		}
-	}, NodeTimeout(8*time.Minute))
+
+		// Every pod got a new IP. On a multi-site run the peer sites' syncrepl
+		// stanzas still name the old ones (ADR-016), so cross-site replication is
+		// dead until their operators rediscover us — and the next spec to write
+		// across sites would eat that latency as a spurious failure. Wait here,
+		// where the damage was done. No-op single-site.
+		waitForCrossSiteReplication(ctx, "a simultaneous restart of all pods")
+	}, NodeTimeout(15*time.Minute))
 })
