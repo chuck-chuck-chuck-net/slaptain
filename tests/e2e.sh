@@ -827,10 +827,27 @@ run_tests() {
         local ctx1="${CONTEXTS[1]}"
         local remote_ip="${NODE_ACCESS_IPS[$ctx1]}"
         log "Test target: local=$ctx0 ($local_ip:$NODEPORT_LDAP), remote=$ctx1 ($remote_ip:$NODEPORT_LDAP)"
+
+        # The cn=config admin password is per-cluster: each SlapdCluster
+        # auto-generates its own <name>-config-password, and unlike the database
+        # credentials (pre-created identically on every site by
+        # generate_shared_credentials) it is NOT shared. So the suite's rootPW —
+        # read from the LOCAL cluster — cannot bind cn=admin,cn=config on a
+        # remote site, and any diagnostic that tried got
+        # `LDAP Result Code 49 "Invalid Credentials"`. Export the remote site's
+        # own config password so cross-site cn=config reads actually work.
+        local remote_root_pw
+        remote_root_pw=$(kctl "$ctx1" -n "$NAMESPACE_TESTING" get secret slapd-config-password \
+            -o jsonpath='{.data.root-password}' 2>/dev/null | base64 -d || true)
+        if [[ -z "$remote_root_pw" ]]; then
+            warn "[$ctx1] could not read slapd-config-password; cross-site cn=config diagnostics will be skipped"
+        fi
+
         test_env+=(
             "E2E_EXTERNAL_REPL=1"
             "E2E_REMOTE_LDAP_ADDR=${remote_ip}:${NODEPORT_LDAP}"
             "E2E_REMOTE_ADMIN_PW=$admin_pw"
+            "E2E_REMOTE_ROOT_PW=$remote_root_pw"
         )
     else
         log "Test target: single-site $ctx0 ($local_ip:$NODEPORT_LDAP)"
@@ -851,7 +868,14 @@ run_tests() {
     #               never tears down, and `all` aborts before teardown (set -e),
     #               so the failed state is left standing either way.
     local seed="${E2E_SEED:-$(date +%s)}"
-    local ginkgo_flags=(--ginkgo.v --ginkgo.timeout=25m "--ginkgo.seed=$seed")
+    # Suite ceilings, not budgets. Raised from 25m/30m when the pod-replacing
+    # specs (resilience ×3, dataloss ×1) gained a cross-site recovery wait: on a
+    # multi-site pod-routed run each of them may sit for up to
+    # crossSiteRecoveryBudget (5m, sized off a measured 147s) while the peer
+    # sites rediscover the new pod IPs. Four such waits plus the gated
+    # backup/restore/scaleup/accesslog-migration scenarios can outrun 25m
+    # without anything actually being wrong.
+    local ginkgo_flags=(--ginkgo.v --ginkgo.timeout=45m "--ginkgo.seed=$seed")
     if [[ -n "${E2E_LABEL_FILTER:-}" ]]; then
         ginkgo_flags+=("--ginkgo.label-filter=$E2E_LABEL_FILTER")
         log "Label filter: $E2E_LABEL_FILTER (only matching specs run)"
@@ -866,7 +890,7 @@ run_tests() {
     (
         cd "$PROJECT_ROOT/tests/e2e"
         env "${test_env[@]}" go test -v ./... \
-            -timeout 30m \
+            -timeout 50m \
             "${ginkgo_flags[@]}"
     )
 }

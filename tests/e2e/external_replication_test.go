@@ -43,6 +43,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 	var (
 		remoteAddr    string
 		remoteAdminPW string
+		remoteRootPW  string // siteB's OWN cn=config admin password — see BeforeEach
 		replicas      int32
 		extPeerRID    string // expected RID for the first external peer (ridBase + 51)
 	)
@@ -63,6 +64,17 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			remoteAdminPW = adminPW
 		}
 		Expect(remoteAdminPW).NotTo(BeEmpty(), "E2E_REMOTE_ADMIN_PW must be set (or siteA admin password is used as fallback)")
+
+		// The cn=config admin password is per-cluster. The database credentials
+		// ARE shared across sites (e2e.sh pre-creates the same secret
+		// everywhere), which is why remoteAdminPW can fall back to the local
+		// one — but each SlapdCluster auto-generates its own
+		// <name>-config-password, so the suite-wide rootPW is siteA's and only
+		// siteA's. Anything binding cn=admin,cn=config against siteB must use
+		// this. e2e.sh reads it off the remote cluster and exports it; when it
+		// is empty, cross-site cn=config reads are skipped rather than attempted
+		// with a password that cannot work.
+		remoteRootPW = os.Getenv("E2E_REMOTE_ROOT_PW")
 
 		sts, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, "slapd", metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
@@ -89,7 +101,10 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			defer cancel()
 			defer conn.Close()
 
-			// Re-bind as cn=admin,cn=config to read olcSyncRepl.
+			// Re-bind as cn=admin,cn=config to read olcSyncRepl. dialPodLDAP
+			// targets a LOCAL (siteA) pod, so the suite-wide rootPW — siteA's own
+			// config password — is the right credential here. Remote pods need
+			// remoteRootPW instead; see the note in BeforeEach.
 			Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed())
 
 			sr, err := conn.Search(ldap.NewSearchRequest(
@@ -112,6 +127,47 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		}
 	}, NodeTimeout(3*time.Minute))
 
+	// ── 1b. The remote site's cn=config is actually readable ─────────────────
+	//
+	// Regression guard for a diagnostic that could never authenticate: the
+	// cross-site dump bound cn=admin,cn=config with the LOCAL cluster's
+	// password, so it always failed with "Invalid Credentials" and never printed
+	// siteB's syncrepl stanzas — precisely the state you need when cross-site
+	// replication stalls. Asserting the bind here keeps the credential wiring
+	// honest: if e2e.sh stops exporting E2E_REMOTE_ROOT_PW, or exports the wrong
+	// site's, this spec fails instead of a diagnostic silently going blank.
+
+	It("can read the remote site's cn=config with the remote config password", func(ctx SpecContext) {
+		Expect(remoteRootPW).NotTo(BeEmpty(),
+			"E2E_REMOTE_ROOT_PW must be exported for multi-site runs — without it the "+
+				"cross-site diagnostics cannot read siteB's syncrepl stanzas")
+		Expect(remoteRootPW).NotTo(Equal(rootPW),
+			"E2E_REMOTE_ROOT_PW looks like the LOCAL config password; each SlapdCluster "+
+				"auto-generates its own, so this would be the same bug in a new disguise")
+
+		conn, err := ldap.DialURL("ldap://" + remoteAddr)
+		Expect(err).NotTo(HaveOccurred(), "dial remote %s", remoteAddr)
+		defer conn.Close()
+		Expect(conn.Bind("cn=admin,cn=config", remoteRootPW)).To(Succeed(),
+			"bind cn=admin,cn=config on the remote site %s", remoteAddr)
+
+		sr, err := conn.Search(ldap.NewSearchRequest(
+			"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+			0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
+			[]string{"olcSyncRepl"}, nil))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sr.Entries).NotTo(BeEmpty(), "remote data DB entry not found in cn=config")
+		Expect(sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")).NotTo(BeEmpty(),
+			"the remote site should have syncrepl stanzas for the data DB")
+
+		// Prove the fixed diagnostic actually renders them.
+		dump := dumpReplDiagnostics(remoteAddr, remoteAdminPW, remoteRootPW)
+		Expect(dump).To(ContainSubstring("olcSyncRepl:"),
+			"the cross-site diagnostic must dump the remote syncrepl stanzas; got:\n%s", dump)
+		Expect(dump).NotTo(ContainSubstring("config bind error"),
+			"the cross-site diagnostic must not fail its config bind; got:\n%s", dump)
+	}, NodeTimeout(1*time.Minute))
+
 	// ── 2. Write on siteA propagates to siteB ────────────────────────────────
 
 	It("a write on siteA propagates to siteB", func(ctx SpecContext) {
@@ -127,7 +183,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			return ldapExists(remoteConn, dn)
 		}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).Should(BeTrue(),
 			"entry %s should replicate from siteA to siteB within 60 s\n%s", dn,
-			dumpReplDiagnostics(remoteAddr, remoteAdminPW))
+			dumpReplDiagnostics(remoteAddr, remoteAdminPW, remoteRootPW))
 	}, NodeTimeout(3*time.Minute))
 
 	// ── 3. Write on siteB propagates to siteA ────────────────────────────────
@@ -145,7 +201,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			return ldapExists(ldapConn, dn)
 		}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).Should(BeTrue(),
 			"entry %s should replicate from siteB to siteA within 60 s\n%s", dn,
-			dumpReplDiagnostics(localLDAPAddr, adminPW))
+			dumpReplDiagnostics(localLDAPAddr, adminPW, rootPW))
 	}, NodeTimeout(3*time.Minute))
 
 	// ── 4. Removing external peer removes stanza ─────────────────────────────
@@ -177,6 +233,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 				defer cancel()
 				defer conn.Close()
 
+				// Local pod (dialPodLDAP), so rootPW is correct — see BeforeEach.
 				if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
 					return false
 				}
@@ -221,6 +278,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 				defer cancel()
 				defer conn.Close()
 
+				// Local pod (dialPodLDAP), so rootPW is correct — see BeforeEach.
 				if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
 					return false
 				}
@@ -312,7 +370,14 @@ func containsRID(stanza, rid string) bool {
 // dumpReplDiagnostics connects to a site's LDAP and returns a diagnostic string
 // with contextCSN and syncrepl stanzas. Called in assertion messages on failure
 // so the output appears in the test log.
-func dumpReplDiagnostics(addr, adminPassword string) string {
+//
+// configPassword is that SITE's cn=config admin password, passed explicitly
+// because it is per-cluster: this used to read the suite-wide rootPW, which is
+// siteA's, so every remote invocation printed
+// `config bind error: LDAP Result Code 49 "Invalid Credentials"` and the syncrepl
+// stanzas — the single most useful thing to know when cross-site replication
+// stalls — were never dumped. Pass "" to skip the cn=config section explicitly.
+func dumpReplDiagnostics(addr, adminPassword, configPassword string) string {
 	var b strings.Builder
 	b.WriteString("--- replication diagnostics for " + addr + " ---\n")
 
@@ -341,6 +406,11 @@ func dumpReplDiagnostics(addr, adminPassword string) string {
 	}
 
 	// syncrepl stanzas from cn=config (need config admin).
+	if configPassword == "" {
+		b.WriteString("cn=config not dumped: no config admin password for this site " +
+			"(multi-site runs export E2E_REMOTE_ROOT_PW; single-site uses rootPW)\n")
+		return b.String()
+	}
 	cfgConn, err := ldap.DialURL("ldap://" + addr)
 	if err != nil {
 		fmt.Fprintf(&b, "config dial error: %v\n", err)
@@ -348,7 +418,7 @@ func dumpReplDiagnostics(addr, adminPassword string) string {
 	}
 	defer cfgConn.Close()
 
-	if err := cfgConn.Bind("cn=admin,cn=config", rootPW); err != nil {
+	if err := cfgConn.Bind("cn=admin,cn=config", configPassword); err != nil {
 		fmt.Fprintf(&b, "config bind error: %v\n", err)
 		return b.String()
 	}
