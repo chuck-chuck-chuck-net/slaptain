@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -145,19 +146,41 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			"E2E_REMOTE_ROOT_PW looks like the LOCAL config password; each SlapdCluster "+
 				"auto-generates its own, so this would be the same bug in a new disguise")
 
-		conn, err := ldap.DialURL("ldap://" + remoteAddr)
-		Expect(err).NotTo(HaveOccurred(), "dial remote %s", remoteAddr)
-		defer conn.Close()
-		Expect(conn.Bind("cn=admin,cn=config", remoteRootPW)).To(Succeed(),
-			"bind cn=admin,cn=config on the remote site %s", remoteAddr)
+		// Dial and bind with explicit timeouts, and retry. A bare
+		// ldap.DialURL + Bind has no deadline at all: a NodePort connection can
+		// establish against a backend that is gone (stale conntrack, a pod
+		// replaced moments earlier by the resilience specs) and then wait for a
+		// bind response forever. That is exactly what happened on the first run
+		// of this spec — the goroutine sat in readPacket for the full 90 s node
+		// timeout. Every other cross-pod path in the suite retries for the same
+		// reason (retryConnectLDAP); this one must too.
+		var stanzas []string
+		Eventually(ctx, func() error {
+			c, err := ldap.DialURL("ldap://"+remoteAddr, ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}))
+			if err != nil {
+				return fmt.Errorf("dial %s: %w", remoteAddr, err)
+			}
+			defer c.Close()
+			c.SetTimeout(10 * time.Second)
 
-		sr, err := conn.Search(ldap.NewSearchRequest(
-			"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-			0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
-			[]string{"olcSyncRepl"}, nil))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(sr.Entries).NotTo(BeEmpty(), "remote data DB entry not found in cn=config")
-		Expect(sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")).NotTo(BeEmpty(),
+			if err := c.Bind("cn=admin,cn=config", remoteRootPW); err != nil {
+				return fmt.Errorf("bind cn=admin,cn=config on %s: %w", remoteAddr, err)
+			}
+			sr, err := c.Search(ldap.NewSearchRequest(
+				"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+				0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
+				[]string{"olcSyncRepl"}, nil))
+			if err != nil {
+				return fmt.Errorf("search cn=config on %s: %w", remoteAddr, err)
+			}
+			if len(sr.Entries) == 0 {
+				return fmt.Errorf("remote data DB entry not found in cn=config")
+			}
+			stanzas = sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
+			return nil
+		}).WithTimeout(90*time.Second).WithPolling(5*time.Second).Should(Succeed(),
+			"the remote site's cn=config must be readable with E2E_REMOTE_ROOT_PW")
+		Expect(stanzas).NotTo(BeEmpty(),
 			"the remote site should have syncrepl stanzas for the data DB")
 
 		// Prove the fixed diagnostic actually renders them.
@@ -166,7 +189,7 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			"the cross-site diagnostic must dump the remote syncrepl stanzas; got:\n%s", dump)
 		Expect(dump).NotTo(ContainSubstring("config bind error"),
 			"the cross-site diagnostic must not fail its config bind; got:\n%s", dump)
-	}, NodeTimeout(1*time.Minute))
+	}, NodeTimeout(4*time.Minute))
 
 	// ── 2. Write on siteA propagates to siteB ────────────────────────────────
 
@@ -381,12 +404,16 @@ func dumpReplDiagnostics(addr, adminPassword, configPassword string) string {
 	var b strings.Builder
 	b.WriteString("--- replication diagnostics for " + addr + " ---\n")
 
-	conn, err := ldap.DialURL("ldap://" + addr)
+	// Deadlines on every diagnostic dial: this runs inside a failure message,
+	// often right after pods were replaced, and a diagnostic that blocks turns a
+	// clear assertion failure into an opaque node timeout.
+	conn, err := ldap.DialURL("ldap://"+addr, ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}))
 	if err != nil {
 		fmt.Fprintf(&b, "dial error: %v\n", err)
 		return b.String()
 	}
 	defer conn.Close()
+	conn.SetTimeout(10 * time.Second)
 
 	// contextCSN from the data DB (anonymous read of rootDSE-like operational attrs).
 	if err := conn.Bind(fmt.Sprintf("cn=admin,%s", baseDN), adminPassword); err != nil {
@@ -411,12 +438,13 @@ func dumpReplDiagnostics(addr, adminPassword, configPassword string) string {
 			"(multi-site runs export E2E_REMOTE_ROOT_PW; single-site uses rootPW)\n")
 		return b.String()
 	}
-	cfgConn, err := ldap.DialURL("ldap://" + addr)
+	cfgConn, err := ldap.DialURL("ldap://"+addr, ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}))
 	if err != nil {
 		fmt.Fprintf(&b, "config dial error: %v\n", err)
 		return b.String()
 	}
 	defer cfgConn.Close()
+	cfgConn.SetTimeout(10 * time.Second)
 
 	if err := cfgConn.Bind("cn=admin,cn=config", configPassword); err != nil {
 		fmt.Fprintf(&b, "config bind error: %v\n", err)

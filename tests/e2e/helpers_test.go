@@ -3,6 +3,7 @@ package e2e_test
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -399,10 +400,16 @@ func waitForCrossSiteReplication(ctx SpecContext, why string) {
 		// Re-dial on every failure: the peer drops client connections while its
 		// operator rewrites olcSyncRepl, which is exactly the window we are in.
 		if remote == nil {
-			c, err := ldap.Dial("tcp", remoteAddr)
+			// Deadlines, not just retries: a NodePort connection can establish
+			// against a backend that no longer exists (stale conntrack after the
+			// pod replacement we are waiting on) and then block in readPacket
+			// indefinitely, burning the whole budget in one poll.
+			c, err := ldap.DialURL("ldap://"+remoteAddr,
+				ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}))
 			if err != nil {
 				return false
 			}
+			c.SetTimeout(10 * time.Second)
 			if err := c.Bind(fmt.Sprintf("cn=admin,%s", baseDN), remotePW); err != nil {
 				c.Close()
 				return false
