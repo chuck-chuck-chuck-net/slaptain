@@ -183,12 +183,22 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		Expect(stanzas).NotTo(BeEmpty(),
 			"the remote site should have syncrepl stanzas for the data DB")
 
-		// Prove the fixed diagnostic actually renders them.
-		dump := dumpReplDiagnostics(remoteAddr, remoteAdminPW, remoteRootPW)
-		Expect(dump).To(ContainSubstring("olcSyncRepl:"),
-			"the cross-site diagnostic must dump the remote syncrepl stanzas; got:\n%s", dump)
-		Expect(dump).NotTo(ContainSubstring("config bind error"),
-			"the cross-site diagnostic must not fail its config bind; got:\n%s", dump)
+		// Prove the fixed diagnostic actually renders them — retried, because it
+		// opens its own connections and a single unlucky cross-site dial made
+		// this assertion fail on an otherwise-healthy mesh ("bind error:
+		// connection timed out"). What is being asserted is the credential
+		// wiring, not the reachability of one TCP connection.
+		Eventually(ctx, func() error {
+			dump := dumpReplDiagnostics(remoteAddr, remoteAdminPW, remoteRootPW)
+			if !strings.Contains(dump, "olcSyncRepl:") {
+				return fmt.Errorf("diagnostic did not dump the remote syncrepl stanzas:\n%s", dump)
+			}
+			if strings.Contains(dump, "config bind error") {
+				return fmt.Errorf("diagnostic failed its config bind:\n%s", dump)
+			}
+			return nil
+		}).WithTimeout(90*time.Second).WithPolling(5*time.Second).Should(Succeed(),
+			"the cross-site diagnostic must render the remote site's syncrepl stanzas")
 	}, NodeTimeout(4*time.Minute))
 
 	// ── 2. Write on siteA propagates to siteB ────────────────────────────────

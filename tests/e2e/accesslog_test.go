@@ -3,6 +3,7 @@ package e2e_test
 import (
 	"context"
 	"fmt"
+	"net"
 	"io"
 	"os"
 	"regexp"
@@ -141,7 +142,7 @@ var _ = Describe("per-database accesslog", Label("accesslog"), Ordered, Continue
 	It("gives every replicated database its own accesslog DB, consistently referenced", func(ctx SpecContext) {
 		for _, pod := range rwPods {
 			By("inspecting cn=config on " + pod)
-			conn := dialPodConfig(pod)
+			conn := dialPodConfigEventually(ctx, pod)
 			assertPerDatabaseAccesslogLayout(conn, pod, dbNames, dbSuffixes, true)
 			conn.Close()
 		}
@@ -496,11 +497,48 @@ func (m observedMdb) String() string { return fmt.Sprintf("%s[%s @ %s]", m.dn, m
 // ADR-020 R3, the log's contents; the *data* rootDN is a different database's
 // and is denied).
 func dialPodConfig(pod string) *ldap.Conn {
+	conn, err := tryDialPodConfig(pod)
+	Expect(err).NotTo(HaveOccurred(), "dial+bind cn=config on %s", pod)
+	return conn
+}
+
+// tryDialPodConfig is the non-fatal form. Use it inside an Eventually closure:
+// dialPodConfig's Expect calls abort the whole spec on the first transient
+// failure instead of letting the poll retry, which is how a momentary
+// `connection refused` on one pod's NodePort — a pod mid-restart, or a
+// reconfiguration dropping connections — turned into a hard failure of the
+// migration spec rather than one wasted poll.
+func tryDialPodConfig(pod string) (*ldap.Conn, error) {
 	addr := podNodePortAddr(pod, "E2E_POD_NODEPORT_BASE")
-	Expect(addr).NotTo(BeEmpty(), "E2E_NODE_IP and E2E_POD_NODEPORT_BASE must be set")
-	conn, err := ldap.Dial("tcp", addr)
-	Expect(err).NotTo(HaveOccurred(), "dial %s (%s)", pod, addr)
-	Expect(conn.Bind("cn=admin,cn=config", rootPW)).To(Succeed(), "config bind on %s", pod)
+	if addr == "" {
+		return nil, fmt.Errorf("E2E_NODE_IP and E2E_POD_NODEPORT_BASE must be set to dial %s", pod)
+	}
+	conn, err := ldap.DialURL("ldap://"+addr, ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}))
+	if err != nil {
+		return nil, fmt.Errorf("dial %s (%s): %w", pod, addr, err)
+	}
+	conn.SetTimeout(10 * time.Second)
+	if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("config bind on %s (%s): %w", pod, addr, err)
+	}
+	return conn, nil
+}
+
+// dialPodConfigEventually retries until the pod's cn=config is reachable. For
+// one-shot assertions that run after cluster churn, where the pod is expected to
+// be up but may need a moment.
+func dialPodConfigEventually(ctx SpecContext, pod string) *ldap.Conn {
+	var conn *ldap.Conn
+	Eventually(ctx, func() error {
+		c, err := tryDialPodConfig(pod)
+		if err != nil {
+			return err
+		}
+		conn = c
+		return nil
+	}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
+		"cn=config on %s must become reachable", pod)
 	return conn
 }
 

@@ -871,11 +871,11 @@ run_tests() {
     # Suite ceilings, not budgets. Raised from 25m/30m when the pod-replacing
     # specs (resilience ×3, dataloss ×1) gained a cross-site recovery wait: on a
     # multi-site pod-routed run each of them may sit for up to
-    # crossSiteRecoveryBudget (5m, sized off a measured 147s) while the peer
-    # sites rediscover the new pod IPs. Four such waits plus the gated
+    # crossSiteRecoveryBudget (8m, sized off measurements of 140-268s) while the
+    # peer sites rediscover the new pod IPs. Four such waits plus the gated
     # backup/restore/scaleup/accesslog-migration scenarios can outrun 25m
     # without anything actually being wrong.
-    local ginkgo_flags=(--ginkgo.v --ginkgo.timeout=45m "--ginkgo.seed=$seed")
+    local ginkgo_flags=(--ginkgo.v --ginkgo.timeout=60m "--ginkgo.seed=$seed")
     if [[ -n "${E2E_LABEL_FILTER:-}" ]]; then
         ginkgo_flags+=("--ginkgo.label-filter=$E2E_LABEL_FILTER")
         log "Label filter: $E2E_LABEL_FILTER (only matching specs run)"
@@ -890,7 +890,7 @@ run_tests() {
     (
         cd "$PROJECT_ROOT/tests/e2e"
         env "${test_env[@]}" go test -v ./... \
-            -timeout 50m \
+            -timeout 65m \
             "${ginkgo_flags[@]}"
     )
 }

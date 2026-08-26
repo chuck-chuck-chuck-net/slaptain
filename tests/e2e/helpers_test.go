@@ -333,17 +333,22 @@ func addReplTestUser(conn *ldap.Conn, uid string, uidNum int) string {
 // SlapdDatabase controller, and the consumer picks it up on its next syncrepl
 // retry (retry="10 +" in the test fixture).
 //
-// Measured on a three-site pod-routed lab: deleting all of siteA's pods and then
-// timing a siteA write until it appeared on siteB took **147 s** end to end
-// (125 s from the first accepted write). Right after siteA's pods were Ready,
-// siteB was still naming siteA's previous pod IP as a provider — a dead address.
-// So the honest budget is well above the 60 s a steady-state cluster needs, and
-// this is deliberately ~2× the measurement: the point of this wait is to remove
-// a race from the specs that follow, and a wait that itself races is worse than
-// none. It is NOT an assertion about acceptable production recovery time — the
-// operator-side question of tying rediscovery to the CSN-monitoring requeue is
-// tracked separately.
-const crossSiteRecoveryBudget = 5 * time.Minute
+// Measured on a three-site pod-routed lab, deleting all of siteA's pods and
+// timing a siteA write until it appeared on siteB:
+//
+//	147 s  by hand (125 s from the first accepted write)
+//	140 s  in-suite (E2E_SEED=1787729356)
+//	268 s  in-suite, same seed, next run
+//
+// Right after siteA's pods were Ready, siteB was still naming siteA's previous
+// pod IP as a provider — a dead address. The spread is the point: where the
+// restart lands in the peer's 60 s requeue cycle, times three peer sites, plus
+// syncrepl retry backoff, moves this by minutes. 5 minutes left only 32 s of
+// headroom over the 268 s observation, so the budget is 8 — a wait that itself
+// races is worse than no wait at all. This is NOT an assertion about acceptable
+// production recovery time; the operator-side question of tying rediscovery to
+// the CSN-monitoring requeue is tracked separately.
+const crossSiteRecoveryBudget = 8 * time.Minute
 
 // waitForCrossSiteReplication blocks until a write made on this site is visible
 // on the remote peer site, then removes the probe entry.

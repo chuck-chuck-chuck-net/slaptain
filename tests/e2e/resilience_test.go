@@ -117,7 +117,7 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 		// reach the other pods — but a peer whose fan-out picked slapd-1 is
 		// stalled until rediscovery, so wait on the same contract.
 		waitForCrossSiteReplication(ctx, "the slapd-1 restart")
-	}, NodeTimeout(11*time.Minute))
+	}, NodeTimeout(14*time.Minute))
 
 	// ── Seed pod restart ──────────────────────────────────────────────────────
 	//
@@ -163,7 +163,7 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 		Expect(ldapExists(ldapConn, fmt.Sprintf("ou=People,%s", baseDN))).To(BeTrue())
 
 		waitForCrossSiteReplication(ctx, "the seed pod (slapd-0) restart")
-	}, NodeTimeout(11*time.Minute))
+	}, NodeTimeout(14*time.Minute))
 
 	// ── All-pods simultaneous restart (warm start) ────────────────────────────
 	//
@@ -272,5 +272,5 @@ var _ = Describe("resilience", Label("resilience"), Ordered, func() {
 		// across sites would eat that latency as a spurious failure. Wait here,
 		// where the damage was done. No-op single-site.
 		waitForCrossSiteReplication(ctx, "a simultaneous restart of all pods")
-	}, NodeTimeout(15*time.Minute))
+	}, NodeTimeout(18*time.Minute))
 })

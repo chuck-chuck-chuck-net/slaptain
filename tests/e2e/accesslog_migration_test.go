@@ -95,7 +95,7 @@ var _ = Describe("legacy shared accesslog migration", Label("accesslog-migration
 			makeLegacyAccesslogLayout(pod, dbNames, dbSuffixes)
 
 			By("confirming the pre-state on " + pod)
-			conn := dialPodConfig(pod)
+			conn := dialPodConfigEventually(ctx, pod)
 			mdbs := observedMdbDatabases(conn)
 			legacy, ok := findMdb(mdbs, "cn=accesslog")
 			Expect(ok).To(BeTrue(), "pod %s: no legacy cn=accesslog was created; got %v", pod, mdbs)
@@ -137,7 +137,8 @@ var _ = Describe("legacy shared accesslog migration", Label("accesslog-migration
 		for _, p := range rwPods {
 			pod := p
 			Eventually(ctx, func(g Gomega) {
-				conn := dialPodConfig(pod)
+				conn, err := tryDialPodConfig(pod)
+				g.Expect(err).NotTo(HaveOccurred())
 				defer conn.Close()
 				mdbs := observedMdbDatabases(conn)
 				for _, db := range mdbs {
@@ -153,7 +154,7 @@ var _ = Describe("legacy shared accesslog migration", Label("accesslog-migration
 
 		By("asserting the full ADR-019/ADR-020 end state on every pod")
 		for _, pod := range rwPods {
-			conn := dialPodConfig(pod)
+			conn := dialPodConfigEventually(ctx, pod)
 			assertPerDatabaseAccesslogLayout(conn, pod, dbNames, dbSuffixes, false)
 			conn.Close()
 		}
@@ -163,7 +164,7 @@ var _ = Describe("legacy shared accesslog migration", Label("accesslog-migration
 		snapshot := func() map[string]string {
 			out := map[string]string{}
 			for _, pod := range rwPods {
-				conn := dialPodConfig(pod)
+				conn := dialPodConfigEventually(ctx, pod)
 				out[pod] = configFingerprint(conn)
 				conn.Close()
 			}
