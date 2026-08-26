@@ -36,8 +36,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -2698,31 +2701,45 @@ func (r *SlapdDatabaseReconciler) setStatus(
 func (r *SlapdDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ldapv1alpha1.SlapdDatabase{}).
-		Watches(&ldapv1alpha1.SlapdCluster{}, handler.EnqueueRequestsFromMapFunc(
-			func(ctx context.Context, obj client.Object) []ctrl.Request {
-				sc, ok := obj.(*ldapv1alpha1.SlapdCluster)
-				if !ok {
-					return nil
-				}
-				// Find all SlapdDatabases that reference this cluster.
-				var dbList ldapv1alpha1.SlapdDatabaseList
-				if err := r.List(ctx, &dbList, client.InNamespace(sc.Namespace)); err != nil {
-					return nil
-				}
-				var reqs []ctrl.Request
-				for _, db := range dbList.Items {
-					if db.Spec.ClusterRef == sc.Name {
-						reqs = append(reqs, ctrl.Request{
-							NamespacedName: client.ObjectKey{
-								Name:      db.Name,
-								Namespace: db.Namespace,
-							},
-						})
+		// The predicate is load-bearing for steady-state cost, not correctness:
+		// see slapdClusterChangeMatters for the enumeration of what the
+		// SlapdDatabase controller actually reads off the cluster, and for the
+		// rule that a new read must be added there and to its test.
+		WatchesRawSource(source.Kind(mgr.GetCache(), client.Object(&ldapv1alpha1.SlapdCluster{}),
+			handler.EnqueueRequestsFromMapFunc(
+				func(ctx context.Context, obj client.Object) []ctrl.Request {
+					sc, ok := obj.(*ldapv1alpha1.SlapdCluster)
+					if !ok {
+						return nil
 					}
-				}
-				return reqs
-			},
-		)).
+					// Find all SlapdDatabases that reference this cluster.
+					var dbList ldapv1alpha1.SlapdDatabaseList
+					if err := r.List(ctx, &dbList, client.InNamespace(sc.Namespace)); err != nil {
+						return nil
+					}
+					var reqs []ctrl.Request
+					for _, db := range dbList.Items {
+						if db.Spec.ClusterRef == sc.Name {
+							reqs = append(reqs, ctrl.Request{
+								NamespacedName: client.ObjectKey{
+									Name:      db.Name,
+									Namespace: db.Namespace,
+								},
+							})
+						}
+					}
+					return reqs
+				},
+			), predicate.Funcs{
+				UpdateFunc: func(e event.UpdateEvent) bool {
+					oldSC, ok1 := e.ObjectOld.(*ldapv1alpha1.SlapdCluster)
+					newSC, ok2 := e.ObjectNew.(*ldapv1alpha1.SlapdCluster)
+					if !ok1 || !ok2 {
+						return true
+					}
+					return slapdClusterChangeMatters(oldSC, newSC)
+				},
+			})).
 		Named("slapddatabase").
 		Complete(r)
 }
