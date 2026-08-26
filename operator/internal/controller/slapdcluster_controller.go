@@ -27,7 +27,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -62,31 +61,6 @@ const (
 	// monitoring when the cluster is Running with replication enabled. Without
 	// this, CSN checks only run on resource changes and go stale.
 	csnCheckInterval = 60 * time.Second
-
-	// peerDiscoveryInterval is the base reconcile interval for a cluster that
-	// has at least one externalPeers[].discovery peer. Peer addresses are pod
-	// IPs (ADR-016) or Multus IPs (ADR-007): they change without any spec change
-	// and without any event this operator watches, so the only way to notice is
-	// to look. 15s is a quarter of csnCheckInterval — enough to cut the observed
-	// 130-268s cross-site recovery to tens of seconds, while staying far away
-	// from a busy loop against someone else's API server. Discovery-only passes
-	// are status no-ops (see csnCheckDue), so the extra passes cost one remote
-	// list each and nothing downstream.
-	peerDiscoveryInterval = 15 * time.Second
-
-	// peerDiscoverySettleInterval is the tightened interval used while a peer's
-	// address set is still moving. Sized under the ~5-10s it takes a replacement
-	// pod to go Running-with-an-IP, so the sequential return of a restarted
-	// site's pods is observed as it happens rather than one base interval per
-	// pod — which is the partial-observation multiplier that produced the 268s
-	// worst case.
-	peerDiscoverySettleInterval = 3 * time.Second
-
-	// peerDiscoveryMaxFastPasses bounds the tightened phase per cluster. A whole
-	// site's restart settles in a handful of passes; 10 * 3s = 30s of fast
-	// polling is a generous ceiling. See discoveryRequeue for why the bound is
-	// about remote API load rather than about churn.
-	peerDiscoveryMaxFastPasses = 10
 )
 
 // SlapdClusterReconciler reconciles a SlapdCluster object.
@@ -96,16 +70,6 @@ const (
 type SlapdClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	// discoveryFastPasses counts consecutive tightened requeues per cluster,
-	// keyed by namespace/name. Controller-local on purpose: it is a rate limiter,
-	// not observed state, so it has no business on the API object. Keyed by
-	// namespace/name rather than UID so the NotFound path can evict it; a cluster
-	// deleted and recreated under the same name inherits at most a few passes of
-	// stale budget, which can only make the next tightening shorter, never
-	// longer. Losing it on operator restart is fine — the budget exists to cap
-	// remote API load, and a restart is not a load amplifier.
-	discoveryFastPasses map[string]int
-	discoveryFastMu     sync.Mutex
 	// DefaultImageTag is the tag substituted into SlapdCluster.spec.images.{slapd,init}
 	// when the user leaves them blank. Wired from the OPERATOR_IMAGE_TAG env in
 	// the operator Deployment (Helm chart injects it from Chart.AppVersion), so
@@ -210,21 +174,9 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	sc := &ldapv1alpha1.SlapdCluster{}
 	if err := r.Get(ctx, req.NamespacedName, sc); err != nil {
 		if errors.IsNotFound(err) {
-			r.forgetDiscoveryFastPasses(req.String())
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
-	}
-
-	// Snapshot the LAST-APPLIED peer statuses before this pass rebuilds them.
-	// sc was just Get-ed, so this is what is currently persisted — the baseline
-	// for "did the discovered addresses change this pass?" and the carry-forward
-	// source for the CSN fields on a discovery-only pass. Deep-copied because the
-	// rebuild below reassigns the slice and callees write through pointers into
-	// the new elements.
-	prevPeerStatuses := make([]ldapv1alpha1.ExternalPeerStatus, len(sc.Status.ExternalPeerStatuses))
-	for i, ps := range sc.Status.ExternalPeerStatuses {
-		prevPeerStatuses[i] = *ps.DeepCopy()
 	}
 
 	// 1a. Honor spec.suspend — leave everything in place, stop observing.
@@ -352,39 +304,15 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Peer address discovery runs on its own cadence for clusters that have a
-	// discovery peer, so a pod-IP change is noticed in seconds rather than up to
-	// a full csnCheckInterval (see discovery_cadence.go). The CSN checks stay on
-	// the monitoring interval: they are the expensive part (an LDAP dial, bind
-	// and search per pod, per database, per peer) AND the only thing in this
-	// section that writes a changing field every pass, so leaving them ungated
-	// would turn a faster reconcile into per-pass LDAP fan-out and per-pass
-	// resourceVersion churn.
-	//
-	// Clusters without a discovery peer keep the old behaviour exactly: every
-	// pass is a monitoring pass, because their pass rate is unchanged.
-	hasDiscoveryPeer := clusterHasDiscoveryPeer(sc)
-	runCSNChecks := !hasDiscoveryPeer || csnCheckDue(prevPeerStatuses, time.Now(), csnCheckInterval)
-	if hasDiscoveryPeer && !runCSNChecks {
-		log.V(1).Info("discovery-only pass: CSN monitoring not due, carrying its status forward")
-	}
-
 	// Local CSN convergence check + gather local newest CSN for cross-site comparison.
 	// Uses the replication bind DN/password since ACLs may deny anonymous access.
 	dbInfos := r.listDatabaseInfo(ctx, sc)
 	var localNewestTime time.Time
-	if runCSNChecks && sc.Spec.Replication.Enabled && ready >= 2 && len(dbInfos) > 0 {
-		// Skipping this also leaves the ReplicationConverged condition untouched
-		// in sc.Status.Conditions, which is exactly the carry-forward we want:
-		// the condition was read back off the object at the top of Reconcile.
+	if sc.Spec.Replication.Enabled && ready >= 2 && len(dbInfos) > 0 {
 		localNewestTime = r.checkLocalCSNConvergence(ctx, sc, dbInfos)
 	}
 
 	// External peer status: discovery, connectivity, and CSN convergence.
-	// discoveryErrored feeds the requeue decision: an unconfirmed address set is
-	// worth another look soon. Tracked here rather than read back out of
-	// LastError, which conflates discovery and CSN errors.
-	discoveryErrored := false
 	sc.Status.ExternalPeerStatuses = nil
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		status := ldapv1alpha1.ExternalPeerStatus{
@@ -395,7 +323,6 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			addrs, err := r.discoverRemotePeerAddresses(ctx, sc, &ep)
 			if err != nil {
 				status.LastError = err.Error()
-				discoveryErrored = true
 				log.Info("remote peer discovery failed", "peer", ep.Name, "err", err)
 			} else {
 				status.DiscoveredAddresses = addrs
@@ -403,21 +330,14 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		} else if len(ep.PodAddresses) > 0 {
 			// Static podAddresses: addresses are in the spec directly.
 		} else if ep.URI != "" {
-			// A connectivity probe, not discovery: a uri peer's address is in
-			// the spec. Gated with the CSN checks so a discovery-only pass stays
-			// discovery-only and does not dial a uri peer four times a minute.
-			if runCSNChecks {
-				if err := testExternalPeerConnectivity(ep.URI); err != nil {
-					status.LastError = err.Error()
-				}
+			if err := testExternalPeerConnectivity(ep.URI); err != nil {
+				status.LastError = err.Error()
 			}
 		}
 
 		// CSN convergence check against this peer.
-		if runCSNChecks && len(dbInfos) > 0 && !localNewestTime.IsZero() {
+		if len(dbInfos) > 0 && !localNewestTime.IsZero() {
 			r.checkPeerCSNConvergence(ctx, sc, &ep, &status, dbInfos, localNewestTime)
-		} else if !runCSNChecks {
-			carryForwardPeerCSNStatus(prevPeerStatuses, &status)
 		}
 
 		// Derive Connected from ReplicationState (backward compat).
@@ -472,20 +392,6 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Without this, CSN checks only run on resource changes and go stale once
 	// the cluster stabilises.
 	if sc.Spec.Replication.Enabled {
-		// A cluster with a discovery peer runs on the faster discovery cadence,
-		// tightened further while a peer's address set is still moving. Note the
-		// single ctrl.Result: one unsettled peer tightens the whole cluster's
-		// requeue, which is accepted — the alternative is per-peer scheduling
-		// machinery for a case that lasts seconds.
-		if hasDiscoveryPeer {
-			unsettled := peerAddressesUnsettled(prevPeerStatuses, sc.Status.ExternalPeerStatuses, discoveryErrored)
-			after := r.nextDiscoveryRequeue(req.String(), unsettled)
-			if unsettled {
-				log.V(1).Info("peer addresses still moving; tightening requeue",
-					"after", after.String())
-			}
-			return ctrl.Result{RequeueAfter: after}, nil
-		}
 		return ctrl.Result{RequeueAfter: csnCheckInterval}, nil
 	}
 
