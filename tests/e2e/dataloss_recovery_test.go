@@ -213,16 +213,17 @@ var _ = Describe("data loss recovery via replication",
 	// lines — see docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md.
 	// Upstream fixed it in commit 414866b8, released only in 2.7.0/2.7.1.
 	//
-	// Red-first honesty (measured 2026-09-11): a FRESH SINGLE-SITE cluster does
-	// NOT reproduce the storm on 2.6 — this spec counted 0 occurrences across 3
-	// RW pods with an 18 s recovery, because every local SID has a recent CSN
-	// and the mincsn lookup succeeds. The storm needs a dormant SID, i.e. the
-	// multi-site mesh of the investigation doc (one site originating no writes).
-	// So this assertion has never been observed red: it is a tripwire whose red
-	// lives in the multi-site scenario (deferred with multi-site validation —
-	// ADR-021). On a multi-site run against `-ol26` images it is expected to
-	// fail, and that failure would be the point. See ADR-021 before "fixing"
-	// it by raising the threshold.
+	// Red-first honesty (measured 2026-09-11): this assertion has never been
+	// observed red. A fresh single-site cluster counts 0 on 2.6 (every local
+	// SID has a recent CSN); a fresh three-site mesh counts 0 too (the suite's
+	// own probes keep SIDs warm); and even engineered dormancy — an idle-site
+	// SID aged past an aggressive accesslogPurge, six armed triggers under
+	// live churn (tests/e2e-storm-repro.sh) — produced only isolated,
+	// self-healing staleness (3 lines, twice). The persistent storm needs the
+	// refresh to regress a contextCSN on the refreshed node (the replay-order
+	// race upstream's 414866b8 FIXME describes). The threshold of 50 cleanly
+	// separates that measured isolated staleness from the measured storm
+	// (thousands); see ADR-021 before "fixing" a red by raising it.
 	It("no 'sync cookie is stale' storm follows the recovery (ITS#9580, ADR-021)",
 		func(ctx SpecContext) {
 			const needle = "sync cookie is stale"
