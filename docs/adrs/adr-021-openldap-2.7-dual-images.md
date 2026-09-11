@@ -113,14 +113,32 @@ Ship two image pairs, with the plain tag being OpenLDAP 2.7.1.
   mincsn lookup succeeded; the storm needs a **dormant SID**, i.e. the
   multi-site mesh of the investigation doc with one site originating no writes.
   The assertion therefore stands as a tripwire, but its red has not yet been
-  observed in an e2e run. A first three-site `-ol26` attempt (same date) also
+  observed in an e2e run. A first three-site `-ol26` attempt (same date)
   counted 0: the suite's own cross-site probe traffic keeps every SID warm, so
-  dormancy never accumulates inside one run. That matches the original repro's
-  intermittency (it hit on iteration 28 of a repro loop). Observing the red
-  deliberately needs an iteration loop with an idle site, not a single cycle —
-  until then the tripwire's value is guarding 2.7 against regression (~0
-  measured single-site and three-site), not proving 2.6 broken (the
-  investigation's live capture already does that).
+  dormancy never accumulates inside one run.
+
+  A deliberate reproduction attempt followed (`tests/e2e-storm-repro.sh`, same
+  date): an `-ol26` mesh with an aggressive `accesslogPurge` (5 min — the
+  `storm-repro` fixture), a dormant marker written through an otherwise idle
+  site and aged past the purge horizon before every trigger, live write churn
+  on two sites during the recovery, six armed PVC-loss triggers. Result:
+  engineered dormancy **reliably produces isolated staleness** — twice the
+  recovery logged exactly 3 `sync cookie is stale` answers (the first non-zero
+  counts measured on 2.6 all day) — but every rejected consumer self-healed
+  with one full refresh, and the cascade never ignited. Mechanism: once the
+  dormant SID's journal entries purge out entirely, the log's minCSN tracking
+  stops naming that SID, and the reconnect checks pass again. The *persistent*
+  rejection of the original incident needs more than an old cookie: the
+  refresh itself must regress a contextCSN value on the refreshed node
+  (upstream's own FIXME on commit `414866b8`: "we're reverting some CSNs (at
+  least our own) in the contextCSN to an older value") — a replay-order race
+  that no armed trigger hit.
+
+  Standing conclusion: the tripwire guards 2.7 against regression (~0 measured
+  single-site and three-site); 2.6's brokenness rests on the investigation's
+  live capture, plus the reproducible isolated-staleness finding above. The
+  repro tool stays in the tree for future attempts; raising its odds means
+  provoking the CSN regression itself, not more dormancy.
 
 ## Consequences
 
