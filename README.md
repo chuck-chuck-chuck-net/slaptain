@@ -23,12 +23,12 @@ This installs the CRDs (`SlapdCluster`, `SlapdDatabase`, `SlapdSchema`), RBAC, a
 Create a TLS Secret and a `SlapdCluster` CR (infrastructure only — no databases yet):
 
 ```bash
-# Generate a self-signed TLS cert (or use your own)
-kubectl create namespace slaptain
+# Generate a self-signed TLS cert (or use your own).
+# gencert creates the slaptain-testing namespace and puts the slapd-tls Secret there.
 make gencert
 
 # Single replica (simplest)
-kubectl apply -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
+kubectl apply -n slaptain-testing -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
 ```
 
 For a replicated cluster, set `replicas` and `replication.enabled`:

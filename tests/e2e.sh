@@ -85,7 +85,7 @@ fi
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-NAMESPACE="${NAMESPACE:-slaptain}"
+NAMESPACE="${NAMESPACE:-slaptain-system}"
 
 NAMESPACE_TESTING="${NAMESPACE_TESTING:-slaptain-testing}"
 NODEPORT_LDAP="${NODEPORT_LDAP:-30389}"

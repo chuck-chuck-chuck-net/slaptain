@@ -500,7 +500,7 @@ step connects to each pod via headless DNS. If the external peer's `bindPassword
 Secret is missing or empty, the operator logs a warning and skips that peer.
 
 ```bash
-kubectl logs -n slaptain deploy/slaptain-operator | grep -i replication
+kubectl logs -n slaptain-system deploy/slaptain-operator | grep -i replication
 ```
 
 **Data not replicating:** Verify syncrepl status from inside a pod:
@@ -618,7 +618,7 @@ make e2e-multisite-teardown CONTEXTS="s1 s2"
 | Env var | Default | Description |
 |---|---|---|
 | `CONTEXTS` | *(required)* | Space-separated kubectl context names |
-| `NAMESPACE` | `slaptain` | Operator namespace |
+| `NAMESPACE` | `slaptain-system` | Operator namespace |
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
 | `NODEPORT_LDAP` | `30389` | NodePort for plain LDAP (test runner access) |
 | `NODEPORT_LDAPS` | `30636` | NodePort for LDAPS (cross-cluster syncrepl in NodePort mode) |
@@ -702,7 +702,7 @@ LDAP connections to **both** clusters (each via its own NodePort) and asserts:
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `NAMESPACE_OPERATOR` | `slaptain` | Operator namespace |
+| `NAMESPACE_OPERATOR` | `slaptain-system` | Operator namespace |
 | `NAMESPACE_FAKEPROD` | `fakeprod` | Source-cluster namespace |
 | `NAMESPACE_SLAPTAIN` | `slaptain-target` | Target-cluster namespace |
 | `NODEPORT_SLAPTAIN` | `30389` | NodePort for slaptain LDAP access from the test runner |
