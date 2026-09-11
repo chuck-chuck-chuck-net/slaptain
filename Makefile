@@ -1,6 +1,6 @@
 REGISTRY ?= ghcr.io/chuck-chuck-chuck-net
 PROJECT ?= slaptain
-NAMESPACE ?= slaptain
+NAMESPACE ?= slaptain-system
 NAMESPACE_TESTING ?= slaptain-testing
 CONTAINER_ENGINE ?= podman
 

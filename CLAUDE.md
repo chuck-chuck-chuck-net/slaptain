@@ -366,17 +366,17 @@ make operator-helm-install
 # Or for development without building/pushing an image, run locally instead:
 cd operator && make run
 
-# 3. Prereqs for a SlapdCluster: namespace + TLS secret
-kubectl create namespace slaptain
-make gencert   # creates slapd-tls secret in slaptain namespace
+# 3. Prereqs for a SlapdCluster: TLS secret (gencert creates the
+#    slaptain-testing namespace itself and puts slapd-tls there)
+make gencert
 
-# 4. Apply sample CR
-kubectl apply -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
+# 4. Apply sample CR into the same namespace
+kubectl apply -n slaptain-testing -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
 
 # 5. Verify
-kubectl get sc -n slaptain
-kubectl get statefulset,svc,secret,pvc -n slaptain -l app.kubernetes.io/instance=slapd
-kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
+kubectl get sc -n slaptain-testing
+kubectl get statefulset,svc,secret,pvc -n slaptain-testing -l app.kubernetes.io/instance=slapd
+kubectl rollout status statefulset/slapd -n slaptain-testing --timeout=120s
 
 # 6. Phase 1 guard smoke test: apply with replicas:2, verify status.phase=Error
 ```

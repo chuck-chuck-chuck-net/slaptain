@@ -19,7 +19,7 @@ operatorNamespace: littlered-system   # littlered's top-level key (legacy)
 # ── slaptain section ─────────────────────────────────────────────────────────
 slaptain:
   registry: registry.k8s.example      # container registry for all images
-  operatorNamespace: slaptain
+  operatorNamespace: slaptain-system
   testingNamespace: slaptain-testing
   testResources: example              # tests/resources/<dir> to apply
   replicationNetwork:
