@@ -107,6 +107,17 @@ E2E_NODE_ACCESS_IP=<reachable-node-ip> ./tests/e2e.sh test <context>
 E2E_NODE_ACCESS_IPS="<ctx1>=<ip1> <ctx2>=<ip2>" ./tests/e2e.sh all <ctx1> <ctx2>
 ```
 
+Rather than riding these on every invocation, describe the lab once in a
+**lab config file**: `<repo-root>/lab.yaml` (gitignored — it carries internal
+addresses; `E2E_CONFIG=<path>` overrides the location). See `lab.yaml.sample`
+for the schema, which is shared with the littlered operator's multi-site e2e so
+one file can describe the whole lab. The file supplies lab facts — site
+contexts (used as the default context list when the command line names none),
+per-site `nodeAccessIP`, registry, namespaces, replication network mode — and
+never per-run knobs (`GIT_TAG`, `SLAPD_TAG_SUFFIX`, `E2E_*` gates). Environment
+variables always win over file values. `./tests/e2e.sh config` prints the
+resolved configuration without touching any cluster.
+
 This affects only how the *runner* reaches NodePorts (and the IPs the TLS cert is
 SAN'd for). Cross-site replication peer URIs keep using the node `InternalIP`,
 since they must ride the (cross-site-routed) replication network, not the
@@ -155,6 +166,7 @@ runtime; that is expected.
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
+| `E2E_CONFIG` | `<repo-root>/lab.yaml` if present | Lab config file (site inventory, registry, network mode). Env vars win over file values. Schema: `lab.yaml.sample` |
 | `E2E_NODE_ACCESS_IP` | *(node `InternalIP`)* | Single-site override for the address the runner uses to reach NodePorts (+ cert SAN). Set when the `InternalIP` isn't reachable from the runner. |
 | `E2E_NODE_ACCESS_IPS` | *(node `InternalIP`)* | Multi-site map, e.g. `"<ctx1>=<ip1> <ctx2>=<ip2>"`. Per-context form of `E2E_NODE_ACCESS_IP`. |
 | `LDAP_ADDR` | *(set by script)* | `<node-access-ip>:<nodeport>` — required when invoking `go test` directly |

@@ -3,3 +3,4 @@
 bin/
 *.tar
 tests/image-pull-secret.yaml
+/lab.yaml
