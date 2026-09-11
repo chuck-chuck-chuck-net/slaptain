@@ -123,7 +123,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 deliver deliver-operator deploy-operator clean show-tag
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
 
 ## all: the six pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -234,6 +234,11 @@ import-slapd-ol26: build-slapd-ol26
 	$(call import-if-needed,$(SLAPD_IMAGE_OL26))
 
 import-ol26: import-init-ol26 import-slapd-ol26
+
+## Push a single image (per-image counterparts of the aggregate `push`,
+## so `deliver-operator` resolves under the default DELIVERY=push).
+push-operator: build-operator
+	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
 
 ## Delivery: dispatch to push or import based on DELIVERY variable
 deliver: $(DELIVERY)
