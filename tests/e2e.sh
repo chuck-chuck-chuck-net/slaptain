@@ -143,17 +143,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Image tag: git tag or short commit hash (with -dirty suffix for uncommitted changes).
+# Tag derivation lives in scripts/image-tag.sh — one rule for the Makefile and
+# for us, dirty trees get a content-hashed suffix. See the script.
 if [[ -z "${GIT_TAG:-}" ]]; then
-    if exact=$(git -C "$PROJECT_ROOT" describe --tags --exact-match 2>/dev/null) && [[ -n "$exact" ]]; then
-        GIT_TAG="$exact"
-    else
-        hash=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)
-        if ! git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null; then
-            GIT_TAG="${hash}-dirty"
-        else
-            GIT_TAG="$hash"
-        fi
-    fi
+    GIT_TAG="$("$PROJECT_ROOT/scripts/image-tag.sh")"
 fi
 
 # SLAPD_TAG_SUFFIX: appended to the slapd/slapd-init image tags only (the
@@ -1067,7 +1060,29 @@ fi
 declare -A NODE_IPS          # node k8s InternalIP — used for cross-site peer URIs
 declare -A NODE_ACCESS_IPS   # address used to reach node NodePorts + cert SAN (override: E2E_NODE_ACCESS_IP[S])
 
+# Fail fast when the images this run would deploy were never pushed — an
+# ImagePullBackOff twenty minutes into setup is the worst way to learn that.
+# Anonymous HEAD against the OCI distribution API; only a definite 404 dies.
+# Registries that demand auth even for manifest HEADs (401/403) and unreachable
+# ones get a warning — the probe must never false-fail a working private setup.
+require_image_in_registry() { # image-name tag
+    local host path url code
+    case "$REGISTRY" in
+        */*) host="${REGISTRY%%/*}"; path="${REGISTRY#*/}/$PROJECT/$1" ;;
+        *)   host="$REGISTRY";       path="$PROJECT/$1" ;;
+    esac
+    url="https://$host/v2/$path/manifests/$2"
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10         -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json"         "$url" 2>/dev/null || echo 000)
+    case "$code" in
+        200) : ;;
+        404) die "$REGISTRY/$PROJECT/$1:$2 is not in the registry. Build and push first (make push REGISTRY=$REGISTRY), or pin GIT_TAG=<pushed-tag>. A dirty tree derives a content-hashed tag (scripts/image-tag.sh) that exists only after you push it." ;;
+        *)   log "WARN: cannot verify $1:$2 in the registry (HTTP $code) — continuing" ;;
+    esac
+}
+
 do_setup() {
+    require_image_in_registry slapd "$SLAPD_TAG"
+    require_image_in_registry operator "$GIT_TAG"
     setup_foundation
     setup_cross_trust
     setup_remote_kubeconfigs

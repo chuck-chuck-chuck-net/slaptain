@@ -82,19 +82,27 @@ Individual targets: `build-init`, `build-slapd`, `build-ol26` (both legacy
 images), `build-toolkit`, `build-operator`, `build-openldap-deb`, `build-slctl`
 (→ `bin/slctl`, plus `install-slctl` for `/usr/local/bin`).
 
-### The tag, and the `-dirty` trap
+### The tag
 
-`GIT_TAG` is derived, not configured: an exact git tag if `HEAD` is on one,
-otherwise the short commit hash, with `-dirty` appended when the working tree
-has uncommitted changes. That last part is a feature — a rebuild after local
-edits gets a distinct tag that will not collide with what is already on the
-nodes — and a trap: **anything you deploy must have been built and delivered
-under the same tag**. `tests/e2e.sh` derives the tag by the same rule but never
-builds anything, so the usual lab loop is "build and push once, then pin":
+`GIT_TAG` is derived, not configured — by `scripts/image-tag.sh`, the single
+source shared by the Makefile and `tests/e2e.sh`: an exact git tag if `HEAD` is
+on one, otherwise the short commit hash, and on a dirty working tree
+`<hash>-dirty-<contenthash>`. The dirty suffix hashes the actual diff, so the
+same dirty state always derives the same tag (builds and e2e runs agree),
+while a different edit derives a different one — a stale image can never
+masquerade as your current tree. Untracked files are invisible to the tag
+(`git add -N` a new file if it must count before its first commit).
+
+Deploying still requires the tag to have been built and delivered, so
+`tests/e2e.sh setup` probes the registry first and fails immediately — with
+the fix spelled out — when the derived tag was never pushed. The two working
+loops:
 
 ```bash
-make push                                   # note the tag
-GIT_TAG=<pushed-tag> ./tests/e2e.sh all <context>
+make push && ./tests/e2e.sh all <context>   # same tree state → same tag, just works
+
+make push                                   # …or note a tag once
+GIT_TAG=<pushed-tag> ./tests/e2e.sh all <context>   # …and pin it while editing
 ```
 
 Override `REGISTRY` (default `ghcr.io/chuck-chuck-chuck-net`) and `PROJECT` for

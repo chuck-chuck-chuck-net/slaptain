@@ -4,20 +4,11 @@ NAMESPACE ?= slaptain
 NAMESPACE_TESTING ?= slaptain-testing
 CONTAINER_ENGINE ?= podman
 
-# Image tag: exact git tag if on one, otherwise short commit hash.
-# Appends -dirty when the working tree has uncommitted changes, so a rebuild
-# after local edits produces a distinct tag that won't match what's already
-# on the nodes — triggering a re-import.
-GIT_TAG := $(shell if [ -n "$$(git describe --tags --exact-match 2>/dev/null)" ]; then \
-                   git describe --tags --exact-match; \
-               else \
-                   hash=$$(git rev-parse --short HEAD); \
-                   if ! git diff --quiet HEAD 2>/dev/null; then \
-                       echo "$${hash}-dirty"; \
-                   else \
-                       echo "$$hash"; \
-                   fi; \
-               fi)
+# Image tag: exact git tag if on one, else short commit hash, else — on a
+# dirty tree — <hash>-dirty-<contenthash>. Derived by scripts/image-tag.sh,
+# the single source shared with tests/e2e.sh; see the script for the rule and
+# why the dirty suffix is content-hashed.
+GIT_TAG := $(shell scripts/image-tag.sh)
 
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= push
@@ -134,7 +125,7 @@ endef
 
 .PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 deliver deliver-operator deploy-operator clean show-tag
 
-## all: the five pushable images plus slctl. build-ol26 is included so a
+## all: the six pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
 all: build-init build-slapd build-ol26 build-toolkit build-operator build-slctl
 
