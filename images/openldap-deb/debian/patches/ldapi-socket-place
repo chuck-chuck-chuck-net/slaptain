@@ -1,0 +1,18 @@
+Move the ldapi socket to /var/run/slapd from /var/run, since /var/run
+is only writable by root and slapd runs as openldap.
+
+Debian-specific.
+
+Index: openldap/include/ldap_defaults.h
+===================================================================
+--- openldap.orig/include/ldap_defaults.h	2022-05-20 17:36:09.977244324 -0400
++++ openldap/include/ldap_defaults.h	2022-05-20 17:36:09.973244321 -0400
+@@ -40,7 +40,7 @@
+ 
+ /* default ldapi:// socket */
+ #ifndef LDAPI_SOCK
+-#define LDAPI_SOCK LDAP_RUNDIR LDAP_DIRSEP "run" LDAP_DIRSEP "ldapi"
++#define LDAPI_SOCK LDAP_RUNDIR LDAP_DIRSEP "run" LDAP_DIRSEP "slapd" LDAP_DIRSEP "ldapi"
+ #endif
+ 
+ /*

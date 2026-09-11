@@ -1,0 +1,38 @@
+--- openldap-2.6.9+dfsg.orig/configure.ac
++++ openldap-2.6.9+dfsg/configure.ac
+@@ -675,7 +675,7 @@
+ 
+ if test $ol_aix_threads = yes ; then
+ 	if test -z "${CC}" ; then
+-		AC_CHECK_PROGS(CC,cc_r xlc_r cc)
++		AC_CHECK_TOOLS(CC,cc_r xlc_r cc)
+ 
+ 		if test "$CC" = cc ; then
+ 			dnl no CC! don't allow --with-threads
+@@ -696,7 +696,7 @@
+ fi
+ 
+ if test -z "${CC}"; then
+-	AC_CHECK_PROGS(CC,cc gcc,missing)
++	AC_CHECK_TOOLS(CC,cc gcc,missing)
+ 
+ 	if test "${CC}" = "missing" ; then
+ 		AC_MSG_ERROR([Unable to locate cc(1) or suitable replacement.  Check PATH or set CC.])
+@@ -704,7 +704,7 @@
+ fi
+ 
+ if test -z "${AR}"; then
+-	AC_CHECK_PROGS(AR,ar gar,missing)
++	AC_CHECK_TOOLS(AR,ar gar,missing)
+ 
+ 	if test "${AR}" = "missing" ; then
+ 		AC_MSG_ERROR([Unable to locate ar(1) or suitable replacement.  Check PATH or set AR.])
+@@ -712,7 +712,7 @@
+ fi
+ 
+ if test -z "${STRIP}"; then
+-	AC_CHECK_PROGS(STRIP,strip,missing)
++	AC_CHECK_TOOLS(STRIP,strip,missing)
+ 
+ 	if test "${STRIP}" = "missing" ; then
+ 		AC_MSG_ERROR([Unable to locate strip(1) or suitable replacement.  Check PATH or set STRIP.])

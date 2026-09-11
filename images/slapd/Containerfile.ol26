@@ -1,39 +1,22 @@
-# OpenLDAP 2.7.1 slapd runtime image (the default `slapd:<tag>`).
+# OpenLDAP 2.6 (Debian trixie package) slapd runtime image — the LEGACY variant.
 #
-# The packages come from the vendored packaging fork built by
-# images/openldap-deb/Containerfile — one package build feeds both this image
-# and slapd-init. 2.7 is the default because the ITS#9580 delta-syncrepl fix
-# ships in no 2.6.x release; the previous Debian-package-based 2.6 build stays
-# available as slapd:<tag>-ol26 (images/slapd/Containerfile.ol26). See ADR-021.
+# Built as <registry>/slaptain/slapd:<tag>-ol26. The default `slapd:<tag>` image
+# is OpenLDAP 2.7.1 from the vendored packaging fork (images/openldap-deb/).
+# Keep this variant for legacy interop and hot-migration clusters that must run
+# the same 2.6 code as their migration source — see ADR-021 and ADR-011.
 #
-# Paths, UID/GID and the ENTRYPOINT are identical to the ol26 variant: the
-# runtime contract (/usr/sbin/slapd, /usr/lib/ldap, /etc/ldap/schema, 1024:1024)
-# is what bootstrap.sh and the operator depend on, not the slapd version.
-
-# Image carrying the built .deb files in /debs. `make build-slapd` passes the
-# locally built tag; the default keeps a bare `podman build images/slapd/`
-# honest about what it needs.
-ARG OPENLDAP_DEB_IMAGE=localhost/slaptain/openldap-deb:latest
-
-FROM ${OPENLDAP_DEB_IMAGE} AS debs
+# It is knowingly affected by OpenLDAP ITS#9580 (the "sync cookie is stale"
+# refresh storm after a pod loses its data volumes); do not use it for new
+# clusters.
 
 # ── Build / gather stage ────────────────────────────────────────────────────
 FROM debian:trixie-slim AS build
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-COPY --from=debs /debs /debs
-
-# Install the forked 2.7.1 packages instead of Debian's 2.6 slapd. apt resolves
-# their dependencies from the archive; the .deb paths must be absolute for apt
-# to treat them as local files rather than package names.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        /debs/libldap-common_*.deb \
-        /debs/libldap2_*.deb \
-        /debs/slapd_*.deb \
-        /debs/ldap-utils_*.deb \
+        slapd \
+        ldap-utils \
         dpkg-dev \
-    && rm -rf /var/lib/apt/lists/* /debs
+    && rm -rf /var/lib/apt/lists/*
 
 # Assemble a staging root for the distroless runtime.
 # NOTE: do NOT pre-create /staging/usr/lib/ldap here — cp -r creates it

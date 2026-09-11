@@ -1,0 +1,59 @@
+Add /etc/ldap/sasl2 to the SASL configuration search path.
+
+Not submitted upstream.  Somewhat Debian-specific and probably not of
+interest upstream.
+
+Index: openldap/include/ldap_defaults.h
+===================================================================
+--- openldap.orig/include/ldap_defaults.h	2022-05-20 17:36:12.337246188 -0400
++++ openldap/include/ldap_defaults.h	2022-05-20 17:36:12.333246185 -0400
+@@ -75,4 +75,6 @@
+  */
+ #define LLOADD_DEFAULT_CONFIGFILE	LDAP_SYSCONFDIR LDAP_DIRSEP "lloadd.conf"
+ 
++#define SASL_CONFIGPATH                        LDAP_SYSCONFDIR LDAP_DIRSEP "sasl2"
++
+ #endif /* _LDAP_CONFIG_H */
+Index: openldap/servers/slapd/sasl.c
+===================================================================
+--- openldap.orig/servers/slapd/sasl.c	2022-05-20 17:36:12.337246188 -0400
++++ openldap/servers/slapd/sasl.c	2022-05-20 17:36:12.333246185 -0400
+@@ -1231,12 +1231,38 @@
+ 	slapd_rw_destroy
+ };
+ 
++static int
++slap_sasl_getconfpath( void * context, char ** path )
++{
++	char * sasl_default_configpath;
++	size_t len;
++
++#if SASL_VERSION_MAJOR >= 2
++	sasl_default_configpath = "/usr/lib/sasl2";
++#else
++	sasl_default_configpath = "/usr/lib/sasl";
++#endif
++
++	len = strlen(SASL_CONFIGPATH) + 1 /* colon */ +
++		strlen(sasl_default_configpath) + 1 /* \0 */;
++	*path = malloc( len );
++	if ( *path == NULL )
++		return SASL_FAIL;
++
++	if (snprintf( *path, len, "%s:%s", SASL_CONFIGPATH,
++				sasl_default_configpath ) != len-1 )
++		return SASL_FAIL;
++
++	return SASL_OK;
++}
++
+ int slap_sasl_init( void )
+ {
+ #ifdef HAVE_CYRUS_SASL
+ 	int rc;
+ 	static sasl_callback_t server_callbacks[] = {
+ 		{ SASL_CB_LOG, (slap_sasl_cb_ft)&slap_sasl_log, NULL },
++		{ SASL_CB_GETCONFPATH, (slap_sasl_cb_ft)&slap_sasl_getconfpath, NULL },
+ 		{ SASL_CB_GETOPT, (slap_sasl_cb_ft)&slap_sasl_getopt, NULL },
+ 		{ SASL_CB_LIST_END, NULL, NULL }
+ 	};

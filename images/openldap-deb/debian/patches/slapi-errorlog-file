@@ -1,0 +1,18 @@
+The slapi error log file defaults to /var/errors given our setting
+of --localstatedir.  Move it to /var/log/slapi-errors instead.
+
+Debian-specific.
+
+Index: openldap/servers/slapd/slapi/slapi_overlay.c
+===================================================================
+--- openldap.orig/servers/slapd/slapi/slapi_overlay.c	2022-05-20 17:36:09.141243662 -0400
++++ openldap/servers/slapd/slapi/slapi_overlay.c	2022-05-20 17:36:09.141243662 -0400
+@@ -933,7 +933,7 @@
+ 		ldap_pvt_thread_mutex_init( &slapi_printmessage_mutex );
+ 
+ 		if ( slapi_log_file == NULL )
+-			slapi_log_file = slapi_ch_strdup( LDAP_RUNDIR LDAP_DIRSEP "errors" );
++			slapi_log_file = slapi_ch_strdup( LDAP_RUNDIR LDAP_DIRSEP "log" LDAP_DIRSEP "slapi-errors" );
+ 
+ 		rc = slapi_int_init_object_extensions();
+ 		if ( rc != 0 )

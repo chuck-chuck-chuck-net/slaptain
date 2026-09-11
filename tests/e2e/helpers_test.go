@@ -1,8 +1,10 @@
 package e2e_test
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -125,6 +127,80 @@ func deploymentReady(c *kubernetes.Clientset, ns, name string) bool {
 		return false
 	}
 	return d.Status.ReadyReplicas >= 1
+}
+
+// ── Pod log helpers ──────────────────────────────────────────────────────────
+
+// rwPodNames returns the RW StatefulSet's pod names (slapd-0 … slapd-N-1),
+// derived from its desired replica count rather than a label list — pods can be
+// mid-recreation, and the desired set is what we want to inspect.
+func rwPodNames(ctx context.Context, stsName string) []string {
+	sts, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, stsName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "get statefulset %s", stsName)
+	n := int32(1)
+	if sts.Spec.Replicas != nil {
+		n = *sts.Spec.Replicas
+	}
+	names := make([]string, 0, n)
+	for i := int32(0); i < n; i++ {
+		names = append(names, fmt.Sprintf("%s-%d", stsName, i))
+	}
+	return names
+}
+
+// countInContainerLog streams one container's log for one pod — limited to
+// entries at or after `since` — and counts occurrences of `needle`. It streams
+// rather than buffering because the logs this is used on can be enormous: the
+// pathology it looks for is a log storm. A pod that was deleted and recreated
+// only has the new container's log, which is exactly the window a recovery test
+// cares about.
+func countInContainerLog(ctx context.Context, podName, container string, since time.Time, needle string) (int, error) {
+	sinceTime := metav1.NewTime(since)
+	req := k8sClient.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: container,
+		SinceTime: &sinceTime,
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer stream.Close() //nolint:errcheck // read-only stream
+
+	// bufio.Reader, not Scanner: a Scanner gives up on a line longer than its
+	// buffer, and slapd can emit long lines. Reading to the delimiter cannot
+	// split a match, since the needles we look for never contain a newline.
+	r := bufio.NewReader(stream)
+	n := 0
+	for {
+		line, err := r.ReadString('\n')
+		n += strings.Count(line, needle)
+		if err != nil {
+			if err == io.EOF {
+				return n, nil
+			}
+			return n, err
+		}
+	}
+}
+
+// countInSlapdLogs counts occurrences of `needle` in the slapd container log of
+// every named pod since `since`. Returns the per-pod counts and the total. A pod
+// whose log cannot be read is reported as an error entry rather than silently
+// counted as zero — "no log" must never read as "no problem".
+func countInSlapdLogs(ctx context.Context, podNames []string, since time.Time, needle string) (map[string]int, int, []string) {
+	counts := map[string]int{}
+	var problems []string
+	total := 0
+	for _, p := range podNames {
+		n, err := countInContainerLog(ctx, p, "slapd", since, needle)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", p, err))
+			continue
+		}
+		counts[p] = n
+		total += n
+	}
+	return counts, total, problems
 }
 
 // ── LDAP helpers ──────────────────────────────────────────────────────────────

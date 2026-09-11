@@ -1,0 +1,58 @@
+Importing a new upstream version
+--------------------------------
+
+Here are the instructions for when you want to import a new OpenLDAP
+upstream version.
+
+1) Create the new upstream branch, if needed.
+
+   The 'upstream' branch in the salsa repository is used to track
+   versions released to Debian unstable.  If you intend to work on a
+   new version that will be uploaded to Debian experimental, you need
+   to create a separate 'upstream-X.Y' branch (where X.Y is the
+   OpenLDAP version).
+
+   For example, if Debian unstable is currently shipping OpenLDAP
+   2.5.x, and if you are planning to import a new OpenLDAP 2.6.x
+   version and upload it to the experimental distribution, you should
+   create an 'upstream-2.6' branch
+
+2) Adjust debian/gbp.conf, if needed.
+
+   If you created a new upstream branch, you also have to make sure
+   that the 'upstream-branch' option in debian/gbp.conf points to it.
+
+3) Generate the DFSG-compliant orig tarball.
+
+   The package still doesn't have a DEP-5-compliant debian/copyright
+   file, so we rely on debian/rules' 'get-orig-source' target to
+   generate the tarball.  You need to set the 'VERSION' environment
+   variable to the OpenLDAP version you want to import.  For example:
+
+     $ debian/rules VERSION=2.6.2 get-orig-source
+
+   You can now move the tarball to the previous directory.
+
+4) Add the OpenLDAP upstream git repository as a remote.
+
+   This step is needed because we use gbp's '--upstream-vcs-tag'
+   option.
+
+     $ git remote add upstream https://git.openldap.org/openldap/openldap.git
+     $ git fetch upstream
+
+5) Import the new version into the repository.
+
+   Before running the import command, you need to determine the
+   upstream tag for the release you are planning to import.  Upstream
+   names their tags using the following format:
+
+     OPENLDAP_REL_ENG_X_Y_Z
+
+   Make sure to double check if the tag version matches the orig
+   tarball version.  Once everything is OK, you can run the import
+   command:
+
+     $ gbp import-orig ../openldap_X.Y.Z+dfsg.orig.tar.gz --upstream-vcs-tag=OPENLDAP_REL_ENG_X_Y_Z
+
+ -- Sergio Durigan Junior <sergiodj@debian.org>, Fri, 20 May 2022 18:44:14 -0400

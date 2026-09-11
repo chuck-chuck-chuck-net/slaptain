@@ -1,0 +1,25 @@
+openldap (2.6.9+dfsg-1~exp2) experimental; urgency=medium
+
+  The TLS library used for the OpenLDAP packages has changed from GnuTLS to
+  OpenSSL. This affects the set of configuration options available, as well as
+  the behaviour of some options.
+
+  If no TLS CA certificates are specified, the system default trust store will
+  now be loaded automatically. If you do not want the default CAs to be used,
+  you must configure the trusted CAs explicitly.
+
+  Previously, the TLS_CIPHER_SUITE option accepted a GnuTLS priority string.
+  Now, the option accepts an OpenSSL cipher list. For information about the
+  cipher list format, see the openssl-ciphers(1) man page.
+
+  The TLS_CRLFILE option is no longer supported; it is accepted, but silently
+  ignored. Use the TLS_CRLCHECK option instead. The TLS_CACERTDIR option must
+  also be set.
+
+  For more information about the libldap configuration, see the ldap.conf(5)
+  man page.
+
+  For more information about the slapd(8) configuration, see
+  /usr/share/doc/slapd/README.Debian.gz.
+
+ -- Ryan Tandy <ryan@nardis.ca>  Fri, 10 Jan 2025 18:17:14 -0800

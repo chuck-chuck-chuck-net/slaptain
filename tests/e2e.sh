@@ -96,6 +96,13 @@ if [[ -z "${GIT_TAG:-}" ]]; then
     fi
 fi
 
+# SLAPD_TAG_SUFFIX: appended to the slapd/slapd-init image tags only (the
+# operator tag is untouched). Empty = OpenLDAP 2.7.1; "-ol26" runs the suite
+# against the legacy OpenLDAP 2.6 pair, which is expected to FAIL the ITS#9580
+# assertion in dataloss_recovery_test.go — see ADR-021.
+SLAPD_TAG_SUFFIX="${SLAPD_TAG_SUFFIX:-}"
+SLAPD_TAG="${GIT_TAG}${SLAPD_TAG_SUFFIX}"
+
 # ── Image pull secret ────────────────────────────────────────────────────────
 PULL_SECRET_FILE="$SCRIPT_DIR/image-pull-secret.yaml"
 PULL_SECRET_HELM_ARGS=()
@@ -268,9 +275,9 @@ configure_multus_external_peers_static() {
             --namespace "$NAMESPACE_TESTING" \
             -f "$VALUES_FILE" \
             --set "images.slapd.repository=$REGISTRY/$PROJECT/slapd" \
-            --set "images.slapd.tag=$GIT_TAG" \
+            --set "images.slapd.tag=$SLAPD_TAG" \
             --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
-            --set "images.init.tag=$GIT_TAG" \
+            --set "images.init.tag=$SLAPD_TAG" \
             --set "replication.network.multusNetwork=$MULTUS_NETWORK" \
             --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
@@ -566,9 +573,9 @@ setup_slapd_clusters() {
             --namespace "$NAMESPACE_TESTING" --create-namespace \
             -f "$VALUES_FILE" \
             --set "images.slapd.repository=$REGISTRY/$PROJECT/slapd" \
-            --set "images.slapd.tag=$GIT_TAG" \
+            --set "images.slapd.tag=$SLAPD_TAG" \
             --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
-            --set "images.init.tag=$GIT_TAG" \
+            --set "images.init.tag=$SLAPD_TAG" \
             --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \

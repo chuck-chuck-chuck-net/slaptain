@@ -1,0 +1,21 @@
+# OpenLDAP 2.6 (Debian trixie package) bootstrap init image — the LEGACY variant.
+#
+# Built as <registry>/slaptain/slapd-init:<tag>-ol26 and must be paired with the
+# matching slapd:<tag>-ol26 runtime image. See images/slapd/Containerfile.ol26
+# and ADR-021.
+
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        slapd \
+        ldap-utils \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupmod -g 1024 openldap && \
+    usermod -u 1024 -g 1024 openldap
+
+COPY bootstrap.sh /usr/local/bin/bootstrap.sh
+
+USER 1024:1024
+ENTRYPOINT ["/usr/local/bin/bootstrap.sh"]

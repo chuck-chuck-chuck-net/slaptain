@@ -1,0 +1,185 @@
+#!/bin/sh
+set -eux
+
+# our test domain
+domain="example.com"
+suffix="dc=example,dc=com"
+
+sudo debconf-set-selections <<EOF
+slapd slapd/password1 password secret
+slapd slapd/password2 password secret
+slapd slapd/domain string $domain
+slapd slapd/organization string $domain
+EOF
+
+echo "installing slapd..."
+sudo DEBIAN_FRONTEND=noninteractive apt-get -y install slapd slapd-contrib
+
+fail() {
+	# for debugging, this exit can be skipped - retaining existing ldap records.
+	# to change them (reinsert with new content), ldapdelete them manually
+	# e.g. to test with a new policy, do
+	# sudo ldapdelete -H ldapi:/// -Y EXTERNAL 'cn=default,ou=policies,dc=example,dc=com'
+	# disable the exit here,
+	# and re-run this script.
+	[ -n "${1-}" ] && echo "error: $1"
+	exit 1
+}
+
+# check if password policy module exists (in slapd-contrib)
+ppm_lib="/usr/lib/ldap/ppm.so"
+test -f "$ppm_lib" || fail "ppm library not distributed"
+
+# socket auth should give uid 0
+test "$(sudo ldapwhoami -H ldapi:/// -Y EXTERNAL)" = 'dn:gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth' || fail "socket auth failure"
+
+db_dn=$(sudo ldapsearch -LLL -Q -Y EXTERNAL -H ldapi:/// -b "cn=config" "(olcSuffix=$suffix)" dn 2>/dev/null | sed -n 's/^dn: //p')
+
+[ -z "$db_dn" ] && fail "database for test domain not found"
+
+echo "setting up password policy overlay and configuration..."
+
+# ppm module configuration (see ppm.example how to configure the password policy parameters)
+# this can probably suit every corporate compliance manager's needs, but
+# the best password quality would arguably be just a very long one like https://xkcd.com/936/
+ppm_conf_b64=$(base64 -w 0 <<'EOF'
+# we need to have 3 of the 4 classes below in a password
+minQuality 3
+# password must not contain token from relative DN of the user (split by space, tab, etc)
+checkRDN 1
+# tokens from these attributes invalidate the password
+checkAttributes uid,cn
+# must not be in the password
+forbiddenChars ;
+maxConsecutivePerClass 0
+useCracklib 0
+cracklibDict /var/cache/cracklib/cracklib_dict
+# characters, minimum chars required, minimum chars required for a quality point, maximum chars allowed
+class-upperCase ABCDEFGHIJKLMNOPQRSTUVWXYZ 0 1 0
+class-lowerCase abcdefghijklmnopqrstuvwxyz 0 1 0
+class-digit 0123456789 0 1 0
+class-special <>,?;.:/!§ù%*µ^¨$£²&é~"#'{([-|è`_\ç^à@)]°=}+ 0 1 0
+EOF
+)
+
+sudo ldapmodify -Y EXTERNAL -H ldapi:/// <<EOF || fail
+# grant access to domain database to peercred root user (so we don't need the password :)
+dn: $db_dn
+changetype: modify
+add: olcAccess
+olcAccess: {0}to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * break
+
+# load ppolicy module
+# this also loads the ppolicy schema
+dn: cn=module{0},cn=config
+changetype: modify
+add: olcModuleLoad
+olcModuleLoad: ppolicy
+
+# ppolicy overlay configuration
+dn: olcOverlay={0}ppolicy,$db_dn
+changetype: add
+objectClass: olcOverlayConfig
+objectClass: olcPPolicyConfig
+olcOverlay: ppolicy
+olcPPolicyDefault: cn=default,ou=policies,$suffix
+olcPPolicyForwardUpdates: FALSE
+olcPPolicyHashCleartext: TRUE
+olcPPolicyUseLockout: FALSE
+olcPPolicyCheckModule: $ppm_lib
+
+dn: ou=policies,$suffix
+changetype: add
+objectClass: organizationalUnit
+ou: policies
+
+# create policy (as referenced by olcPPolicyDefault from the overlay)
+dn: cn=default,ou=policies,$suffix
+changetype: add
+objectClass: device
+objectClass: pwdPolicy
+objectClass: pwdPolicyChecker
+cn: defaultpolicy
+pwdAttribute: userPassword
+pwdMustChange: TRUE
+pwdSafeModify: FALSE
+pwdMinLength: 16
+pwdMaxAge: 0
+pwdInHistory: 0
+pwdCheckQuality: 2
+pwdCheckModuleArg:: $ppm_conf_b64
+pwdUseCheckModule: TRUE
+EOF
+
+echo "testing password policy..."
+
+test_user_dn="uid=testuser,$suffix"
+sudo ldapadd -Y EXTERNAL -H ldapi:/// << EOF || fail
+dn: $test_user_dn
+objectClass: inetOrgPerson
+cn: Test Person
+sn: User
+uid: awesomeuser
+userPassword: Hunter2
+EOF
+
+# reset the password (handy, if we debug this script)
+sudo ldappasswd -Y EXTERNAL -H ldapi:/// -s "Hunter2" "$test_user_dn"
+
+if ! ldappasswd -x -D "$test_user_dn" -w "Hunter2" -s "Hunter42Gatherer" "$test_user_dn"; then
+	echo "bad: initial password was rejected"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "123" "$test_user_dn"; then
+	echo "bad: short password was accepted"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "roflkopterlolsosecure" "$test_user_dn"; then
+	echo "bad: password with just 1 quality point was accepted"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "ROFLkopterLOLsosecure" "$test_user_dn"; then
+	echo "bad: password with just 2 quality points was accepted"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "ROFLkopter1337" "$test_user_dn"; then
+	echo "bad: short password with 3 quality points was accepted"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "ROFLkopter1337;secure" "$test_user_dn"; then
+	echo "bad: forbidden character was accepted"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "ROFLkopter1337-awesomeuser" "$test_user_dn"; then
+	echo "bad: uid content was accepted"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "ROFLkopter1337-testuser" "$test_user_dn"; then
+	echo "bad: rdn content was accepted"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "rofl_kopter_test_1337" "$test_user_dn"; then
+	echo "bad: cn content 1 was accepted"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "rofl person PASSWORD 1337" "$test_user_dn"; then
+	echo "bad: cn content 2 was accepted"; exit 1;
+fi
+
+if ! ldappasswd -x -D "$test_user_dn" -w "Hunter42Gatherer" -s "ROFLkopter1337secure" "$test_user_dn"; then
+	echo "bad: valid password 1 was rejected"; exit 1;
+fi
+
+if ldappasswd -x -D "$test_user_dn" -w "ROFLkopter1337secure" -s "rofl kopter 1337" "$test_user_dn"; then
+	echo "bad: password with small chars and numbers was accepted"; exit 1;
+fi
+
+if ! ldappasswd -x -D "$test_user_dn" -w "ROFLkopter1337secure" -s "rofl kopter 1337 SECURE" "$test_user_dn"; then
+	echo "bad: valid password 2 was rejected"; exit 1;
+fi
+
+if ! test "$(ldapwhoami -x -D $test_user_dn -w 'rofl kopter 1337 SECURE')" = "dn:$test_user_dn"; then
+	echo "bad: login with valid password failed"; exit 1;
+fi
+
+echo "test successful!"
