@@ -66,7 +66,7 @@ OPENLDAP_DEB_IMAGE = localhost/$(PROJECT)/openldap-deb:$(GIT_TAG)
 RUN_UPSTREAM_TESTS ?= 0
 
 # Helm chart OCI registry. Charts land under <registry>/<project>/charts/<name>.
-# Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/slaptain/charts/slaptain-operator --version X.Y.Z
+# Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain-operator --version X.Y.Z
 CHART_REGISTRY ?= oci://$(REGISTRY)/charts
 CHART_OUT      := .charts
 
