@@ -280,9 +280,18 @@ Two follow-ups worth considering:
 - **Lag is only observable under traffic.** `csnSyncThreshold` is 5 s, so a broken
   link shows as `Lagging` promptly *while writes flow*; on an idle database both
   sides sit at the same CSN and the state reads `Synced` across an arbitrarily broken
-  link. Heartbeat writes would close that, and are deferred with reasons in the
-  ADR-008 amendment — the objection is that the operator would be writing into the
-  user's data tree, not that it wouldn't work.
+  link. Heartbeat writes would close that, and per the ADR-008 amendment of
+  2026-09-11 would also close a real gap: idleness lets a serverID go dormant,
+  which is what makes `syncprov`'s minCSN fallback pick a stale lookup key and
+  trigger the ITS#9580 "sync cookie is stale" full-refresh storm on reconnect
+  (see `docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md`).
+  They stay deferred anyway: the OpenLDAP 2.7 upgrade (ADR-021) and the syncprov
+  sessionlog's per-SID viability check (ADR-022) act on that defect directly, and
+  the objection that the operator would be writing into the user's data tree
+  still applies to a heartbeat, which would only mask it. This is the second
+  time the system has turned out to depend on periodic activity nobody
+  deliberately generates — the first was the incidental 60 s-tick resync
+  found in the ADR-002 amendment (2026-08-26).
 
 ---
 
