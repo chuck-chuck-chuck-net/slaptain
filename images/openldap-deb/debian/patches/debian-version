@@ -1,0 +1,16 @@
+Description: Replace upstream version with Debian version in version strings
+Forwarded: not-needed
+Author: Ryan Tandy <ryan@nardis.ca>
+Index: openldap/build/version.sh
+===================================================================
+--- openldap.orig/build/version.sh	2022-05-20 17:35:48.989227363 -0400
++++ openldap/build/version.sh	2022-05-20 17:35:48.989227363 -0400
+@@ -36,7 +36,7 @@
+ echo OL_PATCH=$ol_patch
+ echo OL_API_INC=$ol_api_inc
+ echo OL_API_LIB_VERSION=$ol_api_lib_version
+-echo OL_VERSION=$ol_version
++echo OL_VERSION=\"${DEB_VERSION:-$ol_version}\"
+ echo OL_TYPE=$ol_type
+ echo OL_STRING=\"${ol_string}\"
+ echo OL_RELEASE_DATE=\"${ol_release_date}\"

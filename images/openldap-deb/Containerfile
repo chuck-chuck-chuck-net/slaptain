@@ -1,0 +1,82 @@
+# OpenLDAP 2.7.1 Debian packages, built from pristine upstream sources with the
+# vendored packaging fork in ./debian (see README.md and ADR-021).
+#
+# This image is a *build artifact carrier*, not a runtime image: the final stage
+# is `scratch` holding nothing but /debs. Both images/slapd/Containerfile and
+# images/slapd-init/Containerfile consume it via
+#   COPY --from=${OPENLDAP_DEB_IMAGE} /debs /debs
+# so the package build runs ONCE per tag and feeds both. It is never pushed to a
+# registry — `make build-openldap-deb` tags it under localhost/.
+
+# ── Package build stage ─────────────────────────────────────────────────────
+FROM debian:trixie-slim AS deb-build
+
+ARG OPENLDAP_VERSION=2.7.1
+# sha256 of the upstream release tarball. A mismatch fails the build — this is
+# the only integrity check on the download, so it must never be relaxed.
+ARG OPENLDAP_SHA256=253db80f301258ea69cda1184766d57395b836aaabf41157eb0316eb0fac1341
+ARG OPENLDAP_URL=https://www.openldap.org/software/download/OpenLDAP/openldap-release/openldap-${OPENLDAP_VERSION}.tgz
+# Upstream test suite: skipped by default (it takes tens of minutes and needs a
+# working loopback/krb5 setup). Set to 1 to run it — see README.md.
+ARG RUN_UPSTREAM_TESTS=0
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        devscripts \
+        equivs \
+        fakeroot \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Fetch and verify the upstream tarball. The sha256 is pinned above; the build
+# stops here on any mismatch rather than packaging an unverified source tree.
+RUN set -eux; \
+    curl -fsSL -o openldap-${OPENLDAP_VERSION}.tgz "${OPENLDAP_URL}"; \
+    echo "${OPENLDAP_SHA256}  openldap-${OPENLDAP_VERSION}.tgz" | sha256sum -c -; \
+    tar xzf openldap-${OPENLDAP_VERSION}.tgz; \
+    # dpkg-source keeps the .orig tarball next to the source tree.
+    cp openldap-${OPENLDAP_VERSION}.tgz openldap_${OPENLDAP_VERSION}.orig.tar.gz
+
+# The vendored packaging fork.
+COPY debian /build/openldap-${OPENLDAP_VERSION}/debian
+
+WORKDIR /build/openldap-${OPENLDAP_VERSION}
+
+# apt-get update again: the stage above dropped the package lists, and
+# mk-build-deps needs them to resolve the build dependencies.
+RUN apt-get update \
+    && mk-build-deps -i -r -t 'apt-get -y --no-install-recommends' debian/control \
+    && rm -rf /var/lib/apt/lists/*
+
+# DFSG_NONFREE=1: we build the pristine upstream tarball, so debian/rules must
+# skip both its DFSG-freeness assertion and its schema substitution (which
+# expects the +dfsg-repacked source layout).
+#
+# Note there is deliberately NO DPKG_GENSYMBOLS_CHECK_LEVEL override here: the
+# 2.6 -> 2.7 libldap ABI delta is recorded in debian/libldap2.symbols, so an
+# unexpected symbol change fails the build instead of being papered over.
+RUN set -eux; \
+    export DFSG_NONFREE=1; \
+    if [ "${RUN_UPSTREAM_TESTS}" = "1" ]; then check=""; else check="nocheck"; fi; \
+    export DEB_BUILD_OPTIONS="${check} parallel=$(nproc)"; \
+    dpkg-buildpackage -us -uc -b
+
+# Collect only the packages the images install. The -dbgsym, -dev and
+# slapd-contrib packages are build by-products we do not ship — the 2.6 images
+# never carried contrib either, and 2.7's `slapd` module set is a superset of
+# what Debian's 2.6 `slapd` shipped (minus back-perl/back-sql, retired upstream).
+RUN set -eux; \
+    install -d /debs; \
+    for p in slapd ldap-utils libldap2 libldap-common; do \
+        cp /build/${p}_*.deb /debs/; \
+    done; \
+    ls -la /debs
+
+# ── Artifact carrier ────────────────────────────────────────────────────────
+FROM scratch
+COPY --from=deb-build /debs /debs

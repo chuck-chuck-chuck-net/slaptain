@@ -1,0 +1,13 @@
+Index: openldap/build/top.mk
+===================================================================
+--- openldap.orig/build/top.mk	2022-05-20 17:36:15.513248684 -0400
++++ openldap/build/top.mk	2022-05-20 17:36:15.509248681 -0400
+@@ -20,7 +20,7 @@
+ RELEASEDATE= @OPENLDAP_RELEASE_DATE@
+ 
+ @SET_MAKE@
+-SHELL = /bin/sh
++SHELL = @SHELL@
+ 
+ top_builddir = @top_builddir@
+ 

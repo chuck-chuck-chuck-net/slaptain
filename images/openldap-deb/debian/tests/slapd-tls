@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eux
+
+SSL_CERT=/etc/ssl/certs/ssl-cert-snakeoil.pem
+SSL_KEY=/etc/ssl/private/ssl-cert-snakeoil.key
+SSL_PRIVATE_DIR=/etc/ssl/private
+
+export DEBIAN_FRONTEND=noninteractive
+
+debconf-set-selections << eof
+slapd slapd/password1 password secret
+slapd slapd/password2 password secret
+slapd slapd/domain string example.com
+slapd slapd/organization string example.com
+eof
+
+apt-get -y install slapd
+
+chgrp openldap "$SSL_PRIVATE_DIR" "$SSL_KEY"
+chmod g+r "$SSL_KEY"
+
+ldapmodify -H ldapi:// -Y EXTERNAL << EOF
+dn: cn=config
+add: olcTLSCertificateFile
+olcTLSCertificateFile: $SSL_CERT
+-
+add: olcTLSCertificateKeyFile
+olcTLSCertificateKeyFile: $SSL_KEY
+
+EOF
+
+test "$(ldapwhoami -ZZ -o tls_cacert="$SSL_CERT" -x -D 'cn=admin,dc=example,dc=com' -w secret)" = 'dn:cn=admin,dc=example,dc=com'

@@ -1,0 +1,302 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the openldap package.
+# Yangfl <mmyangfl@gmail.com>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: openldap\n"
+"Report-Msgid-Bugs-To: openldap@packages.debian.org\n"
+"POT-Creation-Date: 2021-08-16 01:12+0000\n"
+"PO-Revision-Date: 2026-01-08 07:11+0800\n"
+"Last-Translator: Yangfl <mmyangfl@gmail.com>\n"
+"Language-Team: 漢語 <debian-l10n-chinese@lists.debian.org>\n"
+"Language: zh_TW\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"X-Generator: Poedit 3.8\n"
+
+#. Type: boolean
+#. Description
+#: ../slapd.templates:1001
+msgid "Omit OpenLDAP server configuration?"
+msgstr "跳過 OpenLDAP 伺服器設定？"
+
+#. Type: boolean
+#. Description
+#: ../slapd.templates:1001
+msgid ""
+"If you enable this option, no initial configuration or database will be "
+"created for you."
+msgstr "選擇此選項，則不會為您建立初始設定或資料庫。"
+
+#. Type: select
+#. Choices
+#: ../slapd.templates:2001
+msgid "always"
+msgstr "總是"
+
+#. Type: select
+#. Choices
+#: ../slapd.templates:2001
+msgid "when needed"
+msgstr "按需"
+
+#. Type: select
+#. Choices
+#: ../slapd.templates:2001
+msgid "never"
+msgstr "從不"
+
+#. Type: select
+#. Description
+#: ../slapd.templates:2002
+msgid "Dump databases to file on upgrade:"
+msgstr "升級時將資料庫轉儲到檔案："
+
+#. Type: select
+#. Description
+#: ../slapd.templates:2002
+msgid ""
+"Before upgrading to a new version of the OpenLDAP server, the data from your "
+"LDAP directories can be dumped into plain text files in the standard LDAP "
+"Data Interchange Format."
+msgstr ""
+"在升級到新版本的 OpenLDAP 伺服器之前，可以將 LDAP 目錄中的資料轉儲為標準 "
+"LDAP 資料交換格式的純文字檔案。"
+
+#. Type: select
+#. Description
+#: ../slapd.templates:2002
+msgid ""
+"Selecting \"always\" will cause the databases to be dumped unconditionally "
+"before an upgrade. Selecting \"when needed\" will only dump the database if "
+"the new version is incompatible with the old database format and it needs to "
+"be reimported. If you select \"never\", no dump will be done."
+msgstr ""
+"選擇「始終」將在升級前無條件轉儲資料庫。選擇「按需」僅在新版本與舊資料庫格式"
+"不相容且需要重新匯入時才轉儲資料庫。選擇「從不」，則不會執行任何轉儲操作。"
+
+#. Type: string
+#. Description
+#: ../slapd.templates:3001
+msgid "Directory to use for dumped databases:"
+msgstr "用於存放轉儲資料庫的目錄："
+
+#. Type: string
+#. Description
+#: ../slapd.templates:3001
+msgid ""
+"Please specify the directory where the LDAP databases will be exported. In "
+"this directory, several LDIF files will be created which correspond to the "
+"search bases located on the server. Make sure you have enough free space on "
+"the partition where the directory is located. The first occurrence of the "
+"string \"VERSION\" is replaced with the server version you are upgrading "
+"from."
+msgstr ""
+"請指定要轉儲 LDAP 資料庫的目錄。在此目錄下，將建立多個 LDIF 文件，分別對應於"
+"伺服器上的各個搜尋庫。請確保目錄所在的分割區有足夠的可用空間。字串“VERSION”首"
+"次出現時將被替換為升級前的伺服器版本號。"
+
+#. Type: boolean
+#. Description
+#: ../slapd.templates:4001
+msgid "Move old database?"
+msgstr "移動舊資料庫？"
+
+#. Type: boolean
+#. Description
+#: ../slapd.templates:4001
+msgid ""
+"There are still files in /var/lib/ldap which will probably break the "
+"configuration process. If you enable this option, the maintainer scripts "
+"will move the old database files out of the way before creating a new "
+"database."
+msgstr ""
+"/var/lib/ldap 目錄中仍然存在一些文件，可能會使設定過程出錯。選擇此選項，維護"
+"腳本會在建立新資料庫之前將舊資料庫檔案移走。"
+
+#. Type: boolean
+#. Description
+#: ../slapd.templates:5001
+msgid "Retry configuration?"
+msgstr "重試設定？"
+
+#. Type: boolean
+#. Description
+#: ../slapd.templates:5001
+msgid ""
+"The configuration you entered is invalid. Make sure that the DNS domain name "
+"is syntactically valid, the field for the organization is not left empty and "
+"the admin passwords match. If you decide not to retry the configuration the "
+"LDAP server will not be set up. Run 'dpkg-reconfigure slapd' if you want to "
+"retry later."
+msgstr ""
+"您輸入的設定無效。請確保 DNS 網域名稱語法正確，組織名稱欄位不為空，且管理員密"
+"碼相符。如果您選擇不重試配置，將不會設定 LDAP 伺服器。如果您想稍後重試，請執"
+"行「dpkg-reconfigure slapd」。"
+
+#. Type: string
+#. Description
+#: ../slapd.templates:6001
+msgid "DNS domain name:"
+msgstr "DNS 網域名稱："
+
+#. Type: string
+#. Description
+#: ../slapd.templates:6001
+msgid ""
+"The DNS domain name is used to construct the base DN of the LDAP directory. "
+"For example, 'foo.example.org' will create the directory with 'dc=foo, "
+"dc=example, dc=org' as base DN."
+msgstr ""
+"DNS 網域用於建立 LDAP 目錄的基本 DN。例如，網域「foo.example.org」將建立以"
+"「dc=foo, dc=example, dc=org」為基本 DN 的目錄。"
+
+#. Type: string
+#. Description
+#: ../slapd.templates:7001
+msgid "Organization name:"
+msgstr "組織名稱："
+
+#. Type: string
+#. Description
+#: ../slapd.templates:7001
+msgid ""
+"Please enter the name of the organization to use in the base DN of your LDAP "
+"directory."
+msgstr "請輸入要在 LDAP 目錄的基本 DN 中使用的組織名稱。"
+
+#. Type: password
+#. Description
+#: ../slapd.templates:8001
+msgid "Administrator password:"
+msgstr "管理員密碼："
+
+#. Type: password
+#. Description
+#: ../slapd.templates:8001
+msgid "Please enter the password for the admin entry in your LDAP directory."
+msgstr "請輸入 LDAP 目錄中管理員條目的密碼。"
+
+#. Type: password
+#. Description
+#: ../slapd.templates:9001
+msgid "Confirm password:"
+msgstr "確認密碼："
+
+#. Type: password
+#. Description
+#: ../slapd.templates:9001
+msgid ""
+"Please enter the admin password for your LDAP directory again to verify that "
+"you have typed it correctly."
+msgstr "請再次輸入 LDAP 目錄的管理員密碼，以確認輸入正確。"
+
+#. Type: note
+#. Description
+#: ../slapd.templates:10001
+msgid "Password mismatch"
+msgstr "密碼不匹配"
+
+#. Type: note
+#. Description
+#: ../slapd.templates:10001
+msgid "The two passwords you entered were not the same. Please try again."
+msgstr "您兩次輸入的密碼不一致。請重試。"
+
+#. Type: boolean
+#. Description
+#: ../slapd.templates:11001
+msgid "Do you want the database to be removed when slapd is purged?"
+msgstr "清除 slapd 時移除資料庫嗎？"
+
+#. Type: error
+#. Description
+#: ../slapd.templates:14001
+msgid "slapcat failure during upgrade"
+msgstr "升級過程中 slapcat 故障"
+
+#. Type: error
+#. Description
+#: ../slapd.templates:14001
+msgid "An error occurred while upgrading the LDAP directory."
+msgstr "升級 LDAP 目錄時發生錯誤。"
+
+#. Type: error
+#. Description
+#: ../slapd.templates:14001
+msgid ""
+"The 'slapcat' program failed while extracting the LDAP directory. This may "
+"be caused by an incorrect configuration file (for example, missing "
+"'moduleload' lines to support the backend database)."
+msgstr ""
+"「slapcat」程式擷取 LDAP 目錄失敗。可能是設定檔不正確造成的（例如，缺少用於支"
+"援後端資料庫的「moduleload」行）。"
+
+#. Type: error
+#. Description
+#. This paragraph is followed by a (non translatable) paragraph
+#. containing a command line
+#: ../slapd.templates:14001
+msgid ""
+"This failure will cause 'slapadd' to fail later as well. The old database "
+"files will be moved to /var/backups. If you want to try this upgrade again, "
+"you should move the old database files back into place, fix whatever caused "
+"slapcat to fail, and run:"
+msgstr ""
+"此次故障會導致後續的「slapadd」指令也失敗。舊的資料庫檔案將會被移到 /var/"
+"backups 目錄。如果您想再次嘗試升級，應將舊的資料庫檔案移回原位，修復導致 "
+"slapcat 失敗的問題，然後執行以下指令："
+
+#. Type: error
+#. Description
+#. Translators: keep "${location}" unchanged. This is a variable that
+#. will be replaced by a directory name at execution
+#: ../slapd.templates:14001
+msgid ""
+"Then move the database files back to a backup area and then try running "
+"slapadd from ${location}."
+msgstr "然後將資料庫檔案移回備份區域，然後嘗試在 ${location} 執行 slapadd。"
+
+#. Type: note
+#. Description
+#: ../slapd.templates:15001
+msgid "Error while performing post-installation tasks"
+msgstr "執行安裝後任務時發生錯誤"
+
+#. Type: note
+#. Description
+#: ../slapd.templates:15001
+msgid ""
+"There has been one or more errors while performing some post-installation "
+"tasks. This probably means that the slapd package could not automatically "
+"migrate one or more LDAP databases, or that a backend being used by the "
+"current OpenLDAP installation is not supported anymore."
+msgstr ""
+"執行某些安裝後任務時出現一個或多個錯誤。這可能意味著 slapd 套件無法自動遷移一"
+"個或多個 LDAP 資料庫，或目前 OpenLDAP 安裝使用的後端已不再受支援。"
+
+#. Type: note
+#. Description
+#: ../slapd.templates:15001
+msgid ""
+"The maintainer script responsible for executing the post-installation tasks "
+"has exited, but the slapd service has NOT been (re)started. You will need to "
+"manually fix the problem and then start the service."
+msgstr ""
+"負責執行安裝後任務的維護腳本已退出，但 slapd 服務尚未（重新）啟動。您需要手動"
+"修復此問題，再啟動該服務。"
+
+#. Type: note
+#. Description
+#: ../slapd.templates:15001
+msgid ""
+"For more information on possible problematic scenarios and how to address "
+"them, please take a look at the README.Debian file (under /usr/share/doc/"
+"slapd/)."
+msgstr ""
+"有關可能出現的問題以及如何解決這些問題的更多信息，請參閱 README.Debian 檔案"
+"（位於 /usr/share/doc/slapd/ 下）。"

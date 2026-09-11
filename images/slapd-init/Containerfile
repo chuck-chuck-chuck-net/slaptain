@@ -1,10 +1,30 @@
+# OpenLDAP 2.7.1 bootstrap init image (the default `slapd-init:<tag>`).
+#
+# Same packages as the slapd runtime image, from the same one-shot package build
+# (images/openldap-deb/Containerfile) — the init container runs slapadd/slaptest
+# against the config and data volumes that slapd then opens, so the two images
+# must carry the same OpenLDAP version. The 2.6 variant lives in
+# Containerfile.ol26 and is built as slapd-init:<tag>-ol26. See ADR-021.
+
+ARG OPENLDAP_DEB_IMAGE=localhost/slaptain/openldap-deb:latest
+
+FROM ${OPENLDAP_DEB_IMAGE} AS debs
+
 FROM debian:trixie-slim
 
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY --from=debs /debs /debs
+
+# slapd + ldap-utils from the local 2.7.1 packages (apt pulls their archive
+# dependencies); python3 for bootstrap.sh's LDIF handling.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        slapd \
-        ldap-utils \
+        /debs/libldap-common_*.deb \
+        /debs/libldap2_*.deb \
+        /debs/slapd_*.deb \
+        /debs/ldap-utils_*.deb \
         python3 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /debs
 
 RUN groupmod -g 1024 openldap && \
     usermod -u 1024 -g 1024 openldap
