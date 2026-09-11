@@ -229,8 +229,8 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [Team Onboarding](docs/ONBOARDING.md) — LDAP concepts, OpenLDAP specifics, operator model
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
 - [Backup & Restore](docs/BACKUP.md) — S3 backup, scheduled backups + retention, restore into a fresh DB, in-place rollback
-- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-014
-- [Development Guide](docs/DEVELOPMENT.md) — local dev workflow, building, testing
+- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-022
+- [Development Guide](docs/DEVELOPMENT.md) — prerequisites, image builds, operator dev loop, e2e cycle, debugging, project discipline
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 
 ## Development

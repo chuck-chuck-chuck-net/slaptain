@@ -64,7 +64,7 @@ make testing-apply    # kubectl apply tests/resources/$TEST_RESOURCES/
 make testing-delete
 ```
 
-`TEST_RESOURCES` defaults to `example` (open-source fixtures). Set it to `lab` for the
+`TEST_RESOURCES` defaults to `example` in `tests/e2e.sh` but to `lab` in the root Makefile's `testing-apply` (an internal-lab convenience — pass `TEST_RESOURCES=example` there when in doubt). Set it to `lab` for the
 internal lab variant (see `tests/resources/lab/` for SOPS-encrypted secrets used there),
 or to `storm-repro` for the ITS#9580 reproduction fixture — a copy of `example` whose
 `accesslogPurge` is 5 minutes instead of 2 days (used by `tests/e2e-storm-repro.sh`,
@@ -500,7 +500,7 @@ step connects to each pod via headless DNS. If the external peer's `bindPassword
 Secret is missing or empty, the operator logs a warning and skips that peer.
 
 ```bash
-kubectl logs -n slaptain deploy/slaptain-operator-controller-manager | grep -i replication
+kubectl logs -n slaptain deploy/slaptain-operator | grep -i replication
 ```
 
 **Data not replicating:** Verify syncrepl status from inside a pod:

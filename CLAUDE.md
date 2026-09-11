@@ -43,6 +43,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ├── CLAUDE.md
 ├── docs/
 │   ├── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
+│   ├── DEVELOPMENT.md              # Dev guide: prerequisites, builds, operator loop, e2e cycle, debugging
 │   ├── ONBOARDING.md               # Team onboarding: LDAP concepts, operator model, credential model
 │   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
 │   ├── MIGRATION-LEGACY-SOURCE.md  # Source-side (legacy slapd) prep for hot migration
