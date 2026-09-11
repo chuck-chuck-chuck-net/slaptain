@@ -151,3 +151,60 @@ Cheaper and strictly-better-value alternatives, tracked in `docs/BACKLOG.md`:
 comparing the addresses a stanza actually names against the addresses currently
 discovered — both already known locally, no writes, and it catches the stale-address
 class even while idle.
+
+### Amendment (2026-09-11): the idle-periods premise was wrong — heartbeats stay deferred anyway
+
+The bullet above — "it buys liveness detection only during idle periods, which
+is exactly when nothing is at stake" — is refuted. It stays in the text above;
+this section is the correction, not a rewrite.
+
+A syncrepl cookie carries one CSN per serverID. `syncprov` cannot look CSNs up
+by serverid, so it falls back to the *minimum* CSN across all SIDs as its
+accesslog lookup key (`servers/slapd/overlays/syncprov.c`, upstream TODO
+around line 3460 in 2.6.13: "dormant serverids in the cluster become mincsns
+and more likely to make `syncprov_findcsn(,FIND_CSN,)` fail -> triggering an
+expensive refresh"). A dormant SID — a pod or site that has not written in a
+long time — pins that minimum arbitrarily old.
+
+Idleness itself breaks nothing while a persistent connection stays up. The
+failure fires on reconnection — pod restart, IP change, network blip: if the
+provider's accesslog can no longer produce an entry at that old minCSN
+(purged by `accesslogPurge`, wiped, or contaminated by a prior refresh), it
+answers `err=4096` "sync cookie is stale", the consumer full-refreshes, and
+that refresh contaminates its own accesslog for its own consumers in turn. The
+loop cascades. This is the same mechanism as the live-measured ITS#9580 storm
+in `docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md`
+(~14k connections in 27 s, hundreds of millicores), not a separate incident.
+
+So the idle/at-stake framing had it backwards: no-traffic is the amplifier —
+it is what lets a SID go dormant and its minCSN go stale — reconnect is the
+trigger, and an accesslog that can't answer at the old minCSN is the
+ammunition. `spec.replication.keepalive` only touches the trigger: TCP
+keepalive stops a connection from going silently dead, but advances no CSN,
+so it does nothing about the amplifier.
+
+Heartbeats would have worked against this. A per-pod write at an interval
+comfortably inside the `accesslogPurge` maxage keeps every SID's CSN findable
+in every peer's log — exactly the condition dormancy violates. So the original
+reasoning was wrong in the other direction too: this was a real gap, not a
+harmless one.
+
+They stay deferred anyway, for different reasons now:
+
+1. We chose two better mitigations instead. The OpenLDAP 2.7 line ships the
+   ITS#9580 present-phase cookie-flush fix (MR 472, commit `414866b8`, merged
+   2022, first released in 2.7.0 on 2026-08-06) — see ADR-021. The syncprov
+   sessionlog's replay path does a per-SID viability check ("SID not present
+   == new enough") that neutralizes dormant SIDs for the reconnects it can
+   serve — see ADR-022. Both act on the defect's mechanism (the 2.7 fix
+   partially, by upstream's own account; the sessionlog as hardening); a
+   heartbeat only avoids triggering it.
+2. The boundary objection from the original deferral is unchanged: the
+   operator would still be writing into the user's data tree.
+3. A heartbeat is probabilistic masking of an upstream defect, not a fix for
+   it — it lowers the odds a SID goes dormant enough to matter, no more. With
+   ADR-021/ADR-022 addressing the defect directly, masking buys little.
+
+If we ever build it regardless: opt-in, one entry per pod, not per site — the
+mechanism keys on SID, and RW pods within a site each hold their own — at an
+interval well inside `accesslogPurge` maxage.
