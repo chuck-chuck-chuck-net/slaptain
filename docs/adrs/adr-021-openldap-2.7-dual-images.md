@@ -113,9 +113,14 @@ Ship two image pairs, with the plain tag being OpenLDAP 2.7.1.
   mincsn lookup succeeded; the storm needs a **dormant SID**, i.e. the
   multi-site mesh of the investigation doc with one site originating no writes.
   The assertion therefore stands as a tripwire, but its red has not yet been
-  observed in an e2e run: that red belongs to the deferred multi-site
-  validation, where an `-ol26` run is expected to fail it (thousands of lines)
-  and a 2.7.1 run to pass (~0).
+  observed in an e2e run. A first three-site `-ol26` attempt (same date) also
+  counted 0: the suite's own cross-site probe traffic keeps every SID warm, so
+  dormancy never accumulates inside one run. That matches the original repro's
+  intermittency (it hit on iteration 28 of a repro loop). Observing the red
+  deliberately needs an iteration loop with an idle site, not a single cycle —
+  until then the tripwire's value is guarding 2.7 against regression (~0
+  measured single-site and three-site), not proving 2.6 broken (the
+  investigation's live capture already does that).
 
 ## Consequences
 
