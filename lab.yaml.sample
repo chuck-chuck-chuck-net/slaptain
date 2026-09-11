@@ -1,0 +1,52 @@
+# lab.yaml — lab inventory for the e2e suites. SAMPLE with placeholder values.
+#
+# Copy to <repo-root>/lab.yaml and fill in your lab's real values. lab.yaml is
+# gitignored: it typically carries internal addresses and hostnames that must
+# never be committed (see CLAUDE.md "References"). tests/e2e.sh picks it up
+# automatically; E2E_CONFIG=<path> overrides the location.
+#
+# The schema is shared with the littlered operator's multi-site e2e config so
+# ONE file can describe the whole lab. Keys a project does not know are
+# ignored. Environment variables always win over file values — the file
+# supplies lab facts (sites, registry, network mode), never per-run knobs
+# (GIT_TAG, SLAPD_TAG_SUFFIX, E2E_* gates, seeds).
+
+# ── littlered-only (slaptain ignores these) ──────────────────────────────────
+hubContext: hub                       # hub-and-spoke control-plane context
+hubPodCIDR: "10.100.0.0/16"           # hub pod CIDR (network-cut scenarios)
+operatorNamespace: littlered-system   # littlered's top-level key (legacy)
+
+# ── slaptain section ─────────────────────────────────────────────────────────
+slaptain:
+  registry: registry.k8s.example      # container registry for all images
+  operatorNamespace: slaptain
+  testingNamespace: slaptain-testing
+  testResources: example              # tests/resources/<dir> to apply
+  replicationNetwork:
+    mode: pod-routed                  # pod-routed (ADR-016) | multus (ADR-007)
+    # multusNetwork: infra/replication-net   # required when mode: multus
+
+# ── shared site inventory ────────────────────────────────────────────────────
+# Order matters: the first site is the primary. When the e2e is invoked
+# without context arguments, all sites are used (N≥2 → multi-site).
+sites:
+  - name: site-a
+    context: site-a                   # kubectl context name
+    endpoint: https://192.0.2.10:6443 # site API URL routable FROM PODS on the
+                                      # other sites (remote peer discovery)
+    nodeAccessIP: 198.51.100.10       # slaptain: NodePort + TLS-SAN address.
+                                      # Needed on dual-homed nodes whose k8s
+                                      # InternalIP the test runner cannot
+                                      # reach; omit when InternalIP is fine.
+    vms:                              # libvirt inventory for whole-site
+                                      # outage scenarios (littlered scenario A;
+                                      # slaptain: planned ITS#9580 dormancy
+                                      # repro — idle/killed site)
+      - {name: site-a-node1, uri: qemu+ssh://user@hypervisor.example/system}
+      - {name: site-a-node2, uri: qemu+ssh://user@hypervisor.example/system}
+  - name: site-b
+    context: site-b
+    endpoint: https://192.0.2.20:6443
+    nodeAccessIP: 198.51.100.20
+    vms:
+      - {name: site-b-node1, uri: qemu+ssh://user@hypervisor.example/system}

@@ -39,6 +39,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ```
 .
 ├── Makefile                        # Root build targets (see Makefile Targets below)
+├── lab.yaml.sample                 # Lab config schema for tests/e2e.sh (real lab.yaml is gitignored)
 ├── CLAUDE.md
 ├── docs/
 │   ├── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
@@ -279,7 +280,10 @@ dual-homed clusters that default is wrong when the `InternalIP` is on a network 
 runner can't reach north-south (e.g. a routed replication network chosen as the
 primary node network) — and the reachable NIC isn't k8s-registered, so it can't be
 auto-discovered. Override it: `E2E_NODE_ACCESS_IP=<ip>`
-(single-site) or `E2E_NODE_ACCESS_IPS="ctx=ip ..."` (multi-site). This drives
+(single-site) or `E2E_NODE_ACCESS_IPS="ctx=ip ..."` (multi-site) — or describe
+the lab once in a gitignored `<repo-root>/lab.yaml` (schema: `lab.yaml.sample`;
+shared with littlered's multi-site e2e; env vars win; `./tests/e2e.sh config`
+dumps the resolved values; sites double as the default context list). This drives
 `LDAP_ADDR`/`E2E_REMOTE_LDAP_ADDR`, the suite's `E2E_NODE_IP`, and the TLS cert
 SAN; cross-site peer URIs keep the `InternalIP` (they must ride the replication
 network). See `tests/README.md`.
