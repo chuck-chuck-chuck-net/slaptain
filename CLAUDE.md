@@ -132,7 +132,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
         ├── readonly_test.go        # Read-only replica tests: data sync, write rejection
         ├── resilience_test.go      # Pod-restart resilience (warm restart labelled persistent-only; gated E2E_RESILIENCE=1)
-        ├── dataloss_recovery_test.go # Pod loses its PVCs; replication restores DIT (ADR-012 case 2) + ITS#9580 no-storm assertion (ADR-021; expected to FAIL on -ol26 images)
+        ├── dataloss_recovery_test.go # Pod loses its PVCs; replication restores DIT (ADR-012 case 2) + ITS#9580 no-storm assertion (ADR-021; red only on -ol26 in a multi-site mesh with a dormant SID — single-site fresh measured 0)
         ├── migration_test.go       # Migration scenario (gated at registration time: E2E_MIGRATION=1)
         ├── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
         ├── backup_test.go          # SlapdBackup → S3 round-trip (gated: E2E_BACKUP=1, deploys versitygw)

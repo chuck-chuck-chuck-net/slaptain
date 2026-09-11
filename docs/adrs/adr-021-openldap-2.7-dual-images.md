@@ -103,9 +103,19 @@ Ship two image pairs, with the plain tag being OpenLDAP 2.7.1.
 - The guard against a regression is a behavioural e2e assertion, not a version
   check. `tests/e2e/dataloss_recovery_test.go` asserts that fewer than 50
   `sync cookie is stale` lines appear across the RW pods' slapd logs in the
-  recovery window — red on `-ol26` (thousands), green on 2.7.1 (~0). The spec
-  skips itself when the cluster's `logLevel` lacks the `stats` bit, since without
-  it the count is trivially zero and the green would be false.
+  recovery window. The spec skips itself when the cluster's `logLevel` lacks the
+  `stats` bit, since without it the count is trivially zero and the green would
+  be false.
+
+  **Measured negative result (2026-09-11):** a fresh single-site 3-pod cluster
+  on 2.6.10 does **not** reproduce the storm — the red-first run counted 0
+  occurrences with an 18 s recovery. Every local SID had a recent CSN, so the
+  mincsn lookup succeeded; the storm needs a **dormant SID**, i.e. the
+  multi-site mesh of the investigation doc with one site originating no writes.
+  The assertion therefore stands as a tripwire, but its red has not yet been
+  observed in an e2e run: that red belongs to the deferred multi-site
+  validation, where an `-ol26` run is expected to fail it (thousands of lines)
+  and a 2.7.1 run to pass (~0).
 
 ## Consequences
 

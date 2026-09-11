@@ -66,7 +66,9 @@ tag):
 SLAPD_TAG_SUFFIX=-ol26 ./tests/e2e.sh all <context>
 ```
 
-Expect `dataloss_recovery_test`'s ITS#9580 spec to **fail** there: that failure
+In a **multi-site mesh with an idle site**, expect `dataloss_recovery_test`'s
+ITS#9580 spec to **fail** there (a fresh single-site cluster does not reproduce
+the storm — no SID is dormant, measured 2026-09-11): that failure
 is the behaviour the version bump fixes.
 
 ## Migrating an existing 2.6 cluster to 2.7

@@ -213,10 +213,16 @@ var _ = Describe("data loss recovery via replication",
 	// lines — see docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md.
 	// Upstream fixed it in commit 414866b8, released only in 2.7.0/2.7.1.
 	//
-	// Running this suite against the legacy `-ol26` images is therefore EXPECTED
-	// TO FAIL here, and that failure is the point: it is the red that the
-	// version bump turns green. See ADR-021 before "fixing" it by raising the
-	// threshold.
+	// Red-first honesty (measured 2026-09-11): a FRESH SINGLE-SITE cluster does
+	// NOT reproduce the storm on 2.6 — this spec counted 0 occurrences across 3
+	// RW pods with an 18 s recovery, because every local SID has a recent CSN
+	// and the mincsn lookup succeeds. The storm needs a dormant SID, i.e. the
+	// multi-site mesh of the investigation doc (one site originating no writes).
+	// So this assertion has never been observed red: it is a tripwire whose red
+	// lives in the multi-site scenario (deferred with multi-site validation —
+	// ADR-021). On a multi-site run against `-ol26` images it is expected to
+	// fail, and that failure would be the point. See ADR-021 before "fixing"
+	// it by raising the threshold.
 	It("no 'sync cookie is stale' storm follows the recovery (ITS#9580, ADR-021)",
 		func(ctx SpecContext) {
 			const needle = "sync cookie is stale"
@@ -249,8 +255,9 @@ var _ = Describe("data loss recovery via replication",
 			Expect(total).To(BeNumerically("<", maxOccurrences),
 				"%d %q lines across %v since the PVC-loss recovery (limit %d). This is the "+
 					"ITS#9580 refresh storm: OpenLDAP 2.6 cannot serve a delta-sync cookie from "+
-					"an accesslog that a full refresh filled in receive order. Expected on the "+
-					"-ol26 images; on 2.7.1 it should be ~0. See ADR-021.",
+					"an accesslog that a full refresh filled in receive order. Reproduces on "+
+					"-ol26 images only in a multi-site mesh with a dormant SID; on 2.7.1 it "+
+					"should be ~0 everywhere. See ADR-021.",
 				total, needle, pods, maxOccurrences)
 		}, NodeTimeout(3*time.Minute))
 
