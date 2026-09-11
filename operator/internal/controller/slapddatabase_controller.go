@@ -881,7 +881,14 @@ func dataDBOverlays(conn *ldap.Conn, dataDN string) (hasAccesslog, hasSyncprov b
 // of whether it offers delta-sync. ensureAccesslogOverlay is the additional
 // step that opts a provider into delta-sync.
 //
-// Idempotent: checks for existing overlay before adding.
+// Also converges olcSpSessionlog on every reconcile (ADR-022), which is why
+// this does not early-return on an already-present overlay: the sessionlog is
+// on by default, so an overlay added by an operator predating ADR-022 — or a
+// changed spec value, or a hand-edit — must be brought into line without
+// recreating the overlay.
+//
+// Idempotent: checks for existing overlay before adding, and writes
+// olcSpSessionlog only when it differs from desired.
 func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 	ctx context.Context,
 	conn *ldap.Conn,
@@ -894,22 +901,140 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 	if err != nil {
 		return err
 	}
-	if hasSyncprov {
+
+	ops, sessionlog := desiredSessionlogOps(sd)
+
+	if !hasSyncprov {
+		log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
+		syncprovDN := "olcOverlay=syncprov," + dataDN
+		addReq := ldap.NewAddRequest(syncprovDN, nil)
+		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
+		addReq.Attribute("olcOverlay", []string{"syncprov"})
+		if sd.Spec.Replication.SyncprovCheckpoint != "" {
+			addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
+		}
+		if sessionlog {
+			addReq.Attribute("olcSpSessionlog", []string{strconv.Itoa(int(ops))})
+		}
+		if err := conn.Add(addReq); err != nil {
+			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+				return fmt.Errorf("add syncprov overlay: %w", err)
+			}
+		}
+	}
+
+	return r.ensureSyncprovSessionlog(ctx, conn, host, dataDN, ops, sessionlog)
+}
+
+// defaultSyncprovSessionlogOps is the sessionlog size the operator applies when
+// spec.replication.syncprovSessionlog is unset (ADR-022). One entry is a CSN, an
+// entryUUID and an op tag, so 5000 of them stay well under a megabyte resident.
+const defaultSyncprovSessionlogOps int32 = 5000
+
+// desiredSessionlogOps resolves spec.replication.syncprovSessionlog into an
+// operation count and whether the sessionlog is wanted at all (ADR-022):
+// unset → the operator default, 0 → disabled, >0 → that count verbatim.
+//
+// Applies to the DATA database's syncprov overlay only. An accesslog DB's
+// syncprov must never carry a sessionlog — see ADR-022 for why a successful
+// replay there would displace the minCSN guard.
+func desiredSessionlogOps(sd *ldapv1alpha1.SlapdDatabase) (int32, bool) {
+	if sd.Spec.Replication.SyncprovSessionlog == nil {
+		return defaultSyncprovSessionlogOps, true
+	}
+	ops := *sd.Spec.Replication.SyncprovSessionlog
+	if ops <= 0 {
+		return 0, false
+	}
+	return ops, true
+}
+
+// sessionlogAction is what planSessionlog decided to do with olcSpSessionlog.
+type sessionlogAction int
+
+const (
+	sessionlogNoop sessionlogAction = iota
+	sessionlogSet
+	sessionlogRemove
+)
+
+// planSessionlog compares the live olcSpSessionlog values against desired and
+// returns the single write needed, if any. Pure — the LDAP half only executes
+// the verdict.
+//
+// A live value that does not parse as an integer is treated as differing, not
+// as an error: cn=config holds whatever was last written there, and converging
+// it is the point.
+func planSessionlog(current []string, ops int32, enabled bool) (sessionlogAction, string) {
+	if !enabled {
+		if len(current) == 0 {
+			return sessionlogNoop, ""
+		}
+		return sessionlogRemove, ""
+	}
+	want := strconv.Itoa(int(ops))
+	if len(current) == 1 {
+		if live, err := strconv.Atoi(strings.TrimSpace(current[0])); err == nil && live == int(ops) {
+			return sessionlogNoop, ""
+		}
+	}
+	return sessionlogSet, want
+}
+
+// ensureSyncprovSessionlog aligns olcSpSessionlog on the data DB's syncprov
+// overlay to what planSessionlog wants. Same shape as ensureAccesslogACL:
+// observe, compare, write only on a difference.
+//
+// The overlay's real DN carries a {N} ordering prefix assigned by slapd, so it
+// is read back rather than reconstructed. No overlay means nothing to converge —
+// the caller's add either has not happened yet or was removed concurrently, and
+// the next reconcile handles it (ADR-001).
+func (r *SlapdDatabaseReconciler) ensureSyncprovSessionlog(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	ops int32,
+	enabled bool,
+) error {
+	log := logf.FromContext(ctx)
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcSyncProvConfig)",
+		[]string{"olcSpSessionlog"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search syncprov overlay under %s: %w", dataDN, err)
+	}
+	if len(sr.Entries) == 0 {
+		return nil
+	}
+	overlayDN := sr.Entries[0].DN
+	current := sr.Entries[0].GetEqualFoldAttributeValues("olcSpSessionlog")
+
+	action, value := planSessionlog(current, ops, enabled)
+	if action == sessionlogNoop {
 		return nil
 	}
 
-	log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
-	syncprovDN := "olcOverlay=syncprov," + dataDN
-	addReq := ldap.NewAddRequest(syncprovDN, nil)
-	addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
-	addReq.Attribute("olcOverlay", []string{"syncprov"})
-	if sd.Spec.Replication.SyncprovCheckpoint != "" {
-		addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
+	modReq := ldap.NewModifyRequest(overlayDN, nil)
+	switch action {
+	case sessionlogSet:
+		log.Info("setting syncprov sessionlog on data database",
+			"host", host, "dn", overlayDN, "ops", value)
+		modReq.Replace("olcSpSessionlog", []string{value})
+	case sessionlogRemove:
+		log.Info("removing syncprov sessionlog from data database",
+			"host", host, "dn", overlayDN)
+		modReq.Delete("olcSpSessionlog", nil)
+	case sessionlogNoop:
+		return nil
 	}
-	if err := conn.Add(addReq); err != nil {
-		if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-			return fmt.Errorf("add syncprov overlay: %w", err)
+	if err := conn.Modify(modReq); err != nil {
+		if action == sessionlogRemove && ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchAttribute) {
+			return nil
 		}
+		return fmt.Errorf("set olcSpSessionlog on %s: %w", overlayDN, err)
 	}
 	return nil
 }
