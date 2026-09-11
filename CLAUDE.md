@@ -46,6 +46,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
 │   ├── MIGRATION-LEGACY-SOURCE.md  # Source-side (legacy slapd) prep for hot migration
 │   ├── BACKUP.md                   # S3 backup/restore user guide (ADR-014)
+│   ├── OPENLDAP-VERSIONS.md        # Dual 2.7/2.6 image pairs, tag scheme, 2.6→2.7 migration runbook (ADR-021)
 │   ├── BACKUP-PLAN.md              # ADR-014 implementation breakdown (phases)
 │   ├── BACKLOG.md                  # Cross-cutting tech debt (e.g. client.Apply deprecation)
 │   └── adrs/
@@ -68,7 +69,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-017-bare-integer-serverid.md
 │       ├── adr-018-pvc-deletion-leases.md
 │       ├── adr-019-per-database-accesslog.md
-│       └── adr-020-accesslog-access-control.md
+│       ├── adr-020-accesslog-access-control.md
+│       ├── adr-021-openldap-2.7-dual-images.md
+│       └── adr-022-syncprov-sessionlog.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -77,8 +80,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── slapd-cluster/              # Helm chart deploying a SlapdCluster CR (operator required)
 │   └── slapd-toolkit/              # Persistent debug pod (ldap-utils, python3, ldap3) wired to operator-managed Secrets
 ├── images/
-│   ├── slapd/Containerfile         # slapd runtime image
-│   ├── slapd-init/Containerfile    # Bootstrap init container image
+│   ├── openldap-deb/               # Vendored Debian packaging fork → OpenLDAP 2.7.1 .debs (ADR-021)
+│   ├── slapd/Containerfile         # slapd runtime image (OpenLDAP 2.7.1; Containerfile.ol26 = legacy 2.6)
+│   ├── slapd-init/Containerfile    # Bootstrap init container image (2.7.1; Containerfile.ol26 = legacy 2.6)
 │   ├── slapd-toolkit/Containerfile # Toolkit image (ldap-utils, python3, pyyaml, ldap3)
 │   └── operator/Containerfile      # Operator image (multi-stage, distroless/static)
 ├── scripts/
@@ -128,12 +132,13 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
         ├── readonly_test.go        # Read-only replica tests: data sync, write rejection
         ├── resilience_test.go      # Pod-restart resilience (warm restart labelled persistent-only; gated E2E_RESILIENCE=1)
-        ├── dataloss_recovery_test.go # Pod loses its PVCs (kubectl delete pod + pvc); replication restores DIT (ADR-012 case 2)
+        ├── dataloss_recovery_test.go # Pod loses its PVCs; replication restores DIT (ADR-012 case 2) + ITS#9580 no-storm assertion (ADR-021; expected to FAIL on -ol26 images)
         ├── migration_test.go       # Migration scenario (gated at registration time: E2E_MIGRATION=1)
         ├── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
         ├── backup_test.go          # SlapdBackup → S3 round-trip (gated: E2E_BACKUP=1, deploys versitygw)
         ├── restore_test.go         # bootstrapFrom restore into a fresh cluster (gated: E2E_BACKUP=1)
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
+        ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
         ├── accesslog_migration_test.go # ADR-019 R8 convergence off a hand-made legacy shared log (gated: E2E_ACCESSLOG_MIGRATION=1)
         └── scaleup_test.go         # standalone → HA transition: schema/modules/serverID runtime convergence (gated: E2E_SCALEUP=1)
 ```
@@ -143,8 +148,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ### Image Details
 
 - **Build tooling:** Plain Containerfile + podman (apko dropped — only beneficial in the Wolfi ecosystem).
-- **slapd runtime** (`images/slapd/`): `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell.
-- **slapd-init** (`images/slapd-init/`): `debian:trixie-slim` — ephemeral bootstrap; needs shell + python3 + OpenLDAP tools.
+- **slapd runtime** (`images/slapd/`): OpenLDAP **2.7.1** (`2.7.1-0+slaptain1`, built from the vendored packaging fork in `images/openldap-deb/` — ADR-021) on `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell. Legacy Debian 2.6 build stays available as `slapd:<tag>-ol26` (`Containerfile.ol26`) for hot-migration interop (ADR-011). **LMDB 1.0 format break:** 2.6-written volumes cannot be opened by 2.7 — see `docs/OPENLDAP-VERSIONS.md` for the migration runbook.
+- **slapd-init** (`images/slapd-init/`): `debian:trixie-slim` + the same locally-built 2.7.1 packages (slapcat/slapadd/slaptest must match the slapd version) — ephemeral bootstrap; shell + python3. `-ol26` variant pairs with the 2.6 slapd image — always pin both or neither.
 - **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532. Builder stage uses `golang:1.25`.
 - **User (slapd):** `openldap` (UID/GID 1024). Debian's slapd package creates this user; we `groupmod`/`usermod` to 1024.
 - **Ports:** 1024 (ldap), 1025 (ldaps) — non-privileged. Service maps 389→1024 and 636→1025.
@@ -306,11 +311,13 @@ runs without readpw configuration but skips those test cases.
 
 | Target | Effect |
 |---|---|
-| `make all` | Build all three images |
+| `make all` | Build all images (2.7 slapd pair, `-ol26` 2.6 pair, toolkit, operator) |
 | `make build-init` | Build slapd-init image |
 | `make build-slapd` | Build slapd image |
 | `make build-operator` | Build operator image (build context = repo root) |
-| `make push` | Build + push all three images |
+| `make push` | Build + push all six images (both slapd pairs, toolkit, operator) |
+| `make build-openldap-deb` | Build the local-only OpenLDAP 2.7.1 .deb carrier image (feeds both 2.7 image builds; never pushed) |
+| `make build-ol26` / `make import-ol26` | Build / CRI-import the legacy 2.6 slapd+init pair (`:<tag>-ol26`, ADR-021) |
 | `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |
 | `make operator-manifests` | Run `make manifests` in `operator/`, then sync CRD to `charts/operator/crds/` |
 | `make operator-sync-crd` | Copy CRD from `operator/config/crd/bases/` to `charts/operator/crds/` |

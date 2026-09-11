@@ -355,3 +355,19 @@ about it is broken; it is manual.
 cluster? a peer-elected coordinator? a CLI-driven sequence with no new
 controller?) and the failure semantics before any code. See the ADR-014
 amendment (2026-08-24), section "Not decided: hub-and-spoke orchestration".
+
+---
+
+## ADR-022 follow-ups: syncprov tuning convergence is inconsistent
+
+`olcSpSessionlog` now converges on every reconcile (set / replace / delete —
+ADR-022), but `olcSpCheckpoint` is still written only when the syncprov overlay
+is first added: a later `syncprovCheckpoint` spec change is silently ignored on
+pods whose overlay already exists. Align the checkpoint with the sessionlog's
+converge-always pattern (the pure `planSessionlog` seam generalizes).
+
+Separately: `syncprov-sessionlog-source` (the persistent, accesslog-backed
+sessionlog) was rejected in ADR-022 because it reads the change journal — the
+artifact that is contaminated or purged in exactly the scenarios where a
+persistent log would pay off. Revisit once the journal's trustworthiness across
+refresh/purge transitions is settled (upstream ITS#9580 work, ADR-021).
