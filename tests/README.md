@@ -65,7 +65,10 @@ make testing-delete
 ```
 
 `TEST_RESOURCES` defaults to `example` (open-source fixtures). Set it to `lab` for the
-internal lab variant; see `tests/resources/lab/` for SOPS-encrypted secrets used there.
+internal lab variant (see `tests/resources/lab/` for SOPS-encrypted secrets used there),
+or to `storm-repro` for the ITS#9580 reproduction fixture — a copy of `example` whose
+`accesslogPurge` is 5 minutes instead of 2 days (used by `tests/e2e-storm-repro.sh`,
+see "ITS#9580 storm reproduction" below).
 
 ---
 
@@ -161,12 +164,31 @@ Specs skip themselves when the resource set declares a single database
 (`DB2_CR_NAME` unset). Adding the second database raises the default-suite
 runtime; that is expected.
 
+**Sessionlog (ADR-022).** `tests/e2e/sessionlog_test.go` (standard suite,
+label `sessionlog`) asserts that every RW pod's *data* DB syncprov overlay
+carries `olcSpSessionlog` at the CR-derived value (unset → the operator default
+of 5000), and that no accesslog DB's syncprov carries one — the placement rule
+is the load-bearing half of ADR-022. Observed red against a pre-ADR-022
+operator (2026-09-11), green since.
+
+**ITS#9580 no-storm assertion (ADR-021).** `dataloss_recovery_test.go` also
+asserts that fewer than 50 `sync cookie is stale` lines follow the PVC-loss
+recovery across all RW pods (needs the `stats` log bit, 256 — the fixture's
+16640 has it; the spec skips loudly otherwise). On OpenLDAP 2.7.1 (the plain
+image tags) this is ~0. Honesty note: the assertion has never been observed
+red — fresh clusters don't develop the dormancy the storm needs, and even the
+engineered reproduction produced only isolated, self-healing staleness (see
+ADR-021 and the section below). It is a 2.7-regression tripwire; its threshold
+separates measured isolated staleness (3) from the measured storm (thousands).
+
 ### Env vars
 
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
 | `E2E_CONFIG` | `<repo-root>/lab.yaml` if present | Lab config file (site inventory, registry, network mode). Env vars win over file values. Schema: `lab.yaml.sample` |
+| `SLAPD_TAG_SUFFIX` | *(empty — OpenLDAP 2.7.1)* | Appended to the slapd/slapd-init image tags only (operator/toolkit untouched). `-ol26` deploys the legacy OpenLDAP 2.6 pair (ADR-011 interop / ADR-021). |
+| `E2E_LABEL_FILTER` | *(unset — full suite)* | Ginkgo label filter to run a subset, e.g. `accesslog`, `sessionlog`, `resilience` (the dataloss container), `external-replication`. |
 | `E2E_NODE_ACCESS_IP` | *(node `InternalIP`)* | Single-site override for the address the runner uses to reach NodePorts (+ cert SAN). Set when the `InternalIP` isn't reachable from the runner. |
 | `E2E_NODE_ACCESS_IPS` | *(node `InternalIP`)* | Multi-site map, e.g. `"<ctx1>=<ip1> <ctx2>=<ip2>"`. Per-context form of `E2E_NODE_ACCESS_IP`. |
 | `LDAP_ADDR` | *(set by script)* | `<node-access-ip>:<nodeport>` — required when invoking `go test` directly |
@@ -506,6 +528,11 @@ The `e2e.sh` script automates the entire cross-cluster workflow: it deploys the
 operator, SlapdClusters with mutual `externalPeers`, test resources, and runs the full e2e
 suite (including external replication tests) — all from a single command.
 
+With a lab config file in place (see "Node access" above), the whole thing
+collapses to `./tests/e2e.sh test` — contexts, node-access IPs, registry and
+network mode all come from `lab.yaml`, and only per-run knobs (`GIT_TAG`,
+gates, `SLAPD_TAG_SUFFIX`) ride the command line.
+
 ### Prerequisites
 
 - N Kubernetes clusters (minimum 2) reachable via kubectl contexts
@@ -597,6 +624,43 @@ make e2e-multisite-teardown CONTEXTS="s1 s2"
 | `NODEPORT_LDAPS` | `30636` | NodePort for LDAPS (cross-cluster syncrepl in NodePort mode) |
 | `MULTUS_NETWORK` | *(unset)* | NAD reference (e.g. `infra/replication-net`). Enables Multus mode |
 | `STATIC_PODADDRESSES` | *(unset)* | Set to `1` for legacy static podAddresses instead of dynamic discovery |
+
+---
+
+## ITS#9580 storm reproduction (`tests/e2e-storm-repro.sh`)
+
+The no-storm assertion in `dataloss_recovery_test.go` guards against the
+ITS#9580 stale-cookie refresh storm (ADR-021), but a healthy e2e mesh never
+develops the conditions that trigger it. `tests/e2e-storm-repro.sh`
+manufactures them deliberately, on a multi-site OpenLDAP 2.6 (`-ol26`) mesh:
+
+- **dormancy** — one write through an otherwise idle site (the last context),
+  so a serverID stamps a CSN into every cookie and then goes silent;
+- **ammunition** — the `storm-repro` fixture's 5-minute `accesslogPurge` ages
+  that CSN out of every journal (re-armed and re-aged before every iteration);
+- **trigger** — the dataloss spec's PVC-loss recovery, run under live write
+  churn on two sites, iterated until the no-storm assertion goes red or
+  `MAX_ITERS` is reached.
+
+```bash
+GIT_TAG=<pushed-tag> ./tests/e2e-storm-repro.sh              # sites from lab.yaml
+GIT_TAG=<tag> MAX_ITERS=5 SKIP_SETUP=1 ./tests/e2e-storm-repro.sh <ctx...>
+```
+
+Exit codes: `0` = red observed (record the evidence in ADR-021), `3` = honest
+negative after `MAX_ITERS`, `2` = the suite failed on something other than the
+storm spec. Requires ≥2 sites, both image pairs pushed at `GIT_TAG`, `yq` v4
+and local `ldap-utils`.
+
+**Measured so far (2026-09-11, six armed triggers):** engineered dormancy
+reliably produces *isolated* staleness (exactly 3 `sync cookie is stale`
+answers, twice) that self-heals in one refresh round — once the dormant SID's
+entries purge out entirely, the journals' minCSN tracking stops naming it. The
+persistent cascade additionally needs the refresh to regress a `contextCSN` on
+the refreshed node (the replay-order race described in upstream commit
+`414866b8`'s own FIXME), which no trigger hit. Raising the odds means
+provoking that regression (larger DIT, heavier mid-refresh write pressure),
+not more dormancy. Full record: ADR-021.
 
 ---
 
