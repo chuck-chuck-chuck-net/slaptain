@@ -288,6 +288,13 @@ as the default context list). This drives
 SAN; cross-site peer URIs keep the `InternalIP` (they must ride the replication
 network). See `tests/README.md`.
 
+**Failed restore specs keep their evidence.** `restore*_test.go` skip teardown
+when a spec fails (`E2E_KEEP_ON_FAILURE=0` to opt out) and print a post-mortem —
+CR statuses, pod/container states, init + slapd logs, events — into the spec
+output before anything is deleted. Green runs delete their
+`volumeClaimTemplates` PVCs too. Run the bootstrapFrom spec alone with
+`E2E_LABEL_FILTER=restore-bootstrap`.
+
 **Backup/restore e2e** (gated `E2E_BACKUP=1`): `E2E_BACKUP=1 ./tests/e2e.sh test <ctx>`
 deploys `tests/resources/versitygw.yaml` (lean Apache-2.0 S3 server — NOT minio)
 and runs `backup_test.go` + `restore_test.go`. The restore spec stands up a

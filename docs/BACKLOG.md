@@ -118,22 +118,62 @@ orphaned PVCs from a previous run being rebound with populated `/config` and
 the failure still occurred once. The `slapd-ip` and `slapd-rr` restore clusters in
 the same runs start fine.
 
-Why it has resisted diagnosis: the spec's cleanup deletes the SlapdCluster and
-SlapdDatabase, so by the time anyone looks there is no pod, no CR, and no pod log
-left to inspect. **Anyone picking this up should first make the failure
-inspectable** — keep the cluster on failure (skip cleanup when the spec failed, or
-gate cleanup behind an env var) and capture the init-container and slapd logs from
-the pod that will not start. Without that, this is unfixable by inspection after
-the fact.
+Why it had resisted diagnosis: the spec's cleanup deletes the SlapdCluster and
+SlapdDatabase, so by the time anyone looked there was no pod, no CR, and no pod log
+left to inspect.
 
-Related but separate: the restore specs leak their PVCs. Their cleanup deletes the
-CRs but not the volumes, and StatefulSet `volumeClaimTemplates` PVCs are never
-garbage-collected (no `persistentVolumeClaimRetentionPolicy` is set anywhere).
-Orphaned `*-slapd-restore-0` PVCs accumulate across runs. That is not the cause of
-this flake, but it does make `e2e.sh test` re-runs dirty and should be fixed
-regardless — deleting the PVCs in the specs' cleanup, not by changing operator
-behaviour, since leaving PVCs on SlapdCluster deletion is defensible (ADR-005's
-Retain default).
+### 2026-09-12: the failure is now inspectable; the flake did not reproduce
+
+Both halves of "make it inspectable" have landed in the restore specs
+(`restore_test.go` hosts the helpers; `restore_inplace_test.go` and
+`restore_replay_test.go` use them):
+
+- **Autopsy at failure time** (`dumpRestoreAutopsy`, an `AfterEach` that fires only
+  on a failed spec, before any teardown): SlapdCluster + SlapdDatabase status YAML,
+  every pod's phase/conditions/per-container state, the `init` and `slapd` container
+  logs (plus the *previous* container's log when it has restarted), and the
+  namespace events for `<cluster>*`. It runs regardless of the keep setting, so even
+  a run that must leave nothing behind prints its own post-mortem.
+- **Keep-on-failure** (`keepOnFailure`, default **on**; `E2E_KEEP_ON_FAILURE=0`
+  restores unconditional teardown): a failed restore spec leaves its cluster,
+  database, backup, service and PVCs standing and prints what was kept, the
+  `slctl debug-dump -n <ns> <cluster>` one-liner, and the cleanup commands.
+- **PVC leak fixed spec-side** (`deleteRestorePVCs`): green runs now delete the
+  `volumeClaimTemplates` PVCs by `app.kubernetes.io/instance`. Operator behaviour is
+  untouched — ADR-005's Retain default stands.
+
+Verified by mutation (the tooling's red): the `restoreApplied` timeout was
+temporarily cut to 6 s so the spec failed exactly the way the flake does — with
+`slapd-restore-0` not yet serving. The autopsy printed the full init-container log,
+the pod's container states, 32 events, and the keep banner; the cluster was still
+standing afterwards. Mutation reverted.
+
+**Hunt: 16 consecutive green runs, no reproduction** (scm 3-site lab, build
+`fd9b420`, OpenLDAP 2.7.1): 10 runs of the bootstrapFrom spec alone
+(`E2E_LABEL_FILTER=restore-bootstrap`, ~40 s each) and 6 runs of the whole
+`restore` label group (~172 s each, 4 specs, replay skipped as expected on a mesh).
+Every run left zero `slapd-restore*` / `slapd-ip*` / `slapd-rr*` objects behind.
+So: unreproduced on *this* substrate, which is fast enough that the whole spec
+finishes in 37 s against a 480 s timeout — i.e. the failing runs were roughly an
+order of magnitude off normal, not marginally slow.
+
+Still **not established**: why slapd does not start. Candidate mechanisms to check
+the next time it fires, now that the evidence survives — in the order the autopsy
+answers them:
+
+1. Pod never scheduled or stuck mounting (events: `FailedScheduling`,
+   `FailedAttachVolume`, `FailedMount`). The lab's storage is node-local RWO
+   (`openebs-lvm`), and ADR-018's deletion-lease rule means any pod object still
+   naming one of the three PVCs pins the volume to a node.
+2. Init container looping or exiting non-zero (init log + `state=terminated(exit=…)`).
+3. slapd crash-looping (`restarts>0` plus the *previous* container log — the reason
+   a slapd that dies at startup leaves an empty current log).
+4. Pod healthy but unreachable, i.e. a service/DNS/routing fault rather than a slapd
+   fault (pod `Ready=True` while the SlapdDatabase reports `NoPodsReachable`).
+
+Note that (4) is the normal *transient* state for the first ~10 s of every run — the
+SlapdDatabase legitimately passes through `phase=Error`/`NoPodsReachable` before the
+pod serves. The flake is that state persisting, not its appearance.
 
 ---
 
