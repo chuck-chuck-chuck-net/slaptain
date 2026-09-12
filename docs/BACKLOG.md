@@ -432,3 +432,96 @@ into the S3 **object metadata** at upload, so a restore can surface them without
 the CR. `backup.Upload` already accepts a metadata map; what is missing is a way
 for the Job's uploader to carry arbitrary pairs (`manager backup-upload
 --meta k=v`).
+
+---
+
+## Scale and operations tunables — from the production-config review, 2026-09-12
+
+A review of slaptain's generated `cn=config` against a large production OpenLDAP
+platform produced 18 findings. The five that break a large cluster outright are
+being implemented now; **ADR-024 fixes where each of these lives** (converged
+per pod / bootstrap-time / create-only-by-nature, and which CR owns it), so
+these entries record the gap and the severity, not the design. Pick any of them
+up by reading ADR-024's placement table first — the class is already decided.
+
+- **`olcDbCheckpoint` never set** (degrades). No mdb checkpoint interval on any
+  database, and it interacts with `noSync`: no checkpoint plus `noSync` loses an
+  unbounded window of writes on unclean shutdown. *Surface:* converged
+  `SlapdDatabase` field with an operator default, on the data and the accesslog
+  database (the log tolerates a longer interval); validated against `noSync` so
+  the unsafe combination is not silently reachable.
+- **`noSync` is create-only and has no cluster-level policy** (degrades).
+  Flipping `spec.noSync` on a live database does nothing — an ADR-024 R4
+  violation, same family as `maxSize`. Durability posture is also a
+  cluster-wide property. *Surface:* converge the existing per-DB field; consider
+  a `SlapdCluster` default it inherits.
+- **`olcDbEnvFlags` not exposed** (degrades). The LMDB environment flags
+  (`writemap`, `nometasync`, `nosync`) are the standard high-write-rate lever;
+  `writemap` materially changes the write-path cost on a large map. Not
+  production-proven — a known-missing knob, better exposed next to `noSync` now
+  than invented under incident pressure. *Surface:* converged `SlapdDatabase`
+  list, defaulted empty.
+- **`olcDbRtxnSize` not exposed** (degrades). Bounds how many entries one read
+  transaction covers; a long read transaction — a syncrepl full refresh or a
+  bulk export — pins free pages and grows the map. *Surface:* converged, with an
+  operator default; low user-visibility, could reasonably be operator-set only.
+- **No connection-lifetime or concurrency surface at all** (degrades; the
+  timeouts are the urgent half). None of `olcIdleTimeout`, `olcWriteTimeout`,
+  `olcThreads`, `olcListenerThreads`, `olcConcurrency`, `olcToolThreads`,
+  `olcSockbufMaxIncoming*`, `olcConnMaxPending` is set or exposed. Both timeouts
+  default to *never*, so a pod behind a stateful firewall accumulates dead
+  connections until it runs out of descriptors. *Surface:* a converged
+  `SlapdCluster.spec.tuning` block; start with the two timeouts and leave the
+  thread counts as documented escape hatches at upstream defaults.
+- **Syncrepl stanzas carry no timeouts, and `keepalive` has no default**
+  (degrades). `buildDesiredSyncRepl` emits no `network-timeout` and no
+  `timeout`, so a half-open provider connection is noticed only when TCP gives
+  up; `spec.replication.keepalive` exists but is optional and undefaulted, so an
+  unconfigured cluster gets neither. *Surface:* operator-set defaults in the
+  stanza builder, overridable by the existing fields.
+- **Restore does not use bulk-load mode** (degrades). `restore_job.go` runs
+  `slapadd` with no quick/bulk mode and no tool threads, with the cluster scaled
+  to zero for the whole window — on a multi-GB LDIF that is tens of minutes
+  versus hours. *Surface:* operator-set in the restore Job builder, optional
+  escape hatch on the restore CR, with a documented caveat about what bulk mode
+  skips.
+- **No `cn=monitor`, no native metrics** (hygiene). The monitor backend module
+  is not loaded, no monitor database exists, `olcMonitoring` is never set — so
+  there are no per-database operation counters and nothing an exporter can read.
+  Monitoring today is the operator's CSN polling, which by ADR-008's own
+  amendment cannot see an idle-but-broken link. *Surface:* a `SlapdCluster`
+  toggle defaulting on, an operator-created monitor DB with an operator-managed
+  identity and ACL, converged per pod. This is also the substrate the
+  heartbeat/observability gap ADR-008 deferred would want.
+- **Log level defaults to silence** (hygiene). `spec.logLevel` defaults to 0, so
+  a pod logs essentially nothing and every replication incident starts with
+  "restart it with logging on" — which changes the state you were trying to
+  observe. *Surface:* change the operator default to the sync level (ADR-024 R5),
+  keep the field.
+- **TLS posture is unpinned** (hygiene). Only certificate, key and CA paths are
+  written: no `olcTLSProtocolMin` floor, no cipher policy, no CRL policy, no
+  `olcLocalSSF`/`olcSecurity`. Whatever the runtime image's OpenSSL happens to
+  default to is our policy, and it changes silently with a base-image bump.
+  *Surface:* converged `SlapdCluster.spec.ldap.tls` fields — pin a modern
+  protocol floor, leave cipher policy empty but available.
+- **Password hashing policy not exposed** (hygiene). `olcPasswordHash` is never
+  set, so the frontend default applies to anything the directory hashes on a
+  user's behalf; no surface for a stronger scheme (the memory-hard module modern
+  OpenLDAP ships) or `olcPasswordCryptSaltFormat`. The operator's own generated
+  root passwords use a salted SHA variant and are fine. *Surface:* a converged
+  `SlapdCluster` field; document-only is an acceptable first step, but answer
+  the module-availability question for the runtime image either way.
+- **Overlay surface beyond replication** (hygiene, document-only). We manage
+  `syncprov` and `accesslog` and nothing else; the production platform also runs
+  password-policy, uniqueness, dynamic-list and member-of overlays plus
+  last-bind tracking. Not a scale defect — it is the difference between a
+  replicating store and a directory an application stack can sit on. Worth a
+  stated position (explicitly out of scope, or an ADR for a generic overlay
+  surface on `SlapdDatabase`) rather than silence.
+
+**Stale prior comparison.** An older written-down comparison lists
+`olcSpCheckpoint`, `olcSpSessionlog`, `olcAccessLogPurge`,
+`olcAccessLogOps`/`Success`, syncrepl `retry`, the accesslog indices and
+per-database accesslog separation as missing. They are not: ADR-019, ADR-022 and
+the syncprov overlay code cover all of them. Do not re-raise them from that
+document.

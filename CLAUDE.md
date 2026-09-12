@@ -74,7 +74,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-020-accesslog-access-control.md
 │       ├── adr-021-openldap-2.7-dual-images.md
 │       ├── adr-022-syncprov-sessionlog.md
-│       └── adr-023-rolling-replacement.md
+│       ├── adr-023-rolling-replacement.md
+│       └── adr-024-tunable-placement.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -508,6 +509,7 @@ the original decision — the history of reasoning matters.
 - ADR-021: OpenLDAP 2.7.1 by default, built from a vendored Debian packaging fork (`images/openldap-deb/`); the 2.6 pair stays as `:<tag>-ol26` for hot-migration interop (ADR-011). ITS#9580 is fixed in no 2.6.x release and no distro ships 2.7; LMDB 1.0 makes 2.6→2.7 a dump/reload (`docs/OPENLDAP-VERSIONS.md` runbook) — *Accepted (images + single-site e2e green on 2.7.1 2026-09-11; the ITS#9580 storm red and mixed-mesh validation belong to the deferred multi-site session — a fresh single-site cluster measured 0 storm lines even on 2.6)*
 - ADR-022: The syncprov sessionlog belongs on the data DB only — never an accesslog DB, where a successful replay would displace the minCSN guard and under-replicate silently. On by default at 5000 ops via `spec.replication.syncprovSessionlog` (tristate: unset→5000, 0→off, >0 verbatim) — *Accepted (unit red-first + e2e red/green on live clusters 2026-09-11)*
 - ADR-023: Rolling volume replacement — an imperative, one-shot `SlapdRollingReplace` rebuilds pods from the mesh one ordinal at a time (ADR-012 case 2 promoted to an operation), gated on surviving redundancy and CSN convergence; headline use case: the 2.6 → 2.7 LMDB format break (ADR-021) without the ADR-014 outage — *Proposed 2026-09-12, implementation after v0.1.0*
+- ADR-024: Where an OpenLDAP tunable lives — three placement classes (converged-per-pod as the default, bootstrap-time, create-only-by-nature), a spec field that cannot be honoured is rejected or converged but never ignored, and unset means slaptain's default rather than slapd's — *Accepted 2026-09-12*
 - ADR-020: An accesslog DB is at least as restrictive as the database it journals — `to * by dn.exact="cn=replication,<suffix>" read by * none`; without it a data DB's ACLs are bypassable through its own change journal — *Accepted (impl + e2e green 2026-08-25; the bypass was captured live before the fix — an anonymous read of the shared journal returned `reqMod: userPassword:+ {SSHA}…` for a user whose `userPassword` the data DB denies)*
 
 ---
