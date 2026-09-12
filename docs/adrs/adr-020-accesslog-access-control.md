@@ -145,6 +145,49 @@ replication bind DN of the database it journals, and nothing to anyone else.**
 - No CRD change, no RBAC change, no new Secret. The rule is derived from the
   suffix the operator already has in hand.
 
+## Amendment (2026-09-12): the limits are part of the same contract
+
+**What the original decision missed.** R1 answers *who* may read a database's
+change journal. It does not answer *how much* they may read — and slapd answers
+that separately, with `olcLimits`, whose default is 500 entries.
+
+So the rule as shipped grants `cn=replication,<suffix>` read access to a journal
+it can only read the first 500 records of. The same gap exists one database over:
+the data DB's ACL grants the same identity read-all, and its searches cap at 500
+too. A consumer's syncrepl search is an ordinary search: it is subject to the
+provider's size limit like any other. The observable result is a directory that
+stops replicating past its 500th entry, and a delta journal that stops being
+usable past its 500th record, on a cluster reporting itself `Synced` — because
+CSN comparison cannot see it either (ADR-008's own amendment).
+
+This was captured live on a three-site mesh, where ADR-020's e2e spec — "the
+replication identity can read its journal" — was **red**, not because the ACL
+was wrong but because the journal had grown past 500 records.
+
+**The addition.** The operator writes, on BOTH a data database and its accesslog
+database, beside the ACL:
+
+    olcLimits: dn.exact="cn=replication,<suffix>" time.soft=unlimited
+               time.hard=unlimited size.soft=unlimited size.hard=unlimited
+
+converged on every reconcile, per pod, in the same pass that converges the ACL.
+Not a CRD field: the DN, its ACL and its limits are one contract the operator
+owns end to end (ADR-024 R7 — a user who cannot change the DN has no business
+capping its searches, and a value that caps it breaks replication silently).
+
+**Why this is an amendment and not a new ADR.** The core principle is unchanged
+and in fact strengthened: *an accesslog database is at least as restrictive as
+the database it journals, and no more restrictive than the replication identity
+needs.* ADR-020 wrote down the first half. This writes down the second, in the
+only place slapd lets you say it.
+
+**Verification.** Structurally invisible below 500 entries, which is why it
+survived a green suite: `tests/e2e/scale_test.go` (gated `E2E_SCALE=1`) is the
+many-entries vehicle — a generated seed of >1000 entries plus a journal-heavy
+churn — and asserts both the convergence past the cap and the journal read past
+it (ADR-024 Consequences).
+
+
 ## Related
 
 - ADR-004 — ACLs are declared on `SlapdDatabase`; this keeps that declaration
@@ -152,6 +195,8 @@ replication bind DN of the database it journals, and nothing to anyone else.**
 - ADR-008 — replication credentials; `cn=replication,<suffix>` is the identity
   this ADR grants, and the uniform-password assumption is why one DN suffices.
 - ADR-014 — backup and restore run offline `slapcat`/`slapadd` (R4).
+- ADR-024 — where a tunable lives; R7 is why the limits above are operator-set
+  rather than a CRD field.
 - ADR-019 — one accesslog per data database. Independent of this gap, but the
   change that makes "the log of *this* database" a well-defined thing to write an
   ACL for, and the pass in which this is implemented.

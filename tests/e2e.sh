@@ -221,6 +221,12 @@ Reproducibility and triage:
                          always logged). The suite shares one mutable slapd
                          cluster, so cross-spec interference depends on spec
                          order — replaying the logged seed reproduces it exactly.
+  E2E_SCALE            = Set to 1 to run the many-entries fixture class (ADR-024):
+                         a generated seed of >1000 entries plus a journal-heavy
+                         churn, the only shape in which the breaks-at-scale
+                         tunables (replication sizelimit cap, map size, search
+                         limits) are observable. Volume knobs: E2E_SCALE_ENTRIES
+                         (default 1200), E2E_SCALE_CHURN (default 700).
   E2E_LABEL_FILTER     = Ginkgo label expression selecting which specs run, e.g.
                          "restore-inplace" or "backup && !restore". Lets a single
                          scenario be iterated without paying for the whole suite,
@@ -881,6 +887,24 @@ run_tests() {
     if [[ "${E2E_SCALEUP:-}" == "1" ]]; then
         log "[$ctx0] E2E_SCALEUP=1 — enabling scale-up transition specs"
         test_env+=("E2E_SCALEUP=1")
+    fi
+
+    # Many-entries fixture class (ADR-024): a generated seed of >1000 entries
+    # plus a journal-heavy churn, which is the only shape in which the
+    # breaks-at-scale tunables are observable at all — a single-digit-entry
+    # LDIF cannot see a 500-entry cap. Writes thousands of entries into the
+    # shared fixture database (under its own OU, removed afterwards) and takes
+    # minutes, so it is opt-in. E2E_SCALE_ENTRIES / E2E_SCALE_CHURN tune the
+    # volume without a repository diff.
+    if [[ "${E2E_SCALE:-}" == "1" ]]; then
+        log "[$ctx0] E2E_SCALE=1 — enabling the many-entries scale specs"
+        test_env+=("E2E_SCALE=1")
+        if [[ -n "${E2E_SCALE_ENTRIES:-}" ]]; then
+            test_env+=("E2E_SCALE_ENTRIES=$E2E_SCALE_ENTRIES")
+        fi
+        if [[ -n "${E2E_SCALE_CHURN:-}" ]]; then
+            test_env+=("E2E_SCALE_CHURN=$E2E_SCALE_CHURN")
+        fi
     fi
 
     if [[ "$MULTISITE" -eq 1 ]]; then

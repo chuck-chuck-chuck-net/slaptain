@@ -139,6 +139,24 @@ EOF
         fi
     fi
 
+    # ── back-mdb backend section (ADR-024 R2, bootstrap-time) ──────────────────
+    # `backend mdb` configures the BACKEND (olcBackend={0}mdb), not a database:
+    # slapd initialises it before any database exists, and idlexp governs the
+    # on-disk index layout, so it must be set before data is loaded. This whole
+    # block only runs on a fresh /config volume — the operator never converges
+    # it, and changing SlapdCluster.spec.backend.idlExponent later only affects
+    # pods bootstrapped afterwards. See the field's godoc for the recreate path.
+    #
+    # Must come after the global directives and before the database sections;
+    # slaptest rejects a backend stanza that follows a database stanza.
+    if [[ -n "${LDAP_MDB_IDL_EXP:-}" ]]; then
+        cat <<EOF >> "$TMP_CONF"
+
+backend mdb
+idlexp ${LDAP_MDB_IDL_EXP}
+EOF
+    fi
+
     # ── Config database ────────────────────────────────────────────────────────
     cat <<EOF >> "$TMP_CONF"
 

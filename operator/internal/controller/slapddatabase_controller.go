@@ -154,6 +154,20 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// parameter.
 	healthyPods := map[string]bool{}
 
+	// Start each pass assuming every operator-managed tunable matches; the
+	// per-pod work flips this to False when it finds one it cannot apply to a
+	// live database (today: the map size). Set here rather than at the end so
+	// a divergence that has been repaired — by recreating the database —
+	// clears itself without a special case (ADR-001 idempotency).
+	setCondition(&sd.Status.Conditions, metav1.Condition{
+		Type:               tunablesConvergedCondition,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Converged",
+		Message:            "every operator-managed tunable matches cn=config on every pod",
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sd.Generation,
+	})
+
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
@@ -473,6 +487,46 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		}
 	}
 
+	// ── Scale tunables, converged per pod on every reconcile (ADR-024) ───────
+	//
+	// All four run unconditionally, unlike the two blocks above: they carry
+	// operator opinions and operator-owned contract, so none of them may ride
+	// on a user field being non-empty. Between them they are the difference
+	// between a cluster that works at fixture size and one that works at
+	// production size — and every one of them is invisible below ~500 entries.
+
+	// Baseline indices (ADR-024 R7): entryCSN + entryUUID are searched by
+	// syncrepl itself; unindexed they are a full scan on a replication hot path.
+	if err := r.ensureDataBaselineIndices(ctx, conn, host, dataDN); err != nil {
+		return fmt.Errorf("ensure baseline indices at %s: %w", host, err)
+	}
+
+	// Map size (ADR-024 R4): set at creation, REPORTED (never written) on an
+	// existing database — modifying olcDbMaxSize under a running slapd
+	// segfaults it. See compareMaxSize.
+	maxSize, err := desiredDataMaxSize(sd)
+	if err != nil {
+		return fmt.Errorf("spec.maxSize: %w", err)
+	}
+	if err := r.checkMaxSize(ctx, conn, host, dataDN, "data database", maxSize, sd); err != nil {
+		return err
+	}
+
+	// Search limits (ADR-024 R5): unlimited by default, so a client
+	// enumerating a real subtree is not silently handed the first 500 entries.
+	if err := r.ensureSearchLimits(ctx, conn, host, dataDN, sd); err != nil {
+		return fmt.Errorf("ensure search limits at %s: %w", host, err)
+	}
+
+	// Per-identity limits (ADR-024 R7): the replication identity's exemption
+	// from those limits. Without it a consumer's syncrepl search caps at
+	// slapd's default 500 entries and the directory stops replicating there —
+	// silently, on a cluster reporting itself Synced (ADR-020 amendment).
+	replicatingIdentity := sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly()
+	if err := r.ensureLimits(ctx, conn, host, dataDN, desiredLimits(sd, replicatingIdentity)); err != nil {
+		return fmt.Errorf("ensure limits at %s: %w", host, err)
+	}
+
 	// Manage the data DB's replication infrastructure. Two independent gates:
 	//
 	//   wantsSyncProv  — this cluster acts as a syncrepl provider. True in
@@ -701,16 +755,31 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 	addReq.Attribute("olcRootPW", []string{rootPWHash})
 	addReq.Attribute("olcDbDirectory", []string{dbDirectory})
 
-	if sd.Spec.MaxSize != "" {
-		addReq.Attribute("olcDbMaxSize", []string{sd.Spec.MaxSize})
+	// Map size: always written, from spec.maxSize or the operator default
+	// (ADR-024 R1/R5). Leaving it out means back-mdb's own ~10 MB, which stops
+	// accepting writes the moment the directory outgrows a fixture.
+	maxSize, err := desiredDataMaxSize(sd)
+	if err != nil {
+		return "", fmt.Errorf("spec.maxSize: %w", err)
 	}
+	addReq.Attribute("olcDbMaxSize", []string{strconv.FormatInt(maxSize, 10)})
 
 	if sd.Spec.NoSync {
 		addReq.Attribute("olcDbNoSync", []string{"TRUE"})
 	}
 
-	// Default index on objectClass.
-	addReq.Attribute("olcDbIndex", []string{"objectClass eq"})
+	// Search limits: slaptain's defaults, not slapd's 500-entry / 3600-second
+	// ones (ADR-024 R5). Converged afterwards by ensureSearchLimits.
+	if v, write := desiredSizeLimit(sd); write {
+		addReq.Attribute("olcSizeLimit", []string{v})
+	}
+	if v, write := desiredTimeLimit(sd); write {
+		addReq.Attribute("olcTimeLimit", []string{v})
+	}
+
+	// The baseline index set (objectClass + the two attributes syncrepl itself
+	// searches on). spec.indices adds to this; it cannot take it away.
+	addReq.Attribute("olcDbIndex", planDataBaselineIndices(nil))
 
 	// Consumer-only mode: stamp olcReadOnly=TRUE on the data DB so the cluster
 	// rejects client writes while still accepting syncrepl updates from
@@ -816,20 +885,10 @@ func (r *SlapdDatabaseReconciler) applyIndices(
 
 	current := sr.Entries[0].GetEqualFoldAttributeValues("olcDbIndex")
 
-	// Build set of current indices (normalized).
-	currentSet := make(map[string]bool, len(current))
-	for _, idx := range current {
-		currentSet[normalizeIndex(idx)] = true
-	}
-
-	// Find missing indices.
-	var missing []string
-	for _, idx := range desired {
-		if !currentSet[normalizeIndex(idx)] {
-			missing = append(missing, idx)
-		}
-	}
-
+	// Subtract what is already indexed, per ATTRIBUTE — see planUserIndices for
+	// why a per-value comparison is not good enough (back-mdb rejects the whole
+	// modify with "duplicate index definition for attr <x>").
+	missing := planUserIndices(current, desired)
 	if len(missing) == 0 {
 		log.V(1).Info("indices already up-to-date", "host", host)
 		return nil
@@ -841,9 +900,6 @@ func (r *SlapdDatabaseReconciler) applyIndices(
 	return conn.Modify(modReq)
 }
 
-func normalizeIndex(s string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
-}
 
 // ── Seed Data ────────────────────────────────────────────────────────────────
 
@@ -1350,6 +1406,13 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AccesslogDir(sd.Name)})
 		addReq.Attribute("olcDbIndex", planAccesslogIndices(nil))
 		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Spec.Suffix)})
+		// A journal with no map size gets back-mdb's ~10 MB, and a full journal
+		// is worse than a full data DB: it fails on write RATE, not data
+		// volume, and delta-syncrepl stops advancing (ADR-024 R1).
+		addReq.Attribute("olcDbMaxSize", []string{strconv.FormatInt(defaultAccesslogMaxSizeBytes, 10)})
+		// And the replication identity must be able to read all of it — the
+		// ACL says who, this says how much (ADR-020 amendment).
+		addReq.Attribute("olcLimits", []string{replicationLimits(sd.Spec.Suffix)})
 		if err := conn.Add(addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add accesslog DB %s: %w", logSuffix, err)
@@ -1379,6 +1442,20 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	// modify, so this converges without a restart.
 	if err := r.ensureAccesslogIndices(ctx, conn, host, dbDN); err != nil {
 		return err
+	}
+
+	// The replication identity's limits exemption converges onto a log DB
+	// created by an operator predating ADR-024 — the population that silently
+	// caps at 500 journal records (ADR-020 amendment). The journal's map size
+	// can only be REPORTED on an existing log DB, for the same reason as the
+	// data DB's.
+	if err := r.checkMaxSize(ctx, conn, host, dbDN, "accesslog database",
+		defaultAccesslogMaxSizeBytes, sd); err != nil {
+		return err
+	}
+	if err := r.ensureLimits(ctx, conn, host, dbDN,
+		[]string{replicationLimits(sd.Spec.Suffix)}); err != nil {
+		return fmt.Errorf("ensure accesslog limits at %s: %w", host, err)
 	}
 
 	// Read this log DB's children once, and use them for two things: reaping
@@ -1457,51 +1534,10 @@ var accesslogIndexAttrs = []string{
 
 // planAccesslogIndices returns the olcDbIndex values to ADD so that an accesslog
 // DB covers accesslogIndexAttrs, given what it carries today. nil means nothing
-// to do. Pure — the LDAP half only executes the verdict. Passing nil plans a
-// fresh DB's whole index set, so creation and convergence share one seam.
-//
-// An attribute already named in any live value counts as configured, whatever
-// its index types: back-mdb rejects a *second* definition for an attribute that
-// already has one, so a hand-set richer index (say "reqDN eq,sub") must be left
-// alone rather than duplicated.
-//
-// Converging existing DBs is safe on back-mdb: per slapd-mdb(5), "changing index
-// settings dynamically by LDAPModifying cn=config automatically causes rebuilding
-// of the indices online in a background task" — the slapindex(8) requirement
-// applies to slapd.conf-era changes, not to a cn=config modify. Worst case the
-// rebuild costs one background pass over a change journal that is purged
-// periodically anyway, and even if a rebuild were skipped the log's older entries
-// age out, so lazy convergence would still reach a fully indexed steady state.
+// to do. Thin wrapper over planIndices, which the data DB's baseline set uses
+// too — one planner, one set of rules about what counts as already-indexed.
 func planAccesslogIndices(current []string) []string {
-	indexed := make(map[string]bool, len(current)*2)
-	for _, v := range current {
-		fields := strings.Fields(v)
-		if len(fields) == 0 {
-			continue
-		}
-		// "<attrlist> [<types>]" — the attribute list is the whitespace-tolerant
-		// remainder once a trailing type field is dropped.
-		attrList := fields[0]
-		if len(fields) > 1 {
-			attrList = strings.Join(fields[:len(fields)-1], "")
-		}
-		for _, a := range strings.Split(attrList, ",") {
-			if a = strings.TrimSpace(a); a != "" {
-				indexed[strings.ToLower(a)] = true
-			}
-		}
-	}
-
-	var missing []string
-	for _, a := range accesslogIndexAttrs {
-		if !indexed[strings.ToLower(a)] {
-			missing = append(missing, a)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	return []string{strings.Join(missing, ",") + " eq"}
+	return planIndices(current, accesslogIndexAttrs)
 }
 
 // ensureAccesslogIndices adds whatever planAccesslogIndices finds missing on a
