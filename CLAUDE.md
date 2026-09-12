@@ -124,7 +124,6 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
     │   ├── versitygw.yaml          # Lean S3 server (Apache-2.0) for backup e2e — NOT minio
     │   └── lab/                    # Internal lab configuration (SOPS-encrypted secrets)
     ├── README.md                   # Test suite documentation (quick-start cycle at top)
-    ├── SOPS.md                     # SOPS/age secret management guide
     └── e2e/                        # Ginkgo e2e tests (go-ldap, client-go)
         ├── suite_test.go           # BeforeSuite: NodePort LDAP connect, rootDSE baseDN discovery, admin connect
         ├── helpers_test.go         # k8s/LDAP helpers (ldapSearch, ldapAdd, dialPodLDAP, …)
