@@ -439,10 +439,20 @@ for the Job's uploader to carry arbitrary pairs (`manager backup-upload
 
 A review of slaptain's generated `cn=config` against a large production OpenLDAP
 platform produced 18 findings. The five that break a large cluster outright are
-being implemented now; **ADR-024 fixes where each of these lives** (converged
-per pod / bootstrap-time / create-only-by-nature, and which CR owns it), so
-these entries record the gap and the severity, not the design. Pick any of them
-up by reading ADR-024's placement table first — the class is already decided.
+have **landed** (2026-09-12); **ADR-024 fixes where each of these lives**
+(converged per pod / bootstrap-time / create-only-by-nature, and which CR owns
+it), so the entries below record the gap and the severity, not the design. Pick
+any of them up by reading ADR-024's placement table first — the class is already
+decided.
+
+Already done, listed so nobody re-raises them: the replication identity's
+`olcLimits` exemption on the data and accesslog databases (ADR-020 amendment —
+this was a silent 500-entry replication cap), `olcDbMaxSize` on both with
+operator defaults and a converge-on-change path that refuses a shrink out loud,
+per-database `sizeLimit`/`timeLimit`/`limits`, the `entryCSN`/`entryUUID`
+baseline indices on data databases, and `spec.backend.idlExponent`. The
+many-entries fixture class ADR-024 asks for is `tests/e2e/scale_test.go`, gated
+`E2E_SCALE=1` — every one of the five is structurally invisible without it.
 
 - **`olcDbCheckpoint` never set** (degrades). No mdb checkpoint interval on any
   database, and it interacts with `noSync`: no checkpoint plus `noSync` loses an
