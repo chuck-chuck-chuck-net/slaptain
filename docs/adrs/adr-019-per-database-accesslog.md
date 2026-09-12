@@ -500,3 +500,22 @@ and are stable enough to locate the code; the mechanism is identical in the
   `tests/data/slapd-deltasync-provider.conf`,
   `tests/data/slapd-deltasync-consumer.conf`,
   `tests/scripts/test063-delta-multiprovider`
+
+## Amendment (2026-09-12): the log DB's index set
+
+Log DBs are created with
+`olcDbIndex: entryCSN,objectClass,reqEnd,reqResult,reqStart,reqDN eq` —
+upstream's delta-syncrepl set. The original `default eq` +
+`reqEnd,reqResult,reqStart eq` was incomplete: `index default <type>` sets only
+the fallback *type* for attributes listed without one and indexes nothing by
+itself (slapd-mdb(5)), and `reqDN` is asserted by multi-provider out-of-order
+modify resolution — `(&(entryCSN>=…)(reqDN=…)…)` against the *local* log on
+every conflicting write (`syncrepl.c`) — so a write-contended mesh was doing
+unindexed scans on a hot path.
+
+The operator converges the set on every reconcile (add-missing only, never
+replace: back-mdb rejects a duplicate definition for an already-indexed
+attribute), which upgrades log DBs created by earlier operators in place — per
+slapd-mdb(5), a cn=config `olcDbIndex` modify rebuilds the indices online in a
+background task, so no restart and no `slapindex`. Performance, not
+correctness: this ADR's decisions are unchanged.

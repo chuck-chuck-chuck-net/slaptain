@@ -402,6 +402,14 @@ func assertPerDatabaseAccesslogLayout(
 			"pod %s: accesslog DB %q must carry exactly the ADR-020 R1 rule for %q",
 			pod, wantLog, dataSuffix)
 
+		// (a3) with the full upstream index set. reqDN above all: multi-provider
+		// out-of-order modify resolution searches the local log with
+		// (&(entryCSN>=…)(reqDN=…)…) on every conflicting write, so a missing
+		// index turns a write-contended mesh into unindexed log scans.
+		Expect(logDBIndexedAttrs(conn, logDB.dn)).To(ContainElements(wantAccesslogIndexAttrs),
+			"pod %s: accesslog DB %q must index %v (eq); got %v",
+			pod, wantLog, wantAccesslogIndexAttrs, logDBIndexedAttrs(conn, logDB.dn))
+
 		// (b) the data DB's overlay names it.
 		dataDB, ok := findMdb(mdbs, dataSuffix)
 		Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, dataSuffix)
@@ -474,6 +482,48 @@ func logDBAccess(conn *ldap.Conn, dn string) []string {
 	Expect(err).NotTo(HaveOccurred(), "read olcAccess on %s", dn)
 	Expect(res.Entries).To(HaveLen(1))
 	return res.Entries[0].GetEqualFoldAttributeValues("olcAccess")
+}
+
+// wantAccesslogIndexAttrs is the index set the operator must put on every
+// per-database accesslog DB (lowercased — attribute names are case-insensitive).
+// Mirrors accesslogIndexAttrs in the operator's slapddatabase_controller.go;
+// internal/ cannot be imported from here, so the list is duplicated on purpose.
+var wantAccesslogIndexAttrs = []string{
+	"entrycsn", "objectclass", "reqend", "reqresult", "reqstart", "reqdn",
+}
+
+// logDBIndexedAttrs returns the lowercased attribute names a database indexes
+// with an eq index, as read from its olcDbIndex values ("<attrlist> <types>").
+func logDBIndexedAttrs(conn *ldap.Conn, dn string) []string {
+	res, err := conn.Search(ldap.NewSearchRequest(
+		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=*)", []string{"olcDbIndex"}, nil))
+	Expect(err).NotTo(HaveOccurred(), "read olcDbIndex on %s", dn)
+	Expect(res.Entries).To(HaveLen(1))
+
+	var attrs []string
+	for _, v := range res.Entries[0].GetEqualFoldAttributeValues("olcDbIndex") {
+		fields := strings.Fields(v)
+		if len(fields) < 2 {
+			continue // no explicit type — the database default, not an eq index
+		}
+		types := strings.Split(strings.ToLower(fields[len(fields)-1]), ",")
+		hasEq := false
+		for _, t := range types {
+			if strings.TrimSpace(t) == "eq" {
+				hasEq = true
+			}
+		}
+		if !hasEq {
+			continue
+		}
+		for _, a := range strings.Split(strings.Join(fields[:len(fields)-1], ""), ",") {
+			if a = strings.TrimSpace(strings.ToLower(a)); a != "" {
+				attrs = append(attrs, a)
+			}
+		}
+	}
+	return attrs
 }
 
 // nsName is a shorthand for the controller-runtime object key.

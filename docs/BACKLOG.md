@@ -252,25 +252,6 @@ Two follow-ups worth considering:
 
 ---
 
-## Accesslog index set is incomplete
-
-The per-database accesslog DBs (ADR-019) are created with
-`olcDbIndex: default eq` + `reqEnd,reqResult,reqStart eq`. Upstream indexes
-`entryCSN,objectClass,reqEnd,reqResult,reqStart,reqDN`. Note `index default eq`
-indexes nothing on its own — it only sets the default *type*.
-
-`reqDN` is the one that matters: multi-provider out-of-order modify resolution
-searches the local log with `(&(entryCSN>=…)(reqDN=…)…)` on **every** conflicting
-write (`syncrepl.c`), so on a write-contended mesh that is an unindexed
-attribute assertion on a hot path. `entryCSN` and `objectClass` are cheap wins.
-
-Deliberately out of scope for ADR-019 (it changes performance, not correctness,
-and folding it in would have muddied that ADR's blast radius). Independent of it:
-the fix is a one-line change to the index list plus an e2e that asserts the
-resulting `olcDbIndex`.
-
----
-
 ## e2e cannot pin an old `slapd-init` image, so one migration failure mode has no guard
 
 The 2026-08-25 "syncrepl stanzas written to a pod whose accesslog DB does not
