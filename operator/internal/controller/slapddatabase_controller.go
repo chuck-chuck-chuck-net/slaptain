@@ -1348,10 +1348,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		// back-mdb does not create olcDbDirectory; the init container
 		// provisions /accesslog/<db> from DATABASE_DIRS (ADR-019 R3).
 		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AccesslogDir(sd.Name)})
-		addReq.Attribute("olcDbIndex", []string{
-			"default eq",
-			"reqEnd,reqResult,reqStart eq",
-		})
+		addReq.Attribute("olcDbIndex", planAccesslogIndices(nil))
 		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Spec.Suffix)})
 		if err := conn.Add(addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
@@ -1373,6 +1370,14 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	// Converge the ACL on every reconcile (ADR-020 R5). Covers a log created
 	// by an operator predating ADR-020, and any hand-edit.
 	if err := r.ensureAccesslogACL(ctx, conn, host, dbDN, sd.Spec.Suffix); err != nil {
+		return err
+	}
+
+	// Same for the index set: a log DB created by an operator predating
+	// accesslogIndexAttrs is missing reqDN, the attribute every out-of-order
+	// modify resolution asserts on. back-mdb reindexes online after a cn=config
+	// modify, so this converges without a restart.
+	if err := r.ensureAccesslogIndices(ctx, conn, host, dbDN); err != nil {
 		return err
 	}
 
@@ -1427,6 +1432,109 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		}
 	}
 	return nil
+}
+
+// accesslogIndexAttrs is the equality index set every per-database accesslog DB
+// carries — upstream's set for a delta-syncrepl log (slapo-accesslog(5)'s
+// documented example and the OpenLDAP Administrator's Guide delta-syncrepl
+// recipe both index exactly these).
+//
+// reqDN is the one that earns its keep: multi-provider out-of-order modify
+// resolution searches the *local* log with (&(entryCSN>=…)(reqDN=…)…) on every
+// conflicting write (syncrepl.c), so without it a write-contended mesh does an
+// unindexed attribute assertion on a hot path. entryCSN and objectClass are the
+// cheap companions — accesslog purge and the log's own syncprov scan them.
+//
+// Note what is NOT here: "default eq". Per slapd-mdb(5), `index default <type>`
+// only sets the type used for attributes listed *without* one — "setting a
+// default does not imply that all attributes will be indexed". Every value the
+// operator writes names its types explicitly, so the old "default eq" indexed
+// nothing and is dropped. It is not removed from DBs that already have it
+// (harmless, and a Replace would force a needless reindex).
+var accesslogIndexAttrs = []string{
+	"entryCSN", "objectClass", "reqEnd", "reqResult", "reqStart", "reqDN",
+}
+
+// planAccesslogIndices returns the olcDbIndex values to ADD so that an accesslog
+// DB covers accesslogIndexAttrs, given what it carries today. nil means nothing
+// to do. Pure — the LDAP half only executes the verdict. Passing nil plans a
+// fresh DB's whole index set, so creation and convergence share one seam.
+//
+// An attribute already named in any live value counts as configured, whatever
+// its index types: back-mdb rejects a *second* definition for an attribute that
+// already has one, so a hand-set richer index (say "reqDN eq,sub") must be left
+// alone rather than duplicated.
+//
+// Converging existing DBs is safe on back-mdb: per slapd-mdb(5), "changing index
+// settings dynamically by LDAPModifying cn=config automatically causes rebuilding
+// of the indices online in a background task" — the slapindex(8) requirement
+// applies to slapd.conf-era changes, not to a cn=config modify. Worst case the
+// rebuild costs one background pass over a change journal that is purged
+// periodically anyway, and even if a rebuild were skipped the log's older entries
+// age out, so lazy convergence would still reach a fully indexed steady state.
+func planAccesslogIndices(current []string) []string {
+	indexed := make(map[string]bool, len(current)*2)
+	for _, v := range current {
+		fields := strings.Fields(v)
+		if len(fields) == 0 {
+			continue
+		}
+		// "<attrlist> [<types>]" — the attribute list is the whitespace-tolerant
+		// remainder once a trailing type field is dropped.
+		attrList := fields[0]
+		if len(fields) > 1 {
+			attrList = strings.Join(fields[:len(fields)-1], "")
+		}
+		for _, a := range strings.Split(attrList, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				indexed[strings.ToLower(a)] = true
+			}
+		}
+	}
+
+	var missing []string
+	for _, a := range accesslogIndexAttrs {
+		if !indexed[strings.ToLower(a)] {
+			missing = append(missing, a)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return []string{strings.Join(missing, ",") + " eq"}
+}
+
+// ensureAccesslogIndices adds whatever planAccesslogIndices finds missing on a
+// log DB. Converged on every reconcile, the way ensureAccesslogACL converges the
+// ADR-020 rule: it is what upgrades a log DB created by an operator predating
+// this index set (notably one with no reqDN index).
+func (r *SlapdDatabaseReconciler) ensureAccesslogIndices(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dbDN string,
+) error {
+	log := logf.FromContext(ctx)
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dbDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		1, 0, false, "(objectClass=*)", []string{"olcDbIndex"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("read olcDbIndex on %s: %w", dbDN, err)
+	}
+	if len(sr.Entries) == 0 {
+		return fmt.Errorf("no entry at %s", dbDN)
+	}
+
+	missing := planAccesslogIndices(sr.Entries[0].GetEqualFoldAttributeValues("olcDbIndex"))
+	if len(missing) == 0 {
+		return nil
+	}
+
+	log.Info("adding missing accesslog indices", "host", host, "dn", dbDN, "add", missing)
+	modReq := ldap.NewModifyRequest(dbDN, nil)
+	modReq.Add("olcDbIndex", missing)
+	return conn.Modify(modReq)
 }
 
 // accesslogACL returns the single olcAccess rule an accesslog database carries
