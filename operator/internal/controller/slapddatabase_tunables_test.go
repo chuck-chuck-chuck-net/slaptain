@@ -198,31 +198,34 @@ func TestDesiredDataMaxSize(t *testing.T) {
 	})
 }
 
-func TestPlanMaxSize(t *testing.T) {
+// The live cluster overruled the design here: an ldapmodify of olcDbMaxSize
+// against a running back-mdb database segfaults slapd (observed on OpenLDAP
+// 2.7.1, exit 139). So the seam COMPARES; nothing writes to a live database.
+func TestCompareMaxSize(t *testing.T) {
 	const want32Gi = int64(34359738368)
 	cases := []struct {
-		name       string
-		current    string
-		desired    int64
-		wantAction maxSizeAction
-		wantValue  string
+		name        string
+		current     string
+		desired     int64
+		wantVerdict maxSizeVerdict
+		wantCurrent string
 	}{
-		{"absent → write", "", want32Gi, maxSizeWrite, "34359738368"},
-		{"equal → noop", "34359738368", want32Gi, maxSizeNoop, ""},
-		{"smaller → grow", "1073741824", want32Gi, maxSizeWrite, "34359738368"},
-		{"larger → rejected, never shrunk", "68719476736", want32Gi, maxSizeShrinkRejected, "68719476736"},
-		{"unparseable current → write ours", "wat", want32Gi, maxSizeWrite, "34359738368"},
+		{"absent → needs grow (back-mdb's ~10 MB)", "", want32Gi, maxSizeNeedsGrow, ""},
+		{"equal → matches", "34359738368", want32Gi, maxSizeMatches, "34359738368"},
+		{"smaller → needs grow", "1073741824", want32Gi, maxSizeNeedsGrow, "1073741824"},
+		{"larger → needs shrink", "68719476736", want32Gi, maxSizeNeedsShrink, "68719476736"},
+		{"unparseable current → needs grow, reported verbatim", "wat", want32Gi, maxSizeNeedsGrow, "wat"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			action, value := planMaxSize(tc.current, tc.desired)
-			if action != tc.wantAction {
-				t.Fatalf("planMaxSize(%q, %d) action = %v, want %v",
-					tc.current, tc.desired, action, tc.wantAction)
+			verdict, cur := compareMaxSize(tc.current, tc.desired)
+			if verdict != tc.wantVerdict {
+				t.Fatalf("compareMaxSize(%q, %d) verdict = %v, want %v",
+					tc.current, tc.desired, verdict, tc.wantVerdict)
 			}
-			if value != tc.wantValue {
-				t.Fatalf("planMaxSize(%q, %d) value = %q, want %q",
-					tc.current, tc.desired, value, tc.wantValue)
+			if cur != tc.wantCurrent {
+				t.Fatalf("compareMaxSize(%q, %d) current = %q, want %q",
+					tc.current, tc.desired, cur, tc.wantCurrent)
 			}
 		})
 	}

@@ -154,6 +154,20 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// parameter.
 	healthyPods := map[string]bool{}
 
+	// Start each pass assuming every operator-managed tunable matches; the
+	// per-pod work flips this to False when it finds one it cannot apply to a
+	// live database (today: the map size). Set here rather than at the end so
+	// a divergence that has been repaired — by recreating the database —
+	// clears itself without a special case (ADR-001 idempotency).
+	setCondition(&sd.Status.Conditions, metav1.Condition{
+		Type:               tunablesConvergedCondition,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Converged",
+		Message:            "every operator-managed tunable matches cn=config on every pod",
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sd.Generation,
+	})
+
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
@@ -487,12 +501,14 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		return fmt.Errorf("ensure baseline indices at %s: %w", host, err)
 	}
 
-	// Map size (ADR-024 R1/R4): grows live, refuses to shrink out loud.
+	// Map size (ADR-024 R4): set at creation, REPORTED (never written) on an
+	// existing database — modifying olcDbMaxSize under a running slapd
+	// segfaults it. See compareMaxSize.
 	maxSize, err := desiredDataMaxSize(sd)
 	if err != nil {
 		return fmt.Errorf("spec.maxSize: %w", err)
 	}
-	if err := r.ensureMaxSize(ctx, conn, host, dataDN, maxSize); err != nil {
+	if err := r.checkMaxSize(ctx, conn, host, dataDN, "data database", maxSize, sd); err != nil {
 		return err
 	}
 
@@ -1441,11 +1457,13 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		return err
 	}
 
-	// Same for the journal's map size and the replication identity's limits
-	// exemption — both converge onto a log DB created by an operator predating
-	// ADR-024, which is the population that silently caps at 500 journal
-	// records and at a ~10 MB journal (ADR-024 R1, ADR-020 amendment).
-	if err := r.ensureMaxSize(ctx, conn, host, dbDN, defaultAccesslogMaxSizeBytes); err != nil {
+	// The replication identity's limits exemption converges onto a log DB
+	// created by an operator predating ADR-024 — the population that silently
+	// caps at 500 journal records (ADR-020 amendment). The journal's map size
+	// can only be REPORTED on an existing log DB, for the same reason as the
+	// data DB's.
+	if err := r.checkMaxSize(ctx, conn, host, dbDN, "accesslog database",
+		defaultAccesslogMaxSizeBytes, sd); err != nil {
 		return err
 	}
 	if err := r.ensureLimits(ctx, conn, host, dbDN,

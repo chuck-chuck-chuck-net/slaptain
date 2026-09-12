@@ -8,6 +8,7 @@ import (
 
 	ldap "github.com/go-ldap/ldap/v3"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
@@ -134,49 +135,62 @@ func desiredDataMaxSize(sd *ldapv1alpha1.SlapdDatabase) (int64, error) {
 	return parseMaxSize(sd.Spec.MaxSize)
 }
 
-// maxSizeAction is what planMaxSize decided to do with olcDbMaxSize.
-type maxSizeAction int
+// maxSizeVerdict is what comparing the live olcDbMaxSize against the desired
+// value concluded.
+type maxSizeVerdict int
 
 const (
-	// maxSizeNoop — cn=config already carries the desired value.
-	maxSizeNoop maxSizeAction = iota
-	// maxSizeWrite — write the desired value (a fresh database, or a grow).
-	maxSizeWrite
-	// maxSizeShrinkRejected — the spec asks for a SMALLER map than the
-	// database already has. Never written; reported instead (ADR-024 R4).
-	maxSizeShrinkRejected
+	// maxSizeMatches — cn=config already carries the desired value.
+	maxSizeMatches maxSizeVerdict = iota
+	// maxSizeNeedsGrow — cn=config has a smaller value, or none at all (which
+	// means back-mdb's ~10 MB).
+	maxSizeNeedsGrow
+	// maxSizeNeedsShrink — the spec asks for a SMALLER map than the database
+	// already has.
+	maxSizeNeedsShrink
 )
 
-// planMaxSize compares the live olcDbMaxSize against the desired byte count.
+// compareMaxSize compares the live olcDbMaxSize against the desired byte count.
 //
-// Growing is safe on a live database: slapd applies olcDbMaxSize to the running
-// environment, and a larger map is a larger reservation over the same data.
-// Shrinking is not — LMDB cannot map an environment smaller than the data it
-// already holds, and a map size below the current one is either refused by
-// slapd or, worse, accepted into cn=config while the running environment keeps
-// the old size, which is exactly the spec/cn=config divergence ADR-024 R4
-// exists to forbid. So a shrink is reported, never applied; the returned value
-// in that case is the CURRENT size, for the message.
+// NEITHER verdict is written to a running database. This is the one place where
+// the live cluster overruled the design: ADR-024 named the map size as the
+// worked example of a field that had no business being create-only, and growing
+// it live looked safe on paper. It is not. An `ldapmodify` of olcDbMaxSize
+// against a running back-mdb database **segfaults slapd** — observed on
+// OpenLDAP 2.7.1, exit code 139, immediately after the MOD is logged:
 //
-// An unparseable current value (a hand-edit) is treated as "not ours" and
-// overwritten — convergence's whole job.
-func planMaxSize(current string, desired int64) (maxSizeAction, string) {
-	want := strconv.FormatInt(desired, 10)
+//	conn=1011 op=6 MOD dn="olcDatabase={1}mdb,cn=config"
+//	conn=1011 op=6 MOD attr=olcDbMaxSize
+//	slap_get_csn: conn=1011 op=6 generated new csn=…
+//	<process dies>
+//
+// The mechanism is LMDB's own contract: mdb_env_set_mapsize may only be called
+// with no transactions active in the process, and a live slapd always has some.
+// So the map size is set when the database is CREATED — where it is safe,
+// because the backend is initialised with it and there is no live environment
+// to resize — and on an existing database a mismatch is reported, never
+// applied. ADR-024 R4 is still honoured: the divergence gets a status
+// condition, which is R2's "documents itself as bootstrap-time and reports the
+// pending-reload state", not R4's forbidden silence.
+//
+// An unparseable current value (a hand-edit) counts as "smaller than ours" so
+// it is reported rather than quietly accepted.
+func compareMaxSize(current string, desired int64) (maxSizeVerdict, string) {
 	cur := strings.TrimSpace(current)
 	if cur == "" {
-		return maxSizeWrite, want
+		return maxSizeNeedsGrow, ""
 	}
 	curBytes, err := strconv.ParseInt(cur, 10, 64)
 	if err != nil {
-		return maxSizeWrite, want
+		return maxSizeNeedsGrow, cur
 	}
 	switch {
 	case curBytes == desired:
-		return maxSizeNoop, ""
+		return maxSizeMatches, cur
 	case curBytes > desired:
-		return maxSizeShrinkRejected, cur
+		return maxSizeNeedsShrink, cur
 	default:
-		return maxSizeWrite, want
+		return maxSizeNeedsGrow, cur
 	}
 }
 
@@ -414,18 +428,21 @@ func searchLimitEqual(a, b string) bool {
 	return norm(a) == norm(b)
 }
 
-// ensureMaxSize converges olcDbMaxSize on one database (data or accesslog).
+// checkMaxSize reports — and never fixes — a divergence between the desired map
+// size and what a live database carries. See compareMaxSize for why writing it
+// is not an option (it segfaults slapd).
 //
-// A grow is applied live. A SHRINK is refused with an error rather than
-// silently dropped: the API accepted the edit, so the user gets a signal
-// (the SlapdDatabase goes Degraded with this message) instead of a spec that
-// says one thing while cn=config keeps another — ADR-024 R4, the rule this
-// field's create-only past is the debt against.
-func (r *SlapdDatabaseReconciler) ensureMaxSize(
+// The report is a status condition on the SlapdDatabase, not an error: the
+// database is otherwise healthy, and failing its reconcile would wedge
+// replication over a condition no reconcile can clear. The change path is a
+// database recreate (restore into a fresh database, ADR-014), which is the same
+// shape as every other bootstrap-time attribute's (ADR-024 R2).
+func (r *SlapdDatabaseReconciler) checkMaxSize(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host, dbDN string,
+	host, dbDN, what string,
 	desired int64,
+	sd *ldapv1alpha1.SlapdDatabase,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -438,22 +455,42 @@ func (r *SlapdDatabaseReconciler) ensureMaxSize(
 		cur = current[0]
 	}
 
-	action, value := planMaxSize(cur, desired)
-	switch action {
-	case maxSizeNoop:
+	verdict, curVal := compareMaxSize(cur, desired)
+	if verdict == maxSizeMatches {
 		return nil
-	case maxSizeShrinkRejected:
-		return fmt.Errorf(
-			"refusing to shrink olcDbMaxSize on %s at %s from %s to %d bytes: LMDB cannot "+
-				"map an environment smaller than the data it holds; raise spec.maxSize back to "+
-				"at least %s, or recreate the database to shrink it (ADR-024 R4)",
-			dbDN, host, value, desired, value)
 	}
 
-	log.Info("aligning olcDbMaxSize", "host", host, "dn", dbDN, "from", cur, "to", value)
-	modReq := ldap.NewModifyRequest(dbDN, nil)
-	modReq.Replace("olcDbMaxSize", []string{value})
-	return conn.Modify(modReq)
+	shown := curVal
+	if shown == "" {
+		shown = "unset (back-mdb's ~10 MB default)"
+	}
+	var msg string
+	if verdict == maxSizeNeedsShrink {
+		msg = fmt.Sprintf(
+			"%s on %s has olcDbMaxSize %s; spec asks for %d bytes. A map size is fixed "+
+				"once the database exists — LMDB cannot be resized under a running slapd "+
+				"(the modify segfaults it), and it cannot map an environment smaller than "+
+				"the data it holds at all. Raise spec.maxSize back to %s, or recreate the "+
+				"database to shrink it.", what, host, shown, desired, curVal)
+	} else {
+		msg = fmt.Sprintf(
+			"%s on %s has olcDbMaxSize %s; spec asks for %d bytes. A map size is fixed once "+
+				"the database exists — LMDB cannot be resized under a running slapd (the "+
+				"modify segfaults it). Recreate the database (back up, delete, restore into "+
+				"a fresh one) to apply the larger map.", what, host, shown, desired)
+	}
+
+	log.Info("olcDbMaxSize diverges from spec and cannot be applied to a live database",
+		"host", host, "dn", dbDN, "current", shown, "desired", desired)
+	setCondition(&sd.Status.Conditions, metav1.Condition{
+		Type:               tunablesConvergedCondition,
+		Status:             metav1.ConditionFalse,
+		Reason:             "RecreateRequired",
+		Message:            msg,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sd.Generation,
+	})
+	return nil
 }
 
 // ensureDataBaselineIndices adds whatever planDataBaselineIndices finds missing
@@ -481,3 +518,10 @@ func (r *SlapdDatabaseReconciler) ensureDataBaselineIndices(
 	modReq.Add("olcDbIndex", missing)
 	return conn.Modify(modReq)
 }
+
+// tunablesConvergedCondition reports whether every operator-managed tunable on
+// this database matches cn=config on every pod. False means a value the
+// operator cannot apply to a live database has diverged — today only the map
+// size (ADR-024 R4: a spec field that cannot be honoured is reported, never
+// silently ignored).
+const tunablesConvergedCondition = "TunablesConverged"

@@ -280,10 +280,16 @@ type SlapdDatabaseSpec struct {
 	// Sizing the map far above the volume is therefore cheap and normal; the
 	// volume, not this field, is what you grow to make room.
 	//
-	// Converged on every reconcile (ADR-024 R1). Growing it live is safe.
-	// SHRINKING below the value cn=config already carries is REJECTED — the
-	// database reports Degraded with the reason rather than silently keeping
-	// the larger map (ADR-024 R4); recreate the database to shrink.
+	// SET WHEN THE DATABASE IS CREATED, and fixed from then on. slapd cannot
+	// take this at runtime: an ldapmodify of olcDbMaxSize against a running
+	// back-mdb database SEGFAULTS slapd (observed on OpenLDAP 2.7.1), because
+	// LMDB's mdb_env_set_mapsize may not be called while transactions are
+	// active and a live slapd always has some. Editing this field on an
+	// existing SlapdDatabase therefore does NOT resize anything — it sets the
+	// TunablesConverged condition to False with the current value, the desired
+	// value and the change path, which is to recreate the database (back up,
+	// delete, restore into a fresh one — ADR-014). Reported, never silently
+	// dropped: ADR-024 R4 with R2's change-path documentation.
 	// +optional
 	MaxSize string `json:"maxSize,omitempty"`
 	// sizeLimit is the maximum number of entries a search against this database

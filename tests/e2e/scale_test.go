@@ -124,7 +124,15 @@ var _ = Describe("many entries", Label("scale"), Ordered, ContinueOnFailure, fun
 		}
 		// Entry-exact, not "the last one arrived": a cap truncates the MIDDLE
 		// of a refresh, so a spot check on one DN can pass while hundreds are
-		// missing. Pre-ADR-024 this settles at exactly 500 and stays there.
+		// missing.
+		//
+		// Honest about its teeth (the accesslog_test.go convention): this spec
+		// was GREEN on the pre-fix operator, because a seed written into a
+		// live mesh propagates as a stream of small delta searches — none of
+		// which individually approaches 500. The size limit bites a WHOLE-DB
+		// search: a fresh consumer's full refresh (a new pod, a replaced PVC,
+		// a post-restore re-seed). This is the guard for that path; the
+		// journal spec below is the one that goes red on a steady-state mesh.
 		for _, pod := range rwPods[1:] {
 			c := dialPodAs(pod, "cn=admin,"+baseDN, adminPW)
 			var last int
