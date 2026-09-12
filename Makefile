@@ -281,8 +281,9 @@ helm-uninstall:
 	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
 
 ## Test resources: SlapdSchema + SlapdDatabase + readpw Secret.
-## Set TEST_RESOURCES to "example" or "lab" (default: lab).
-TEST_RESOURCES ?= lab
+## Set TEST_RESOURCES to "example" or "lab" (default: example; "lab" is the
+## internal fixture set and requires SOPS-decryptable secrets — see tests/resources/lab/).
+TEST_RESOURCES ?= example
 
 testing-apply:
 	$(KUBECTL) apply -n $(NAMESPACE_TESTING) -f tests/resources/$(TEST_RESOURCES)/

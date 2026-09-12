@@ -64,7 +64,8 @@ make testing-apply    # kubectl apply tests/resources/$TEST_RESOURCES/
 make testing-delete
 ```
 
-`TEST_RESOURCES` defaults to `example` in `tests/e2e.sh` but to `lab` in the root Makefile's `testing-apply` (an internal-lab convenience — pass `TEST_RESOURCES=example` there when in doubt). Set it to `lab` for the
+`TEST_RESOURCES` defaults to `example` in both `tests/e2e.sh` and the root Makefile's
+`testing-apply`. Set it to `lab` for the
 internal lab variant (see `tests/resources/lab/` for SOPS-encrypted secrets used there),
 or to `storm-repro` for the ITS#9580 reproduction fixture — a copy of `example` whose
 `accesslogPurge` is 5 minutes instead of 2 days (used by `tests/e2e-storm-repro.sh`,
