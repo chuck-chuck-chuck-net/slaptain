@@ -153,6 +153,47 @@ type SlapdPVCConfig struct {
 	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
 }
 
+// SlapdMdbBackendConfig configures the back-mdb BACKEND entry
+// (olcBackend={0}mdb), which is initialised before any database exists and is
+// therefore BOOTSTRAP-TIME configuration in the ADR-024 R2 sense: the init
+// container writes it into the generated base config, and the operator never
+// converges it at runtime.
+//
+// Change path — read this before setting anything here. These attributes are
+// applied when a pod's /config volume is first bootstrapped and NEVER again:
+// this script only runs when cn=config does not yet exist. Editing the field on
+// a live SlapdCluster therefore changes nothing on existing pods, and any pod
+// bootstrapped afterwards (a scale-out, a replaced PVC) picks up the NEW value
+// while its peers keep the old one. To change it cluster-wide you recreate the
+// config volumes: back up (SlapdBackup), delete the StatefulSet's config PVCs
+// pod by pod letting each pod re-bootstrap, or rebuild the cluster and restore.
+// See docs/adrs/adr-024-tunable-placement.md §R2.
+type SlapdMdbBackendConfig struct {
+	// idlExponent is the power of two bounding how many entry IDs one index
+	// slot holds before back-mdb degrades that slot to a range (the `idlexp`
+	// backend directive, olcBkMdbIdlExp). Valid range 16-30; slapd's default
+	// is 16 (65536 IDs), which is also slaptain's — see the note below on why
+	// this one does NOT get an opinionated operator default.
+	//
+	// Raising it a few steps is the standard large-directory adjustment: on a
+	// directory where a common index slot exceeds the cap, every search using
+	// that slot falls back to a range and reads far more candidates than it
+	// needs. The cost of raising it is memory per index page.
+	//
+	// Deliberately NOT operator-defaulted away from slapd's value (an
+	// exception to ADR-024 R5, whose corollary "defaults live in the operator
+	// so measurement can move them" assumes a converged attribute): this one
+	// governs on-disk index layout and never converges, so moving the default
+	// later would silently split a cluster into pods bootstrapped before and
+	// after the change, with nothing able to repair it. An opt-in field whose
+	// value is recorded in the CR is the honest shape for a knob nobody can
+	// re-apply.
+	// +kubebuilder:validation:Minimum=16
+	// +kubebuilder:validation:Maximum=30
+	// +optional
+	IDLExponent *int32 `json:"idlExponent,omitempty"`
+}
+
 // SlapdPersistenceConfig configures persistent storage for config and data volumes.
 //
 // Per ADR-013, persistent storage is mandatory; there is no "disabled" mode.
@@ -503,6 +544,10 @@ type SlapdClusterSpec struct {
 	// Bitmasks combine, e.g. 256+128=384 for stats+ACL.
 	// +kubebuilder:default=256
 	LogLevel int32 `json:"logLevel,omitempty"`
+	// backend configures the back-mdb BACKEND (olcBackend={0}mdb), as opposed
+	// to the individual databases. Bootstrap-time only — see SlapdMdbBackendConfig.
+	// +optional
+	Backend *SlapdMdbBackendConfig `json:"backend,omitempty"`
 	// persistence configures persistent storage for config and data volumes.
 	// +optional
 	Persistence SlapdPersistenceConfig `json:"persistence,omitempty"`

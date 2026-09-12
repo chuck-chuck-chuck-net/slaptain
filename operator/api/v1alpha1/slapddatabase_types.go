@@ -267,10 +267,55 @@ type SlapdDatabaseSpec struct {
 	// (e.g. "o=myapp" → "myapp"). Must be unique within the cluster.
 	// +optional
 	DataDirectory string `json:"dataDirectory,omitempty"`
-	// maxSize is the maximum database size (olcDbMaxSize) in bytes. Accepts
-	// standard Kubernetes quantity format (e.g. "1Gi", "32Gi").
+	// maxSize is the LMDB map size (olcDbMaxSize) for this database. Accepts
+	// either a Kubernetes quantity ("32Gi", "1G") or a bare byte count
+	// ("34359738368"); the operator converts to the bare byte count slapd
+	// wants. Unset means the operator's default (32Gi), NOT back-mdb's own
+	// ~10 MB — a database that outgrows its map size stops accepting writes
+	// (MDB_MAP_FULL). See ADR-024 R5.
+	//
+	// The map size is an address-space reservation, not an allocation: LMDB
+	// sparsely grows the file within it, so the REAL bound on this database is
+	// the size of the /data volume (spec.persistence.data on the SlapdCluster).
+	// Sizing the map far above the volume is therefore cheap and normal; the
+	// volume, not this field, is what you grow to make room.
+	//
+	// Converged on every reconcile (ADR-024 R1). Growing it live is safe.
+	// SHRINKING below the value cn=config already carries is REJECTED — the
+	// database reports Degraded with the reason rather than silently keeping
+	// the larger map (ADR-024 R4); recreate the database to shrink.
 	// +optional
 	MaxSize string `json:"maxSize,omitempty"`
+	// sizeLimit is the maximum number of entries a search against this database
+	// may return (olcSizeLimit). Unset means the operator's default,
+	// "unlimited" — NOT slapd's built-in 500, which silently truncates any
+	// enumeration of a directory larger than a fixture (ADR-024 R5). Set an
+	// explicit number to restore a cap; per-identity exemptions go in
+	// spec.limits. Converged per pod.
+	// +kubebuilder:validation:Pattern=`^(unlimited|none|[0-9]+)$`
+	// +optional
+	SizeLimit *string `json:"sizeLimit,omitempty"`
+	// timeLimit is the maximum number of seconds slapd spends answering a
+	// search against this database (olcTimeLimit). Unset means the operator's
+	// default, "unlimited" — slapd's built-in 3600 aborts exactly the bulk
+	// sweeps a large directory exists to serve (ADR-024 R5). Set an explicit
+	// number of seconds to restore a cap. Converged per pod.
+	// +kubebuilder:validation:Pattern=`^(unlimited|none|[0-9]+)$`
+	// +optional
+	TimeLimit *string `json:"timeLimit,omitempty"`
+	// limits is a list of per-identity search-limit exemptions (olcLimits
+	// values) in slapd.conf "limits" format, without the {N} index prefix —
+	// e.g. `dn.exact="cn=bulkreader,dc=example,dc=org" size=unlimited
+	// time=unlimited size.prtotal=unlimited`. Modelled like spec.acls: the
+	// operator numbers them and converges them per pod.
+	//
+	// The replication identity's own exemption is NOT configurable here: it is
+	// part of the replication contract the operator owns end to end and is
+	// always prepended to this list (ADR-024 R7, ADR-020 amendment). A
+	// replication identity capped at slapd's default 500 entries caps
+	// replication itself at 500 entries.
+	// +optional
+	Limits []string `json:"limits,omitempty"`
 	// noSync disables fsync after each write (olcDbNoSync). Improves write
 	// performance at the cost of durability on unclean shutdown. Replicas
 	// provide redundancy. Default false (fsync enabled).

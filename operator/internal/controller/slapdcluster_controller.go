@@ -887,6 +887,18 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		{Name: "DATABASE_DIRS", Value: strings.Join(databaseNames, ",")},
 	}
 
+	// back-mdb BACKEND configuration (olcBackend={0}mdb) — bootstrap-time by
+	// construction, since the backend is initialised before any database
+	// exists, and the IDL exponent governs on-disk index layout so a late
+	// write would apply to only part of the database (ADR-024 R2). Consumed by
+	// bootstrap.sh's `backend mdb` stanza, which only runs on a FRESH /config
+	// volume; changing this field later is a recreate, documented on the field.
+	if exp, ok := mdbIdlExponent(sc); ok {
+		initEnv = append(initEnv,
+			corev1.EnvVar{Name: "LDAP_MDB_IDL_EXP", Value: strconv.Itoa(int(exp))},
+		)
+	}
+
 	if sc.Spec.LDAP.TLS.Enabled {
 		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "LDAP_TLS_CACERT_PATH", Value: "/etc/openldap/tls/ca.crt"},
