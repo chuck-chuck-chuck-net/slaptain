@@ -221,6 +221,7 @@ func main() {
 		Scheme:          mgr.GetScheme(),
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
+		ClusterDomain:   clusterDomain,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdBackup")
 		os.Exit(1)

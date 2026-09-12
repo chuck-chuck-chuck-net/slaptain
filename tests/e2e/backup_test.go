@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -84,5 +85,21 @@ var _ = Describe("backup", Label("backup"), Ordered, func() {
 		Expect(got.Status.Path).NotTo(BeEmpty(), "status.path should be the S3 object key")
 		Expect(got.Status.Path).To(HaveSuffix(".ldif.gz"))
 		Expect(got.Status.SizeBytes).To(BeNumerically(">", 0), "status.sizeBytes should be the uploaded artifact size")
+
+		By("asserting the backup recorded WHERE it read from (ADR-014 amendment 2026-09-12)")
+		// A backup is one pod's view of the DIT. Which pod, and whether that pod
+		// was current with its peers, is recorded unconditionally — on every
+		// topology, replicated or not. The contextCSN vector is asserted only in
+		// restore_replay_test.go, which is gated on a replicated cluster: an
+		// unreplicated database has no syncprov overlay and therefore no
+		// contextCSN to record.
+		Expect(got.Status.SourcePod).To(Equal("slapd-0"),
+			"status.sourcePod should name the pod the artifact was read from")
+		conv := findCondition(got.Status.Conditions, "SourceConverged")
+		Expect(conv).NotTo(BeNil(),
+			"a backup must always carry a SourceConverged condition, whatever it says")
+		Expect(conv.Reason).NotTo(BeEmpty())
+		fmt.Fprintf(GinkgoWriter, "backup source: pod=%s contextCSN=%v SourceConverged=%s (%s: %s)\n",
+			got.Status.SourcePod, got.Status.SourceContextCSN, conv.Status, conv.Reason, conv.Message)
 	})
 })

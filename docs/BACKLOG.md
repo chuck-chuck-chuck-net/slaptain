@@ -400,3 +400,35 @@ Discipline applies: reproduce, read the kubectl branch condition, then decide
 whether the operator should set an explicit strategy or the docs should simply
 never use `rollout status` as a readiness gate (the demo now waits on
 `status.readyReplicas`, which cannot lie).
+
+---
+
+## Designed, deferred: opt-in `SlapdBackup.spec.requireConverged` with a bounded wait
+
+A backup always `slapcat`s pod-0, so on a replicating cluster that is briefly
+behind, a write ACKed elsewhere can legitimately be missing from the artifact
+(demonstrated 2026-09-12; ADR-014 amendment of that date). That amendment fixed
+the *silence*: every backup now records `status.sourcePod`,
+`status.sourceContextCSN` and a `SourceConverged` condition. It deliberately did
+**not** add a gate.
+
+The opt-in gate is designed and parked here until someone asks for it:
+
+- `spec.requireConverged: true` (never default) plus `spec.convergenceTimeout`;
+- while the target `SlapdCluster` reports `ReplicationConverged != True`, the
+  backup stays `Pending` with a reason saying what it is waiting for;
+- on timeout it **takes the backup anyway** and records that it waited and gave
+  up. A backup that declines to run is a backup you do not have; "requireConverged"
+  must never become "no artifact exists".
+
+Rejected outright, and not to be revisited without new information: a strict
+CSN-dominance gate (refuse unless the source's CSN vector dominates every
+peer's). A replica of a heavily-written provider never dominates, and under
+multi-master two vectors can be mutually incomparable — the predicate is both
+unusable and ill-defined.
+
+Also unbuilt, cheap, and independent: stamping `sourcePod` + the converged flag
+into the S3 **object metadata** at upload, so a restore can surface them without
+the CR. `backup.Upload` already accepts a metadata map; what is missing is a way
+for the Job's uploader to carry arbitrary pairs (`manager backup-upload
+--meta k=v`).

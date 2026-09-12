@@ -722,3 +722,142 @@ is how comparable systems document the same operation.
   remote clusters, and the baseline that hub-and-spoke would change.
 - ADR-018 — co-located Job PVC leases; the lease bug was silently blocking
   operation 1.
+
+## Amendment (2026-09-12): a backup records its circumstances
+
+**Status:** Accepted. Adds status surface and documentation; changes no backup
+behaviour. A backup still always takes a backup.
+
+### Context
+
+A multi-site e2e run failed the accesslog-replay spec again, with a new cause.
+The spec adds a marker entry through the cluster Service, backs the database up,
+deletes the marker, restores, and expects the marker back. This time the marker
+was never in the artifact at all.
+
+The chain, fully demonstrated:
+
+1. The write was ACKed — through the ClusterIP Service, which routed it to
+   `slapd-2`.
+2. Seconds later the backup ran. A `SlapdBackup` always `slapcat`s **pod-0**
+   (the Job co-locates with pod-0 to mount its RWO PVCs).
+3. The cluster was freshly created, and pod-0's syncrepl consumer sessions were
+   still inside their boot retry window, so pod-0 had not yet pulled the write.
+4. `slapcat` dumped pod-0 faithfully: no marker.
+5. The restore then restored that artifact faithfully: still no marker, and the
+   spec failed on a premise it had never actually established.
+
+None of steps 2–5 is a defect. Backing up one replica of a replicating set means
+the artifact is that replica's view at that moment, and under multi-master a
+write ACKed elsewhere need not have arrived yet. This ADR already said as much —
+"a backup taken from **any one pod** is representative" — which is true of a
+converged cluster and quietly false of a lagging one.
+
+**The defect is that this was silent.** A completed `SlapdBackup` recorded the
+object key and its size and nothing about where the bytes came from or what
+state that source was in. Months later, during a restore, there is no way to ask.
+
+### Decisions
+
+1. **A backup always takes a backup.** No freshness gate, no refusal, by default
+   and forever-default. A backup that declines to run is a backup you do not
+   have, and "the cluster looked unhealthy" is the moment you most want an
+   artifact. This is the load-bearing decision; everything below is bookkeeping
+   around it.
+
+2. **A backup records its circumstances, unconditionally.** New on
+   `SlapdBackup.status`, written when the backup Job is created:
+
+   | Field | Meaning |
+   |---|---|
+   | `sourcePod` | The pod the artifact was read from (today always `<cluster>-0`). |
+   | `sourceContextCSN` | That pod's `contextCSN` vector for the database's suffix — the artifact's position in the replication timeline. |
+   | condition `SourceConverged` | Whether the cluster reported its replicas converged at backup time. |
+
+   This is honesty, not policy. Nothing here can delay, refuse or fail a backup:
+   a failed CSN read logs and leaves the field unset, and the backup proceeds.
+
+   The `slapcat` artifact **already embeds** the same vector (`contextCSN` is an
+   operational attribute of the suffix entry and is dumped with it). Status is
+   the *queryable* copy — visible in `kubectl get slapdbackup -o yaml` without
+   fetching and decompressing a multi-gigabyte object from S3, and visible even
+   after the object is aged out by retention.
+
+3. **`SourceConverged` consumes the cluster's verdict; it does not compute one.**
+   The SlapdCluster controller already judges local convergence on its CSN
+   monitoring tick and publishes it as the `ReplicationConverged` condition
+   (ADR-008). The backup controller mirrors that condition and carries its
+   message and timestamp. Regular operations judge health; a backup consumes the
+   signal. A second, backup-local notion of "converged" would be a second
+   authority that can disagree with the first, and disagreeing authorities on
+   replication health is precisely what ADR-003 exists to avoid elsewhere.
+
+   Three shapes, all recorded:
+
+   - cluster has the condition → mirror it (`ClusterConverged` /
+     `ClusterDiverged` / `ConvergenceUnknown`);
+   - cluster is not a replication participant (replication disabled, or a single
+     replica with no external peers) → `True` / `NotReplicated`. Chosen over
+     `Unknown`: there is nothing to be current *with*, so the source is by
+     construction the whole truth, and an `Unknown` here would train readers to
+     ignore the field on the majority of deployments;
+   - cluster is a participant but has published no such condition yet →
+     `Unknown` / `NoConvergenceSignal`. Silence is not evidence of convergence.
+
+   The verdict is only as fresh as the cluster's last CSN tick (60 s), and
+   ADR-008's amendment bounds what CSN comparison can see at all — an idle
+   database reads converged across a broken link. The condition message carries
+   the source condition's timestamp so the staleness is visible rather than
+   implied.
+
+4. **Rejected: gate the backup on CSN dominance.** The tempting strict version —
+   refuse (or wait) unless the source pod's CSN vector dominates every peer's —
+   is wrong on two counts. A replica of a heavily-written provider legitimately
+   never dominates, so the gate would refuse backups indefinitely on exactly the
+   busiest cluster. And under multi-master two vectors can be mutually
+   incomparable (each carrying a serverID entry the other lacks), so "dominates"
+   is not even a total order to test against. A predicate that is both unusable
+   and ill-defined is not a safety feature.
+
+5. **Deferred, designed: an opt-in `spec.requireConverged` with a bounded wait.**
+   The shape, should demand appear: `requireConverged: true` plus a
+   `convergenceTimeout`; the controller holds the backup in `Pending` while the
+   cluster reports `ReplicationConverged != True`, and on timeout **takes the
+   backup anyway**, recording that it did. Opt-in, never default, and never
+   able to turn into "no backup exists". Not built now: no user has asked, the
+   recording above already makes the condition visible, and the freshness the
+   gate would buy is bounded by the 60 s monitoring tick it would read. Carried
+   in `docs/BACKLOG.md`.
+
+6. **Not done: stamping the source onto the S3 object.** Putting `sourcePod` and
+   the converged flag into the object's metadata (alongside the existing
+   replication-password hash) would let a restore years later surface them
+   without the CR. `backup.Upload` already takes a metadata map, but the Job's
+   uploader has no flag to carry arbitrary pairs, so it needs a new
+   `manager backup-upload --meta k=v` surface. Left for whoever needs it; status
+   is the load-bearing part and the artifact embeds the CSN vector regardless.
+
+### Consequences
+
+- Every `SlapdBackup` — including those a `SlapdScheduledBackup` emits, which go
+  through the same controller — carries `sourcePod`, `sourceContextCSN` and
+  `SourceConverged` with no configuration. `kubectl get slapdbackup -o wide`
+  shows the source pod.
+- The backup controller now reads `contextCSN` from the source pod over LDAP,
+  binding as `cn=replication,<suffix>` with the database's replication password
+  (the ADR-008 identity and path, reused). It is best-effort and cannot fail a
+  backup.
+- The accesslog-replay e2e no longer writes its marker through the Service. It
+  writes to pod-0 — the pod the backup actually reads — so the spec tests
+  replay-undo protection rather than replication freshness, and then asserts the
+  premise it used to assume: the marker reaches every RW pod, and the marker is
+  **in the artifact** (the object is grepped out of the S3 backend). Both status
+  fields are asserted there too.
+- `docs/BACKUP.md` states plainly what an artifact is: one pod's view, taken at
+  one moment, with its circumstances recorded next to it.
+
+### Related
+
+- ADR-008 (amendment) — what CSN comparison can and cannot observe; the source of
+  the signal this consumes and the bound on how much it is worth.
+- ADR-018 — the co-located Job that makes pod-0 the source in the first place.

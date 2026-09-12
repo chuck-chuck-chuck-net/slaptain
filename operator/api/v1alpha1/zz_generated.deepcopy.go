@@ -388,6 +388,11 @@ func (in *SlapdBackupStatus) DeepCopyInto(out *SlapdBackupStatus) {
 		in, out := &in.CompletedAt, &out.CompletedAt
 		*out = (*in).DeepCopy()
 	}
+	if in.SourceContextCSN != nil {
+		in, out := &in.SourceContextCSN, &out.SourceContextCSN
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))
