@@ -337,9 +337,15 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 				}
 			}
 			return true
-		}).WithTimeout(60 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
+		}).WithTimeout(150 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
 			"external peer syncrepl stanza (rid=%s) should be restored on all RW pods after re-adding peer", extPeerRID)
-	}, NodeTimeout(3*time.Minute))
+		// 150 s, not 60: re-adding the peer reconciles immediately, but the
+		// stanza needs the peer's addresses, and address discovery rides the
+		// 60 s CSN-monitoring tick (ADR-016 amendment 2026-08-26; the M8
+		// negative result). Worst case is a full tick plus the follow-up
+		// SlapdDatabase reconcile on every pod — a 60 s budget fails on tick
+		// phase alone, which is exactly how this spec flaked.
+	}, NodeTimeout(4*time.Minute))
 
 	// ── 5. External peer status reported in CR ───────────────────────────────
 
