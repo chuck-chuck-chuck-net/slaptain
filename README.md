@@ -144,6 +144,35 @@ kubectl get slapdschema
 # myapp-schema    slapd     100        true      1m
 ```
 
+## OpenLDAP 2.7 by default
+
+The slapd images ship **OpenLDAP 2.7.1**, built from a vendored Debian
+packaging fork — at a time when no distribution packages 2.7 at all. That is a
+deliberately early adoption, for two reasons:
+
+1. **It addresses an issue we actually ran into.** A pod that loses its volumes
+   and resyncs from its peers can drive an OpenLDAP 2.6 mesh into a
+   `sync cookie is stale` refresh storm
+   ([ITS#9580](https://bugs.openldap.org/show_bug.cgi?id=9580)) — minutes of
+   pegged CPU while the cluster reports itself healthy. The fix is released
+   only in the 2.7 line. Upstream calls it a partial fix, so 2.7 *addresses*
+   the failure mode rather than provably closing it — but partial and released
+   beats complete and hypothetical.
+2. **This project leans forward.** Anyone bold enough to run a young operator
+   for multi-master OpenLDAP is not the audience that needs to wait for a
+   distro to package 2.7.
+
+The previous Debian-packaged 2.6 build stays available as the `<tag>-ol26`
+image pair — needed for hot-migration clusters that must match a 2.6 source.
+
+> **⚠ There is no in-place 2.6 → 2.7 upgrade.** OpenLDAP 2.7 uses LMDB 1.0,
+> whose on-disk format 2.6 cannot read and vice versa. Editing a populated 2.6
+> cluster's `spec.images` to 2.7 is **not** an upgrade: every pod crashloops on
+> volumes it cannot open, and the operator currently neither refuses the change
+> nor explains the crashloop. The supported migration is a dump and reload —
+> the runbook, the tag scheme, and the reasoning live in
+> [`docs/OPENLDAP-VERSIONS.md`](docs/OPENLDAP-VERSIONS.md).
+
 ## Key Features
 
 - **Multi-resource CRD architecture**: `SlapdCluster` manages infrastructure (StatefulSet, Services, TLS); `SlapdDatabase` manages per-database lifecycle (ACLs, indices, replication, seed data); `SlapdSchema` manages global schemas. Clean separation of concerns.

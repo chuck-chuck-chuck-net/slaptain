@@ -326,3 +326,21 @@ stanza range overlaps another's), plus a red-first e2e: two databases with the
 same ridBase, assert the second reports the collision instead of writing
 colliding stanzas. A webhook would also work but the project has none — do not
 grow one just for this.
+
+---
+
+## A version-crossing image change on a populated cluster fails without explanation
+
+Editing a populated 2.6 cluster's `spec.images` to the 2.7 pair (or back)
+crashloops every pod on volumes the new slapd cannot open (LMDB 1.0 format
+break, ADR-021). The operator neither refuses the change nor explains the
+failure — the user gets CrashLoopBackOff and has to find the runbook.
+
+Honest constraints: image tags are free-form (nothing reliable marks a tag as
+"2.6" or "2.7"), and ADR-018 means the operator cannot inspect the volumes. So
+a hard admission guard is likely impossible without new API surface (e.g. an
+explicit `spec.images.generation` the deployer asserts). The realistic minimum
+is observability: when pods crashloop after an image change, surface the slapd
+startup error (the LMDB version complaint is in the container log) into a
+SlapdCluster condition with a pointer to docs/OPENLDAP-VERSIONS.md. Decide the
+shape before building; do not grow a webhook for this.
