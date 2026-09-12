@@ -384,3 +384,19 @@ is observability: when pods crashloop after an image change, surface the slapd
 startup error (the LMDB version complaint is in the container log) into a
 SlapdCluster condition with a pointer to docs/OPENLDAP-VERSIONS.md. Decide the
 shape before building; do not grow a webhook for this.
+
+---
+
+## `kubectl rollout status` returns before readiness on slaptain StatefulSets
+
+Observed during the v0.1.0 demo rehearsal: `kubectl rollout status
+statefulset/slapd` completes in ~0.1 s with "partitioned roll out complete"
+while the pod is still ContainerCreating — the documented wait gates were
+decorative. The controller sets no `updateStrategy` explicitly, so the
+partition involved is API-server defaulting; whether kubectl's partitioned
+branch (which checks `updatedReplicas`, never readiness) should trigger on a
+defaulted partition of 0 needs root-causing before blaming anyone. Fix
+Discipline applies: reproduce, read the kubectl branch condition, then decide
+whether the operator should set an explicit strategy or the docs should simply
+never use `rollout status` as a readiness gate (the demo now waits on
+`status.readyReplicas`, which cannot lie).
