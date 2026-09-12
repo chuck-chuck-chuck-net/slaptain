@@ -39,13 +39,16 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ```
 .
 ├── Makefile                        # Root build targets (see Makefile Targets below)
+├── lab.yaml.sample                 # Lab config schema for tests/e2e.sh (real lab.yaml is gitignored)
 ├── CLAUDE.md
 ├── docs/
 │   ├── BOOTSTRAP.md                # Cluster bootstrap internals (init container + operator phases)
+│   ├── DEVELOPMENT.md              # Dev guide: prerequisites, builds, operator loop, e2e cycle, debugging
 │   ├── ONBOARDING.md               # Team onboarding: LDAP concepts, operator model, credential model
 │   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
 │   ├── MIGRATION-LEGACY-SOURCE.md  # Source-side (legacy slapd) prep for hot migration
 │   ├── BACKUP.md                   # S3 backup/restore user guide (ADR-014)
+│   ├── OPENLDAP-VERSIONS.md        # Dual 2.7/2.6 image pairs, tag scheme, 2.6→2.7 migration runbook (ADR-021)
 │   ├── BACKUP-PLAN.md              # ADR-014 implementation breakdown (phases)
 │   ├── BACKLOG.md                  # Cross-cutting tech debt (e.g. client.Apply deprecation)
 │   └── adrs/
@@ -68,7 +71,10 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-017-bare-integer-serverid.md
 │       ├── adr-018-pvc-deletion-leases.md
 │       ├── adr-019-per-database-accesslog.md
-│       └── adr-020-accesslog-access-control.md
+│       ├── adr-020-accesslog-access-control.md
+│       ├── adr-021-openldap-2.7-dual-images.md
+│       ├── adr-022-syncprov-sessionlog.md
+│       └── adr-023-rolling-replacement.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -77,8 +83,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── slapd-cluster/              # Helm chart deploying a SlapdCluster CR (operator required)
 │   └── slapd-toolkit/              # Persistent debug pod (ldap-utils, python3, ldap3) wired to operator-managed Secrets
 ├── images/
-│   ├── slapd/Containerfile         # slapd runtime image
-│   ├── slapd-init/Containerfile    # Bootstrap init container image
+│   ├── openldap-deb/               # Vendored Debian packaging fork → OpenLDAP 2.7.1 .debs (ADR-021)
+│   ├── slapd/Containerfile         # slapd runtime image (OpenLDAP 2.7.1; Containerfile.ol26 = legacy 2.6)
+│   ├── slapd-init/Containerfile    # Bootstrap init container image (2.7.1; Containerfile.ol26 = legacy 2.6)
 │   ├── slapd-toolkit/Containerfile # Toolkit image (ldap-utils, python3, pyyaml, ldap3)
 │   └── operator/Containerfile      # Operator image (multi-stage, distroless/static)
 ├── scripts/
@@ -118,7 +125,6 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
     │   ├── versitygw.yaml          # Lean S3 server (Apache-2.0) for backup e2e — NOT minio
     │   └── lab/                    # Internal lab configuration (SOPS-encrypted secrets)
     ├── README.md                   # Test suite documentation (quick-start cycle at top)
-    ├── SOPS.md                     # SOPS/age secret management guide
     └── e2e/                        # Ginkgo e2e tests (go-ldap, client-go)
         ├── suite_test.go           # BeforeSuite: NodePort LDAP connect, rootDSE baseDN discovery, admin connect
         ├── helpers_test.go         # k8s/LDAP helpers (ldapSearch, ldapAdd, dialPodLDAP, …)
@@ -128,12 +134,13 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
         ├── readonly_test.go        # Read-only replica tests: data sync, write rejection
         ├── resilience_test.go      # Pod-restart resilience (warm restart labelled persistent-only; gated E2E_RESILIENCE=1)
-        ├── dataloss_recovery_test.go # Pod loses its PVCs (kubectl delete pod + pvc); replication restores DIT (ADR-012 case 2)
+        ├── dataloss_recovery_test.go # Pod loses its PVCs; replication restores DIT (ADR-012 case 2) + ITS#9580 no-storm assertion (ADR-021; red only on -ol26 in a multi-site mesh with a dormant SID — single-site fresh measured 0)
         ├── migration_test.go       # Migration scenario (gated at registration time: E2E_MIGRATION=1)
         ├── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
         ├── backup_test.go          # SlapdBackup → S3 round-trip (gated: E2E_BACKUP=1, deploys versitygw)
         ├── restore_test.go         # bootstrapFrom restore into a fresh cluster (gated: E2E_BACKUP=1)
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
+        ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
         ├── accesslog_migration_test.go # ADR-019 R8 convergence off a hand-made legacy shared log (gated: E2E_ACCESSLOG_MIGRATION=1)
         └── scaleup_test.go         # standalone → HA transition: schema/modules/serverID runtime convergence (gated: E2E_SCALEUP=1)
 ```
@@ -143,8 +150,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ### Image Details
 
 - **Build tooling:** Plain Containerfile + podman (apko dropped — only beneficial in the Wolfi ecosystem).
-- **slapd runtime** (`images/slapd/`): `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell.
-- **slapd-init** (`images/slapd-init/`): `debian:trixie-slim` — ephemeral bootstrap; needs shell + python3 + OpenLDAP tools.
+- **slapd runtime** (`images/slapd/`): OpenLDAP **2.7.1** (`2.7.1-0+slaptain1`, built from the vendored packaging fork in `images/openldap-deb/` — ADR-021) on `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell. Legacy Debian 2.6 build stays available as `slapd:<tag>-ol26` (`Containerfile.ol26`) for hot-migration interop (ADR-011). **LMDB 1.0 format break:** 2.6-written volumes cannot be opened by 2.7 — see `docs/OPENLDAP-VERSIONS.md` for the migration runbook.
+- **slapd-init** (`images/slapd-init/`): `debian:trixie-slim` + the same locally-built 2.7.1 packages (slapcat/slapadd/slaptest must match the slapd version) — ephemeral bootstrap; shell + python3. `-ol26` variant pairs with the 2.6 slapd image — always pin both or neither.
 - **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary, UID 65532. Builder stage uses `golang:1.25`.
 - **User (slapd):** `openldap` (UID/GID 1024). Debian's slapd package creates this user; we `groupmod`/`usermod` to 1024.
 - **Ports:** 1024 (ldap), 1025 (ldaps) — non-privileged. Service maps 389→1024 and 636→1025.
@@ -274,10 +281,20 @@ dual-homed clusters that default is wrong when the `InternalIP` is on a network 
 runner can't reach north-south (e.g. a routed replication network chosen as the
 primary node network) — and the reachable NIC isn't k8s-registered, so it can't be
 auto-discovered. Override it: `E2E_NODE_ACCESS_IP=<ip>`
-(single-site) or `E2E_NODE_ACCESS_IPS="ctx=ip ..."` (multi-site). This drives
+(single-site) or `E2E_NODE_ACCESS_IPS="ctx=ip ..."` (multi-site) — or describe
+the lab once in a gitignored `<repo-root>/lab.yaml` (schema: `lab.yaml.sample`;
+env vars win; `./tests/e2e.sh config` dumps the resolved values; sites double
+as the default context list). This drives
 `LDAP_ADDR`/`E2E_REMOTE_LDAP_ADDR`, the suite's `E2E_NODE_IP`, and the TLS cert
 SAN; cross-site peer URIs keep the `InternalIP` (they must ride the replication
 network). See `tests/README.md`.
+
+**Failed restore specs keep their evidence.** `restore*_test.go` skip teardown
+when a spec fails (`E2E_KEEP_ON_FAILURE=0` to opt out) and print a post-mortem —
+CR statuses, pod/container states, init + slapd logs, events — into the spec
+output before anything is deleted. Green runs delete their
+`volumeClaimTemplates` PVCs too. Run the bootstrapFrom spec alone with
+`E2E_LABEL_FILTER=restore-bootstrap`.
 
 **Backup/restore e2e** (gated `E2E_BACKUP=1`): `E2E_BACKUP=1 ./tests/e2e.sh test <ctx>`
 deploys `tests/resources/versitygw.yaml` (lean Apache-2.0 S3 server — NOT minio)
@@ -306,11 +323,13 @@ runs without readpw configuration but skips those test cases.
 
 | Target | Effect |
 |---|---|
-| `make all` | Build all three images |
+| `make all` | Build all images (2.7 slapd pair, `-ol26` 2.6 pair, toolkit, operator) |
 | `make build-init` | Build slapd-init image |
 | `make build-slapd` | Build slapd image |
 | `make build-operator` | Build operator image (build context = repo root) |
-| `make push` | Build + push all three images |
+| `make push` | Build + push all six images (both slapd pairs, toolkit, operator) |
+| `make build-openldap-deb` | Build the local-only OpenLDAP 2.7.1 .deb carrier image (feeds both 2.7 image builds; never pushed) |
+| `make build-ol26` / `make import-ol26` | Build / CRI-import the legacy 2.6 slapd+init pair (`:<tag>-ol26`, ADR-021) |
 | `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |
 | `make operator-manifests` | Run `make manifests` in `operator/`, then sync CRD to `charts/operator/crds/` |
 | `make operator-sync-crd` | Copy CRD from `operator/config/crd/bases/` to `charts/operator/crds/` |
@@ -354,17 +373,17 @@ make operator-helm-install
 # Or for development without building/pushing an image, run locally instead:
 cd operator && make run
 
-# 3. Prereqs for a SlapdCluster: namespace + TLS secret
-kubectl create namespace slaptain
-make gencert   # creates slapd-tls secret in slaptain namespace
+# 3. Prereqs for a SlapdCluster: TLS secret (gencert creates the
+#    slaptain-testing namespace itself and puts slapd-tls there)
+make gencert
 
-# 4. Apply sample CR
-kubectl apply -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
+# 4. Apply sample CR into the same namespace
+kubectl apply -n slaptain-testing -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
 
 # 5. Verify
-kubectl get sc -n slaptain
-kubectl get statefulset,svc,secret,pvc -n slaptain -l app.kubernetes.io/instance=slapd
-kubectl rollout status statefulset/slapd -n slaptain --timeout=120s
+kubectl get sc -n slaptain-testing
+kubectl get statefulset,svc,secret,pvc -n slaptain-testing -l app.kubernetes.io/instance=slapd
+kubectl rollout status statefulset/slapd -n slaptain-testing --timeout=120s
 
 # 6. Phase 1 guard smoke test: apply with replicas:2, verify status.phase=Error
 ```
@@ -469,7 +488,7 @@ the original decision — the history of reasoning matters.
 - ADR-005: SlapdDatabase cleanup policy (Retain default, Delete opt-in)
 - ADR-006: Schema lifecycle (additive-only, desired-minimum model)
 - ADR-007: Multus-based dedicated replication network for cross-site traffic (amended: dynamic peer discovery via remote kubeconfig)
-- ADR-008: CSN monitoring uses replication bind credentials (uniform-password assumption) — *amended 2026-08-26: what CSN comparison can and cannot observe — peer status is consumer-side and one-directional (a provider cannot see that a consumer stopped consuming), and lag is only observable while writes flow, so an idle database reads `Synced` across a broken link; heartbeat writes considered and deferred*
+- ADR-008: CSN monitoring uses replication bind credentials (uniform-password assumption) — *amended 2026-08-26: what CSN comparison can and cannot observe — peer status is consumer-side and one-directional, and lag is only observable while writes flow, so an idle database reads `Synced` across a broken link; amended again 2026-09-11: the "heartbeats only help during idle periods, when nothing is at stake" premise was refuted by ITS#9580 dormancy (idleness lets a SID's minCSN go stale; the next reconnect pays with a stale-cookie full-refresh storm) — heartbeats stay deferred regardless, superseded by ADR-021 (OpenLDAP 2.7) and ADR-022 (syncprov sessionlog)*
 - ADR-009: SlapdUser lifecycle (service users only, single-pod write, retain default) — *Proposed*
 - ADR-010: SlapdCluster replication modes (peer / consumer-only, in-place promotion) — *Accepted (impl + e2e green 2026-05-13)*
 - ADR-011: Hot migration topology contract (RID/ServerID coexistence, plain-syncrepl interop, stage transitions) — *Accepted (impl + e2e green 2026-05-13)*
@@ -480,7 +499,10 @@ the original decision — the history of reasoning matters.
 - ADR-016: Direct native pod-IP routing as a cross-cluster replication transport (alongside Multus/NodePort; `network.mode: pod-routed`) — *Accepted (impl + e2e green across three routed-pod-CIDR sites 2026-07-06)* — *amended 2026-08-26: replacing a pod invalidates every peer's syncrepl addresses, including via the scale-to-0 restore machine; measured recovery 130-268s, because address discovery rides on the 60s CSN-monitoring tick*
 - ADR-017: `olcServerID` is a bare integer (`serverIDBase + ordinal + 1`), not the URL-list self-match form — sheds the FQDN/cluster-domain coupling that made serverID the ADR-015 boot crash surface — *Accepted 2026-07-17*
 - ADR-018: Co-located PVC access — RWO is per-node, but any pod object naming a PVC (finished pods included) is a deletion lease that blocks pod re-roll; the operator reaps every Job it creates — *Accepted 2026-08-23*
-- ADR-019: One accesslog DB per replicated data DB (`cn=accesslog-<dbname>` at `/accesslog/<dbname>`) — a shared log makes every write to one DB kick the other DB's consumers into full refresh; verified against slapd sources and upstream guidance — *Accepted (impl + e2e green 2026-08-25; amended twice the same day from the first live run — R8 step order + reference-counted delete, then the "never reuse an olcDatabase={N} DN across a delete" rule and per-pod stanza deferral; Consequences corrected: a missing `logbase` **halts** replication, it does not degrade to full refresh)*
+- ADR-019: One accesslog DB per replicated data DB (`cn=accesslog-<dbname>` at `/accesslog/<dbname>`) — a shared log makes every write to one DB kick the other DB's consumers into full refresh; verified against slapd sources and upstream guidance — *Accepted (impl + e2e green 2026-08-25; amended twice the same day from the first live run — R8 step order + reference-counted delete, then the "never reuse an olcDatabase={N} DN across a delete" rule and per-pod stanza deferral; Consequences corrected: a missing `logbase` **halts** replication, it does not degrade to full refresh; amended 2026-09-12: adopts upstream's full index set — adds `reqDN`, `entryCSN`, `objectClass`, drops the no-op `default eq` — converged onto existing log DBs)*
+- ADR-021: OpenLDAP 2.7.1 by default, built from a vendored Debian packaging fork (`images/openldap-deb/`); the 2.6 pair stays as `:<tag>-ol26` for hot-migration interop (ADR-011). ITS#9580 is fixed in no 2.6.x release and no distro ships 2.7; LMDB 1.0 makes 2.6→2.7 a dump/reload (`docs/OPENLDAP-VERSIONS.md` runbook) — *Accepted (images + single-site e2e green on 2.7.1 2026-09-11; the ITS#9580 storm red and mixed-mesh validation belong to the deferred multi-site session — a fresh single-site cluster measured 0 storm lines even on 2.6)*
+- ADR-022: The syncprov sessionlog belongs on the data DB only — never an accesslog DB, where a successful replay would displace the minCSN guard and under-replicate silently. On by default at 5000 ops via `spec.replication.syncprovSessionlog` (tristate: unset→5000, 0→off, >0 verbatim) — *Accepted (unit red-first + e2e red/green on live clusters 2026-09-11)*
+- ADR-023: Rolling volume replacement — an imperative, one-shot `SlapdRollingReplace` rebuilds pods from the mesh one ordinal at a time (ADR-012 case 2 promoted to an operation), gated on surviving redundancy and CSN convergence; headline use case: the 2.6 → 2.7 LMDB format break (ADR-021) without the ADR-014 outage — *Proposed 2026-09-12, implementation after v0.1.0*
 - ADR-020: An accesslog DB is at least as restrictive as the database it journals — `to * by dn.exact="cn=replication,<suffix>" read by * none`; without it a data DB's ACLs are bypassable through its own change journal — *Accepted (impl + e2e green 2026-08-25; the bypass was captured live before the fix — an anonymous read of the shared journal returned `reqMod: userPassword:+ {SSHA}…` for a user whose `userPassword` the data DB denies)*
 
 ---
@@ -497,7 +519,7 @@ or inspecting cluster state.
 | `slctl inspect [-n ns] [name]` | Per-pod LDAP queries + automated consistency checks (CSN convergence, topology, stanza counts). `--short` for CI. Exits non-zero on check failure |
 | `slctl debug-dump [-n ns] <name>` | Collect CR YAML, pod logs, LDAP state (rootDSE, contextCSN, syncrepl, ACLs), services, PVCs, events, operator logs into a timestamped directory |
 | `slctl debug [cluster] [--pod <ord>] [-- cmd...]` | Attach an ephemeral **slapd-toolkit** debug container to a slapd pod (`kubectl debug --target=slapd`, defaults to `bash`; slapd is PID 1 there, its LDAP on `localhost:1024`). **Auto-detects the namespace's PodSecurity level** via a server-side dry-run probe and adapts: **privileged** → root + `SYS_PTRACE`/`SYS_ADMIN`/`NET_ADMIN`/`NET_RAW`, slapd's *live* FS at `/proc/1/root/`, `strace -p 1` works; **baseline** → root, no added caps, slapd PVCs mounted **read-only** at `/config`/`/data`/`/accesslog` (warns, prints the label command to unlock full power); **restricted** → UID 1024 + the same read-only mounts. `--no-privileged` forces the mount mode. Toolkit image auto-derived from the target pod's *running* slapd image (not the CR spec, so it works when `spec.images` is operator-defaulted; `--image` to override). The slapd container's own hardened security context is never touched. NB: `kubectl debug` ephemeral containers persist on the pod until it is recreated |
-| `slctl ldapsearch [slctl-flags] [ldapsearch-args...]` | Wraps system `ldapsearch` with auto-discovered `-H`/`-D`/`-w`. Endpoint preference: LoadBalancer → NodePort → port-forward. `--as admin\|config\|replication\|<DN>` selects the bind identity (default `admin`); `--anonymous` skips the bind. `--pod <ord>` forces a port-forward to one pod (RW or RO). `--ldaps` for TLS. `--cluster`/`--database` only needed when the namespace has more than one. **Endpoint overrides (dual-homed/lab clusters where the auto-picked NodePort node IP is unreachable):** `--port-forward` forces a port-forward to pod-0 even when a NodePort/LB Service exists; `--node-ip <ip>` overrides the node address used for a NodePort endpoint (mirrors e2e `E2E_NODE_ACCESS_IP`). **Transparency:** `--verbose` prints the reproducible `kubectl port-forward` + `ldap*` command line so you can run it by hand ("disenchant the magic"); the real password is shown by default (labs — not our job to patronize), `--redact-password` masks it for demos/screenshares. **Reading an accesslog:** a log DB (`cn=accesslog-<database>`) grants read to `cn=replication,<suffix>` and nothing else, with `cn=admin,cn=config` as its rootDN (ADR-020), so `--as config` and `--as replication` can read it while the default `--as admin` — the *data* rootDN — is **denied**; that is a different database with a different rootDN, not a bug. Sibling commands: `ldapadd`, `ldapmodify`, `ldapdelete` (same flags, read LDIF from stdin or `-f`) |
+| `slctl ldapsearch [slctl-flags] [ldapsearch-args...]` | Wraps system `ldapsearch` with auto-discovered `-H`/`-D`/`-w`. Endpoint preference: LoadBalancer → NodePort → direct pod IP → port-forward. `--as admin\|config\|replication\|<DN>` selects the bind identity (default `admin`); `--anonymous` skips the bind. `--pod <ord>` targets one pod (RW or RO) — direct pod IP when reachable, else a port-forward. `--ldaps` for TLS. `--cluster`/`--database` only needed when the namespace has more than one. **Direct pod IPs (pod-routed labs / on-node shells):** whether the client can reach pod IPs directly is a property of the network path, so it is **autodetected, not configured**: a specific (non-default) kernel FIB route covering the pod IP — the artifact left by whoever set up native routing — gates one short confirming TCP dial; machines with only a default route pay nothing and port-forward as before. `--direct` forces it (skips the route check), `SLCTL_DIRECT_POD_IPS=always\|never\|auto` overrides detection (e.g. `never` in odd overlapping-CIDR setups, `always` behind a router that holds the pod-CIDR route). **Endpoint overrides (dual-homed/lab clusters where the auto-picked NodePort node IP is unreachable):** `--port-forward` forces a port-forward to pod-0 even when a NodePort/LB Service exists; `--node-ip <ip>` overrides the node address used for a NodePort endpoint (mirrors e2e `E2E_NODE_ACCESS_IP`). **Transparency:** `--verbose` prints the reproducible `kubectl port-forward` + `ldap*` command line so you can run it by hand ("disenchant the magic"); the real password is shown by default (labs — not our job to patronize), `--redact-password` masks it for demos/screenshares. **Reading an accesslog:** a log DB (`cn=accesslog-<database>`) grants read to `cn=replication,<suffix>` and nothing else, with `cn=admin,cn=config` as its rootDN (ADR-020), so `--as config` and `--as replication` can read it while the default `--as admin` — the *data* rootDN — is **denied**; that is a different database with a different rootDN, not a bug. Sibling commands: `ldapadd`, `ldapmodify`, `ldapdelete` (same flags, read LDIF from stdin or `-f`) |
 
 Common flags: `--context`, `--kubeconfig`, `-n namespace`, `--json`, `-A` (all namespaces).
 
@@ -599,7 +621,7 @@ Each pod has three databases and two overlays:
 | Component | Path | Purpose |
 |---|---|---|
 | Data DB (`olcDatabase={1}mdb`) | `/data` (existing) | LDAP data; unchanged from Phase 1 |
-| Accesslog DB, one per replicated data DB (`cn=accesslog-<dbname>`) | `/accesslog/<dbname>` | Delta-syncrepl change journal. **Never shared between databases** — ADR-019 |
+| Accesslog DB, one per replicated data DB (`cn=accesslog-<dbname>`) | `/accesslog/<dbname>` | Delta-syncrepl change journal, indexed `entryCSN,objectClass,reqEnd,reqResult,reqStart,reqDN eq` (converged on every reconcile). **Never shared between databases** — ADR-019 |
 | `overlay accesslog` on data DB | — | Writes every change to *that database's own* accesslog DB |
 | `overlay syncprov` on each accesslog DB | — | Exposes that change journal to peers |
 | `overlay syncprov` on data DB | — | Required for initial full sync |

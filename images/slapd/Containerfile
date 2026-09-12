@@ -1,11 +1,39 @@
+# OpenLDAP 2.7.1 slapd runtime image (the default `slapd:<tag>`).
+#
+# The packages come from the vendored packaging fork built by
+# images/openldap-deb/Containerfile — one package build feeds both this image
+# and slapd-init. 2.7 is the default because the ITS#9580 delta-syncrepl fix
+# ships in no 2.6.x release; the previous Debian-package-based 2.6 build stays
+# available as slapd:<tag>-ol26 (images/slapd/Containerfile.ol26). See ADR-021.
+#
+# Paths, UID/GID and the ENTRYPOINT are identical to the ol26 variant: the
+# runtime contract (/usr/sbin/slapd, /usr/lib/ldap, /etc/ldap/schema, 1024:1024)
+# is what bootstrap.sh and the operator depend on, not the slapd version.
+
+# Image carrying the built .deb files in /debs. `make build-slapd` passes the
+# locally built tag; the default keeps a bare `podman build images/slapd/`
+# honest about what it needs.
+ARG OPENLDAP_DEB_IMAGE=localhost/slaptain/openldap-deb:latest
+
+FROM ${OPENLDAP_DEB_IMAGE} AS debs
+
 # ── Build / gather stage ────────────────────────────────────────────────────
 FROM debian:trixie-slim AS build
 
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY --from=debs /debs /debs
+
+# Install the forked 2.7.1 packages instead of Debian's 2.6 slapd. apt resolves
+# their dependencies from the archive; the .deb paths must be absolute for apt
+# to treat them as local files rather than package names.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        slapd \
-        ldap-utils \
+        /debs/libldap-common_*.deb \
+        /debs/libldap2_*.deb \
+        /debs/slapd_*.deb \
+        /debs/ldap-utils_*.deb \
         dpkg-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /debs
 
 # Assemble a staging root for the distroless runtime.
 # NOTE: do NOT pre-create /staging/usr/lib/ldap here — cp -r creates it

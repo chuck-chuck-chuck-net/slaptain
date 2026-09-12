@@ -23,9 +23,68 @@
 # must be available in a registry reachable from every cluster.
 set -euo pipefail
 
+# ── Lab config file (optional) ───────────────────────────────────────────────
+# A YAML file describing the lab: site inventory (contexts, API endpoints,
+# node-access IPs, VM inventory) plus per-project settings under a `slaptain:`
+# key. Unknown keys are ignored — see lab.yaml.sample in the repo root.
+#
+# Resolution order: $E2E_CONFIG if set, else <repo-root>/lab.yaml if present,
+# else no file (everything keeps its env/default behavior). Environment
+# variables always win over file values: the file supplies lab facts (sites,
+# registry, network mode), never per-run knobs (GIT_TAG, E2E_* gates, seeds).
+#
+# The file typically contains internal addresses — lab.yaml is gitignored;
+# never commit a real one.
+_E2E_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+E2E_CONFIG="${E2E_CONFIG:-}"
+if [[ -z "$E2E_CONFIG" && -f "$_E2E_SELF_DIR/../lab.yaml" ]]; then
+    E2E_CONFIG="$_E2E_SELF_DIR/../lab.yaml"
+fi
+
+LAB_CONTEXTS=()
+if [[ -n "$E2E_CONFIG" ]]; then
+    if [[ ! -f "$E2E_CONFIG" ]]; then
+        echo "ERROR: E2E_CONFIG=$E2E_CONFIG: no such file" >&2; exit 1
+    fi
+    if ! command -v yq >/dev/null 2>&1; then
+        echo "ERROR: reading $E2E_CONFIG requires yq v4 (https://github.com/mikefarah/yq)" >&2; exit 1
+    fi
+
+    # Scalar lookup: empty string when the key is absent.
+    _lab_get() { yq -r "$1 // \"\"" "$E2E_CONFIG"; }
+
+    _v="$(_lab_get '.slaptain.registry')";          [[ -n "$_v" && -z "${REGISTRY:-}" ]] && REGISTRY="$_v"
+    _v="$(_lab_get '.slaptain.operatorNamespace')"; [[ -n "$_v" && -z "${NAMESPACE:-}" ]] && NAMESPACE="$_v"
+    _v="$(_lab_get '.slaptain.testingNamespace')";  [[ -n "$_v" && -z "${NAMESPACE_TESTING:-}" ]] && NAMESPACE_TESTING="$_v"
+    _v="$(_lab_get '.slaptain.testResources')";     [[ -n "$_v" && -z "${TEST_RESOURCES:-}" ]] && TEST_RESOURCES="$_v"
+
+    # Replication network mode — only when neither knob is already set, so the
+    # POD_ROUTED / MULTUS_NETWORK mutual-exclusion check below still guards
+    # explicit env combinations.
+    if [[ -z "${POD_ROUTED:-}" && -z "${MULTUS_NETWORK:-}" ]]; then
+        case "$(_lab_get '.slaptain.replicationNetwork.mode')" in
+            pod-routed) POD_ROUTED=1 ;;
+            multus)     MULTUS_NETWORK="$(_lab_get '.slaptain.replicationNetwork.multusNetwork')" ;;
+            "")         : ;;
+            *)          echo "ERROR: $E2E_CONFIG: unknown slaptain.replicationNetwork.mode" >&2; exit 1 ;;
+        esac
+    fi
+
+    # Per-site node-access IPs → E2E_NODE_ACCESS_IPS ("ctx=ip ..."). Sites
+    # without nodeAccessIP keep the InternalIP default (single-homed nodes).
+    if [[ -z "${E2E_NODE_ACCESS_IPS:-}" ]]; then
+        E2E_NODE_ACCESS_IPS="$(yq -r '[.sites[] | select(.nodeAccessIP) | .context + "=" + .nodeAccessIP] | join(" ")' "$E2E_CONFIG")"
+        export E2E_NODE_ACCESS_IPS
+    fi
+
+    # Site contexts, in file order — the default context list when the command
+    # line names none.
+    mapfile -t LAB_CONTEXTS < <(yq -r '.sites[].context // ""' "$E2E_CONFIG" | grep -v '^$' || true)
+fi
+
 # ── Configuration ────────────────────────────────────────────────────────────
 
-NAMESPACE="${NAMESPACE:-slaptain}"
+NAMESPACE="${NAMESPACE:-slaptain-system}"
 
 NAMESPACE_TESTING="${NAMESPACE_TESTING:-slaptain-testing}"
 NODEPORT_LDAP="${NODEPORT_LDAP:-30389}"
@@ -83,18 +142,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Image tag: git tag or short commit hash (with -dirty suffix for uncommitted changes).
+# Tag derivation lives in scripts/image-tag.sh — one rule for the Makefile and
+# for us, dirty trees get a content-hashed suffix. See the script.
 if [[ -z "${GIT_TAG:-}" ]]; then
-    if exact=$(git -C "$PROJECT_ROOT" describe --tags --exact-match 2>/dev/null) && [[ -n "$exact" ]]; then
-        GIT_TAG="$exact"
-    else
-        hash=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)
-        if ! git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null; then
-            GIT_TAG="${hash}-dirty"
-        else
-            GIT_TAG="$hash"
-        fi
-    fi
+    GIT_TAG="$("$PROJECT_ROOT/scripts/image-tag.sh")"
 fi
+
+# SLAPD_TAG_SUFFIX: appended to the slapd/slapd-init image tags only (the
+# operator tag is untouched). Empty = OpenLDAP 2.7.1; "-ol26" runs the suite
+# against the legacy OpenLDAP 2.6 pair, which is expected to FAIL the ITS#9580
+# assertion in dataloss_recovery_test.go — see ADR-021.
+SLAPD_TAG_SUFFIX="${SLAPD_TAG_SUFFIX:-}"
+SLAPD_TAG="${GIT_TAG}${SLAPD_TAG_SUFFIX}"
 
 # ── Image pull secret ────────────────────────────────────────────────────────
 PULL_SECRET_FILE="$SCRIPT_DIR/image-pull-secret.yaml"
@@ -139,6 +198,7 @@ Subcommands:
   setup     Deploy operator, SlapdCluster, test resources on all clusters
   test      Run e2e tests (external replication tests gated on N>=2)
   teardown  Remove everything created by setup
+  config    Print the resolved lab configuration (contexts, registry, IPs) and exit
   all       setup + test + teardown
 
 Environment variables (with defaults):
@@ -268,9 +328,9 @@ configure_multus_external_peers_static() {
             --namespace "$NAMESPACE_TESTING" \
             -f "$VALUES_FILE" \
             --set "images.slapd.repository=$REGISTRY/$PROJECT/slapd" \
-            --set "images.slapd.tag=$GIT_TAG" \
+            --set "images.slapd.tag=$SLAPD_TAG" \
             --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
-            --set "images.init.tag=$GIT_TAG" \
+            --set "images.init.tag=$SLAPD_TAG" \
             --set "replication.network.multusNetwork=$MULTUS_NETWORK" \
             --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
@@ -566,9 +626,9 @@ setup_slapd_clusters() {
             --namespace "$NAMESPACE_TESTING" --create-namespace \
             -f "$VALUES_FILE" \
             --set "images.slapd.repository=$REGISTRY/$PROJECT/slapd" \
-            --set "images.slapd.tag=$GIT_TAG" \
+            --set "images.slapd.tag=$SLAPD_TAG" \
             --set "images.init.repository=$REGISTRY/$PROJECT/slapd-init" \
-            --set "images.init.tag=$GIT_TAG" \
+            --set "images.init.tag=$SLAPD_TAG" \
             --set "replication.serverIDBase=${server_id_base}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${peer_sets[@]}" \
@@ -973,12 +1033,18 @@ teardown_all() {
 subcommand="$1"; shift
 CONTEXTS=("$@")
 
-# No context given → single-site on the current kubectl context.
+# No context given → the lab file's site list (all sites, multi-site when
+# N≥2), else single-site on the current kubectl context.
 if [[ ${#CONTEXTS[@]} -lt 1 ]]; then
-    current_ctx=$(kubectl config current-context 2>/dev/null || true)
-    [[ -z "$current_ctx" ]] && die "No context given and no current kubectl context is set"
-    CONTEXTS=("$current_ctx")
-    log "No context given — using current context: $current_ctx"
+    if [[ ${#LAB_CONTEXTS[@]} -ge 1 ]]; then
+        CONTEXTS=("${LAB_CONTEXTS[@]}")
+        log "No context given — using lab config sites: ${CONTEXTS[*]}"
+    else
+        current_ctx=$(kubectl config current-context 2>/dev/null || true)
+        [[ -z "$current_ctx" ]] && die "No context given and no current kubectl context is set"
+        CONTEXTS=("$current_ctx")
+        log "No context given — using current context: $current_ctx"
+    fi
 fi
 
 # MULTISITE=1 when running the cross-cluster path. Used to gate external-peer
@@ -993,7 +1059,29 @@ fi
 declare -A NODE_IPS          # node k8s InternalIP — used for cross-site peer URIs
 declare -A NODE_ACCESS_IPS   # address used to reach node NodePorts + cert SAN (override: E2E_NODE_ACCESS_IP[S])
 
+# Fail fast when the images this run would deploy were never pushed — an
+# ImagePullBackOff twenty minutes into setup is the worst way to learn that.
+# Anonymous HEAD against the OCI distribution API; only a definite 404 dies.
+# Registries that demand auth even for manifest HEADs (401/403) and unreachable
+# ones get a warning — the probe must never false-fail a working private setup.
+require_image_in_registry() { # image-name tag
+    local host path url code
+    case "$REGISTRY" in
+        */*) host="${REGISTRY%%/*}"; path="${REGISTRY#*/}/$PROJECT/$1" ;;
+        *)   host="$REGISTRY";       path="$PROJECT/$1" ;;
+    esac
+    url="https://$host/v2/$path/manifests/$2"
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10         -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json"         "$url" 2>/dev/null || echo 000)
+    case "$code" in
+        200) : ;;
+        404) die "$REGISTRY/$PROJECT/$1:$2 is not in the registry. Build and push first (make push REGISTRY=$REGISTRY), or pin GIT_TAG=<pushed-tag>. A dirty tree derives a content-hashed tag (scripts/image-tag.sh) that exists only after you push it." ;;
+        *)   log "WARN: cannot verify $1:$2 in the registry (HTTP $code) — continuing" ;;
+    esac
+}
+
 do_setup() {
+    require_image_in_registry slapd "$SLAPD_TAG"
+    require_image_in_registry operator "$GIT_TAG"
     setup_foundation
     setup_cross_trust
     setup_remote_kubeconfigs
@@ -1008,6 +1096,27 @@ do_setup() {
     setup_nodeport_services
     wait_test_resources_ready
 }
+
+# `config` is a pure dump — resolved values only, no cluster access. Handled
+# before discover_node_ips so it works with unreachable contexts too.
+if [[ "$subcommand" == "config" ]]; then
+    echo "lab config file:      ${E2E_CONFIG:-<none>}"
+    echo "contexts:             ${CONTEXTS[*]} (multisite=$MULTISITE)"
+    echo "registry/project:     $REGISTRY / $PROJECT"
+    echo "image tag:            $GIT_TAG${SLAPD_TAG_SUFFIX:+ (slapd pair: $GIT_TAG$SLAPD_TAG_SUFFIX)}"
+    echo "operator namespace:   $NAMESPACE"
+    echo "testing namespace:    $NAMESPACE_TESTING"
+    echo "test resources:       $TEST_RESOURCES"
+    if [[ -n "$POD_ROUTED" ]]; then
+        echo "replication network:  pod-routed (ADR-016)"
+    elif [[ -n "$MULTUS_NETWORK" ]]; then
+        echo "replication network:  multus ($MULTUS_NETWORK, ADR-007)"
+    else
+        echo "replication network:  <default: NodePort URIs>"
+    fi
+    echo "node access IPs:      ${E2E_NODE_ACCESS_IPS:-${E2E_NODE_ACCESS_IP:-<InternalIP default>}}"
+    exit 0
+fi
 
 discover_node_ips
 resolve_cr_names

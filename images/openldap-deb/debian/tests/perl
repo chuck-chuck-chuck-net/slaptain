@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+ldapmodify -H ldapi:/// -Y EXTERNAL << eof
+dn: cn=module{0},cn=config
+changetype: modify
+add: olcModuleLoad
+olcModuleLoad: back_perl
+
+eof

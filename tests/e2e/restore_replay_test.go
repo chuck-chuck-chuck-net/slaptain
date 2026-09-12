@@ -44,8 +44,9 @@ var _ = Describe("in-place restore under replication (accesslog replay)", Label(
 	endpoint := fmt.Sprintf("http://versitygw.%s.svc:7480", namespace)
 
 	var (
-		markerDN string
-		rwPods   []string
+		markerDN      string
+		rwPods        []string
+		anySpecFailed bool
 	)
 
 	BeforeAll(func(ctx SpecContext) {
@@ -92,8 +93,29 @@ var _ = Describe("in-place restore under replication (accesslog replay)", Label(
 		markerDN = "uid=replay-marker,ou=People," + baseDN
 	})
 
+	// See restore_test.go. This spec runs against the SHARED primary cluster, so
+	// the autopsy targets it — but note the difference in what "keep" means here:
+	// keeping means the marker entry and the SlapdRestore stay behind on the
+	// shared fixture, which is deliberate (the marker's presence/absence IS the
+	// evidence) but does leave the fixture off baseline.
+	AfterEach(func(ctx SpecContext) {
+		if os.Getenv("E2E_BACKUP") != "1" || !CurrentSpecReport().Failed() {
+			return
+		}
+		anySpecFailed = true
+		dumpRestoreAutopsy(ctx, "slapd", dbCRName)
+	})
+
 	AfterAll(func(ctx SpecContext) {
 		if os.Getenv("E2E_BACKUP") != "1" {
+			return
+		}
+		if (anySpecFailed || CurrentSpecReport().Failed()) && keepOnFailure() {
+			fmt.Fprintf(GinkgoWriter,
+				"\n=== KEEPING FAILED REPLAY STATE: marker %s, SlapdRestore %s, SlapdBackup %s "+
+					"left on the SHARED cluster (E2E_KEEP_ON_FAILURE=0 to tear down) ===\n"+
+					"  slctl debug-dump -n %s slapd\n",
+				markerDN, restoreReq, backupName, namespace)
 			return
 		}
 		// Best-effort: remove the marker so the shared cluster returns to baseline.

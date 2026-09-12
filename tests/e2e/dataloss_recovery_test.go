@@ -44,6 +44,10 @@ var _ = Describe("data loss recovery via replication",
 	var addedUserDN string
 	var preObservedGeneration int64
 
+	// Wall-clock mark taken just before the data-loss event, used to scope the
+	// slapd log reads to the recovery window (see the ITS#9580 spec below).
+	var lossStartedAt time.Time
+
 	BeforeAll(func(ctx SpecContext) {
 		// Add an entry that we'll use as a recovery witness. Seed entries
 		// alone would be insufficient — they prove only that the operator-
@@ -87,6 +91,11 @@ var _ = Describe("data loss recovery via replication",
 		oldPod, err := k8sClient.CoreV1().Pods(namespace).Get(ctx, targetPod, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		oldUID := oldPod.UID
+
+		// Mark the window before anything is destroyed. Pod logs are read back
+		// from here in the ITS#9580 spec; a mark taken later would miss the
+		// first — busiest — seconds of the refresh.
+		lossStartedAt = time.Now().Add(-10 * time.Second)
 
 		By("deleting " + targetPod + "'s PVCs (deletion blocked by pvc-protection finalizer until pod is gone)")
 		// k8s adds kubernetes.io/pvc-protection to in-use PVCs. The delete call
@@ -192,6 +201,66 @@ var _ = Describe("data loss recovery via replication",
 		// resilience specs: whoever moves an address waits for the peers.
 		waitForCrossSiteReplication(ctx, "the pod-loses-its-PVCs recovery")
 	}, NodeTimeout(18*time.Minute))
+
+	// ── ITS#9580: the recovery must not trigger a stale-cookie refresh storm ──
+	//
+	// This is the assertion that justifies running OpenLDAP 2.7 (ADR-021). On
+	// 2.6 the spec above converges *in fact* but leaves the mesh in a refresh
+	// loop: the refreshed pod's accesslog is filled in receive order, so
+	// syncprov's mincsn lookup fails on every reconnect and every peer answers
+	// `err=4096 text=sync cookie is stale`. Measured on 2.6.10: ~14k
+	// connections in 27 s, hundreds of millicores per pod, thousands of these
+	// lines — see docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md.
+	// Upstream fixed it in commit 414866b8, released only in 2.7.0/2.7.1.
+	//
+	// Red-first honesty (measured 2026-09-11): this assertion has never been
+	// observed red. A fresh single-site cluster counts 0 on 2.6 (every local
+	// SID has a recent CSN); a fresh three-site mesh counts 0 too (the suite's
+	// own probes keep SIDs warm); and even engineered dormancy — an idle-site
+	// SID aged past an aggressive accesslogPurge, six armed triggers under
+	// live churn (tests/e2e-storm-repro.sh) — produced only isolated,
+	// self-healing staleness (3 lines, twice). The persistent storm needs the
+	// refresh to regress a contextCSN on the refreshed node (the replay-order
+	// race upstream's 414866b8 FIXME describes). The threshold of 50 cleanly
+	// separates that measured isolated staleness from the measured storm
+	// (thousands); see ADR-021 before "fixing" a red by raising it.
+	It("no 'sync cookie is stale' storm follows the recovery (ITS#9580, ADR-021)",
+		func(ctx SpecContext) {
+			const needle = "sync cookie is stale"
+			// Isolated staleness is legitimate — a consumer can genuinely hold a
+			// cookie the provider can no longer serve once, right after the
+			// refresh. The storm is three orders of magnitude above this.
+			const maxOccurrences = 50
+
+			Expect(lossStartedAt).NotTo(BeZero(),
+				"the data-loss spec must have run first (Ordered container)")
+
+			// The message only reaches the log when slapd logs operation results,
+			// i.e. the `stats` level (256). Without it the count is trivially
+			// zero, which would be a false green — skip loudly instead.
+			var sc ldapv1alpha1.SlapdCluster
+			Expect(crdClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "slapd"}, &sc)).
+				To(Succeed())
+			if sc.Spec.LogLevel&256 == 0 {
+				Skip(fmt.Sprintf("cluster logLevel=%d has no stats bit (256): slapd never logs "+
+					"operation results, so %q cannot be observed", sc.Spec.LogLevel, needle))
+			}
+
+			pods := rwPodNames(ctx, "slapd")
+			counts, total, problems := countInSlapdLogs(ctx, pods, lossStartedAt, needle)
+			Expect(problems).To(BeEmpty(), "could not read slapd logs — an unread log is not a clean log")
+
+			GinkgoLogr.Info("stale-cookie occurrences since the data-loss event",
+				"needle", needle, "perPod", counts, "total", total)
+
+			Expect(total).To(BeNumerically("<", maxOccurrences),
+				"%d %q lines across %v since the PVC-loss recovery (limit %d). This is the "+
+					"ITS#9580 refresh storm: OpenLDAP 2.6 cannot serve a delta-sync cookie from "+
+					"an accesslog that a full refresh filled in receive order. Reproduces on "+
+					"-ol26 images only in a multi-site mesh with a dormant SID; on 2.7.1 it "+
+					"should be ~0 everywhere. See ADR-021.",
+				total, needle, pods, maxOccurrences)
+		}, NodeTimeout(3*time.Minute))
 
 	It("SlapdDatabase observedGeneration is unchanged across the recovery", func(ctx SpecContext) {
 		// Belt-and-braces check on the operator-side promise. ADR-012 says

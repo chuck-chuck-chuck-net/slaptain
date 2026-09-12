@@ -94,7 +94,9 @@ type DatabaseReplicationConfig struct {
 	// In-cluster peer i gets RID = ridBase + i + 1.
 	// External peer j gets RID = ridBase + 50 + j + 1.
 	// Must be unique across all SlapdDatabase CRs in the same cluster to avoid
-	// RID collisions. The operator validates this.
+	// RID collisions. NOT machine-enforced today: the operator validates only
+	// that ridBase is present when replication is enabled (the CEL rule below);
+	// cross-CR uniqueness is the deployer's responsibility. See docs/BACKLOG.md.
 	//
 	// Required when enabled=true (the default); may be omitted when
 	// enabled=false. Encoded as *int32 so CEL's has() can distinguish
@@ -120,6 +122,29 @@ type DatabaseReplicationConfig struct {
 	// or 15 minutes. Empty means no explicit checkpoint (OpenLDAP default).
 	// +optional
 	SyncprovCheckpoint string `json:"syncprovCheckpoint,omitempty"`
+	// syncprovSessionlog sizes the syncprov overlay's in-memory session log on
+	// this database's *data* DB, in operations (olcSpSessionlog). The session
+	// log lets a reconnecting consumer whose cookie is still inside the window
+	// be answered from memory instead of a present-phase scan of the whole
+	// database.
+	//
+	// Three states:
+	//   - unset (nil) — the operator applies its default of 5000 operations
+	//     whenever this database's data DB gets a syncprov overlay. This is the
+	//     normal case; the default is on.
+	//   - 0 — disabled. No olcSpSessionlog is written, and an existing one is
+	//     removed. OpenLDAP's own out-of-the-box behaviour.
+	//   - >0 — that operation count.
+	//
+	// Never applied to an accesslog database's syncprov overlay: there a
+	// session log would displace the minCSN guard and turn a loud
+	// REFRESH_REQUIRED into silent under-replication. See ADR-022 for the
+	// placement rule, the cost model behind the default, and the limits (the
+	// log is in-memory, so empty after a restart, and self-wiping on
+	// refresh-phase traffic).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	SyncprovSessionlog *int32 `json:"syncprovSessionlog,omitempty"`
 	// accesslogPurge sets the accesslog purge interval (only used when deltaSync=true).
 	// Format: "<maxage> <interval>", e.g. "2+00:00 1+00:00" means purge entries older
 	// than 2 days, checking every day. Empty means no purge (accesslog grows unbounded).

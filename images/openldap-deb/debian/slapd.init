@@ -1,0 +1,141 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          slapd
+# Required-Start:    $remote_fs $network $syslog
+# Required-Stop:     $remote_fs $network $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: OpenLDAP standalone server (Lightweight Directory Access Protocol)
+### END INIT INFO
+
+# Specify path variable
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+. /lib/lsb/init-functions
+
+# Kill me on all errors
+set -e
+
+# Set the paths to slapd as a variable so that someone who really
+# wants to can override the path in /etc/default/slapd.
+SLAPD=/usr/sbin/slapd
+
+# Stop processing if slapd is not there
+[ -x $SLAPD ] || exit 0
+
+# debconf may have this file descriptor open and it makes things work a bit
+# more reliably if we close it as a matter of course.  db_stop will take
+# care of this, but this won't hurt.
+exec 3>&-
+
+# Source the init script configuration
+if [ -f /etc/default/slapd ]; then
+	. /etc/default/slapd
+fi
+
+# Load the default location of the slapd config file
+if [ -z "$SLAPD_CONF" ]; then
+	[ -e /etc/ldap/slapd.d ] &&
+		SLAPD_CONF=/etc/ldap/slapd.d ||
+		SLAPD_CONF=/etc/ldap/slapd.conf
+fi
+
+# Stop processing if the config file is not there
+if [ ! -r "$SLAPD_CONF" ]; then
+  log_warning_msg "No configuration file was found for slapd at $SLAPD_CONF."
+  # if there is no config at all, we should assume slapd is not running
+  # and exit 0 on stop so that unconfigured packages can be removed.
+  [ "x$1" = xstop ] && exit 0 || exit 1
+fi
+
+# extend options depending on config type
+[ -f "$SLAPD_CONF" ] &&
+	SLAPD_OPTIONS="-f $SLAPD_CONF $SLAPD_OPTIONS" ||
+	SLAPD_OPTIONS="-F $SLAPD_CONF $SLAPD_OPTIONS"
+
+# Find out the name of slapd's pid file
+if [ -z "$SLAPD_PIDFILE" ]; then
+	if [ -d "$SLAPD_CONF" ] ; then # new directory config scheme
+		SLAPD_PIDFILE=$(sed -rne 's/^olcPidFile:\s+(.+)/\1/p' "$SLAPD_CONF/cn=config.ldif")
+	else # old one-file config scheme
+		SLAPD_PIDFILE=$(sed -rne 's/^pidfile\s+(.+)/\1/p' "$SLAPD_CONF")
+	fi
+fi
+
+# Pass the user and group to run under to slapd
+[ -z "$SLAPD_USER"  ] || SLAPD_OPTIONS="-u $SLAPD_USER $SLAPD_OPTIONS"
+[ -z "$SLAPD_GROUP" ] || SLAPD_OPTIONS="-g $SLAPD_GROUP $SLAPD_OPTIONS"
+
+# Check whether we were configured to not start the services.
+check_for_no_start() {
+	if [ -n "$SLAPD_NO_START" ]; then
+		echo 'Not starting slapd: SLAPD_NO_START set in /etc/default/slapd' >&2
+		exit 0
+	fi
+	if [ -n "$SLAPD_SENTINEL_FILE" ] && [ -e "$SLAPD_SENTINEL_FILE" ]; then
+		echo "Not starting slapd: $SLAPD_SENTINEL_FILE exists" >&2
+		exit 0
+	fi
+}
+
+start_slapd() {
+
+	# Make sure /var/run/slapd exists with correct permissions
+	if [ ! -d /var/run/slapd ]; then
+		mkdir -p /var/run/slapd
+		chown "$SLAPD_USER":"$SLAPD_GROUP" /var/run/slapd
+	fi
+
+	piddir="${SLAPD_PIDFILE%/*}"
+	if [ -z "$SLAPD_PIDFILE" ]; then
+		log_warning_msg "The pid file for slapd has not been specified"
+	elif [ ! -d "$piddir" ]; then
+		mkdir -p "$piddir"
+		chown "$SLAPD_USER":"$SLAPD_GROUP" "$piddir"
+	fi
+
+	[ -z "$KRB5_KTNAME" ] || export KRB5_KTNAME
+
+	log_daemon_msg "Starting OpenLDAP" slapd
+	reason=$(start-stop-daemon --start --quiet --oknodo \
+		${SLAPD_PIDFILE:+--pidfile "$SLAPD_PIDFILE"} \
+		--exec $SLAPD -- ${SLAPD_SERVICES:+-h "$SLAPD_SERVICES"} $SLAPD_OPTIONS 2>&1) ||
+	{
+		[ -z "$reason" ] || log_failure_msg "$reason"
+		log_failure_msg Command line used: ${SLAPD} ${SLAPD_SERVICES:+ -h \"$SLAPD_SERVICES\"} $SLAPD_OPTIONS
+		return 1
+	}
+	log_end_msg 0
+}
+
+stop_slapd() {
+	log_daemon_msg "Stopping OpenLDAP" slapd
+	start-stop-daemon --stop --quiet --oknodo --retry TERM/10 \
+		${SLAPD_PIDFILE:+--pidfile "$SLAPD_PIDFILE"} \
+		--exec $SLAPD ||
+	{
+		log_failure_msg
+		return 1
+	}
+	log_end_msg 0
+}
+
+case "$1" in
+  start)
+	check_for_no_start
+	start_slapd ;;
+  stop)
+	stop_slapd ;;
+  restart|force-reload)
+	check_for_no_start
+	stop_slapd
+	start_slapd
+	;;
+  status)
+	status_of_proc ${SLAPD_PIDFILE:+-p "$SLAPD_PIDFILE"} $SLAPD slapd
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart|force-reload|status}"
+	exit 1
+	;;
+esac

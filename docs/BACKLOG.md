@@ -33,49 +33,6 @@ field-manager ownership semantics are unchanged (same `FieldOwner`,
 too (errcheck, gofmt, modernize, unused, gocyclo, lll — ~70 findings as of
 2026-06-08). Worth a separate sweep, but out of scope for this entry.
 
-## Add a README to the operator Helm chart (`charts/operator/`)
-
-**What:** `charts/operator/` has no `README.md`. The project docs
-(`README.md`, `docs/BACKUP.md`, ADRs) live in the repo, so a consumer who
-installs the chart from a registry (`helm install … oci://…/slaptain-operator`)
-has no docs at the point of use — values, CRDs, and the backup/restore feature
-set are undiscoverable from the chart alone.
-
-**Why deferred + open question:** unclear what shape it should take. Options:
-a copy of the top-level `README.md` (drifts — two sources of truth); a thin
-chart-specific README (values reference + "see the project README/docs for
-concepts" links); or generated from `values.yaml` via a tool like
-`helm-docs`. Decide the approach before writing it — a verbatim copy of the
-top-level README is explicitly *not* wanted.
-
-**How:** pick the approach (lean: a short chart README documenting `values.yaml`
-knobs + image/CRD notes, linking back to the repo docs rather than duplicating
-them), then keep it from drifting (helm-docs in `make operator-manifests`, or a
-CI check).
-
-## Remove the `foreignRIDs` field + its overlap validation (RIDs are consumer-local)
-
-**What:** `SlapdDatabase.spec.replication.foreignRIDs` (and the validation that
-rejects a DB whose computed RID range overlaps it) lets a deployer declare RIDs
-"in use on the other side" of an external-peer relationship, to avoid a
-cross-cluster RID collision. Remove it — the collision it guards against cannot
-happen. A `rid` is the *consumer's* local handle for a syncrepl directive: it
-keys that consumer's own replication cookie state and is never exchanged on the
-wire. slaptain and any peer/source each number their own stanzas independently,
-in disjoint per-node namespaces, so cross-cluster RID coordination is meaningless.
-
-**Why deferred / why it's inconsistent right now:** ADR-011 was rewritten to drop
-the cross-cluster RID discussion (RIDs are invisible across clusters), but that
-rewrite deliberately did **not** touch the operator code. So the `foreignRIDs`
-field + webhook currently outlive the ADR that justified them — no ADR endorses
-the field anymore. This entry is the reconciliation reminder. (Contrast:
-`foreignServerIDs` **stays** — ServerIDs *are* global, embedded in the CSN and
-tracked in `contextCSN`, so cross-cluster ServerID collision is real.)
-
-**How:** drop `foreignRIDs` from `SlapdDatabase` types + deepcopy + CRD; delete
-the RID-overlap validation; keep `ridBase` (that's slaptain's *own* intra-cluster
-RID uniqueness — still valid and still needed). Regenerate manifests; `grep -r
-foreignRIDs` → 0. Update any docs/tests that referenced it.
 
 ## e2e framework: specs cannot provision their own topology
 
@@ -161,22 +118,62 @@ orphaned PVCs from a previous run being rebound with populated `/config` and
 the failure still occurred once. The `slapd-ip` and `slapd-rr` restore clusters in
 the same runs start fine.
 
-Why it has resisted diagnosis: the spec's cleanup deletes the SlapdCluster and
-SlapdDatabase, so by the time anyone looks there is no pod, no CR, and no pod log
-left to inspect. **Anyone picking this up should first make the failure
-inspectable** — keep the cluster on failure (skip cleanup when the spec failed, or
-gate cleanup behind an env var) and capture the init-container and slapd logs from
-the pod that will not start. Without that, this is unfixable by inspection after
-the fact.
+Why it had resisted diagnosis: the spec's cleanup deletes the SlapdCluster and
+SlapdDatabase, so by the time anyone looked there was no pod, no CR, and no pod log
+left to inspect.
 
-Related but separate: the restore specs leak their PVCs. Their cleanup deletes the
-CRs but not the volumes, and StatefulSet `volumeClaimTemplates` PVCs are never
-garbage-collected (no `persistentVolumeClaimRetentionPolicy` is set anywhere).
-Orphaned `*-slapd-restore-0` PVCs accumulate across runs. That is not the cause of
-this flake, but it does make `e2e.sh test` re-runs dirty and should be fixed
-regardless — deleting the PVCs in the specs' cleanup, not by changing operator
-behaviour, since leaving PVCs on SlapdCluster deletion is defensible (ADR-005's
-Retain default).
+### 2026-09-12: the failure is now inspectable; the flake did not reproduce
+
+Both halves of "make it inspectable" have landed in the restore specs
+(`restore_test.go` hosts the helpers; `restore_inplace_test.go` and
+`restore_replay_test.go` use them):
+
+- **Autopsy at failure time** (`dumpRestoreAutopsy`, an `AfterEach` that fires only
+  on a failed spec, before any teardown): SlapdCluster + SlapdDatabase status YAML,
+  every pod's phase/conditions/per-container state, the `init` and `slapd` container
+  logs (plus the *previous* container's log when it has restarted), and the
+  namespace events for `<cluster>*`. It runs regardless of the keep setting, so even
+  a run that must leave nothing behind prints its own post-mortem.
+- **Keep-on-failure** (`keepOnFailure`, default **on**; `E2E_KEEP_ON_FAILURE=0`
+  restores unconditional teardown): a failed restore spec leaves its cluster,
+  database, backup, service and PVCs standing and prints what was kept, the
+  `slctl debug-dump -n <ns> <cluster>` one-liner, and the cleanup commands.
+- **PVC leak fixed spec-side** (`deleteRestorePVCs`): green runs now delete the
+  `volumeClaimTemplates` PVCs by `app.kubernetes.io/instance`. Operator behaviour is
+  untouched — ADR-005's Retain default stands.
+
+Verified by mutation (the tooling's red): the `restoreApplied` timeout was
+temporarily cut to 6 s so the spec failed exactly the way the flake does — with
+`slapd-restore-0` not yet serving. The autopsy printed the full init-container log,
+the pod's container states, 32 events, and the keep banner; the cluster was still
+standing afterwards. Mutation reverted.
+
+**Hunt: 16 consecutive green runs, no reproduction** (scm 3-site lab, build
+`fd9b420`, OpenLDAP 2.7.1): 10 runs of the bootstrapFrom spec alone
+(`E2E_LABEL_FILTER=restore-bootstrap`, ~40 s each) and 6 runs of the whole
+`restore` label group (~172 s each, 4 specs, replay skipped as expected on a mesh).
+Every run left zero `slapd-restore*` / `slapd-ip*` / `slapd-rr*` objects behind.
+So: unreproduced on *this* substrate, which is fast enough that the whole spec
+finishes in 37 s against a 480 s timeout — i.e. the failing runs were roughly an
+order of magnitude off normal, not marginally slow.
+
+Still **not established**: why slapd does not start. Candidate mechanisms to check
+the next time it fires, now that the evidence survives — in the order the autopsy
+answers them:
+
+1. Pod never scheduled or stuck mounting (events: `FailedScheduling`,
+   `FailedAttachVolume`, `FailedMount`). The lab's storage is node-local RWO
+   (`openebs-lvm`), and ADR-018's deletion-lease rule means any pod object still
+   naming one of the three PVCs pins the volume to a node.
+2. Init container looping or exiting non-zero (init log + `state=terminated(exit=…)`).
+3. slapd crash-looping (`restarts>0` plus the *previous* container log — the reason
+   a slapd that dies at startup leaves an empty current log).
+4. Pod healthy but unreachable, i.e. a service/DNS/routing fault rather than a slapd
+   fault (pod `Ready=True` while the SlapdDatabase reports `NoPodsReachable`).
+
+Note that (4) is the normal *transient* state for the first ~10 s of every run — the
+SlapdDatabase legitimately passes through `phase=Error`/`NoPodsReachable` before the
+pod serves. The flake is that state persisting, not its appearance.
 
 ---
 
@@ -280,28 +277,18 @@ Two follow-ups worth considering:
 - **Lag is only observable under traffic.** `csnSyncThreshold` is 5 s, so a broken
   link shows as `Lagging` promptly *while writes flow*; on an idle database both
   sides sit at the same CSN and the state reads `Synced` across an arbitrarily broken
-  link. Heartbeat writes would close that, and are deferred with reasons in the
-  ADR-008 amendment — the objection is that the operator would be writing into the
-  user's data tree, not that it wouldn't work.
-
----
-
-## Accesslog index set is incomplete
-
-The per-database accesslog DBs (ADR-019) are created with
-`olcDbIndex: default eq` + `reqEnd,reqResult,reqStart eq`. Upstream indexes
-`entryCSN,objectClass,reqEnd,reqResult,reqStart,reqDN`. Note `index default eq`
-indexes nothing on its own — it only sets the default *type*.
-
-`reqDN` is the one that matters: multi-provider out-of-order modify resolution
-searches the local log with `(&(entryCSN>=…)(reqDN=…)…)` on **every** conflicting
-write (`syncrepl.c`), so on a write-contended mesh that is an unindexed
-attribute assertion on a hot path. `entryCSN` and `objectClass` are cheap wins.
-
-Deliberately out of scope for ADR-019 (it changes performance, not correctness,
-and folding it in would have muddied that ADR's blast radius). Independent of it:
-the fix is a one-line change to the index list plus an e2e that asserts the
-resulting `olcDbIndex`.
+  link. Heartbeat writes would close that, and per the ADR-008 amendment of
+  2026-09-11 would also close a real gap: idleness lets a serverID go dormant,
+  which is what makes `syncprov`'s minCSN fallback pick a stale lookup key and
+  trigger the ITS#9580 "sync cookie is stale" full-refresh storm on reconnect
+  (see `docs/INVESTIGATION-replication-divergence-after-dataloss-and-restart.md`).
+  They stay deferred anyway: the OpenLDAP 2.7 upgrade (ADR-021) and the syncprov
+  sessionlog's per-SID viability check (ADR-022) act on that defect directly, and
+  the objection that the operator would be writing into the user's data tree
+  still applies to a heartbeat, which would only mask it. This is the second
+  time the system has turned out to depend on periodic activity nobody
+  deliberately generates — the first was the incidental 60 s-tick resync
+  found in the ADR-002 amendment (2026-08-26).
 
 ---
 
@@ -346,3 +333,54 @@ about it is broken; it is manual.
 cluster? a peer-elected coordinator? a CLI-driven sequence with no new
 controller?) and the failure semantics before any code. See the ADR-014
 amendment (2026-08-24), section "Not decided: hub-and-spoke orchestration".
+
+---
+
+## ADR-022 follow-ups: syncprov tuning convergence is inconsistent
+
+`olcSpSessionlog` now converges on every reconcile (set / replace / delete —
+ADR-022), but `olcSpCheckpoint` is still written only when the syncprov overlay
+is first added: a later `syncprovCheckpoint` spec change is silently ignored on
+pods whose overlay already exists. Align the checkpoint with the sessionlog's
+converge-always pattern (the pure `planSessionlog` seam generalizes).
+
+Separately: `syncprov-sessionlog-source` (the persistent, accesslog-backed
+sessionlog) was rejected in ADR-022 because it reads the change journal — the
+artifact that is contaminated or purged in exactly the scenarios where a
+persistent log would pay off. Revisit once the journal's trustworthiness across
+refresh/purge transitions is settled (upstream ITS#9580 work, ADR-021).
+
+---
+
+## ridBase cross-CR uniqueness is documented but not enforced
+
+`spec.replication.ridBase` must be unique across the SlapdDatabase CRs of one
+cluster (colliding values produce colliding RIDs, which corrupts per-consumer
+cookie state). The field's doc comment used to claim "the operator validates
+this" — it never did; the only admission rule is the CEL presence check. Found
+2026-09-12 while retiring the foreignRIDs entry.
+
+The fix is a reconcile-time check in the SlapdDatabase controller (list sibling
+SlapdDatabases of the same cluster, refuse with phase=Error on a ridBase whose
+stanza range overlaps another's), plus a red-first e2e: two databases with the
+same ridBase, assert the second reports the collision instead of writing
+colliding stanzas. A webhook would also work but the project has none — do not
+grow one just for this.
+
+---
+
+## A version-crossing image change on a populated cluster fails without explanation
+
+Editing a populated 2.6 cluster's `spec.images` to the 2.7 pair (or back)
+crashloops every pod on volumes the new slapd cannot open (LMDB 1.0 format
+break, ADR-021). The operator neither refuses the change nor explains the
+failure — the user gets CrashLoopBackOff and has to find the runbook.
+
+Honest constraints: image tags are free-form (nothing reliable marks a tag as
+"2.6" or "2.7"), and ADR-018 means the operator cannot inspect the volumes. So
+a hard admission guard is likely impossible without new API surface (e.g. an
+explicit `spec.images.generation` the deployer asserts). The realistic minimum
+is observability: when pods crashloop after an image change, surface the slapd
+startup error (the LMDB version complaint is in the container log) into a
+SlapdCluster condition with a pointer to docs/OPENLDAP-VERSIONS.md. Decide the
+shape before building; do not grow a webhook for this.

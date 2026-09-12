@@ -1,0 +1,82 @@
+# OpenLDAP 2.6 (Debian trixie package) slapd runtime image — the LEGACY variant.
+#
+# Built as <registry>/slaptain/slapd:<tag>-ol26. The default `slapd:<tag>` image
+# is OpenLDAP 2.7.1 from the vendored packaging fork (images/openldap-deb/).
+# Keep this variant for legacy interop and hot-migration clusters that must run
+# the same 2.6 code as their migration source — see ADR-021 and ADR-011.
+#
+# It is knowingly affected by OpenLDAP ITS#9580 (the "sync cookie is stale"
+# refresh storm after a pod loses its data volumes); do not use it for new
+# clusters.
+
+# ── Build / gather stage ────────────────────────────────────────────────────
+FROM debian:trixie-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        slapd \
+        ldap-utils \
+        dpkg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Assemble a staging root for the distroless runtime.
+# NOTE: do NOT pre-create /staging/usr/lib/ldap here — cp -r creates it
+# correctly only when the destination does not yet exist.  If the dir exists
+# beforehand, cp -r would nest the source inside it (ldap/ldap/back_mdb.so).
+RUN install -d \
+      /staging/usr/sbin \
+      /staging/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) \
+      /staging/etc/ldap \
+      /staging/ldap-config \
+      /staging/ldap-data \
+      /staging/tmp
+
+# Binary
+RUN cp /usr/sbin/slapd /staging/usr/sbin/
+
+# Schema files (referenced by bootstrap-generated config)
+RUN cp -r /etc/ldap/schema /staging/etc/ldap/schema
+
+# Dynamic backend/overlay modules
+# (later: compile these in statically and drop this directory entirely)
+RUN cp -r /usr/lib/ldap /staging/usr/lib/ldap
+
+# Shared libs required by slapd and its loadable modules.
+# Using ldd instead of globs: trixie ships libldap.so.2 / liblber.so.2
+# (not libldap-2.5.so.* as on bookworm), so name-based globs are fragile.
+RUN set -e; arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
+    # Collect all .so paths from slapd and every loadable module, then copy
+    # both the real file and any SONAME symlink for each dependency.
+    { ldd /usr/sbin/slapd; \
+      for mod in /usr/lib/ldap/*.so; do ldd "$mod" 2>/dev/null; done; \
+    } | awk '/=>/ { print $3 }' | sort -u | \
+    while read lib; do \
+        real=$(readlink -f "$lib") || continue; \
+        cp "$real" /staging/usr/lib/$arch/ 2>/dev/null || true; \
+        [ "$lib" != "$real" ] && cp -P "$lib" /staging/usr/lib/$arch/ 2>/dev/null || true; \
+    done; \
+    # SASL plugin directory (loaded at runtime, not via ldd)
+    cp -r /usr/lib/$arch/sasl2 /staging/usr/lib/$arch/ 2>/dev/null || true; \
+    # libgcc_s.so.1 is dlopen'd lazily by glibc for pthread_exit stack
+    # unwinding — it never appears in ldd output, so copy it explicitly.
+    cp -a /usr/lib/$arch/libgcc_s.so.1 /staging/usr/lib/$arch/
+
+# Minimal /etc/passwd and /etc/group — distroless/base only ships root+nobody
+RUN printf \
+      'root:x:0:0:root:/root:/sbin/nologin\nopenldap:x:1024:1024:OpenLDAP:/nonexistent:/sbin/nologin\n' \
+      > /staging/etc/passwd && \
+    printf 'root:x:0:\nopenldap:x:1024:\n' > /staging/etc/group
+
+# ── Runtime stage ───────────────────────────────────────────────────────────
+FROM gcr.io/distroless/base-debian13
+
+COPY --from=build /staging/ /
+
+# /ldap-config and /ldap-data are populated by the init container
+VOLUME ["/ldap-config", "/ldap-data"]
+
+USER 1024:1024
+
+EXPOSE 1024 1025
+
+# Chart overrides args; -F points to config written by the init container
+ENTRYPOINT ["/usr/sbin/slapd"]

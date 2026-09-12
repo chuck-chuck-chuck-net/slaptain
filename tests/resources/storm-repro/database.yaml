@@ -1,0 +1,87 @@
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdDatabase
+metadata:
+  name: example-db
+spec:
+  clusterRef: slapd
+  suffix: "dc=example,dc=org"
+
+  acls:
+    # ServiceAccounts service accounts can read userPassword in ou=Mail (for mail auth lookups).
+    - >-
+      to dn.subtree="ou=Mail,dc=example,dc=org" attrs=userPassword
+      by self write
+      by dn.children="ou=ServiceAccounts,dc=example,dc=org" read
+      by anonymous auth
+      by * none
+    # userPassword hidden everywhere else (self-write + anon-auth only).
+    - >-
+      to attrs=userPassword
+      by self write
+      by anonymous auth
+      by * none
+    # shadowLastChange: self-write, everyone else can read.
+    - >-
+      to attrs=shadowLastChange
+      by self write
+      by * read
+    # Everything else: readable by all.
+    - >-
+      to *
+      by * read
+
+  replication:
+    ridBase: 100
+    deltaSync: true
+    syncprovCheckpoint: "500 15"
+    accesslogPurge: "0+00:05 0+00:01"
+
+  indices:
+    - "objectClass eq"
+    - "uid eq,sub"
+    - "cn eq,sub"
+    - "entryCSN eq"
+    - "entryUUID eq"
+
+  seed:
+    entries:
+      # Root entry.
+      - |
+        dn: dc=example,dc=org
+        objectClass: top
+        objectClass: dcObject
+        objectClass: organization
+        o: example
+        dc: example
+      # Organizational units.
+      - |
+        dn: ou=People,dc=example,dc=org
+        objectClass: organizationalUnit
+        ou: People
+      - |
+        dn: ou=Groups,dc=example,dc=org
+        objectClass: organizationalUnit
+        ou: Groups
+      - |
+        dn: ou=Mail,dc=example,dc=org
+        objectClass: organizationalUnit
+        ou: Mail
+      - |
+        dn: ou=ServiceAccounts,dc=example,dc=org
+        objectClass: organizationalUnit
+        ou: ServiceAccounts
+      # Read-only service account for testing ACL enforcement.
+      # Password: "readonly-password" (plaintext in readpw-secret.yaml).
+      # SSHA hash generated with: slappasswd -h {SSHA} -s readonly-password
+      - |
+        dn: uid=readonly,ou=ServiceAccounts,dc=example,dc=org
+        objectClass: account
+        objectClass: posixAccount
+        cn: readonly
+        uid: readonly
+        uidNumber: 65534
+        gidNumber: 65534
+        homeDirectory: /dev/null
+        userPassword: {SSHA}2j4WPNfd7ak7xflOtFbCVKLHTO10Klay
+
+  cleanupPolicy: Retain

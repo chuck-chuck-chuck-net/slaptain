@@ -46,6 +46,7 @@ var _ = Describe("in-place restore", Label("restore"), Label("restore-inplace"),
 		sourceCount    int
 		nodeIP         string
 		markerDN       string
+		anySpecFailed  bool
 	)
 
 	BeforeAll(func(ctx SpecContext) {
@@ -92,8 +93,22 @@ var _ = Describe("in-place restore", Label("restore"), Label("restore-inplace"),
 		}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(Equal(ldapv1alpha1.BackupPhaseCompleted))
 	})
 
+	// See restore_test.go for why the autopsy runs here and not after cleanup.
+	AfterEach(func(ctx SpecContext) {
+		if os.Getenv("E2E_BACKUP") != "1" || !CurrentSpecReport().Failed() {
+			return
+		}
+		anySpecFailed = true
+		dumpRestoreAutopsy(ctx, restoreCluster, restoreDB)
+	})
+
 	AfterAll(func(ctx SpecContext) {
 		if os.Getenv("E2E_BACKUP") != "1" {
+			return
+		}
+		if (anySpecFailed || CurrentSpecReport().Failed()) && keepOnFailure() {
+			reportKeptRestoreState(restoreCluster, restoreDB,
+				[]string{restoreNPSvc}, []string{srcBackup})
 			return
 		}
 		_ = k8sClient.CoreV1().Services(namespace).Delete(ctx, restoreNPSvc, metav1.DeleteOptions{})
@@ -101,8 +116,7 @@ var _ = Describe("in-place restore", Label("restore"), Label("restore-inplace"),
 		_ = crdClient.Delete(ctx, &ldapv1alpha1.SlapdDatabase{ObjectMeta: metav1.ObjectMeta{Name: restoreDB, Namespace: namespace}})
 		_ = crdClient.Delete(ctx, &ldapv1alpha1.SlapdCluster{ObjectMeta: metav1.ObjectMeta{Name: restoreCluster, Namespace: namespace}})
 		_ = crdClient.Delete(ctx, &ldapv1alpha1.SlapdBackup{ObjectMeta: metav1.ObjectMeta{Name: srcBackup, Namespace: namespace}})
-		_ = k8sClient.CoreV1().PersistentVolumeClaims(namespace).DeleteCollection(ctx, metav1.DeleteOptions{},
-			metav1.ListOptions{LabelSelector: "app.kubernetes.io/instance=" + restoreCluster})
+		deleteRestorePVCs(ctx, restoreCluster)
 	})
 
 	It("rolls an existing database back to a backup via SlapdRestore", func(ctx SpecContext) {

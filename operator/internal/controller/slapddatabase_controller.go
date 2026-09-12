@@ -881,7 +881,14 @@ func dataDBOverlays(conn *ldap.Conn, dataDN string) (hasAccesslog, hasSyncprov b
 // of whether it offers delta-sync. ensureAccesslogOverlay is the additional
 // step that opts a provider into delta-sync.
 //
-// Idempotent: checks for existing overlay before adding.
+// Also converges olcSpSessionlog on every reconcile (ADR-022), which is why
+// this does not early-return on an already-present overlay: the sessionlog is
+// on by default, so an overlay added by an operator predating ADR-022 — or a
+// changed spec value, or a hand-edit — must be brought into line without
+// recreating the overlay.
+//
+// Idempotent: checks for existing overlay before adding, and writes
+// olcSpSessionlog only when it differs from desired.
 func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 	ctx context.Context,
 	conn *ldap.Conn,
@@ -894,22 +901,140 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 	if err != nil {
 		return err
 	}
-	if hasSyncprov {
+
+	ops, sessionlog := desiredSessionlogOps(sd)
+
+	if !hasSyncprov {
+		log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
+		syncprovDN := "olcOverlay=syncprov," + dataDN
+		addReq := ldap.NewAddRequest(syncprovDN, nil)
+		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
+		addReq.Attribute("olcOverlay", []string{"syncprov"})
+		if sd.Spec.Replication.SyncprovCheckpoint != "" {
+			addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
+		}
+		if sessionlog {
+			addReq.Attribute("olcSpSessionlog", []string{strconv.Itoa(int(ops))})
+		}
+		if err := conn.Add(addReq); err != nil {
+			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+				return fmt.Errorf("add syncprov overlay: %w", err)
+			}
+		}
+	}
+
+	return r.ensureSyncprovSessionlog(ctx, conn, host, dataDN, ops, sessionlog)
+}
+
+// defaultSyncprovSessionlogOps is the sessionlog size the operator applies when
+// spec.replication.syncprovSessionlog is unset (ADR-022). One entry is a CSN, an
+// entryUUID and an op tag, so 5000 of them stay well under a megabyte resident.
+const defaultSyncprovSessionlogOps int32 = 5000
+
+// desiredSessionlogOps resolves spec.replication.syncprovSessionlog into an
+// operation count and whether the sessionlog is wanted at all (ADR-022):
+// unset → the operator default, 0 → disabled, >0 → that count verbatim.
+//
+// Applies to the DATA database's syncprov overlay only. An accesslog DB's
+// syncprov must never carry a sessionlog — see ADR-022 for why a successful
+// replay there would displace the minCSN guard.
+func desiredSessionlogOps(sd *ldapv1alpha1.SlapdDatabase) (int32, bool) {
+	if sd.Spec.Replication.SyncprovSessionlog == nil {
+		return defaultSyncprovSessionlogOps, true
+	}
+	ops := *sd.Spec.Replication.SyncprovSessionlog
+	if ops <= 0 {
+		return 0, false
+	}
+	return ops, true
+}
+
+// sessionlogAction is what planSessionlog decided to do with olcSpSessionlog.
+type sessionlogAction int
+
+const (
+	sessionlogNoop sessionlogAction = iota
+	sessionlogSet
+	sessionlogRemove
+)
+
+// planSessionlog compares the live olcSpSessionlog values against desired and
+// returns the single write needed, if any. Pure — the LDAP half only executes
+// the verdict.
+//
+// A live value that does not parse as an integer is treated as differing, not
+// as an error: cn=config holds whatever was last written there, and converging
+// it is the point.
+func planSessionlog(current []string, ops int32, enabled bool) (sessionlogAction, string) {
+	if !enabled {
+		if len(current) == 0 {
+			return sessionlogNoop, ""
+		}
+		return sessionlogRemove, ""
+	}
+	want := strconv.Itoa(int(ops))
+	if len(current) == 1 {
+		if live, err := strconv.Atoi(strings.TrimSpace(current[0])); err == nil && live == int(ops) {
+			return sessionlogNoop, ""
+		}
+	}
+	return sessionlogSet, want
+}
+
+// ensureSyncprovSessionlog aligns olcSpSessionlog on the data DB's syncprov
+// overlay to what planSessionlog wants. Same shape as ensureAccesslogACL:
+// observe, compare, write only on a difference.
+//
+// The overlay's real DN carries a {N} ordering prefix assigned by slapd, so it
+// is read back rather than reconstructed. No overlay means nothing to converge —
+// the caller's add either has not happened yet or was removed concurrently, and
+// the next reconcile handles it (ADR-001).
+func (r *SlapdDatabaseReconciler) ensureSyncprovSessionlog(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	ops int32,
+	enabled bool,
+) error {
+	log := logf.FromContext(ctx)
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcSyncProvConfig)",
+		[]string{"olcSpSessionlog"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search syncprov overlay under %s: %w", dataDN, err)
+	}
+	if len(sr.Entries) == 0 {
+		return nil
+	}
+	overlayDN := sr.Entries[0].DN
+	current := sr.Entries[0].GetEqualFoldAttributeValues("olcSpSessionlog")
+
+	action, value := planSessionlog(current, ops, enabled)
+	if action == sessionlogNoop {
 		return nil
 	}
 
-	log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
-	syncprovDN := "olcOverlay=syncprov," + dataDN
-	addReq := ldap.NewAddRequest(syncprovDN, nil)
-	addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
-	addReq.Attribute("olcOverlay", []string{"syncprov"})
-	if sd.Spec.Replication.SyncprovCheckpoint != "" {
-		addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
+	modReq := ldap.NewModifyRequest(overlayDN, nil)
+	switch action {
+	case sessionlogSet:
+		log.Info("setting syncprov sessionlog on data database",
+			"host", host, "dn", overlayDN, "ops", value)
+		modReq.Replace("olcSpSessionlog", []string{value})
+	case sessionlogRemove:
+		log.Info("removing syncprov sessionlog from data database",
+			"host", host, "dn", overlayDN)
+		modReq.Delete("olcSpSessionlog", nil)
+	case sessionlogNoop:
+		return nil
 	}
-	if err := conn.Add(addReq); err != nil {
-		if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-			return fmt.Errorf("add syncprov overlay: %w", err)
+	if err := conn.Modify(modReq); err != nil {
+		if action == sessionlogRemove && ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchAttribute) {
+			return nil
 		}
+		return fmt.Errorf("set olcSpSessionlog on %s: %w", overlayDN, err)
 	}
 	return nil
 }
@@ -1223,10 +1348,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		// back-mdb does not create olcDbDirectory; the init container
 		// provisions /accesslog/<db> from DATABASE_DIRS (ADR-019 R3).
 		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AccesslogDir(sd.Name)})
-		addReq.Attribute("olcDbIndex", []string{
-			"default eq",
-			"reqEnd,reqResult,reqStart eq",
-		})
+		addReq.Attribute("olcDbIndex", planAccesslogIndices(nil))
 		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Spec.Suffix)})
 		if err := conn.Add(addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
@@ -1248,6 +1370,14 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	// Converge the ACL on every reconcile (ADR-020 R5). Covers a log created
 	// by an operator predating ADR-020, and any hand-edit.
 	if err := r.ensureAccesslogACL(ctx, conn, host, dbDN, sd.Spec.Suffix); err != nil {
+		return err
+	}
+
+	// Same for the index set: a log DB created by an operator predating
+	// accesslogIndexAttrs is missing reqDN, the attribute every out-of-order
+	// modify resolution asserts on. back-mdb reindexes online after a cn=config
+	// modify, so this converges without a restart.
+	if err := r.ensureAccesslogIndices(ctx, conn, host, dbDN); err != nil {
 		return err
 	}
 
@@ -1302,6 +1432,109 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		}
 	}
 	return nil
+}
+
+// accesslogIndexAttrs is the equality index set every per-database accesslog DB
+// carries — upstream's set for a delta-syncrepl log (slapo-accesslog(5)'s
+// documented example and the OpenLDAP Administrator's Guide delta-syncrepl
+// recipe both index exactly these).
+//
+// reqDN is the one that earns its keep: multi-provider out-of-order modify
+// resolution searches the *local* log with (&(entryCSN>=…)(reqDN=…)…) on every
+// conflicting write (syncrepl.c), so without it a write-contended mesh does an
+// unindexed attribute assertion on a hot path. entryCSN and objectClass are the
+// cheap companions — accesslog purge and the log's own syncprov scan them.
+//
+// Note what is NOT here: "default eq". Per slapd-mdb(5), `index default <type>`
+// only sets the type used for attributes listed *without* one — "setting a
+// default does not imply that all attributes will be indexed". Every value the
+// operator writes names its types explicitly, so the old "default eq" indexed
+// nothing and is dropped. It is not removed from DBs that already have it
+// (harmless, and a Replace would force a needless reindex).
+var accesslogIndexAttrs = []string{
+	"entryCSN", "objectClass", "reqEnd", "reqResult", "reqStart", "reqDN",
+}
+
+// planAccesslogIndices returns the olcDbIndex values to ADD so that an accesslog
+// DB covers accesslogIndexAttrs, given what it carries today. nil means nothing
+// to do. Pure — the LDAP half only executes the verdict. Passing nil plans a
+// fresh DB's whole index set, so creation and convergence share one seam.
+//
+// An attribute already named in any live value counts as configured, whatever
+// its index types: back-mdb rejects a *second* definition for an attribute that
+// already has one, so a hand-set richer index (say "reqDN eq,sub") must be left
+// alone rather than duplicated.
+//
+// Converging existing DBs is safe on back-mdb: per slapd-mdb(5), "changing index
+// settings dynamically by LDAPModifying cn=config automatically causes rebuilding
+// of the indices online in a background task" — the slapindex(8) requirement
+// applies to slapd.conf-era changes, not to a cn=config modify. Worst case the
+// rebuild costs one background pass over a change journal that is purged
+// periodically anyway, and even if a rebuild were skipped the log's older entries
+// age out, so lazy convergence would still reach a fully indexed steady state.
+func planAccesslogIndices(current []string) []string {
+	indexed := make(map[string]bool, len(current)*2)
+	for _, v := range current {
+		fields := strings.Fields(v)
+		if len(fields) == 0 {
+			continue
+		}
+		// "<attrlist> [<types>]" — the attribute list is the whitespace-tolerant
+		// remainder once a trailing type field is dropped.
+		attrList := fields[0]
+		if len(fields) > 1 {
+			attrList = strings.Join(fields[:len(fields)-1], "")
+		}
+		for _, a := range strings.Split(attrList, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				indexed[strings.ToLower(a)] = true
+			}
+		}
+	}
+
+	var missing []string
+	for _, a := range accesslogIndexAttrs {
+		if !indexed[strings.ToLower(a)] {
+			missing = append(missing, a)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return []string{strings.Join(missing, ",") + " eq"}
+}
+
+// ensureAccesslogIndices adds whatever planAccesslogIndices finds missing on a
+// log DB. Converged on every reconcile, the way ensureAccesslogACL converges the
+// ADR-020 rule: it is what upgrades a log DB created by an operator predating
+// this index set (notably one with no reqDN index).
+func (r *SlapdDatabaseReconciler) ensureAccesslogIndices(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dbDN string,
+) error {
+	log := logf.FromContext(ctx)
+
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dbDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		1, 0, false, "(objectClass=*)", []string{"olcDbIndex"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("read olcDbIndex on %s: %w", dbDN, err)
+	}
+	if len(sr.Entries) == 0 {
+		return fmt.Errorf("no entry at %s", dbDN)
+	}
+
+	missing := planAccesslogIndices(sr.Entries[0].GetEqualFoldAttributeValues("olcDbIndex"))
+	if len(missing) == 0 {
+		return nil
+	}
+
+	log.Info("adding missing accesslog indices", "host", host, "dn", dbDN, "add", missing)
+	modReq := ldap.NewModifyRequest(dbDN, nil)
+	modReq.Add("olcDbIndex", missing)
+	return conn.Modify(modReq)
 }
 
 // accesslogACL returns the single olcAccess rule an accesslog database carries

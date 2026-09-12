@@ -28,7 +28,7 @@ set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-NAMESPACE_OPERATOR="${NAMESPACE_OPERATOR:-slaptain}"
+NAMESPACE_OPERATOR="${NAMESPACE_OPERATOR:-slaptain-system}"
 NAMESPACE_FAKEPROD="${NAMESPACE_FAKEPROD:-fakeprod}"
 NAMESPACE_SLAPTAIN="${NAMESPACE_SLAPTAIN:-slaptain-target}"
 REGISTRY="${REGISTRY:-ghcr.io/chuck-chuck-chuck-net}"

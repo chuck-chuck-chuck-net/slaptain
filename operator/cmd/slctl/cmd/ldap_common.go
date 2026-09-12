@@ -23,11 +23,12 @@ type ldapTargetFlags struct {
 	as        string // "admin" (default), "config", "replication", or a literal DN
 	anonymous bool
 	password  string // only honored when --as is a literal DN
-	pod       string // ordinal "0" or full pod name; forces port-forward
+	pod       string // ordinal "0" or full pod name; targets one pod (direct or port-forward)
 	useTLS    bool   // ldaps:// instead of ldap://
 
 	// Endpoint overrides (labs / dual-homed clusters).
 	forcePortForward bool   // --port-forward: bypass Service discovery, forward to pod-0
+	forceDirect      bool   // --direct: connect to the pod IP without a route check
 	nodeIP           string // --node-ip: override the node address for a NodePort endpoint
 
 	// Transparency.
@@ -51,6 +52,13 @@ type ldapTarget struct {
 	PortForwardPod string
 	LocalPort      int
 	RemotePort     int
+
+	// Direct pod-IP provenance, for --verbose. DirectPod is non-empty when the
+	// endpoint is the pod's IP (no port-forward). DirectNote explains the
+	// direct-connectivity decision either way (why direct was used, or why a
+	// pod-targeted request fell back to a port-forward).
+	DirectPod  string
+	DirectNote string
 }
 
 func (t *ldapTarget) Close() {
@@ -99,6 +107,8 @@ func resolveLDAPTarget(
 		PortForwardPod: ep.pfPod,
 		LocalPort:      ep.localPort,
 		RemotePort:     ep.remotePort,
+		DirectPod:      ep.directPod,
+		DirectNote:     ep.directNote,
 	}, nil
 }
 
@@ -112,6 +122,8 @@ type resolvedEndpoint struct {
 	pfPod      string // non-empty when reached via port-forward
 	localPort  int
 	remotePort int
+	directPod  string // non-empty when connecting to the pod IP directly
+	directNote string // direct-connectivity decision, for --verbose
 }
 
 // ── Cluster / Database selection ──────────────────────────────────────────────
@@ -242,11 +254,22 @@ func dbCredentialsSecret(db *ldapv1alpha1.SlapdDatabase) string {
 // ── Endpoint resolution ───────────────────────────────────────────────────────
 
 // resolveEndpoint returns the LDAP endpoint to use. Strategy:
-//   - --pod set                 → port-forward to that pod
-//   - --port-forward            → port-forward to pod-0 (bypasses Services)
+//   - --pod set                 → direct pod IP if it works (see below), else
+//     port-forward to that pod
+//   - --port-forward            → port-forward to pod-0 (bypasses Services and
+//     the direct pod-IP path)
+//   - --direct                  → direct to the pod IP (default pod-0), no
+//     route check; falls back to a port-forward if the TCP probe fails
 //   - any LoadBalancer Service  → external IP + service port
 //   - any NodePort Service      → node IP (--node-ip or InternalIP) + nodePort
-//   - otherwise                 → port-forward to pod-0
+//   - otherwise                 → direct pod IP if it works, else port-forward
+//     to pod-0
+//
+// "Direct pod IP if it works" is decided by directProber (directroute.go): the
+// kernel FIB gates a short confirming TCP dial, so machines without a specific
+// route to the pod network pay no probe latency and go straight to the
+// port-forward, while pod-routed labs and on-node shells skip the forward
+// entirely. SLCTL_DIRECT_POD_IPS=never turns the whole path off.
 //
 // The Service search isn't restricted to the operator-owned `<name>` Service —
 // we look at every Service in the namespace whose selector targets this
@@ -282,13 +305,27 @@ func resolveEndpoint(
 		return ""
 	}
 
-	// Port-forward: an explicit --pod, or --port-forward (defaults to pod-0).
-	if f.pod != "" || f.forcePortForward {
+	prober := newDirectProber(f.forceDirect)
+
+	// Single-pod targeting: an explicit --pod, --port-forward, or --direct
+	// (each defaults to pod-0). Direct pod IP is tried first unless
+	// --port-forward forces the tunnel.
+	if f.pod != "" || f.forcePortForward || prober.mode == directAlways {
 		podSpec := f.pod
 		if podSpec == "" {
 			podSpec = "0"
 		}
 		podName := resolvePodName(sc.Name, podSpec)
+
+		var directNote string
+		if !f.forcePortForward {
+			ep, note := tryDirectPodIP(ctx, coreClient, ns, podName, prober, scheme, remotePort, reqCertIfTLS())
+			if ep != nil {
+				return ep, nil
+			}
+			directNote = note
+		}
+
 		localPort, c, err := k8scli.PortForward(ctx, coreClient, restCfg, ns, podName, remotePort)
 		if err != nil {
 			return nil, fmt.Errorf("port-forward to pod %s: %w", podName, err)
@@ -300,6 +337,7 @@ func resolveEndpoint(
 			pfPod:      podName,
 			localPort:  localPort,
 			remotePort: remotePort,
+			directNote: directNote,
 		}, nil
 	}
 
@@ -350,8 +388,13 @@ func resolveEndpoint(
 		return &resolvedEndpoint{uri: fmt.Sprintf("%s://%s:%d", scheme, nodeIP, nodePort), reqCert: reqCertIfTLS()}, nil
 	}
 
-	// Fallback: port-forward to pod-0.
+	// Fallback: no client-reachable Service — direct pod IP if it works,
+	// else port-forward to pod-0.
 	podName := sc.Name + "-0"
+	ep, directNote := tryDirectPodIP(ctx, coreClient, ns, podName, prober, scheme, remotePort, reqCertIfTLS())
+	if ep != nil {
+		return ep, nil
+	}
 	localPort, c, err := k8scli.PortForward(ctx, coreClient, restCfg, ns, podName, remotePort)
 	if err != nil {
 		return nil, fmt.Errorf("port-forward fallback to %s: %w", podName, err)
@@ -363,7 +406,39 @@ func resolveEndpoint(
 		pfPod:      podName,
 		localPort:  localPort,
 		remotePort: remotePort,
+		directNote: directNote,
 	}, nil
+}
+
+// tryDirectPodIP attempts to resolve podName to a directly reachable pod-IP
+// endpoint. Returns (endpoint, "") on success and (nil, reason) when the
+// caller should fall back to a port-forward; the reason feeds --verbose.
+func tryDirectPodIP(
+	ctx context.Context,
+	coreClient kubernetes.Interface,
+	ns, podName string,
+	prober *directProber,
+	scheme string,
+	port int,
+	reqCert string,
+) (*resolvedEndpoint, string) {
+	if prober.mode == directNever {
+		return nil, "" // don't even fetch the pod; no note — nothing was attempted
+	}
+	podIP := ""
+	if pod, err := coreClient.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); err == nil {
+		podIP = pod.Status.PodIP
+	}
+	ok, reason := prober.probe(podIP, port)
+	if !ok {
+		return nil, fmt.Sprintf("%s: %s → port-forward", podName, reason)
+	}
+	return &resolvedEndpoint{
+		uri:        fmt.Sprintf("%s://%s:%d", scheme, podIP, port),
+		reqCert:    reqCert,
+		directPod:  podName,
+		directNote: fmt.Sprintf("%s is %s; %s", podName, podIP, reason),
+	}, ""
 }
 
 func lbIngressAddr(svc *corev1.Service) string {

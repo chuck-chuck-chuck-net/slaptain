@@ -1,23 +1,14 @@
 REGISTRY ?= ghcr.io/chuck-chuck-chuck-net
 PROJECT ?= slaptain
-NAMESPACE ?= slaptain
+NAMESPACE ?= slaptain-system
 NAMESPACE_TESTING ?= slaptain-testing
 CONTAINER_ENGINE ?= podman
 
-# Image tag: exact git tag if on one, otherwise short commit hash.
-# Appends -dirty when the working tree has uncommitted changes, so a rebuild
-# after local edits produces a distinct tag that won't match what's already
-# on the nodes — triggering a re-import.
-GIT_TAG := $(shell if [ -n "$$(git describe --tags --exact-match 2>/dev/null)" ]; then \
-                   git describe --tags --exact-match; \
-               else \
-                   hash=$$(git rev-parse --short HEAD); \
-                   if ! git diff --quiet HEAD 2>/dev/null; then \
-                       echo "$${hash}-dirty"; \
-                   else \
-                       echo "$$hash"; \
-                   fi; \
-               fi)
+# Image tag: exact git tag if on one, else short commit hash, else — on a
+# dirty tree — <hash>-dirty-<contenthash>. Derived by scripts/image-tag.sh,
+# the single source shared with tests/e2e.sh; see the script for the rule and
+# why the dirty suffix is content-hashed.
+GIT_TAG := $(shell scripts/image-tag.sh)
 
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= push
@@ -53,8 +44,29 @@ SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:$(GIT_TAG)
 TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:$(GIT_TAG)
 OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:$(GIT_TAG)
 
+# Legacy OpenLDAP 2.6 variants of the slapd pair (ADR-021). The plain tags above
+# are OpenLDAP 2.7.1; these keep the previous Debian-package build reachable for
+# hot-migration / legacy-interop clusters (ADR-011). Pin them per SlapdCluster
+# with spec.images.{slapd,init}.tag=<tag>-ol26 — both, never one.
+INIT_IMAGE_OL26  = $(REGISTRY)/$(PROJECT)/slapd-init:$(GIT_TAG)-ol26
+SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(GIT_TAG)-ol26
+
+# Tag suffix applied to the slapd/slapd-init image tags when DEPLOYING (only —
+# the operator and toolkit tags are untouched). Empty = OpenLDAP 2.7.1;
+# SLAPD_TAG_SUFFIX=-ol26 deploys the legacy 2.6 pair:
+#   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol26
+SLAPD_TAG_SUFFIX ?=
+
+# OpenLDAP 2.7.1 .deb build. Local-only image (localhost/ prefix — never pushed):
+# it carries nothing but /debs and is consumed by both the slapd and slapd-init
+# 2.7 Containerfiles, so the package build runs once per tag for both.
+OPENLDAP_DEB_IMAGE = localhost/$(PROJECT)/openldap-deb:$(GIT_TAG)
+# Set RUN_UPSTREAM_TESTS=1 to run OpenLDAP's own test suite during the package
+# build (slow; off by default — see images/openldap-deb/README.md).
+RUN_UPSTREAM_TESTS ?= 0
+
 # Helm chart OCI registry. Charts land under <registry>/<project>/charts/<name>.
-# Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/slaptain/charts/slaptain-operator --version X.Y.Z
+# Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain-operator --version X.Y.Z
 CHART_REGISTRY ?= oci://$(REGISTRY)/charts
 CHART_OUT      := .charts
 
@@ -70,9 +82,14 @@ endif
 # Stamp-file directory for incremental builds.
 STAMPS := .stamps
 
-# Source file dependencies per image
-INIT_SRCS    := $(shell find images/slapd-init -type f)
-SLAPD_SRCS   := $(shell find images/slapd -type f)
+# Source file dependencies per image. The 2.7 and 2.6 (-ol26) variants share a
+# directory, so list their Containerfiles explicitly instead of globbing — a
+# change to one variant must not rebuild the other.
+OPENLDAP_DEB_SRCS := $(shell find images/openldap-deb -type f)
+INIT_SRCS        := images/slapd-init/Containerfile images/slapd-init/bootstrap.sh
+INIT_OL26_SRCS   := images/slapd-init/Containerfile.ol26 images/slapd-init/bootstrap.sh
+SLAPD_SRCS       := images/slapd/Containerfile
+SLAPD_OL26_SRCS  := images/slapd/Containerfile.ol26
 TOOLKIT_SRCS := $(shell find images/slapd-toolkit -type f)
 OPERATOR_SRCS := $(shell find images/operator -type f) $(shell find operator -type f -name '*.go') operator/go.mod operator/go.sum
 
@@ -106,9 +123,11 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-init build-slapd build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator deliver deliver-operator deploy-operator clean show-tag
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
 
-all: build-init build-slapd build-toolkit build-operator build-slctl
+## all: the six pushable images plus slctl. build-ol26 is included so a
+## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
+all: build-init build-slapd build-ol26 build-toolkit build-operator build-slctl
 
 ## Stamp-file backed build targets (incremental)
 
@@ -124,12 +143,33 @@ $(STAMPS)/tag: FORCE | $(STAMPS)
 	fi
 .PHONY: FORCE
 
-$(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build -t $(INIT_IMAGE) images/slapd-init/
+# OpenLDAP 2.7.1 packages, built once and consumed by both 2.7 images below.
+$(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
+		-t $(OPENLDAP_DEB_IMAGE) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build -t $(SLAPD_IMAGE) images/slapd/
+$(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE) \
+		-t $(INIT_IMAGE) images/slapd-init/
+	@touch $@
+
+$(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE) \
+		-t $(SLAPD_IMAGE) images/slapd/
+	@touch $@
+
+$(STAMPS)/init-ol26: $(INIT_OL26_SRCS) $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build -f images/slapd-init/Containerfile.ol26 \
+		-t $(INIT_IMAGE_OL26) images/slapd-init/
+	@touch $@
+
+$(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build -f images/slapd/Containerfile.ol26 \
+		-t $(SLAPD_IMAGE_OL26) images/slapd/
 	@touch $@
 
 $(STAMPS)/toolkit: $(TOOLKIT_SRCS) $(STAMPS)/tag | $(STAMPS)
@@ -141,8 +181,12 @@ $(STAMPS)/operator: $(OPERATOR_SRCS) $(STAMPS)/tag | $(STAMPS)
 	@touch $@
 
 ## Phony aliases so `make build-operator` etc. still work
+build-openldap-deb: $(STAMPS)/openldap-deb
 build-init: $(STAMPS)/init
 build-slapd: $(STAMPS)/slapd
+build-init-ol26: $(STAMPS)/init-ol26
+build-slapd-ol26: $(STAMPS)/slapd-ol26
+build-ol26: build-init-ol26 build-slapd-ol26
 build-toolkit: $(STAMPS)/toolkit
 build-operator: $(STAMPS)/operator
 
@@ -152,10 +196,14 @@ build-slctl:
 install-slctl: build-slctl
 	sudo install -m 0755 bin/slctl /usr/local/bin/slctl
 
-## Push to container registry
-push: build-init build-slapd build-toolkit build-operator
+## Push to container registry. Six images: the 2.7 slapd pair (plain tags), the
+## 2.6 pair (-ol26), toolkit and operator. The openldap-deb build artifact
+## carrier is local-only and deliberately not pushed.
+push: build-init build-slapd build-ol26 build-toolkit build-operator
 	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
+	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL26)
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL26)
 	$(CONTAINER_ENGINE) push $(TOOLKIT_IMAGE)
 	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
 
@@ -176,6 +224,21 @@ import-operator: build-operator
 	$(call import-if-needed,$(OPERATOR_IMAGE))
 
 import: import-init import-slapd import-toolkit import-operator
+
+## Legacy 2.6 pair — separate aggregate so the normal loop doesn't pay for it.
+## Use it to run an e2e cycle against -ol26 images (ADR-021).
+import-init-ol26: build-init-ol26
+	$(call import-if-needed,$(INIT_IMAGE_OL26))
+
+import-slapd-ol26: build-slapd-ol26
+	$(call import-if-needed,$(SLAPD_IMAGE_OL26))
+
+import-ol26: import-init-ol26 import-slapd-ol26
+
+## Push a single image (per-image counterparts of the aggregate `push`,
+## so `deliver-operator` resolves under the default DELIVERY=push).
+push-operator: build-operator
+	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
 
 ## Delivery: dispatch to push or import based on DELIVERY variable
 deliver: $(DELIVERY)
@@ -218,8 +281,9 @@ helm-uninstall:
 	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
 
 ## Test resources: SlapdSchema + SlapdDatabase + readpw Secret.
-## Set TEST_RESOURCES to "example" or "lab" (default: lab).
-TEST_RESOURCES ?= lab
+## Set TEST_RESOURCES to "example" or "lab" (default: example; "lab" is the
+## internal fixture set and requires SOPS-decryptable secrets — see tests/resources/lab/).
+TEST_RESOURCES ?= example
 
 testing-apply:
 	$(KUBECTL) apply -n $(NAMESPACE_TESTING) -f tests/resources/$(TEST_RESOURCES)/
@@ -235,8 +299,8 @@ cluster-helm-install:
 	$(HELM) upgrade --install slapd ./charts/slapd-cluster \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
 		-f tests/values.slapd-persistent.yaml \
-		--set images.slapd.tag=$(GIT_TAG) \
-		--set images.init.tag=$(GIT_TAG)
+		--set images.slapd.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX) \
+		--set images.init.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX)
 
 cluster-helm-uninstall:
 	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)

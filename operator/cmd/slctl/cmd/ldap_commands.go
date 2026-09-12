@@ -22,7 +22,8 @@ import (
 //
 //	--cluster <name>   --database <name>   --as <ident>
 //	--password <pw>    --pod <ord>         --anonymous   --ldaps
-//	--port-forward     --node-ip <ip>      --verbose     --redact-password
+//	--port-forward     --direct            --node-ip <ip>
+//	--verbose          --redact-password
 //
 // `--help`/`-h` is delegated to cobra by NOT consuming it here.
 // `--` terminates slctl-flag scanning; remaining tokens always pass through.
@@ -43,6 +44,7 @@ func splitLDAPArgs(raw []string, f *ldapTargetFlags) []string {
 		"--anonymous":       &f.anonymous,
 		"--ldaps":           &f.useTLS,
 		"--port-forward":    &f.forcePortForward,
+		"--direct":          &f.forceDirect,
 		"--verbose":         &f.verbose,
 		"--redact-password": &f.redactPassword,
 	}
@@ -129,6 +131,9 @@ func runLDAPUtil(tool string, raw []string) error {
 		// shown in full by default — deliberately, so the printed ldap* line is
 		// copy-pasteable — and masked only under --redact-password. Whether to
 		// keep it out of shell history is the operator's call, not ours.
+		if target.DirectNote != "" {
+			fmt.Fprintf(os.Stderr, "→ direct pod IP: %s\n", target.DirectNote)
+		}
 		if target.PortForwardPod != "" {
 			fmt.Fprintf(os.Stderr, "→ %s\n",
 				formatPortForwardCmd(kubectlGlobalArgs(), ns, target.PortForwardPod, target.LocalPort, target.RemotePort))
@@ -236,11 +241,19 @@ const ldapLongCommon = `slctl flags (long-form only; short flags pass through to
   --as <ident>         'admin' (default), 'config', 'replication', or a literal DN
   --anonymous          bind anonymously
   --password <pw>      bind password (only with a literal --as DN)
-  --pod <ord|name>     bypass the Service, port-forward to one pod
+  --pod <ord|name>     bypass the Service, talk to one pod (direct pod IP when
+                       this host has a route to the pod network, else a
+                       port-forward)
   --ldaps              connect via ldaps:// (port 1025)
   --port-forward       force a port-forward to pod-0 even when a NodePort/LB
                        Service exists (dual-homed clusters where the auto-picked
-                       node IP isn't reachable from here)
+                       node IP isn't reachable from here); also disables the
+                       direct pod-IP path
+  --direct             force a direct pod-IP connection (default pod-0) without
+                       the route check; falls back to a port-forward if the TCP
+                       probe fails. Direct pod IPs are otherwise auto-detected
+                       from this host's routing table; SLCTL_DIRECT_POD_IPS=
+                       always|never|auto overrides the detection
   --node-ip <ip>       address to reach a NodePort endpoint (overrides the
                        auto-discovered node InternalIP)
   --verbose            print the reproducible kubectl port-forward + ldap*
