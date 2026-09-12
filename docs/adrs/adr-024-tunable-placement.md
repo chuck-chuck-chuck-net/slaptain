@@ -197,3 +197,19 @@ convenience.**
   <https://www.openldap.org/software/man.cgi?query=slapd-mdb>
 - `slapd.access(5)` and `slapd.conf(5)` — the limits and search-limit
   vocabulary: <https://www.openldap.org/software/man.cgi?query=slapd.conf>
+
+## Amendment (2026-09-12, same day): the map size is bootstrap-time after all
+
+This ADR used `olcDbMaxSize` as the worked example of a field with no business
+being create-only. Live evidence refuted that within hours: an `ldapmodify` of
+`olcDbMaxSize` on a running back-mdb database is not rejected — **slapd dies on
+it** (exit 139, reproduced on two pods mid-MOD; LMDB's `mdb_env_set_mapsize`
+must not run with transactions active). "slapd forbids the change" turns out to
+include "slapd crashes on the change", which R2/R3 must read as a forbidding.
+
+So: the map size is written at database creation (operator defaults per R5),
+and a later spec divergence is REPORTED — `TunablesConverged=False`,
+reason `RecreateRequired`, with current value, desired value and the change
+path — never written. R4 stands: the field is not ignored, it is answered.
+The same condition is the home for any future tunable that turns out to be
+recreate-only in practice.
