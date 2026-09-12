@@ -53,30 +53,6 @@ knobs + image/CRD notes, linking back to the repo docs rather than duplicating
 them), then keep it from drifting (helm-docs in `make operator-manifests`, or a
 CI check).
 
-## Remove the `foreignRIDs` field + its overlap validation (RIDs are consumer-local)
-
-**What:** `SlapdDatabase.spec.replication.foreignRIDs` (and the validation that
-rejects a DB whose computed RID range overlaps it) lets a deployer declare RIDs
-"in use on the other side" of an external-peer relationship, to avoid a
-cross-cluster RID collision. Remove it — the collision it guards against cannot
-happen. A `rid` is the *consumer's* local handle for a syncrepl directive: it
-keys that consumer's own replication cookie state and is never exchanged on the
-wire. slaptain and any peer/source each number their own stanzas independently,
-in disjoint per-node namespaces, so cross-cluster RID coordination is meaningless.
-
-**Why deferred / why it's inconsistent right now:** ADR-011 was rewritten to drop
-the cross-cluster RID discussion (RIDs are invisible across clusters), but that
-rewrite deliberately did **not** touch the operator code. So the `foreignRIDs`
-field + webhook currently outlive the ADR that justified them — no ADR endorses
-the field anymore. This entry is the reconciliation reminder. (Contrast:
-`foreignServerIDs` **stays** — ServerIDs *are* global, embedded in the CSN and
-tracked in `contextCSN`, so cross-cluster ServerID collision is real.)
-
-**How:** drop `foreignRIDs` from `SlapdDatabase` types + deepcopy + CRD; delete
-the RID-overlap validation; keep `ridBase` (that's slaptain's *own* intra-cluster
-RID uniqueness — still valid and still needed). Regenerate manifests; `grep -r
-foreignRIDs` → 0. Update any docs/tests that referenced it.
-
 ## e2e framework: specs cannot provision their own topology
 
 **What:** the Go e2e suite cannot stand up the environment it runs against. The
@@ -371,3 +347,20 @@ sessionlog) was rejected in ADR-022 because it reads the change journal — the
 artifact that is contaminated or purged in exactly the scenarios where a
 persistent log would pay off. Revisit once the journal's trustworthiness across
 refresh/purge transitions is settled (upstream ITS#9580 work, ADR-021).
+
+---
+
+## ridBase cross-CR uniqueness is documented but not enforced
+
+`spec.replication.ridBase` must be unique across the SlapdDatabase CRs of one
+cluster (colliding values produce colliding RIDs, which corrupts per-consumer
+cookie state). The field's doc comment used to claim "the operator validates
+this" — it never did; the only admission rule is the CEL presence check. Found
+2026-09-12 while retiring the foreignRIDs entry.
+
+The fix is a reconcile-time check in the SlapdDatabase controller (list sibling
+SlapdDatabases of the same cluster, refuse with phase=Error on a ridBase whose
+stanza range overlaps another's), plus a red-first e2e: two databases with the
+same ridBase, assert the second reports the collision instead of writing
+colliding stanzas. A webhook would also work but the project has none — do not
+grow one just for this.
