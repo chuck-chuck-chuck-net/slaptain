@@ -283,8 +283,8 @@ primary node network) — and the reachable NIC isn't k8s-registered, so it can'
 auto-discovered. Override it: `E2E_NODE_ACCESS_IP=<ip>`
 (single-site) or `E2E_NODE_ACCESS_IPS="ctx=ip ..."` (multi-site) — or describe
 the lab once in a gitignored `<repo-root>/lab.yaml` (schema: `lab.yaml.sample`;
-shared with littlered's multi-site e2e; env vars win; `./tests/e2e.sh config`
-dumps the resolved values; sites double as the default context list). This drives
+env vars win; `./tests/e2e.sh config` dumps the resolved values; sites double
+as the default context list). This drives
 `LDAP_ADDR`/`E2E_REMOTE_LDAP_ADDR`, the suite's `E2E_NODE_IP`, and the TLS cert
 SAN; cross-site peer URIs keep the `InternalIP` (they must ride the replication
 network). See `tests/README.md`.

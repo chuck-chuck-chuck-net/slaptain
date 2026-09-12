@@ -113,8 +113,8 @@ E2E_NODE_ACCESS_IPS="<ctx1>=<ip1> <ctx2>=<ip2>" ./tests/e2e.sh all <ctx1> <ctx2>
 Rather than riding these on every invocation, describe the lab once in a
 **lab config file**: `<repo-root>/lab.yaml` (gitignored — it carries internal
 addresses; `E2E_CONFIG=<path>` overrides the location). See `lab.yaml.sample`
-for the schema, which is shared with the littlered operator's multi-site e2e so
-one file can describe the whole lab. The file supplies lab facts — site
+for the schema. Unknown keys are ignored, so the file can carry more than the
+suite reads. The file supplies lab facts — site
 contexts (used as the default context list when the command line names none),
 per-site `nodeAccessIP`, registry, namespaces, replication network mode — and
 never per-run knobs (`GIT_TAG`, `SLAPD_TAG_SUFFIX`, `E2E_*` gates). Environment

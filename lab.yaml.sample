@@ -5,16 +5,10 @@
 # never be committed (see CLAUDE.md "References"). tests/e2e.sh picks it up
 # automatically; E2E_CONFIG=<path> overrides the location.
 #
-# The schema is shared with the littlered operator's multi-site e2e config so
-# ONE file can describe the whole lab. Keys a project does not know are
-# ignored. Environment variables always win over file values — the file
-# supplies lab facts (sites, registry, network mode), never per-run knobs
-# (GIT_TAG, SLAPD_TAG_SUFFIX, E2E_* gates, seeds).
-
-# ── littlered-only (slaptain ignores these) ──────────────────────────────────
-hubContext: hub                       # hub-and-spoke control-plane context
-hubPodCIDR: "10.100.0.0/16"           # hub pod CIDR (network-cut scenarios)
-operatorNamespace: littlered-system   # littlered's top-level key (legacy)
+# Unknown keys are ignored, so the file can carry more than slaptain reads.
+# Environment variables always win over file values — the file supplies lab
+# facts (sites, registry, network mode), never per-run knobs (GIT_TAG,
+# SLAPD_TAG_SUFFIX, E2E_* gates, seeds).
 
 # ── slaptain section ─────────────────────────────────────────────────────────
 slaptain:
@@ -39,9 +33,8 @@ sites:
                                       # InternalIP the test runner cannot
                                       # reach; omit when InternalIP is fine.
     vms:                              # libvirt inventory for whole-site
-                                      # outage scenarios (littlered scenario A;
-                                      # slaptain: planned ITS#9580 dormancy
-                                      # repro — idle/killed site)
+                                      # outage scenarios (planned: ITS#9580
+                                      # dormancy repro — idle/killed site)
       - {name: site-a-node1, uri: qemu+ssh://user@hypervisor.example/system}
       - {name: site-a-node2, uri: qemu+ssh://user@hypervisor.example/system}
   - name: site-b

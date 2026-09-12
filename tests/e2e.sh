@@ -26,8 +26,7 @@ set -euo pipefail
 # ── Lab config file (optional) ───────────────────────────────────────────────
 # A YAML file describing the lab: site inventory (contexts, API endpoints,
 # node-access IPs, VM inventory) plus per-project settings under a `slaptain:`
-# key. The schema is shared with the littlered operator's multi-site e2e so one
-# file can describe the whole lab — see lab.yaml.sample in the repo root.
+# key. Unknown keys are ignored — see lab.yaml.sample in the repo root.
 #
 # Resolution order: $E2E_CONFIG if set, else <repo-root>/lab.yaml if present,
 # else no file (everything keeps its env/default behavior). Environment
