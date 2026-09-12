@@ -1,8 +1,11 @@
 package e2e_test
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -11,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -26,7 +30,7 @@ import (
 // The restore cluster (slapd-restore) is a single-replica, replication-off
 // target — the minimal restore scenario. Data is verified over a NodePort the
 // spec creates for it (E2E_NODE_IP is set by tests/e2e.sh).
-var _ = Describe("restore", Label("restore"), Ordered, func() {
+var _ = Describe("restore", Label("restore"), Label("restore-bootstrap"), Ordered, func() {
 	const (
 		srcBackup      = "restore-e2e-src"
 		restoreCluster = "slapd-restore"
@@ -45,6 +49,7 @@ var _ = Describe("restore", Label("restore"), Ordered, func() {
 		restoreSuffix  string
 		sourceCount    int
 		nodeIP         string
+		anySpecFailed  bool
 	)
 
 	BeforeAll(func(ctx SpecContext) {
@@ -75,8 +80,27 @@ var _ = Describe("restore", Label("restore"), Ordered, func() {
 		Expect(sourceCount).To(BeNumerically(">", 0))
 	})
 
+	// Autopsy at failure time: the cluster is still standing here, and the spec
+	// that just failed is the only context in which its pod logs still exist.
+	// This flake (docs/BACKLOG.md, "bootstrapFrom restore intermittently never
+	// sets restoreApplied") resisted diagnosis for exactly this reason — cleanup
+	// destroyed the evidence before anyone could look.
+	AfterEach(func(ctx SpecContext) {
+		if os.Getenv("E2E_BACKUP") != "1" || !CurrentSpecReport().Failed() {
+			return
+		}
+		anySpecFailed = true
+		dumpRestoreAutopsy(ctx, restoreCluster, restoreDB)
+	})
+
 	AfterAll(func(ctx SpecContext) {
 		if os.Getenv("E2E_BACKUP") != "1" {
+			return
+		}
+		failed := anySpecFailed || CurrentSpecReport().Failed()
+		if failed && keepOnFailure() {
+			reportKeptRestoreState(restoreCluster, restoreDB, []string{restoreNPSvc},
+				[]string{srcBackup})
 			return
 		}
 		// Best-effort teardown of everything this spec created.
@@ -84,6 +108,7 @@ var _ = Describe("restore", Label("restore"), Ordered, func() {
 		_ = crdClient.Delete(ctx, &ldapv1alpha1.SlapdDatabase{ObjectMeta: metav1.ObjectMeta{Name: restoreDB, Namespace: namespace}})
 		_ = crdClient.Delete(ctx, &ldapv1alpha1.SlapdCluster{ObjectMeta: metav1.ObjectMeta{Name: restoreCluster, Namespace: namespace}})
 		_ = crdClient.Delete(ctx, &ldapv1alpha1.SlapdBackup{ObjectMeta: metav1.ObjectMeta{Name: srcBackup, Namespace: namespace}})
+		deleteRestorePVCs(ctx, restoreCluster)
 	})
 
 	It("restores a backup into a fresh cluster via bootstrapFrom", func(ctx SpecContext) {
@@ -190,6 +215,222 @@ func exposeRestoreNodePort(ctx SpecContext, cluster, svcName, nodeIP string) str
 	np := created.Spec.Ports[0].NodePort
 	Expect(np).NotTo(BeZero(), "NodePort should be assigned")
 	return fmt.Sprintf("%s:%d", nodeIP, np)
+}
+
+// ── Failure inspectability (docs/BACKLOG.md: the bootstrapFrom restore flake) ──
+//
+// The restore specs create a whole throwaway cluster and delete it again in
+// their AfterAll. When one of them fails, that teardown is also the destruction
+// of the only evidence: the pod that would not start, its init-container log,
+// and the CR statuses. Three pieces close that hole:
+//
+//	keepOnFailure()           — skip teardown when the spec failed (default on)
+//	dumpRestoreAutopsy()      — dump the evidence at failure time, into the
+//	                            spec's own output, before anything is deleted
+//	deleteRestorePVCs()       — on a green run, also remove the
+//	                            volumeClaimTemplates PVCs, which are never
+//	                            garbage-collected with the StatefulSet
+//
+// keepOnFailure and the autopsy are deliberately independent: the autopsy runs
+// even with E2E_KEEP_ON_FAILURE=0, so a CI run that must leave nothing behind
+// still prints its own post-mortem.
+
+// keepOnFailure reports whether a failed restore spec should leave its cluster,
+// database, services and PVCs standing for inspection. Default: keep. Set
+// E2E_KEEP_ON_FAILURE=0 to restore unconditional teardown (CI, or a loop that
+// must not have its next iteration poisoned by the previous one's corpse).
+func keepOnFailure() bool { return os.Getenv("E2E_KEEP_ON_FAILURE") != "0" }
+
+// reportKeptRestoreState prints exactly what was left behind and how to look at
+// it. Printed to both GinkgoWriter (spec output) and stdout, because a kept
+// cluster is a fact about the *operator's* state that outlives this test run.
+func reportKeptRestoreState(cluster, database string, services, backups []string) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n=== KEEPING FAILED RESTORE STATE FOR INSPECTION (E2E_KEEP_ON_FAILURE) ===\n")
+	fmt.Fprintf(&b, "namespace:      %s\n", namespace)
+	fmt.Fprintf(&b, "SlapdCluster:   %s\n", cluster)
+	fmt.Fprintf(&b, "SlapdDatabase:  %s\n", database)
+	if len(services) > 0 {
+		fmt.Fprintf(&b, "Services:       %s\n", strings.Join(services, ", "))
+	}
+	if len(backups) > 0 {
+		fmt.Fprintf(&b, "SlapdBackups:   %s\n", strings.Join(backups, ", "))
+	}
+	fmt.Fprintf(&b, "PVCs:           app.kubernetes.io/instance=%s (config-%s-N, data-%s-N, …)\n",
+		cluster, cluster, cluster)
+	fmt.Fprintf(&b, "\ninspect it:\n")
+	fmt.Fprintf(&b, "  slctl debug-dump -n %s %s\n", namespace, cluster)
+	fmt.Fprintf(&b, "  kubectl -n %s describe pod %s-0\n", namespace, cluster)
+	// The init container is named "init" (not "slapd-init" — that is the image).
+	fmt.Fprintf(&b, "  kubectl -n %s logs %s-0 -c init\n", namespace, cluster)
+	fmt.Fprintf(&b, "  kubectl -n %s logs %s-0 -c slapd\n", namespace, cluster)
+	fmt.Fprintf(&b, "\nclean it up when done:\n")
+	fmt.Fprintf(&b, "  kubectl -n %s delete slapddatabase %s; kubectl -n %s delete slapdcluster %s\n",
+		namespace, database, namespace, cluster)
+	fmt.Fprintf(&b, "  kubectl -n %s delete pvc -l app.kubernetes.io/instance=%s\n", namespace, cluster)
+	fmt.Fprintf(&b, "=========================================================================\n")
+	fmt.Fprint(GinkgoWriter, b.String())
+	fmt.Print(b.String())
+}
+
+// dumpRestoreAutopsy writes the post-mortem of a restore cluster into the
+// current spec's output: CR statuses, pod phase and per-container state, the
+// init-container and slapd logs, and the namespace's recent events for the
+// cluster. Everything is best-effort — a missing piece is reported inline, never
+// fatal, because this runs while the spec has *already* failed and must not
+// replace the real failure message with one of its own.
+func dumpRestoreAutopsy(ctx context.Context, cluster, database string) {
+	out := GinkgoWriter
+	fmt.Fprintf(out, "\n=== RESTORE AUTOPSY: cluster=%s database=%s ns=%s ===\n", cluster, database, namespace)
+
+	sc := &ldapv1alpha1.SlapdCluster{}
+	if err := crdClient.Get(ctx, client.ObjectKey{Name: cluster, Namespace: namespace}, sc); err != nil {
+		fmt.Fprintf(out, "--- SlapdCluster %s: %v\n", cluster, err)
+	} else {
+		fmt.Fprintf(out, "--- SlapdCluster %s status ---\n%s", cluster, toYAML(sc.Status))
+	}
+	sd := &ldapv1alpha1.SlapdDatabase{}
+	if err := crdClient.Get(ctx, client.ObjectKey{Name: database, Namespace: namespace}, sd); err != nil {
+		fmt.Fprintf(out, "--- SlapdDatabase %s: %v\n", database, err)
+	} else {
+		fmt.Fprintf(out, "--- SlapdDatabase %s status ---\n%s", database, toYAML(sd.Status))
+	}
+
+	pods, err := k8sClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/instance=" + cluster,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "--- pods: list failed: %v\n", err)
+		return
+	}
+	if len(pods.Items) == 0 {
+		fmt.Fprintf(out, "--- pods: NONE with app.kubernetes.io/instance=%s "+
+			"(scheduling/StatefulSet problem, not a slapd problem)\n", cluster)
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		fmt.Fprintf(out, "--- pod %s: phase=%s node=%s podIP=%s\n", p.Name, p.Status.Phase, p.Spec.NodeName, p.Status.PodIP)
+		for _, c := range p.Status.Conditions {
+			fmt.Fprintf(out, "      condition %s=%s %s %s\n", c.Type, c.Status, c.Reason, c.Message)
+		}
+		for _, cs := range p.Status.InitContainerStatuses {
+			fmt.Fprintf(out, "      init  %-14s ready=%t restarts=%d state=%s\n",
+				cs.Name, cs.Ready, cs.RestartCount, describeContainerState(cs.State))
+		}
+		for _, cs := range p.Status.ContainerStatuses {
+			fmt.Fprintf(out, "      main  %-14s ready=%t restarts=%d state=%s last=%s\n",
+				cs.Name, cs.Ready, cs.RestartCount, describeContainerState(cs.State),
+				describeContainerState(cs.LastTerminationState))
+		}
+		for _, c := range p.Spec.InitContainers {
+			dumpContainerLog(ctx, p.Name, c.Name, false)
+		}
+		for _, c := range p.Spec.Containers {
+			dumpContainerLog(ctx, p.Name, c.Name, false)
+			// A crash-looping slapd has its evidence in the *previous* container.
+			for _, cs := range p.Status.ContainerStatuses {
+				if cs.Name == c.Name && cs.RestartCount > 0 {
+					dumpContainerLog(ctx, p.Name, c.Name, true)
+				}
+			}
+		}
+	}
+
+	dumpClusterEvents(ctx, cluster)
+	fmt.Fprintf(out, "=== END RESTORE AUTOPSY (%s) ===\n\n", cluster)
+}
+
+// dumpContainerLog tails one container's log into the spec output.
+func dumpContainerLog(ctx context.Context, pod, container string, previous bool) {
+	tail := int64(300)
+	label := container
+	if previous {
+		label += " (previous)"
+	}
+	req := k8sClient.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{
+		Container: container, TailLines: &tail, Previous: previous,
+	})
+	body, err := req.DoRaw(ctx)
+	if err != nil {
+		fmt.Fprintf(GinkgoWriter, "--- logs %s/%s: %v\n", pod, label, err)
+		return
+	}
+	if len(body) == 0 {
+		fmt.Fprintf(GinkgoWriter, "--- logs %s/%s: EMPTY (container produced no output)\n", pod, label)
+		return
+	}
+	fmt.Fprintf(GinkgoWriter, "--- logs %s/%s (last %d lines) ---\n%s\n", pod, label, tail, body)
+}
+
+// dumpClusterEvents prints the namespace's events whose involved object belongs
+// to the cluster, oldest first. Events are how "pod never started" explains
+// itself (FailedScheduling, FailedMount, ImagePullBackOff, …).
+func dumpClusterEvents(ctx context.Context, cluster string) {
+	evs, err := k8sClient.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		fmt.Fprintf(GinkgoWriter, "--- events: list failed: %v\n", err)
+		return
+	}
+	var rows []corev1.Event
+	for _, e := range evs.Items {
+		n := e.InvolvedObject.Name
+		if n == cluster || strings.HasPrefix(n, cluster+"-") {
+			rows = append(rows, e)
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return eventTime(rows[i]).Before(eventTime(rows[j])) })
+	fmt.Fprintf(GinkgoWriter, "--- events for %s* (%d) ---\n", cluster, len(rows))
+	for _, e := range rows {
+		fmt.Fprintf(GinkgoWriter, "  %s %-7s %-24s %-22s %s\n",
+			eventTime(e).Format(time.RFC3339), e.Type,
+			e.InvolvedObject.Kind+"/"+e.InvolvedObject.Name, e.Reason, e.Message)
+	}
+}
+
+func eventTime(e corev1.Event) time.Time {
+	if !e.LastTimestamp.IsZero() {
+		return e.LastTimestamp.Time
+	}
+	if e.EventTime.Time.IsZero() {
+		return e.CreationTimestamp.Time
+	}
+	return e.EventTime.Time
+}
+
+func describeContainerState(s corev1.ContainerState) string {
+	switch {
+	case s.Running != nil:
+		return fmt.Sprintf("running(since %s)", s.Running.StartedAt.Format(time.RFC3339))
+	case s.Waiting != nil:
+		return fmt.Sprintf("waiting(%s: %s)", s.Waiting.Reason, s.Waiting.Message)
+	case s.Terminated != nil:
+		return fmt.Sprintf("terminated(exit=%d %s: %s)",
+			s.Terminated.ExitCode, s.Terminated.Reason, s.Terminated.Message)
+	default:
+		return "none"
+	}
+}
+
+func toYAML(v any) string {
+	b, err := yaml.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("<marshal failed: %v>\n", err)
+	}
+	return string(b)
+}
+
+// deleteRestorePVCs removes a restore cluster's volumeClaimTemplates PVCs.
+// StatefulSet PVCs are never garbage-collected (no
+// persistentVolumeClaimRetentionPolicy is set, and ADR-005's Retain default is
+// deliberate), so without this every restore run leaks its volumes and the next
+// run rebinds populated ones.
+func deleteRestorePVCs(ctx context.Context, cluster string) {
+	err := k8sClient.CoreV1().PersistentVolumeClaims(namespace).DeleteCollection(ctx,
+		metav1.DeleteOptions{},
+		metav1.ListOptions{LabelSelector: "app.kubernetes.io/instance=" + cluster})
+	if err != nil {
+		fmt.Fprintf(GinkgoWriter, "warning: deleting PVCs for %s failed: %v\n", cluster, err)
+	}
 }
 
 // readSecretKey reads a single key from a Secret in the test namespace.

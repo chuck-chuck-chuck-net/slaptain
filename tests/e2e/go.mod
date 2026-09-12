@@ -3,6 +3,7 @@ module github.com/chuck-chuck-chuck-net/slaptain/tests/e2e
 go 1.25.3
 
 require (
+	github.com/chuck-chuck-chuck-net/slaptain/operator v0.0.0-00010101000000-000000000000
 	github.com/go-ldap/ldap/v3 v3.4.12
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
@@ -10,7 +11,7 @@ require (
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
 	sigs.k8s.io/controller-runtime v0.23.3
-	github.com/chuck-chuck-chuck-net/slaptain/operator v0.0.0-00010101000000-000000000000
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -63,7 +64,6 @@ require (
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
 replace github.com/chuck-chuck-chuck-net/slaptain/operator => ../../operator
