@@ -525,3 +525,81 @@ func (r *SlapdDatabaseReconciler) ensureDataBaselineIndices(
 // size (ADR-024 R4: a spec field that cannot be honoured is reported, never
 // silently ignored).
 const tunablesConvergedCondition = "TunablesConverged"
+
+// splitIndexValue splits an olcDbIndex value "<attrlist> [<types>]" into its
+// attribute list and its (possibly empty) type field. Whitespace-tolerant about
+// the comma-separated list, the way slapd is.
+func splitIndexValue(v string) (attrs []string, types string) {
+	fields := strings.Fields(v)
+	if len(fields) == 0 {
+		return nil, ""
+	}
+	attrList := fields[0]
+	if len(fields) > 1 {
+		attrList = strings.Join(fields[:len(fields)-1], "")
+		types = fields[len(fields)-1]
+	}
+	for _, a := range strings.Split(attrList, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			attrs = append(attrs, a)
+		}
+	}
+	return attrs, types
+}
+
+// indexedAttrs is the set of attributes any of these olcDbIndex values covers,
+// lowercased.
+func indexedAttrs(values []string) map[string]bool {
+	set := make(map[string]bool, len(values)*2)
+	for _, v := range values {
+		attrs, _ := splitIndexValue(v)
+		for _, a := range attrs {
+			set[strings.ToLower(a)] = true
+		}
+	}
+	return set
+}
+
+// planUserIndices returns the user-declared olcDbIndex values still to be
+// ADDED, with attributes that are already indexed subtracted out.
+//
+// Subtracting per ATTRIBUTE rather than per value is not a refinement, it is
+// the only correct reading: back-mdb rejects a second definition for an
+// attribute that already has one with "duplicate index definition for attr
+// <x>" (LDAP result 80), and that error fails the whole modify. Comparing whole
+// values — which is what this code used to do — misses it whenever the same
+// attribute appears inside a differently-spelled value, and the operator's own
+// baseline set is exactly such a value: one combined
+// "objectClass,entryCSN,entryUUID eq" against a spec.indices that lists
+// "entryCSN eq" separately. Observed live on t3e: every pod of both databases
+// wedged in Error on the first reconcile after the database was created.
+//
+// The user's index types are preserved for whatever attributes survive, so
+// "uid eq,sub" stays "uid eq,sub" and a partially-covered "objectClass,sn eq"
+// becomes "sn eq".
+func planUserIndices(current, desired []string) []string {
+	indexed := indexedAttrs(current)
+
+	var out []string
+	for _, d := range desired {
+		attrs, types := splitIndexValue(d)
+		var remaining []string
+		for _, a := range attrs {
+			if !indexed[strings.ToLower(a)] {
+				remaining = append(remaining, a)
+				// A single modify must not name the same attribute twice
+				// either, so claim it as we go.
+				indexed[strings.ToLower(a)] = true
+			}
+		}
+		if len(remaining) == 0 {
+			continue
+		}
+		v := strings.Join(remaining, ",")
+		if types != "" {
+			v += " " + types
+		}
+		out = append(out, v)
+	}
+	return out
+}

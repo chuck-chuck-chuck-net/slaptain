@@ -345,3 +345,68 @@ func TestMdbIdlExponentEnv(t *testing.T) {
 		t.Fatalf("mdbIdlExponent = (%d, %v), want (20, true)", got, ok)
 	}
 }
+
+// ── 6. User indices vs the operator baseline ────────────────────────────────
+
+// Live regression, found on t3e the first time a database was created by the
+// new code: back-mdb rejects a SECOND olcDbIndex definition for an attribute
+// that already has one ("duplicate index definition for attr \"entryCSN\"",
+// LDAP result 80), and applyIndices compared whole VALUES, not attributes. So
+// a fresh DB carrying the baseline as one combined value —
+// "objectClass,entryCSN,entryUUID eq" — plus a user spec.indices listing
+// "entryCSN eq" wedged every pod of the database in Error.
+//
+// The seam must subtract what is already indexed, per attribute, and keep the
+// user's index types for whatever is left.
+func TestPlanUserIndices(t *testing.T) {
+	cases := []struct {
+		name    string
+		current []string
+		desired []string
+		want    []string
+	}{
+		{
+			name:    "the t3e wedge: baseline as one combined value",
+			current: []string{"objectClass,entryCSN,entryUUID eq"},
+			desired: []string{"objectClass eq", "uid eq,sub", "entryCSN eq", "entryUUID eq"},
+			want:    []string{"uid eq,sub"},
+		},
+		{
+			name:    "nothing indexed yet",
+			current: nil,
+			desired: []string{"uid eq,sub", "cn eq"},
+			want:    []string{"uid eq,sub", "cn eq"},
+		},
+		{
+			name:    "partially covered multi-attribute value keeps the rest",
+			current: []string{"objectClass eq"},
+			desired: []string{"objectClass,sn eq"},
+			want:    []string{"sn eq"},
+		},
+		{
+			name:    "exact duplicates are dropped",
+			current: []string{"uid eq,sub"},
+			desired: []string{"uid eq,sub"},
+			want:    nil,
+		},
+		{
+			name:    "a value with no type field still parses",
+			current: []string{"objectClass eq"},
+			desired: []string{"member"},
+			want:    []string{"member"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := planUserIndices(tc.current, tc.desired)
+			if len(got) != len(tc.want) {
+				t.Fatalf("planUserIndices(%v, %v) = %v, want %v", tc.current, tc.desired, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("planUserIndices[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}

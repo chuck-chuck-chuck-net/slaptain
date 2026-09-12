@@ -885,20 +885,10 @@ func (r *SlapdDatabaseReconciler) applyIndices(
 
 	current := sr.Entries[0].GetEqualFoldAttributeValues("olcDbIndex")
 
-	// Build set of current indices (normalized).
-	currentSet := make(map[string]bool, len(current))
-	for _, idx := range current {
-		currentSet[normalizeIndex(idx)] = true
-	}
-
-	// Find missing indices.
-	var missing []string
-	for _, idx := range desired {
-		if !currentSet[normalizeIndex(idx)] {
-			missing = append(missing, idx)
-		}
-	}
-
+	// Subtract what is already indexed, per ATTRIBUTE — see planUserIndices for
+	// why a per-value comparison is not good enough (back-mdb rejects the whole
+	// modify with "duplicate index definition for attr <x>").
+	missing := planUserIndices(current, desired)
 	if len(missing) == 0 {
 		log.V(1).Info("indices already up-to-date", "host", host)
 		return nil
@@ -910,9 +900,6 @@ func (r *SlapdDatabaseReconciler) applyIndices(
 	return conn.Modify(modReq)
 }
 
-func normalizeIndex(s string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
-}
 
 // ── Seed Data ────────────────────────────────────────────────────────────────
 
