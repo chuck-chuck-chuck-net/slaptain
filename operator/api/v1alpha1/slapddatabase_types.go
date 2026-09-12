@@ -94,7 +94,9 @@ type DatabaseReplicationConfig struct {
 	// In-cluster peer i gets RID = ridBase + i + 1.
 	// External peer j gets RID = ridBase + 50 + j + 1.
 	// Must be unique across all SlapdDatabase CRs in the same cluster to avoid
-	// RID collisions. The operator validates this.
+	// RID collisions. NOT machine-enforced today: the operator validates only
+	// that ridBase is present when replication is enabled (the CEL rule below);
+	// cross-CR uniqueness is the deployer's responsibility. See docs/BACKLOG.md.
 	//
 	// Required when enabled=true (the default); may be omitted when
 	// enabled=false. Encoded as *int32 so CEL's has() can distinguish
