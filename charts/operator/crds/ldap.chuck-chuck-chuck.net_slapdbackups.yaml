@@ -23,6 +23,10 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.sourcePod
+      name: Source
+      priority: 1
+      type: string
     - jsonPath: .status.completedAt
       name: Completed
       type: date
@@ -130,7 +134,11 @@ spec:
                 format: date-time
                 type: string
               conditions:
-                description: conditions holds standard Kubernetes condition entries.
+                description: |-
+                  conditions holds standard Kubernetes condition entries. Besides "Complete",
+                  a backup carries "SourceConverged": whether the SlapdCluster reported its
+                  replicas converged (its own ReplicationConverged condition) at backup time.
+                  It is a record, never a gate — a backup always takes a backup.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -208,6 +216,25 @@ spec:
                 description: sizeBytes is the size of the uploaded artifact in bytes.
                 format: int64
                 type: integer
+              sourceContextCSN:
+                description: |-
+                  sourceContextCSN is the source pod's contextCSN vector for the database's
+                  suffix, read when the backup Job was created. It is the queryable copy of
+                  the vector the artifact itself embeds, and pins the artifact's position in
+                  the replication timeline. Empty when the database has no contextCSN (an
+                  unreplicated database has no syncprov overlay) or when the read failed —
+                  a failed read never fails the backup.
+                items:
+                  type: string
+                type: array
+              sourcePod:
+                description: |-
+                  sourcePod is the slapd pod the artifact was read from (today always
+                  "<cluster>-0" — the backup Job co-locates with pod-0). A backup is one
+                  pod's view of the DIT, not the cluster's; recording which pod makes that
+                  explicit and is the first thing to look at when a restored tree is missing
+                  a write that was ACKed before the backup (ADR-014 amendment 2026-09-12).
+                type: string
               startedAt:
                 description: startedAt is when the backup Job started running.
                 format: date-time

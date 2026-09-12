@@ -116,6 +116,41 @@ kubectl get slapdbackup nightly-2026-06-08 -o wide
 A completed `SlapdBackup` is an immutable record. Failed backups stay `Failed`
 for inspection (check the `<name>-backup` Job's logs).
 
+### What an artifact actually is — and what the record tells you
+
+An artifact is **one pod's view of the DIT at one moment**: the Job always
+`slapcat`s pod-0. On a converged cluster that is the whole truth. On a
+replicating cluster that is momentarily behind, it is not — a write ACKed
+through the ClusterIP Service may have landed on another pod and not yet reached
+pod-0, in which case it is legitimately absent from the artifact. This is
+inherent to backing up one replica of a replicating set, not a fault, and it is
+most likely on a freshly created or freshly restarted cluster, where consumer
+sessions can still be inside their retry window. It happened to us on
+2026-09-12; see the ADR-014 amendment of that date.
+
+A backup therefore always runs — it is never gated, delayed or refused on
+replication health — and records the circumstances it ran under:
+
+```bash
+kubectl get slapdbackup nightly-2026-06-08 \
+  -o jsonpath='{.status.sourcePod}{"\n"}{.status.sourceContextCSN}{"\n"}'
+kubectl get slapdbackup nightly-2026-06-08 -o yaml | grep -A5 SourceConverged
+```
+
+| Field | What it tells you |
+|---|---|
+| `status.sourcePod` | Which pod the bytes came from. |
+| `status.sourceContextCSN` | That pod's `contextCSN` vector when the Job was created — the artifact's place in the replication timeline. The LDIF embeds the same vector; this is the copy you can query without downloading the object. |
+| condition `SourceConverged` | What the `SlapdCluster` said about replica convergence at the time (it mirrors the cluster's own `ReplicationConverged` condition, with its message and timestamp). `NotReplicated` means there was nothing to be current with. |
+
+`SourceConverged=False` does not mean the artifact is bad — it means the source
+was known to be behind some peer, and a write accepted elsewhere in the seconds
+before the backup may not be in it. Treat it as the first thing to check when a
+restored tree is missing something you are sure was written. The verdict is only
+as fresh as the cluster's CSN monitoring tick (60 s), and an idle database reads
+converged even across a broken link (ADR-008 amendment) — it is a recorded
+observation, not a guarantee.
+
 ### Scheduling
 
 The backup Job is pinned (required PodAffinity) to the node running pod-0 so it

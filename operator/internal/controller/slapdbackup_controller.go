@@ -50,6 +50,21 @@ type SlapdBackupReconciler struct {
 	// OperatorImage is the operator's own image reference (repository:tag), used
 	// for the Job's uploader container. Wired from the OPERATOR_IMAGE env.
 	OperatorImage string
+	// ClusterDomain is the cluster's DNS domain, used to build the per-pod FQDN
+	// for the source contextCSN read (ADR-015). Optional: when unset it is
+	// resolved on demand, so an unwired manager still records honest sources.
+	ClusterDomain string
+}
+
+// clusterDomain returns the configured DNS domain, resolving it on demand when
+// the manager did not wire one (ADR-015 precedence: CLUSTER_DOMAIN env →
+// resolv.conf → cluster.local). Called only when a backup Job is created, so
+// the lazy resolution costs nothing on the hot path.
+func (r *SlapdBackupReconciler) clusterDomain() string {
+	if r.ClusterDomain != "" {
+		return r.ClusterDomain
+	}
+	return ResolveClusterDomain()
 }
 
 // imageRef builds "repository:tag", falling back to the operator's running tag
@@ -127,12 +142,25 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	objectKey := backupObjectKey(sb, sc, sd)
 
+	// Where the artifact comes from is a static fact about how backups work
+	// (the Job co-locates with pod-0), so it is recorded on every pass, not only
+	// the one that creates the Job — an operator restart between Create and the
+	// status patch must not leave the record blank.
+	sb.Status.SourcePod = backupSourcePod(sc)
+
 	// Create the Job if it doesn't exist yet.
 	jobName := sb.Name + "-backup"
 	job := &batchv1.Job{}
 	err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: sb.Namespace}, job)
 	switch {
 	case apierrors.IsNotFound(err):
+		// Record the circumstances BEFORE the artifact is produced: which pod
+		// it comes from, where that pod sat in the replication timeline, and
+		// what the cluster said about convergence. This is honesty, not policy —
+		// nothing here can refuse or delay the backup (ADR-014 amendment
+		// 2026-09-12). Taken just before the Job is created, so the recorded
+		// vector is a lower bound: everything in it is certainly in the dump.
+		r.recordSource(ctx, sb, sd, sc)
 		job = buildBackupJob(sb, sd, sc, r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")), r.OperatorImage, objectKey)
 		if err := controllerutil.SetControllerReference(sb, job, r.Scheme); err != nil {
 			return ctrl.Result{}, err
@@ -196,6 +224,74 @@ func backupObjectKey(sb *ldapv1alpha1.SlapdBackup, sc *ldapv1alpha1.SlapdCluster
 		key = p + "/" + key
 	}
 	return key
+}
+
+// recordSource stamps the backup's source circumstances into status: the pod
+// the artifact is read from, that pod's contextCSN vector, and a SourceConverged
+// condition consuming the cluster's own ReplicationConverged verdict.
+//
+// Why this exists: a SlapdBackup always slapcats pod-0, but under multi-master
+// a write ACKed through the cluster Service seconds earlier may have landed on
+// another pod and not yet reached pod-0 — so the artifact can legitimately miss
+// it. That is inherent to backing up one replica of a replicating set and is not
+// a defect. The defect was that it was SILENT.
+//
+// Best-effort throughout: a failed CSN read logs and leaves the field unset. A
+// backup never fails because its bookkeeping did.
+func (r *SlapdBackupReconciler) recordSource(ctx context.Context, sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase, sc *ldapv1alpha1.SlapdCluster) {
+	log := logf.FromContext(ctx)
+
+	sourcePod := backupSourcePod(sc)
+	sb.Status.SourcePod = sourcePod
+	setCondition(&sb.Status.Conditions, sourceConvergedCondition(sc, sb.Generation, metav1.Now()))
+
+	csns, err := r.readSourceContextCSN(ctx, sb.Namespace, sd, sc, sourcePod)
+	if err != nil {
+		log.Info("backup source contextCSN read failed; status.sourceContextCSN left unset",
+			"pod", sourcePod, "suffix", sd.Spec.Suffix, "err", err)
+		return
+	}
+	sb.Status.SourceContextCSN = normalizedCSNVector(csns)
+}
+
+// readSourceContextCSN reads contextCSN off the backup's source pod, using the
+// database's replication bind credentials — the same identity and the same
+// per-pod headless-DNS path the SlapdCluster controller's CSN monitoring uses
+// (ADR-008), so it works wherever that already works.
+func (r *SlapdBackupReconciler) readSourceContextCSN(ctx context.Context, ns string, sd *ldapv1alpha1.SlapdDatabase, sc *ldapv1alpha1.SlapdCluster, sourcePod string) ([]string, error) {
+	if sd.Spec.Suffix == "" {
+		return nil, fmt.Errorf("database %q has no suffix", sd.Name)
+	}
+	host := fmt.Sprintf("%s.%s-headless.%s.svc.%s", sourcePod, sc.Name, ns, r.clusterDomain())
+	tlsEnabled := sc.Spec.LDAP.TLS.Enabled
+	port := ldapContainerPort
+	if tlsEnabled {
+		port = ldapsContainerPort
+	}
+	bindDN := "cn=replication," + sd.Spec.Suffix
+	bindPW, err := r.replicationPassword(ctx, ns, sd)
+	if err != nil {
+		return nil, err
+	}
+	return queryContextCSN(host, port, tlsEnabled, sd.Spec.Suffix, bindDN, bindPW)
+}
+
+// replicationPassword reads a database's replication bind password from its
+// credentials Secret (mirrors the SlapdCluster controller's listDatabaseInfo).
+func (r *SlapdBackupReconciler) replicationPassword(ctx context.Context, ns string, sd *ldapv1alpha1.SlapdDatabase) (string, error) {
+	secretName := sd.Name + "-credentials"
+	if sd.Spec.Credentials.SecretName != "" {
+		secretName = sd.Spec.Credentials.SecretName
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, secret); err != nil {
+		return "", fmt.Errorf("read %s: %w", secretName, err)
+	}
+	pw := string(secret.Data["replication-password"])
+	if pw == "" {
+		return "", fmt.Errorf("secret %s has no replication-password", secretName)
+	}
+	return pw, nil
 }
 
 func (r *SlapdBackupReconciler) setPending(ctx context.Context, sb *ldapv1alpha1.SlapdBackup, reason, msg string) {

@@ -139,6 +139,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
         ├── backup_test.go          # SlapdBackup → S3 round-trip (gated: E2E_BACKUP=1, deploys versitygw)
         ├── restore_test.go         # bootstrapFrom restore into a fresh cluster (gated: E2E_BACKUP=1)
+        ├── restore_replay_test.go  # in-place restore under replication: marker written to the backup's SOURCE pod, asserted present in the artifact + source-honesty status; stale accesslog delete must not replay (gated: E2E_BACKUP=1)
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
         ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
         ├── accesslog_migration_test.go # ADR-019 R8 convergence off a hand-made legacy shared log (gated: E2E_ACCESSLOG_MIGRATION=1)
@@ -176,7 +177,11 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
   them on a cron schedule with `retention{maxCount,maxAge}`; `SlapdDatabase.spec.bootstrapFrom`
   restores a backup into a fresh DB (cluster enters `status.phase=Restoring`,
   scales to 0, runs offline `slapadd`, scales back up). S3 creds via a Secret
-  with keys `access-key-id`/`secret-access-key`.
+  with keys `access-key-id`/`secret-access-key`. A backup always takes a backup
+  and records its circumstances unconditionally (`status.sourcePod`,
+  `status.sourceContextCSN`, condition `SourceConverged` consumed from the
+  cluster's `ReplicationConverged`) — 2026-09-12 amendment; a CSN-dominance
+  gate was rejected, the opt-in `requireConverged` is designed and deferred.
 - In-place restore (ADR-014 amendment): `SlapdRestore` is an imperative,
   immutable-once-created request to restore a backup into an **existing**
   (possibly populated) `SlapdDatabase` — a rollback. The **SlapdCluster

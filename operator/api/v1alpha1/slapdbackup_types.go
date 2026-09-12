@@ -112,10 +112,28 @@ type SlapdBackupStatus struct {
 	// sizeBytes is the size of the uploaded artifact in bytes.
 	// +optional
 	SizeBytes int64 `json:"sizeBytes,omitempty"`
+	// sourcePod is the slapd pod the artifact was read from (today always
+	// "<cluster>-0" — the backup Job co-locates with pod-0). A backup is one
+	// pod's view of the DIT, not the cluster's; recording which pod makes that
+	// explicit and is the first thing to look at when a restored tree is missing
+	// a write that was ACKed before the backup (ADR-014 amendment 2026-09-12).
+	// +optional
+	SourcePod string `json:"sourcePod,omitempty"`
+	// sourceContextCSN is the source pod's contextCSN vector for the database's
+	// suffix, read when the backup Job was created. It is the queryable copy of
+	// the vector the artifact itself embeds, and pins the artifact's position in
+	// the replication timeline. Empty when the database has no contextCSN (an
+	// unreplicated database has no syncprov overlay) or when the read failed —
+	// a failed read never fails the backup.
+	// +optional
+	SourceContextCSN []string `json:"sourceContextCSN,omitempty"`
 	// observedGeneration is the .metadata.generation the controller last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// conditions holds standard Kubernetes condition entries.
+	// conditions holds standard Kubernetes condition entries. Besides "Complete",
+	// a backup carries "SourceConverged": whether the SlapdCluster reported its
+	// replicas converged (its own ReplicationConverged condition) at backup time.
+	// It is a record, never a gate — a backup always takes a backup.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -127,6 +145,7 @@ type SlapdBackupStatus struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=sb
 // +kubebuilder:printcolumn:name="Database",type=string,JSONPath=`.spec.databaseRef`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Source",type=string,priority=1,JSONPath=`.status.sourcePod`
 // +kubebuilder:printcolumn:name="Completed",type=date,JSONPath=`.status.completedAt`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
