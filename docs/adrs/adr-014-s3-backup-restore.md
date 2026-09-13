@@ -861,3 +861,57 @@ state that source was in. Months later, during a restore, there is no way to ask
 - ADR-008 (amendment) — what CSN comparison can and cannot observe; the source of
   the signal this consumes and the bound on how much it is worth.
 - ADR-018 — the co-located Job that makes pod-0 the source in the first place.
+
+## Amendment (2026-09-13): preflight rejects an unrestorable suffix entry; a backup records its source's suffix health
+
+**Status:** Accepted. Strengthens the existing preflight along its own
+destroy-last axis and extends the 2026-09-12 source-honesty surface. Nothing
+gates or refuses a backup; "a backup always takes a backup" stands.
+
+### Context
+
+A multi-site seed race (ADR-025) left one pod's suffix entry demoted to a
+hidden **glue** entry — `objectClass: top`+`glue`, no RDN attribute. `slapcat`
+dumps it faithfully, so the artifact's first line is a correct-looking
+`dn: <suffix>`; the DN-line-only preflight passed it; the restore machine
+scaled the cluster to 0; and `slapadd` then rejected the artifact with
+`(65) attribute 'dc' not allowed` — the exact outcome preflight exists to
+prevent, discovered after the downtime had already been paid. The backup that
+produced the artifact had completed "successfully" with nothing on the
+`SlapdBackup` saying its source pod was broken.
+
+### Decisions
+
+1. **Preflight validates the suffix *entry*, not just its DN line**
+   (`backup.Preflight` → `validateSuffixEntry`). Three independent signals,
+   any one rejecting: `objectClass` contains `glue`; `structuralObjectClass`
+   is `glue`; the suffix's RDN attribute (e.g. `dc`) is absent from the entry
+   body. All three describe artifacts `slapadd` cannot load as the real suffix
+   entry. Both restore triggers (`bootstrapFrom` and `SlapdRestore`) share
+   this preflight, so both are covered; failure keeps the cluster serving —
+   destroy-last, as originally promised.
+
+2. **A backup records `SourceSuffixHealthy`**, next to `sourcePod`/
+   `sourceContextCSN`/`SourceConverged`: `True/SuffixEntryVisible`,
+   `False/GlueSuffix` (this artifact will fail restore preflight),
+   `False/SuffixMissing`, `Unknown/CheckFailed`. Probed just before the Job is
+   created: an ordinary base search as `cn=replication` (ADR-008), then a
+   ManageDSAIT base search (RFC 3296) when hidden — slapd hides glue entries
+   at the frontend, not via ACLs, so the control (not credentials) is what
+   reveals them. Record-only and best-effort: a failed probe records
+   `Unknown`, never blocks the backup.
+
+### Consequences
+
+- A restore pointed at a glue-suffix artifact now fails in `Preflight` with
+  the glue named in `status.restore.message`, cluster untouched.
+- `kubectl get slapdbackup -o yaml` answers "was this artifact restorable?"
+  without downloading it — even after retention aged the object out.
+- e2e: a gated spec plants a hand-crafted glue artifact and asserts the
+  machine stays in Preflight and never scales down.
+
+### Related (amendment)
+
+- ADR-025 — the seed-race class that produces the glue, the full evidence
+  chain, and the prevention/detection decisions this amendment is the
+  backup/restore slice of.

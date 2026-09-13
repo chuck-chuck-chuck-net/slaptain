@@ -78,6 +78,26 @@ initial entries required for the directory and for replication to function:
 Going through a live slapd connection — rather than `slapadd` — is essential when replication
 is enabled. See [Why Not slapadd with Replication](#why-not-slapadd-with-replication).
 
+### Multi-site: exactly one site seeds (founder-only — ADR-025)
+
+In a cross-cluster mesh, **only one site's `SlapdDatabase` may carry
+`spec.seed`**. Every other site deploys the same CR *without* `seed` and
+receives the whole DIT via syncrepl, exactly like a fresh peer pod does.
+
+Why this is a hard rule and not a style preference: `entryUUID` is
+server-generated, so two sites seeding the same DNs create two different
+*identities* for the "same" entries. slapd's syncrepl conflict resolution can
+then demote the losing pod's suffix entry to a permanent, **hidden glue
+entry** — the pod answers base searches with nothing (only a ManageDSAIT
+search reveals the glue), every backup taken from it is unrestorable, and no
+CSN-based health signal ever notices. The operator additionally withholds a
+seed whose suffix already has a foreign creator, but that belt cannot close
+the race between two sites seeding simultaneously — the founder rule does.
+
+Detection and the manual heal runbook for an existing glue live in ADR-025;
+`slctl inspect` (`suffix-visibility`, `suffix-uuid-agreement`) and the
+database's `DataPresent` condition surface it.
+
 ---
 
 ## Why Not slapadd with Replication?
