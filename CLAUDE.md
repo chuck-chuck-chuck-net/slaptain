@@ -76,7 +76,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-021-openldap-2.7-dual-images.md
 │       ├── adr-022-syncprov-sessionlog.md
 │       ├── adr-023-rolling-replacement.md
-│       └── adr-024-tunable-placement.md
+│       ├── adr-024-tunable-placement.md
+│       └── adr-025-single-creator-seed-glue-suffix.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
@@ -132,7 +133,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── helpers_test.go         # k8s/LDAP helpers (ldapSearch, ldapAdd, dialPodLDAP, …)
         ├── slapd_test.go           # StatefulSet, Service, PVC, passwords Secret checks
         ├── bootstrap_test.go       # SlapdDatabase Running checks
-        ├── ldap_test.go            # Directory content: base structure, user/group CRUD, ACL basics
+        ├── ldap_test.go            # Directory content: base structure (incl. per-pod base-DN visibility — glue suffix, ADR-025), user/group CRUD, ACL basics
         ├── readpw_test.go          # cn=config access; readpw user bind + ACL enforcement
         ├── readonly_test.go        # Read-only replica tests: data sync, write rejection
         ├── resilience_test.go      # Pod-restart resilience (warm restart labelled persistent-only; gated E2E_RESILIENCE=1)
@@ -140,7 +141,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── migration_test.go       # Migration scenario (gated at registration time: E2E_MIGRATION=1)
         ├── external_replication_test.go  # Cross-cluster replication (gated: E2E_EXTERNAL_REPL=1)
         ├── backup_test.go          # SlapdBackup → S3 round-trip (gated: E2E_BACKUP=1, deploys versitygw)
-        ├── restore_test.go         # bootstrapFrom restore into a fresh cluster (gated: E2E_BACKUP=1)
+        ├── restore_test.go         # bootstrapFrom restore into a fresh cluster + glue-artifact preflight rejection (ADR-025) (gated: E2E_BACKUP=1)
         ├── restore_replay_test.go  # in-place restore under replication: marker written to the backup's SOURCE pod, asserted present in the artifact + source-honesty status; stale accesslog delete must not replay (gated: E2E_BACKUP=1)
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
         ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
@@ -517,6 +518,7 @@ the original decision — the history of reasoning matters.
 - ADR-022: The syncprov sessionlog belongs on the data DB only — never an accesslog DB, where a successful replay would displace the minCSN guard and under-replicate silently. On by default at 5000 ops via `spec.replication.syncprovSessionlog` (tristate: unset→5000, 0→off, >0 verbatim) — *Accepted (unit red-first + e2e red/green on live clusters 2026-09-11)*
 - ADR-023: Rolling volume replacement — an imperative, one-shot `SlapdRollingReplace` rebuilds pods from the mesh one ordinal at a time (ADR-012 case 2 promoted to an operation), gated on surviving redundancy and CSN convergence; headline use case: the 2.6 → 2.7 LMDB format break (ADR-021) without the ADR-014 outage — *Proposed 2026-09-12, implementation after v0.1.0*
 - ADR-024: Where an OpenLDAP tunable lives — three placement classes (converged-per-pod as the default, bootstrap-time, create-only-by-nature), a spec field that cannot be honoured is rejected or converged but never ignored, and unset means slaptain's default rather than slapd's — *Accepted 2026-09-12; amended twice from live evidence: olcDbMaxSize and olcDbEnvFlags segfault slapd on a live modify, olcIdleTimeout/olcWriteTimeout and the monitor ACL MOD hang it — R1 membership is proven on a running pod. User-facing guide: docs/TUNING.md*
+- ADR-025: Seed is single-creator MESH-wide (founder-only: exactly one site carries `spec.seed`; peers sync). A multi-site seed race demotes one pod's suffix entry to a permanent hidden GLUE — invisible to ordinary searches (ManageDSAIT reveals it), frozen at the winner's entryCSN so all CSN health reads clean, silently breaking that pod and making every backup from it unrestorable. Fix set: e2e founder-only seeding; operator withhold belt (foreign-sid suffix creator → seed withheld — the OPPOSITE direction of the reverted verifySeedExists); restore preflight rejects a glue/RDN-less suffix entry (destroy-last); `SourceSuffixHealthy` on SlapdBackup; `DataPresent` all-pods; `slctl inspect` suffix-visibility + suffix-uuid-agreement; NO auto-heal (manual runbook in the ADR) — *Accepted 2026-09-13*
 - ADR-020: An accesslog DB is at least as restrictive as the database it journals — *amended 2026-09-12: the replication identity also gets unlimited olcLimits on the data DB and the journal (slapd's default sizelimit of 500 capped every syncrepl search — found when a journal outgrew it live); never modify olcDbMaxSize on a live database (slapd segfaults — ADR-024 amendment)* — `to * by dn.exact="cn=replication,<suffix>" read by * none`; without it a data DB's ACLs are bypassable through its own change journal — *Accepted (impl + e2e green 2026-08-25; the bypass was captured live before the fix — an anonymous read of the shared journal returned `reqMod: userPassword:+ {SSHA}…` for a user whose `userPassword` the data DB denies)*
 
 ---

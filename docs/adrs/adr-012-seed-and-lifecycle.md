@@ -192,6 +192,42 @@ cleanly with two existing commands.
   `persistence.enabled=false`) and incidentally exposed an unrelated
   rolling-restart bug.
 
+## Amendment (2026-09-13): seed is single-creator MESH-wide; the withhold belt is not verifySeedExists
+
+This ADR serialised seed writers *within* a cluster (pod-0, one-shot). A
+multi-site incident showed the same race one level up: every site's
+`SlapdDatabase` carried the same `spec.seed`, so N sites created the same DNs
+with N fresh `entryUUID`s, and slapd's conflict resolution demoted one pod's
+suffix entry to a permanent, hidden **glue** — silently breaking that pod for
+clients and poisoning every backup taken from it. Full mechanism, evidence and
+the fix set live in **ADR-025**; this amendment records the two changes to
+this ADR's own contract:
+
+1. **The one-shot invariant is mesh-scoped.** "Seed is one-shot per cluster
+   lifetime" becomes "the seed has exactly one creator per *mesh*": in a
+   replicated multi-site deployment only the founder site carries
+   `spec.seed`; peers receive the DIT via syncrepl (the mesh-wide form of
+   this ADR's "replication propagates the seed from pod-0 to peers").
+
+2. **A withhold-create belt, explicitly distinguished from the reverted
+   `verifySeedExists`.** Before seeding, the controller reads the suffix
+   entry's `entryCSN` on pod-0; if it exists with a serverID outside this
+   cluster's own sid range, the seed is withheld wholesale and `SeedApplied`
+   latches. The directions are opposite and that is the whole point:
+   `verifySeedExists` **re-created on absence** — it could resurrect a tiny
+   subset over real data loss and re-run the multi-pod write race; the belt
+   **declines to create on positive evidence of a foreign creator** — it can
+   only ever write *less* than before. Unknown evidence (entry absent, CSN
+   unreadable) proceeds with the normal idempotent seed: absence is never
+   evidence. The "do not re-introduce verifySeedExists or anything
+   functionally equivalent" postscript stands — this is not functionally
+   equivalent, and the distinction (withhold-on-presence vs
+   re-create-on-absence) is the reusable rule.
+
+`DataPresent` (unchanged in role: observability only, never an action
+trigger) now requires the root entry visible on **every** reached RW pod —
+the any-pod verdict read `True` across a glued pod (ADR-025).
+
 ## Related
 
 - ADR-002: cn=config is node-local — established the "operator-owned declarative
@@ -203,3 +239,5 @@ cleanly with two existing commands.
 - `docs/reconcile-loop-fixes.md` 2026-04-19 "Seed data lost on rolling restart"
   entry — the original fix that this ADR supersedes, amended in place with a
   postscript explaining why
+- ADR-025: seed is single-creator mesh-wide; the glue-suffix class — the
+  2026-09-13 amendment above summarises it for this ADR's scope

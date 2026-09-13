@@ -1,7 +1,10 @@
 package e2e_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"sort"
@@ -189,7 +192,164 @@ var _ = Describe("restore", Label("restore"), Label("restore-bootstrap"), Ordere
 		Expect(entries).To(HaveLen(sourceCount), "restored entry count should equal the source")
 		Expect(ldapExists(conn, "ou=People,"+restoreSuffix)).To(BeTrue(), "ou=People should be restored")
 	})
+
+	// ADR-025: an artifact whose suffix entry is a GLUE entry (the multi-site
+	// seed-race residue — objectClass top+glue, no RDN attribute) has a correct
+	// DN line, so a DN-line-only preflight passes it and slapadd then fails with
+	// "(65) attribute 'dc' not allowed" AFTER the cluster has been scaled to 0
+	// (observed live 2026-09-13: three restore Jobs at BackoffLimitExceeded, the
+	// cluster held at 0 replicas). Destroy-last demands the rejection happens in
+	// preflight, while the cluster is still serving.
+	//
+	// Against pre-ADR-025 code this spec is red by construction: preflight
+	// passes the glue artifact, the machine scales to 0, and both the
+	// stays-in-Preflight and the never-scales-down assertions fail.
+	It("rejects a glue-suffix artifact in preflight without scaling down", func(ctx SpecContext) {
+		const glueDB = "restore-glue-db"
+		const glueKey = "glue-e2e/artifact.ldif.gz"
+
+		By("planting a hand-crafted glue-suffix artifact in the S3 backend")
+		glueLDIF := "dn: " + restoreSuffix + "\n" +
+			"objectClass: top\n" +
+			"objectClass: glue\n" +
+			"structuralObjectClass: glue\n" +
+			"entryUUID: 1a914f3a-43f0-1041-9ed3-896165d17446\n" +
+			"entryCSN: 20260913185308.559566Z#000000#065#000000\n" +
+			"createTimestamp: 20260913185307Z\n" +
+			"\n" +
+			"dn: ou=People," + restoreSuffix + "\n" +
+			"objectClass: organizationalUnit\n" +
+			"ou: People\n"
+		putVersitygwObjectGzip(ctx, bucket, glueKey, []byte(glueLDIF))
+
+		By("creating a bootstrapFrom database pointing at the glue artifact")
+		disabled := false
+		Expect(crdClient.Create(ctx, &ldapv1alpha1.SlapdDatabase{
+			ObjectMeta: metav1.ObjectMeta{Name: glueDB, Namespace: namespace},
+			Spec: ldapv1alpha1.SlapdDatabaseSpec{
+				ClusterRef:  restoreCluster,
+				Suffix:      restoreSuffix,
+				Replication: ldapv1alpha1.DatabaseReplicationConfig{Enabled: &disabled},
+				BootstrapFrom: &ldapv1alpha1.BootstrapSource{
+					S3: &ldapv1alpha1.BootstrapS3Source{
+						Storage: ldapv1alpha1.S3StorageSpec{
+							Bucket: bucket, Endpoint: endpoint, Region: "us-east-1",
+							CredentialsSecretName: credSecret,
+						},
+						Key: glueKey,
+					},
+				},
+			},
+		})).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			if CurrentSpecReport().Failed() && keepOnFailure() {
+				return // keep the evidence, like the rest of the restore suite
+			}
+			_ = crdClient.Delete(ctx, &ldapv1alpha1.SlapdDatabase{
+				ObjectMeta: metav1.ObjectMeta{Name: glueDB, Namespace: namespace}})
+		})
+
+		By("waiting for preflight to reject the artifact as a glue suffix")
+		Eventually(ctx, func() string {
+			sc := &ldapv1alpha1.SlapdCluster{}
+			if err := crdClient.Get(ctx, client.ObjectKey{Name: restoreCluster, Namespace: namespace}, sc); err != nil {
+				return ""
+			}
+			if sc.Status.Restore == nil || sc.Status.Restore.Phase != ldapv1alpha1.RestorePreflight {
+				return ""
+			}
+			return sc.Status.Restore.Message
+		}).WithTimeout(5*time.Minute).WithPolling(5*time.Second).Should(ContainSubstring("glue"),
+			"preflight should reject the glue-suffix artifact by name")
+
+		By("verifying the machine never leaves Preflight and never scales down")
+		Consistently(ctx, func() bool {
+			sc := &ldapv1alpha1.SlapdCluster{}
+			if err := crdClient.Get(ctx, client.ObjectKey{Name: restoreCluster, Namespace: namespace}, sc); err != nil {
+				return false
+			}
+			if sc.Status.Restore == nil || sc.Status.Restore.Phase != ldapv1alpha1.RestorePreflight {
+				return false
+			}
+			sts, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, restoreCluster, metav1.GetOptions{})
+			if err != nil || sts.Spec.Replicas == nil {
+				return false
+			}
+			return *sts.Spec.Replicas == 1
+		}).WithTimeout(45*time.Second).WithPolling(5*time.Second).Should(BeTrue(),
+			"the cluster must keep serving (replicas=1, phase Preflight) while the artifact is invalid — destroy-last")
+
+		gdb := &ldapv1alpha1.SlapdDatabase{}
+		Expect(crdClient.Get(ctx, client.ObjectKey{Name: glueDB, Namespace: namespace}, gdb)).To(Succeed())
+		Expect(gdb.Status.RestoreApplied).To(BeFalse(), "a rejected artifact must never mark restoreApplied")
+	})
 })
+
+// putVersitygwObjectGzip gzips content and writes it as an object into the
+// versitygw POSIX backend (/data/<bucket>/<key>) via an ephemeral container —
+// the write-side sibling of artifactGrepExitCode, and versitygw-specific for
+// the same reason: it keeps the e2e module free of an S3 client and request
+// signing. versitygw's posix backend serves pre-existing files as objects, so
+// a file planted this way is GETtable through its S3 API.
+func putVersitygwObjectGzip(ctx context.Context, bucket, objectKey string, content []byte) {
+	GinkgoHelper()
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, err := gz.Write(content)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(gz.Close()).To(Succeed())
+	b64 := base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	pods, err := k8sClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=versitygw",
+	})
+	Expect(err).NotTo(HaveOccurred(), "list versitygw pods")
+	var podName string
+	for _, p := range pods.Items {
+		if p.Status.Phase == corev1.PodRunning {
+			podName = p.Name
+			break
+		}
+	}
+	Expect(podName).NotTo(BeEmpty(), "no Running versitygw pod to plant the artifact on")
+
+	path := "/data/" + bucket + "/" + objectKey
+	ecName := fmt.Sprintf("artifact-put-%d", time.Now().UnixNano()%1000000)
+
+	pod, err := k8sClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "get versitygw pod")
+	pod.Spec.EphemeralContainers = append(pod.Spec.EphemeralContainers, corev1.EphemeralContainer{
+		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+			Name:  ecName,
+			Image: "busybox:stable",
+			Command: []string{"sh", "-c",
+				`mkdir -p "$(dirname "$F")" && printf %s "$B64" | base64 -d > "$F"`},
+			Env: []corev1.EnvVar{
+				{Name: "F", Value: path},
+				{Name: "B64", Value: b64},
+			},
+			VolumeMounts:             []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
+			TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+		},
+	})
+	_, err = k8sClient.CoreV1().Pods(namespace).UpdateEphemeralContainers(ctx, podName, pod, metav1.UpdateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "attach artifact-put container %s to %s", ecName, podName)
+
+	Eventually(ctx, func() int32 {
+		p, err := k8sClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			return -1
+		}
+		for _, st := range p.Status.EphemeralContainerStatuses {
+			if st.Name == ecName && st.State.Terminated != nil {
+				return st.State.Terminated.ExitCode
+			}
+		}
+		return -1
+	}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(BeZero(),
+		"artifact-put container %s must terminate cleanly", ecName)
+}
 
 // exposeRestoreNodePort creates a NodePort Service for the restore cluster's RW
 // pods and returns a host:port reachable via E2E_NODE_IP.

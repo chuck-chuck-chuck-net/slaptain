@@ -216,19 +216,115 @@ func Preflight(ctx context.Context, cfg S3Config, key, suffix, replPassword stri
 	}
 	defer func() { _ = gz.Close() }()
 
+	if err := validateSuffixEntry(gz, suffix); err != nil {
+		return fmt.Errorf("backup s3://%s/%s: %w", cfg.Bucket, key, err)
+	}
+	return nil
+}
+
+// validateSuffixEntry reads a decompressed slapcat LDIF stream and verifies the
+// suffix entry is present AND restorable. slapcat emits the suffix entry first,
+// so a short read suffices.
+//
+// Presence alone is not enough (ADR-025): a multi-site seed race can leave a pod
+// with a GLUE suffix entry — objectClass top+glue, structuralObjectClass glue,
+// no RDN attribute — which slapcat dumps faithfully (its DN line looks right)
+// and slapadd then rejects with "(65) attribute '<rdn>' not allowed", AFTER the
+// restore machine has already scaled the cluster to 0. Rejecting it here keeps
+// the destroy-last guarantee: a corrupt artifact fails with neither downtime nor
+// data loss. Three independent signals, any one of which rejects:
+//
+//   - objectClass contains "glue"
+//   - structuralObjectClass is "glue"
+//   - the suffix's RDN attribute (e.g. "dc" for "dc=example,dc=org") is absent
+//     from the entry body — glue permits no attributes, and slapadd requires the
+//     RDN attribute regardless of class
+func validateSuffixEntry(r io.Reader, suffix string) error {
 	want := "dn: " + suffix
-	sc := bufio.NewScanner(gz)
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	const maxLines = 1000 // the suffix entry is slapcat's first entry
-	for lines := 0; sc.Scan() && lines < maxLines; lines++ {
+
+	// Phase 1: find the suffix entry's DN line.
+	found := false
+	lines := 0
+	for ; sc.Scan() && lines < maxLines; lines++ {
 		if strings.EqualFold(strings.TrimSpace(sc.Text()), want) {
-			return nil
+			found = true
+			break
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return fmt.Errorf("read backup s3://%s/%s: %w", cfg.Bucket, key, err)
+	if !found {
+		if err := sc.Err(); err != nil {
+			return fmt.Errorf("read backup stream: %w", err)
+		}
+		return fmt.Errorf("does not contain suffix entry %q (wrong or corrupt backup)", suffix)
 	}
-	return fmt.Errorf("backup s3://%s/%s does not contain suffix entry %q (wrong or corrupt backup)", cfg.Bucket, key, suffix)
+
+	// Phase 2: read the suffix entry's body (up to the blank line that ends the
+	// entry), unfolding LDIF continuation lines (leading space), and judge it.
+	var logical []string
+	for sc.Scan() && lines < maxLines {
+		lines++
+		raw := sc.Text()
+		if strings.TrimSpace(raw) == "" {
+			break // end of entry
+		}
+		if strings.HasPrefix(raw, " ") && len(logical) > 0 {
+			logical[len(logical)-1] += raw[1:]
+			continue
+		}
+		logical = append(logical, raw)
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("read backup stream: %w", err)
+	}
+
+	rdnAttr := suffixRDNAttr(suffix)
+	rdnPresent := false
+	for _, line := range logical {
+		if v, ok := ldifValue(line, "objectClass"); ok && strings.EqualFold(strings.TrimSpace(v), "glue") {
+			return fmt.Errorf("suffix entry %q is a glue entry (objectClass: glue) — "+
+				"the backup source pod held a hidden glue suffix (multi-site seed race, ADR-025); "+
+				"slapadd would reject this artifact. Take the backup from a pod whose suffix entry is real", suffix)
+		}
+		if v, ok := ldifValue(line, "structuralObjectClass"); ok && strings.EqualFold(strings.TrimSpace(v), "glue") {
+			return fmt.Errorf("suffix entry %q has structuralObjectClass glue — "+
+				"the backup source pod held a hidden glue suffix (multi-site seed race, ADR-025); "+
+				"slapadd would reject this artifact. Take the backup from a pod whose suffix entry is real", suffix)
+		}
+		if rdnAttr != "" {
+			if _, ok := ldifValue(line, rdnAttr); ok {
+				rdnPresent = true
+			}
+		}
+	}
+	if rdnAttr != "" && !rdnPresent {
+		return fmt.Errorf("suffix entry %q lacks its RDN attribute %q — "+
+			"slapadd rejects an entry whose RDN attribute is absent (\"attribute '%s' not allowed\" "+
+			"for a glue entry, ADR-025); the artifact is not restorable", suffix, rdnAttr, rdnAttr)
+	}
+	return nil
+}
+
+// suffixRDNAttr returns the attribute type of a suffix's first RDN — "dc" for
+// "dc=example,dc=org", "o" for "o=example". Empty when the suffix does not
+// parse (no "="), in which case the RDN-presence check is skipped rather than
+// guessed: absence of evidence must not fail a valid artifact.
+func suffixRDNAttr(suffix string) string {
+	rdn := suffix
+	if i := strings.IndexByte(rdn, ','); i >= 0 {
+		rdn = rdn[:i]
+	}
+	// A multi-valued RDN (a+b=…) is exotic for a suffix; check the first type.
+	if i := strings.IndexByte(rdn, '+'); i >= 0 {
+		rdn = rdn[:i]
+	}
+	eq := strings.IndexByte(rdn, '=')
+	if eq <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(rdn[:eq])
 }
 
 // ldifValue extracts attr's value from an LDIF line, handling base64 (`attr:: …`)

@@ -84,9 +84,12 @@ type podState struct {
 	// per-database accesslog checks need the whole set (ADR-019); syncRepl and
 	// multiProvider above stay as they are, the first data DB's values, because
 	// the per-pod display is written against them.
-	dbs         []observedDB
-	configError string
-	err         string
+	dbs []observedDB
+	// suffixEntries is each data suffix's base entry as this pod shows it —
+	// ordinary visibility, glue verdict (ManageDSAIT), entryUUID (ADR-025).
+	suffixEntries []suffixObservation
+	configError   string
+	err           string
 }
 
 func (ps podState) toJSON() podJSON {
@@ -394,6 +397,19 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 		}
 	}
 
+	// Suffix-entry health (ADR-025): for every data suffix, probe the base
+	// entry — ordinary search first (a real entry is visible, a glue is not),
+	// then ManageDSAIT (RFC 3296) when hidden, which reveals glue entries
+	// (slapd hides them at the frontend, not via ACLs). Anonymous, like the
+	// contextCSN probe above; per-pod DISAGREEMENT is the check's signal, so
+	// an ACL that hides the entry uniformly only downgrades the check to warn.
+	for _, nc := range ps.namingContexts {
+		if strings.HasPrefix(strings.ToLower(nc), "cn=") {
+			continue // accesslog / internal DBs journal, they have no seed identity
+		}
+		ps.suffixEntries = append(ps.suffixEntries, probeSuffixEntry(conn, nc))
+	}
+
 	// cn=config (config admin bind)
 	if configPW == "" {
 		if sc.Spec.Replication.Enabled {
@@ -534,6 +550,15 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 	checks = append(checks,
 		checkNamingContexts(dbs, allStates),
 		checkAccesslogConsistency(dbs, allStates, externalPeerNeedles(sc)),
+	)
+
+	// ── Suffix-entry health: glue detection + entryUUID agreement (ADR-025) ──
+	// RW and RO pods alike: a consumer that initial-synced from a glued
+	// provider replicates the glue (measured live 2026-09-13).
+	suffixPods := append(append([]podState{}, rwPods...), roPods...)
+	checks = append(checks,
+		checkSuffixVisibility(dbs, suffixPods),
+		checkSuffixUUIDAgreement(dbs, suffixPods),
 	)
 
 	// ── contextCSN convergence ──

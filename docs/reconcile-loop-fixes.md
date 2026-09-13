@@ -5,6 +5,68 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-09-13: multi-site seed race leaves one pod a permanent hidden GLUE suffix — and every backup from it unrestorable
+
+**Symptom (two, apparently unrelated):** every restore Job in a multi-site e2e
+run failed with `slapadd: dn="<suffix>" (line=1): (65) attribute 'dc' not
+allowed` (clusters held at 0 replicas by the ADR-014 failure posture), and one
+base-structure spec failed because a base search of the suffix returned
+nothing. Meanwhile: phase `Running`, all peers `Synced`, `DataPresent=True`,
+backups `Completed`.
+
+**Root cause:** every site's `SlapdDatabase` carried the same `spec.seed`, so
+each site independently created the same DNs with fresh `entryUUID`s —
+ADR-012's multi-pod seed race one level up (a per-site latch answering a
+per-mesh question). syncrepl resolves same-DN/different-UUID conflicts in ways
+that can demote one pod's suffix entry to a **glue** (`syncrepl.c:5112-5151`
+non-leaf non-present delete; `:5195-5333` bare glue ancestors — the captured
+artifact matches the second: objectClass top+glue only, no `dc`, fresh local
+UUID). Permanent because the glue's entryCSN equals the winner's (measured):
+delta-syncrepl never re-ships a CSN the cookie already covers and
+`dn_callback` no-ops on an identical CSN (`:6127`) — CSN-based health is
+structurally blind to it. slapd hides glue from ordinary searches (frontend,
+not ACL; only ManageDSAIT reveals it) → the pod is silently broken;
+`slapcat` dumps it faithfully → the DN-line-only restore preflight passed the
+poisoned artifact and the failure surfaced only after scale-to-0. The site's
+RO pod carried the same glue+UUID — a consumer initial-syncing from a glued
+provider replicates the glue.
+
+**Fix (ADR-025):** founder-only seeding (docs + `tests/e2e.sh` strips
+`spec.seed` for every context after the first); an operator withhold belt
+(seed withheld wholesale when pod-0's suffix entry carries a foreign-sid
+entryCSN — withhold-on-presence, the OPPOSITE of the reverted
+`verifySeedExists`'s re-create-on-absence; ADR-012 amendment); restore
+preflight rejects a glue/RDN-less suffix entry before anything scales down
+(ADR-014 amendment); backups record `SourceSuffixHealthy`; `DataPresent`
+requires the root entry on EVERY reached RW pod (`DataMissingOnPods` names the
+hidden ones); `slctl inspect` gains `suffix-visibility` +
+`suffix-uuid-agreement`. No auto-heal — manual runbook in ADR-025.
+
+**Why it was hard to spot:** the glue is invisible to every ordinary search,
+carried the winner's CSN (so every CSN signal read healthy), `DataPresent`
+accepted any one visible pod, the artifact's DN line looked right, and the
+same code had gone fully green on a fresh bring-up hours earlier — the race is
+nondeterministic at seed time. `slctl inspect`'s only red was
+`csn-convergence: … report no contextCSN at all (never synced?)` — a
+misleading message (the pod had synced; its suffix entry was hidden, taking
+`contextCSN` with it).
+
+**Red-first record:** unit reds on `validateSuffixEntry` (glue-class LDIFs vs
+the DN-line-only check), `seedCreatorIsForeign` (vs a never-withhold stub),
+`aggregateDataPresent` (mixed visible/hidden vs any-pod semantics),
+`sourceSuffixHealthyCondition`, and the two `slctl` checks (vs always-pass
+stubs); live e2e red for the per-pod base-DN spec against the preserved broken
+cluster; the preflight-reject e2e is red by construction against pre-fix code
+(that exact failure was observed live) but was not executed pre-fix.
+
+**Lesson:** a one-shot guard is only as wide as the invariant it protects —
+"one seed writer per cluster" does not give "one creator per mesh". And an
+entry that exists is not an entry that is *there*: a DN line in an artifact, a
+root entry visible on some pod, a converged CSN — each was a plausible lie.
+When slapd hides something from you, ask again with ManageDSAIT.
+
+---
+
 ## 2026-09-13: stanza `timeout=300` turns every cn=config write into a ~300 s server-wide freeze
 
 **Symptom:** `./tests/e2e.sh setup` against a three-site mesh times out

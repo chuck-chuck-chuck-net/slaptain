@@ -775,6 +775,25 @@ wait_for_clusters_ready() {
     done
 }
 
+# strip_seed_block removes the 2-space-indented `seed:` mapping (and everything
+# nested under it) from a SlapdDatabase manifest on stdin. Founder-only seeding
+# (ADR-025): in a multi-site mesh exactly ONE site may carry spec.seed — every
+# site seeding the same suffix independently creates same-DN entries with fresh
+# entryUUIDs, and slapd's conflict resolution can demote a loser pod's suffix
+# entry to a permanent hidden glue. Peer sites receive the DIT via replication.
+strip_seed_block() {
+    awk '
+        {
+            if (skip) {
+                if ($0 ~ /^[^ ]/ || $0 ~ /^  [^ ]/) skip = 0
+                else next
+            }
+            if ($0 ~ /^  seed:[ \t]*$/) { skip = 1; next }
+            print
+        }
+    '
+}
+
 apply_test_resources() {
     # Apply SlapdDatabase + SlapdSchema BEFORE the SlapdCluster helm install
     # (see do_setup ordering). That way the SlapdCluster controller's first
@@ -785,10 +804,26 @@ apply_test_resources() {
     # nothing at setup time; adding one to a *running* cluster is the rolling
     # restart ADR-013 accepts. Documented in
     # docs/BUG-ANALYSIS-database-dirs-rolling-restart.md (option A).
+    #
+    # Founder-only seeding (ADR-025): only the FIRST context applies the
+    # fixtures verbatim (seed included); every other site gets spec.seed
+    # stripped and receives the DIT via cross-site replication instead. The
+    # operator additionally withholds a seed whose suffix already has a foreign
+    # creator, but the fixture must not rely on winning that race.
     local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
+    local founder=1
     for ctx in "${CONTEXTS[@]}"; do
-        log "[$ctx] Applying test resources from $resource_dir..."
-        kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$resource_dir/"
+        if [[ $founder == 1 ]]; then
+            log "[$ctx] Applying test resources from $resource_dir (founder site — seed included)..."
+            kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$resource_dir/"
+            founder=0
+        else
+            log "[$ctx] Applying test resources from $resource_dir (peer site — seed stripped, ADR-025)..."
+            local f
+            for f in "$resource_dir"/*.yaml; do
+                strip_seed_block < "$f" | kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f -
+            done
+        fi
     done
 }
 

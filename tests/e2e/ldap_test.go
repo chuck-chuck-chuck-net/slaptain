@@ -1,12 +1,14 @@
 package e2e_test
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Fixed test credentials — plain text is fine for e2e.
@@ -25,6 +27,53 @@ var _ = Describe("LDAP directory", func() {
 			for _, ou := range []string{"People", "Mail", readpwOU} {
 				dn := fmt.Sprintf("ou=%s,%s", ou, baseDN)
 				Expect(ldapExists(ldapConn, dn)).To(BeTrue(), "OU %s is missing", dn)
+			}
+		})
+
+		// ADR-025: a multi-site seed race can demote ONE pod's suffix entry to a
+		// hidden GLUE entry — an ordinary base search returns nothing on exactly
+		// that pod while every peer looks healthy, the pod is silently broken for
+		// clients, and any backup taken from it is unrestorable. The
+		// Service-routed "has the base DN" spec above only catches this when the
+		// Service happens to route there; this spec asks every pod directly.
+		It("shows the base DN on every pod (hidden glue suffix — ADR-025)", func(ctx SpecContext) {
+			if podNodePortAddr("slapd-0", "E2E_POD_NODEPORT_BASE") == "" {
+				Skip("per-pod NodePorts not configured (E2E_NODE_IP/E2E_POD_NODEPORT_BASE)")
+			}
+
+			pods := map[string]func(ns, pod, port string) (*ldap.Conn, context.CancelFunc){}
+			sts, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, "slapd", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			replicas := int32(1)
+			if sts.Spec.Replicas != nil {
+				replicas = *sts.Spec.Replicas
+			}
+			for i := int32(0); i < replicas; i++ {
+				pods[fmt.Sprintf("slapd-%d", i)] = dialPodLDAP
+			}
+			// RO pods too: a consumer that initial-syncs from a glued provider
+			// replicates the glue (measured live 2026-09-13).
+			if roSts, err := k8sClient.AppsV1().StatefulSets(namespace).
+				Get(ctx, "slapd-readonly", metav1.GetOptions{}); err == nil &&
+				podNodePortAddr("slapd-readonly-0", "E2E_RO_POD_NODEPORT_BASE") != "" {
+				ro := int32(0)
+				if roSts.Spec.Replicas != nil {
+					ro = *roSts.Spec.Replicas
+				}
+				for i := int32(0); i < ro; i++ {
+					pods[fmt.Sprintf("slapd-readonly-%d", i)] = dialReadOnlyPodLDAP
+				}
+			}
+
+			for pod, dial := range pods {
+				conn, done := dial(namespace, pod, "")
+				visible := ldapExists(conn, baseDN)
+				conn.Close()
+				done()
+				Expect(visible).To(BeTrue(),
+					"base DN %s is not visible to an ordinary base search on %s — "+
+						"likely a hidden glue suffix entry (verify with ldapsearch -M; ADR-025)",
+					baseDN, pod)
 			}
 		})
 	})
