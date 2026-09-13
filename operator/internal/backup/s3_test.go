@@ -19,6 +19,7 @@ package backup
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,6 +93,110 @@ func TestMetaValue(t *testing.T) {
 	}
 	if got := metaValue(nil, "x"); got != "" {
 		t.Errorf("metaValue(nil) = %q, want empty", got)
+	}
+}
+
+// TestValidateSuffixEntry pins the restore preflight's destroy-last artifact
+// validation (ADR-014, extended by ADR-025): the suffix entry must not only be
+// present but RESTORABLE. A glue suffix entry (objectClass top+glue, no RDN
+// attribute — the multi-site seed-race artifact, ADR-025) passes a DN-line-only
+// check and then fails slapadd with "(65) attribute 'dc' not allowed" AFTER the
+// cluster has been scaled to 0. Preflight must reject it while the cluster is
+// still up.
+func TestValidateSuffixEntry(t *testing.T) {
+	const suffix = "dc=example,dc=org"
+
+	// Positive control: a canonical slapcat dump of a healthy suffix entry must
+	// keep passing — a validator that rejects everything would pass the glue
+	// cases vacuously.
+	healthy := "dn: dc=example,dc=org\n" +
+		"objectClass: top\n" +
+		"objectClass: dcObject\n" +
+		"objectClass: organization\n" +
+		"o: example\n" +
+		"dc: example\n" +
+		"structuralObjectClass: organization\n" +
+		"entryUUID: 1b03268c-43f0-1041-8ac7-1f7f613c2a19\n" +
+		"entryCSN: 20260913185308.559566Z#000000#065#000000\n" +
+		"\n" +
+		"dn: ou=People,dc=example,dc=org\n" +
+		"objectClass: organizationalUnit\n" +
+		"ou: People\n"
+
+	// The live-captured shape (verified on a lab pod 2026-09-13): a glue suffix
+	// entry as slapcat dumps it — top+glue, structuralObjectClass glue, no dc.
+	glue := "dn: dc=example,dc=org\n" +
+		"objectClass: top\n" +
+		"objectClass: glue\n" +
+		"structuralObjectClass: glue\n" +
+		"entryUUID: 1a914f3a-43f0-1041-9ed3-896165d17446\n" +
+		"entryCSN: 20260913185308.559566Z#000000#065#000000\n" +
+		"createTimestamp: 20260913185307Z\n" +
+		"\n" +
+		"dn: ou=People,dc=example,dc=org\n" +
+		"objectClass: organizationalUnit\n" +
+		"ou: People\n"
+
+	// Defensive variant: plausible objectClasses but the RDN attribute (dc) is
+	// absent from the entry body — slapadd rejects this too (the RDN attribute
+	// must be present per schema), so preflight must as well.
+	noRDNAttr := "dn: dc=example,dc=org\n" +
+		"objectClass: top\n" +
+		"objectClass: organization\n" +
+		"o: example\n" +
+		"structuralObjectClass: organization\n" +
+		"\n"
+
+	// structuralObjectClass says glue even though objectClass looks sane —
+	// still not loadable as the real entry.
+	structuralGlue := "dn: dc=example,dc=org\n" +
+		"objectClass: top\n" +
+		"objectClass: dcObject\n" +
+		"objectClass: organization\n" +
+		"o: example\n" +
+		"dc: example\n" +
+		"structuralObjectClass: glue\n" +
+		"\n"
+
+	// slapcat folds long lines with a leading-space continuation; the glue
+	// verdict must survive folding of the objectClass line.
+	foldedGlue := "dn: dc=example,dc=org\n" +
+		"objectClass: top\n" +
+		"objectClass: gl\n" +
+		" ue\n" +
+		"structuralObjectClass: glue\n" +
+		"\n"
+
+	tests := []struct {
+		name    string
+		ldif    string
+		wantErr string // "" = must pass; otherwise substring of the error
+	}{
+		{"healthy suffix entry passes", healthy, ""},
+		{"glue suffix entry rejected", glue, "glue"},
+		{"missing RDN attribute rejected", noRDNAttr, "dc"},
+		{"structuralObjectClass glue rejected", structuralGlue, "glue"},
+		{"folded glue objectClass rejected", foldedGlue, "glue"},
+		{"suffix entry absent rejected", "dn: dc=other,dc=org\nobjectClass: top\n\n", "does not contain suffix entry"},
+		{"empty stream rejected", "", "does not contain suffix entry"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSuffixEntry(strings.NewReader(tc.ldif), suffix)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("validateSuffixEntry(healthy) = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("validateSuffixEntry(%s) = nil, want error containing %q", tc.name, tc.wantErr)
+				return
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("validateSuffixEntry(%s) = %v, want error containing %q", tc.name, err, tc.wantErr)
+			}
+		})
 	}
 }
 
