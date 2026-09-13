@@ -375,14 +375,17 @@ func TestAccesslogACL(t *testing.T) {
 	}
 }
 
-// A syncrepl stanza that carries no timeouts notices a half-open provider only
-// when TCP gives up, which on Linux defaults to a quarter of an hour of a
-// consumer silently not consuming (production-config review, finding 11).
+// A syncrepl stanza that carries no network-timeout and no keepalive notices a
+// half-open provider only when TCP gives up, which on Linux defaults to a
+// quarter of an hour of a consumer silently not consuming (production-config
+// review, finding 11).
 //
 // The keepalive triple is asserted at its source — desiredKeepalive, in
 // scale_tunables_test.go — because the builder takes it as a parameter; what is
 // asserted here is that every stanza the builder emits, of every kind, carries
-// the timeouts and passes a keepalive through.
+// the network-timeout and passes a keepalive through — and that neither
+// `timeout=` nor `timelimit=` ever appears (see the negative assertions below
+// for why each is forbidden).
 func TestBuildDatabaseSyncRepl_StanzaTimeouts(t *testing.T) {
 	const (
 		clusterName   = "slapd"
@@ -431,12 +434,28 @@ func TestBuildDatabaseSyncRepl_StanzaTimeouts(t *testing.T) {
 		for _, s := range stanzas {
 			for _, want := range []string{
 				"network-timeout=10",
-				"timeout=300",
 				"keepalive=" + defaultKeepalive,
 			} {
 				if !strings.Contains(s, want) {
 					t.Errorf("%s stanza missing %q:\n  %s", what, want, s)
 				}
+			}
+			// timeout= (LDAP_OPT_TIMEOUT) must NEVER appear. In the refresh
+			// phase do_syncrep2 uses it as a BLOCKING ldap_result wait on a
+			// threadpool thread (syncrepl.c:1362, OpenLDAP 2.7.1), and slapd's
+			// task can only honour a cn=config pause between messages
+			// (syncrepl.c:2128) — so every external config MOD, which pauses
+			// the whole pool (bconfig.c:6512), froze the entire server for up
+			// to the timeout while any consumer was refreshing. Measured live:
+			// three ~300s total-silence freezes per convergence pass. Expiry
+			// detects nothing (rc 0 → SYNC_TIMEOUT → "listen for more"), so
+			// the wait bought no protection either. Unset means sb_timeout_api
+			// = 0 → non-blocking poll, the pre-regression behaviour.
+			// The leading space keeps this from matching network-timeout=.
+			if strings.Contains(s, " timeout=") {
+				t.Errorf("%s stanza carries timeout=, which turns every "+
+					"cn=config write into a server-wide freeze while a "+
+					"consumer is in refresh phase:\n  %s", what, s)
 			}
 			// timelimit= maps to LDAP_OPT_TIMELIMIT, a server-side search time
 			// limit that would abort a refreshAndPersist connection. It must

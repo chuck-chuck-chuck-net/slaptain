@@ -29,7 +29,7 @@ behaviour of an existing cluster, in every case towards "works at scale":
 | `olcDbCheckpoint` | unset | `1024 5` data, `2048 15` accesslog | Turning `noSync` on becomes a one-field change that is already safe |
 | `olcDbRtxnSize` | 10000 | 10000, written explicitly | Same value; visible in `cn=config` and pinned against a base-image bump |
 | `olcSpSessionlog` | unset (off) | 5000 operations, data DB only | A reconnect inside the window is answered from memory instead of a walk of the whole database ([ADR-022](adrs/adr-022-syncprov-sessionlog.md)) |
-| syncrepl stanza | no keepalive, no timeouts | `keepalive=240:3:30`, `network-timeout=10 timeout=300` | An idle `refreshAndPersist` connection dropped by a stateful firewall used to look healthy indefinitely |
+| syncrepl stanza | no keepalive, no timeouts | `keepalive=240:3:30`, `network-timeout=10` | An idle `refreshAndPersist` connection dropped by a stateful firewall used to look healthy indefinitely |
 | `olcLogLevel` | 256 (stats) | 16640 (stats + consumer-side sync) | A replication incident is diagnosed from what slapd logged while it was going wrong |
 | `olcTLSProtocolMin` | unset | `3.3` (TLS 1.2 floor) | Unset means "whatever this image's OpenSSL permits", a policy that moves on a base-image bump |
 | `olcPasswordHash` | `{SSHA}` compiled in | `{SSHA}`, written | Same value, stated and converged rather than inherited from the build |
@@ -256,12 +256,24 @@ the message.
 
 What landed is on the syncrepl side: every stanza carries `network-timeout=10` (bounds
 the TCP connect and TLS handshake, so a provider whose node is gone is noticed in ten
-seconds rather than at the kernel's TCP timeout), `timeout=300` (bounds the bind and
-the refresh phase only — verified in the 2.7.1 source, because a wrong reading would
-abort every persistent connection), `retry=10 +` and `keepalive=240:3:30`. The
-keepalive idle time sits deliberately under the five-minute mark where stateful
-firewalls and cloud load balancers commonly drop an idle flow, because a
-`refreshAndPersist` connection is idle by design between writes.
+seconds rather than at the kernel's TCP timeout), `retry=10 +` and
+`keepalive=240:3:30`. The keepalive idle time sits deliberately under the five-minute
+mark where stateful firewalls and cloud load balancers commonly drop an idle flow,
+because a `refreshAndPersist` connection is idle by design between writes.
+
+What is deliberately **not** in the stanzas is `timeout=`. It shipped briefly as
+`timeout=300` and was withdrawn the same day on live evidence: supplying it flips
+slapd's refresh-phase waiting discipline from a non-blocking peek to a blocking wait
+on a threadpool thread, and a `cn=config` write pauses the whole pool — so while any
+consumer was in refresh phase, every config write the operator made froze the entire
+server for up to 300 seconds (three such total-silence freezes measured per
+convergence pass, cascading across a three-site mesh). The expiry detects nothing —
+slapd just goes back to listening — so the wait bought no protection at any value.
+Failure detection belongs to the socket-level mechanisms above, which act without
+occupying a worker thread. See the 2026-09-13 entry in
+[`docs/reconcile-loop-fixes.md`](reconcile-loop-fixes.md) and the ADR-024 amendment
+of the same date. `timelimit=` is likewise never emitted — that one is a server-side
+search time limit and would abort the persistent search itself.
 
 What did not land is the client-facing side: slapd will hold a dead client connection
 forever, and there is no field for it yet. If your clients sit behind a NAT or a

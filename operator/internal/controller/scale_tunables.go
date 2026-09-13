@@ -73,17 +73,32 @@ const (
 	// bounds the TCP connect and TLS handshake, so a provider whose node is gone
 	// is noticed in 10 seconds instead of at the kernel's TCP timeout.
 	//
-	// `timeout` (sb_timeout_api → LDAP_OPT_TIMEOUT) bounds the bind and the
-	// REFRESH phase only. Verified in the 2.7.1 source rather than assumed,
-	// because a wrong reading here would abort every persistent connection:
-	// do_syncrep2 sets `tout.tv_sec = 0` once si_refreshDone is set on a
-	// refreshAndPersist stanza, and uses sb_timeout_api only before that. 300s
-	// is a "the provider is dead" bound, generous enough that a genuinely slow
-	// full refresh of a large database is not mistaken for one.
+	// DELIBERATELY NOT emitted, both proven harmful on a running pod:
 	//
-	// NOT emitted: `timelimit`, which maps to LDAP_OPT_TIMELIMIT — a
-	// server-side search time limit that WOULD kill a persistent search.
-	syncreplTimeoutOpts = " network-timeout=10 timeout=300"
+	// `timeout` (sb_timeout_api → LDAP_OPT_TIMEOUT). Supplying it flips slapd's
+	// refresh-phase waiting discipline from a non-blocking peek to a BLOCKING
+	// wait: do_syncrep2 polls with tout={0,0} only in the persist phase, and in
+	// the refresh phase blocks a threadpool thread inside ldap_result for up to
+	// the timeout (servers/slapd/syncrepl.c:1357-1362, OpenLDAP 2.7.1). The
+	// task can only honour a cn=config pause between messages (syncrepl.c:2128),
+	// and every external config MOD pauses the whole pool with listeners
+	// suspended (bconfig.c:6512) — so while any consumer is in refresh phase,
+	// every cn=config write the operator makes freezes the ENTIRE server for
+	// the remainder of that blocking wait. Measured live at timeout=300: three
+	// ~300s total-silence freezes per convergence pass, cascading across pods
+	// and sites. And the wait detects nothing: expiry maps to SYNC_TIMEOUT
+	// ("nothing to read, listen for more", syncrepl.c:2352), never an abort or
+	// retry. Dead-provider detection is the job of the socket-level mechanisms
+	// (network-timeout for connect/handshake, keepalive for established flows),
+	// which act without occupying a pool thread. Accepted residual: the
+	// synchronous syncrepl bind (config.c ldap_sasl_bind_s) is unbounded
+	// against a provider that completes the TLS handshake and then hangs —
+	// the pre-regression status quo; every observed hang state stalls the
+	// handshake itself, which network-timeout bounds.
+	//
+	// `timelimit`, which maps to LDAP_OPT_TIMELIMIT — a server-side search
+	// time limit that WOULD kill a persistent search.
+	syncreplTimeoutOpts = " network-timeout=10"
 )
 
 // ── Durability: noSync + checkpoint (findings 6 and 7) ──────────────────────

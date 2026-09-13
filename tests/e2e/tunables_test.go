@@ -169,9 +169,19 @@ var _ = Describe("scale and operations tunables", Label("tunables"), Ordered, Co
 						"writes; without keepalive a silently dropped flow leaves a "+
 						"consumer that has stopped consuming and still reports Synced:\n%s",
 					pod, s)
+				// timeout= (LDAP_OPT_TIMEOUT) must never appear: in the refresh
+				// phase it is a BLOCKING ldap_result wait on a threadpool
+				// thread, and a cn=config write pauses the whole pool — so any
+				// refresh-phase consumer froze the entire server for up to the
+				// timeout on every config MOD (measured: three ~300s
+				// total-silence freezes per operator convergence pass). The
+				// leading space keeps this from matching network-timeout=.
+				Expect(s).NotTo(ContainSubstring(" timeout="),
+					"pod %s: timeout= turns every cn=config write into a "+
+						"server-wide freeze while a consumer is in refresh phase:\n%s",
+					pod, s)
 				// timelimit= is a server-side search time limit and WOULD abort
-				// the persistent search. timeout= (LDAP_OPT_TIMEOUT) is the safe
-				// one and is what we emit.
+				// the persistent search.
 				Expect(s).NotTo(ContainSubstring("timelimit="),
 					"pod %s: timelimit= would kill the persistent search:\n%s", pod, s)
 			}
