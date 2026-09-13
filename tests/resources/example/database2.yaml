@@ -36,7 +36,10 @@ spec:
     ridBase: 200
     deltaSync: true
     syncprovCheckpoint: "500 15"
-    accesslogPurge: "2+00:00 1+00:00"
+    # accesslogPurge deliberately left unset: this database is the fixture's
+    # coverage of the operator's default purge window ("7+00:00 1+00:00").
+    # database.yaml pins an explicit value, so between the two the e2e exercises
+    # both the defaulted and the verbatim path.
 
   indices:
     - "objectClass eq"

@@ -117,9 +117,20 @@ type DatabaseReplicationConfig struct {
 	// +kubebuilder:default=true
 	// +optional
 	DeltaSync *bool `json:"deltaSync,omitempty"`
-	// syncprovCheckpoint sets the syncprov overlay checkpoint interval.
-	// Format: "<ops> <minutes>", e.g. "500 15" means checkpoint every 500 operations
-	// or 15 minutes. Empty means no explicit checkpoint (OpenLDAP default).
+	// syncprovCheckpoint sets the syncprov overlay checkpoint interval on this
+	// database's *data* DB (olcSpCheckpoint).
+	// Format: "<ops> <minutes>", e.g. "500 15" means checkpoint the contextCSN
+	// every 500 operations or 15 minutes.
+	//
+	// Empty (or the explicit sentinel "none") means no olcSpCheckpoint at all —
+	// OpenLDAP's own default behaviour. Unlike accesslogPurge this carries no
+	// operator default: an unwritten checkpoint is a performance trade, not a
+	// correctness cliff.
+	//
+	// Converged on every reconcile: a later edit is applied to pods whose
+	// syncprov overlay already exists, and clearing the field removes the
+	// attribute. (It used to be written only when the overlay was first
+	// created, so edits were silently ignored — ADR-024 R4.)
 	// +optional
 	SyncprovCheckpoint string `json:"syncprovCheckpoint,omitempty"`
 	// syncprovSessionlog sizes the syncprov overlay's in-memory session log on
@@ -145,9 +156,33 @@ type DatabaseReplicationConfig struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	SyncprovSessionlog *int32 `json:"syncprovSessionlog,omitempty"`
-	// accesslogPurge sets the accesslog purge interval (only used when deltaSync=true).
-	// Format: "<maxage> <interval>", e.g. "2+00:00 1+00:00" means purge entries older
-	// than 2 days, checking every day. Empty means no purge (accesslog grows unbounded).
+	// accesslogPurge sets the purge policy on this database's accesslog change
+	// journal (olcAccessLogPurge; only used when deltaSync=true).
+	// Format: "<maxage> <interval>", e.g. "2+00:00 1+00:00" means purge entries
+	// older than 2 days, sweeping once a day.
+	//
+	// Three states:
+	//   - unset ("") — the operator applies its default of "7+00:00 1+00:00":
+	//     keep 7 days, sweep daily. This is the normal case.
+	//   - "none" — no purging at all. The journal grows unbounded; you are
+	//     taking responsibility for it.
+	//   - any other value — used verbatim.
+	//
+	// Why there is a default at all: an unpurged journal grows until it reaches
+	// its 8Gi map ceiling, and because the accesslog overlay sits in the DATA
+	// database's write path, the moment the journal cannot take a write neither
+	// can the data. That is a slow-motion outage, not a tuning wart, so "no
+	// opinion" is not an acceptable default.
+	//
+	// Why 7 days: the window is how long a consumer may stay away and still
+	// resume from a delta instead of a full refresh, so it must cover a
+	// weekend-plus outage. On 2.7-default images the interaction between purging
+	// and a dormant consumer (upstream ITS#9580) is mitigated by the cookie-flush
+	// fix; clusters still on the -ol26 image pair carry elevated exposure and
+	// should treat a long consumer outage as needing a checked resync.
+	//
+	// Converged on every reconcile: a later edit is applied to pods whose
+	// accesslog overlay already exists, and "none" removes the attribute.
 	// +optional
 	AccesslogPurge string `json:"accesslogPurge,omitempty"`
 	// externalAccesslogSuffix overrides the accesslog suffix used as `logbase`

@@ -1004,8 +1004,8 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 		addReq := ldap.NewAddRequest(syncprovDN, nil)
 		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
 		addReq.Attribute("olcOverlay", []string{"syncprov"})
-		if sd.Spec.Replication.SyncprovCheckpoint != "" {
-			addReq.Attribute("olcSpCheckpoint", []string{sd.Spec.Replication.SyncprovCheckpoint})
+		if checkpoint := desiredSyncprovCheckpoint(sd); checkpoint != "" {
+			addReq.Attribute("olcSpCheckpoint", []string{checkpoint})
 		}
 		if sessionlog {
 			addReq.Attribute("olcSpSessionlog", []string{strconv.Itoa(int(ops))})
@@ -1017,7 +1017,52 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 		}
 	}
 
-	return r.ensureSyncprovSessionlog(ctx, conn, host, dataDN, ops, sessionlog)
+	return r.ensureSyncprovTunables(ctx, conn, host, dataDN, ops, sessionlog,
+		desiredSyncprovCheckpoint(sd))
+}
+
+// ensureSyncprovTunables converges the two tunables the operator owns on the
+// data DB's syncprov overlay: the in-memory sessionlog (ADR-022) and the
+// checkpoint interval (ADR-024 R4). One search, up to two writes.
+//
+// The checkpoint used to be written only into the overlay-creation addReq,
+// which meant a later spec edit was silently ignored on every pod whose overlay
+// already existed — the write-once anti-pattern ADR-024 R4 forbids. Both
+// attributes now follow the same observe/compare/write rule, on a live-modify
+// path verified not to crash or hang slapd.
+//
+// The overlay's real DN carries a {N} ordering prefix assigned by slapd, so it
+// is read back rather than reconstructed. No overlay means nothing to converge —
+// the caller's add either has not happened yet or was removed concurrently, and
+// the next reconcile handles it (ADR-001).
+func (r *SlapdDatabaseReconciler) ensureSyncprovTunables(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	ops int32,
+	sessionlogEnabled bool,
+	checkpoint string,
+) error {
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcSyncProvConfig)",
+		[]string{"olcSpSessionlog", "olcSpCheckpoint"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search syncprov overlay under %s: %w", dataDN, err)
+	}
+	if len(sr.Entries) == 0 {
+		return nil
+	}
+	overlayDN := sr.Entries[0].DN
+
+	if err := r.ensureSyncprovSessionlog(ctx, conn, host, overlayDN,
+		sr.Entries[0].GetEqualFoldAttributeValues("olcSpSessionlog"), ops, sessionlogEnabled); err != nil {
+		return err
+	}
+
+	return ensureOverlayAttr(ctx, conn, host, overlayDN, "olcSpCheckpoint",
+		sr.Entries[0].GetEqualFoldAttributeValues("olcSpCheckpoint"), checkpoint)
 }
 
 // defaultSyncprovSessionlogOps is the sessionlog size the operator applies when
@@ -1079,32 +1124,17 @@ func planSessionlog(current []string, ops int32, enabled bool) (sessionlogAction
 // overlay to what planSessionlog wants. Same shape as ensureAccesslogACL:
 // observe, compare, write only on a difference.
 //
-// The overlay's real DN carries a {N} ordering prefix assigned by slapd, so it
-// is read back rather than reconstructed. No overlay means nothing to converge —
-// the caller's add either has not happened yet or was removed concurrently, and
-// the next reconcile handles it (ADR-001).
+// The overlay DN and its current values are read by the caller
+// (ensureSyncprovTunables), which converges the checkpoint off the same search.
 func (r *SlapdDatabaseReconciler) ensureSyncprovSessionlog(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host, dataDN string,
+	host, overlayDN string,
+	current []string,
 	ops int32,
 	enabled bool,
 ) error {
 	log := logf.FromContext(ctx)
-
-	sr, err := conn.Search(ldap.NewSearchRequest(
-		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		0, 0, false, "(objectClass=olcSyncProvConfig)",
-		[]string{"olcSpSessionlog"}, nil,
-	))
-	if err != nil {
-		return fmt.Errorf("search syncprov overlay under %s: %w", dataDN, err)
-	}
-	if len(sr.Entries) == 0 {
-		return nil
-	}
-	overlayDN := sr.Entries[0].DN
-	current := sr.Entries[0].GetEqualFoldAttributeValues("olcSpSessionlog")
 
 	action, value := planSessionlog(current, ops, enabled)
 	if action == sessionlogNoop {
@@ -1154,34 +1184,68 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 	if err != nil {
 		return err
 	}
-	if hasAccesslog {
-		// An existing overlay's olcAccessLogDB is not modified here, and it
-		// cannot be: converging a legacy cluster-shared cn=accesslog is a
-		// teardown, not a rename, because olcSuffix and olcDbDirectory are not
-		// runtime-mutable (ADR-019 R8). migrateLegacyAccesslog runs immediately
-		// before this call and deletes an overlay that names the shared log, so
-		// by the time we get here an overlay that still exists is one already
-		// pointing at this database's own log.
+
+	purge := desiredAccesslogPurge(sd)
+
+	if !hasAccesslog {
+		log.Info("adding accesslog overlay to data database", "host", host, "dataDN", dataDN)
+		accesslogDN := "olcOverlay=accesslog," + dataDN
+		addReq := ldap.NewAddRequest(accesslogDN, nil)
+		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcAccessLogConfig"})
+		addReq.Attribute("olcOverlay", []string{"accesslog"})
+		addReq.Attribute("olcAccessLogDB", []string{ldapv1alpha1.AccesslogSuffix(sd.Name)})
+		addReq.Attribute("olcAccessLogOps", []string{"writes"})
+		addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
+		if purge != "" {
+			addReq.Attribute("olcAccessLogPurge", []string{purge})
+		}
+		if err := conn.Add(addReq); err != nil {
+			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
+				return fmt.Errorf("add accesslog overlay: %w", err)
+			}
+		}
+	}
+
+	// An existing overlay's olcAccessLogDB is NOT converged here, and it cannot
+	// be: pointing a legacy cluster-shared cn=accesslog at a per-database log is
+	// a teardown, not a rename, because olcSuffix and olcDbDirectory are not
+	// runtime-mutable (ADR-019 R8). migrateLegacyAccesslog runs immediately
+	// before this call and deletes an overlay that names the shared log, so by
+	// the time we get here an overlay that still exists already points at this
+	// database's own log.
+	//
+	// olcAccessLogPurge is a different matter: it IS runtime-modifiable
+	// (verified live — replace and delete, no crash, no hang), so it is
+	// converged on every reconcile rather than written once at creation.
+	// Leaving it write-once meant an operator-defaulted or edited purge window
+	// never reached a pod whose overlay predated the change, and an unpurged
+	// journal ends in stalled data writes.
+	return r.ensureAccesslogPurge(ctx, conn, host, dataDN, purge)
+}
+
+// ensureAccesslogPurge converges olcAccessLogPurge on the data DB's accesslog
+// overlay. Thin executor over planOverlayAttr; the overlay DN is read back
+// because slapd assigns it a {N} ordering prefix. No overlay means nothing to
+// converge — the next reconcile handles it (ADR-001).
+func (r *SlapdDatabaseReconciler) ensureAccesslogPurge(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN, purge string,
+) error {
+	sr, err := conn.Search(ldap.NewSearchRequest(
+		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+		0, 0, false, "(objectClass=olcAccessLogConfig)",
+		[]string{"olcAccessLogPurge"}, nil,
+	))
+	if err != nil {
+		return fmt.Errorf("search accesslog overlay under %s: %w", dataDN, err)
+	}
+	if len(sr.Entries) == 0 {
 		return nil
 	}
 
-	log.Info("adding accesslog overlay to data database", "host", host, "dataDN", dataDN)
-	accesslogDN := "olcOverlay=accesslog," + dataDN
-	addReq := ldap.NewAddRequest(accesslogDN, nil)
-	addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcAccessLogConfig"})
-	addReq.Attribute("olcOverlay", []string{"accesslog"})
-	addReq.Attribute("olcAccessLogDB", []string{ldapv1alpha1.AccesslogSuffix(sd.Name)})
-	addReq.Attribute("olcAccessLogOps", []string{"writes"})
-	addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
-	if sd.Spec.Replication.AccesslogPurge != "" {
-		addReq.Attribute("olcAccessLogPurge", []string{sd.Spec.Replication.AccesslogPurge})
-	}
-	if err := conn.Add(addReq); err != nil {
-		if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
-			return fmt.Errorf("add accesslog overlay: %w", err)
-		}
-	}
-	return nil
+	return ensureOverlayAttr(ctx, conn, host, sr.Entries[0].DN, "olcAccessLogPurge",
+		sr.Entries[0].GetEqualFoldAttributeValues("olcAccessLogPurge"), purge)
 }
 
 // moduleBaseName normalises one olcModuleLoad value to a bare module name:
@@ -3053,4 +3117,154 @@ func (r *SlapdDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		)).
 		Named("slapddatabase").
 		Complete(r)
+}
+
+// ── Overlay tunables: purge window and checkpoint (ADR-024 R4/R5) ───────────
+
+// defaultAccesslogPurge is the purge window the operator applies when
+// spec.replication.accesslogPurge is unset: keep 7 days of change journal,
+// sweep once a day.
+//
+// Unset used to mean NO purge, which is not a neutral default — it is a
+// slow-motion outage. The journal grows until it hits its map ceiling, and
+// because the accesslog overlay sits in the DATA database's write path, the
+// moment the journal cannot take a write neither can the data. The window is
+// sized to survive a weekend-plus consumer outage: a consumer offline longer
+// than the window loses its delta anchor and needs a full refresh, so the
+// window trades journal bytes for how long a peer may stay away.
+const defaultAccesslogPurge = "7+00:00 1+00:00"
+
+// noneSentinel is the explicit opt-out spelling shared by the string-valued
+// tunables that the operator defaults (keepalive, accesslogPurge): "" means
+// "no opinion, use the operator default", "none" means "I really want none".
+const noneSentinel = "none"
+
+// desiredAccesslogPurge resolves spec.replication.accesslogPurge: unset gets
+// the operator's window (see defaultAccesslogPurge for why "nothing" is not an
+// option), "none" is the explicit way to ask for no purging at all, and any
+// other value is passed through verbatim.
+func desiredAccesslogPurge(sd *ldapv1alpha1.SlapdDatabase) string {
+	if sd == nil {
+		return defaultAccesslogPurge
+	}
+	v := strings.TrimSpace(sd.Spec.Replication.AccesslogPurge)
+	switch {
+	case v == "":
+		return defaultAccesslogPurge
+	case strings.EqualFold(v, noneSentinel):
+		return ""
+	default:
+		return v
+	}
+}
+
+// desiredSyncprovCheckpoint resolves spec.replication.syncprovCheckpoint.
+// Unlike the purge window this has NO operator default: an unwritten
+// olcSpCheckpoint means slapd's own contextCSN checkpointing behaviour, which
+// is a performance trade rather than a correctness cliff. Unset and the "none"
+// sentinel both mean "no attribute", which the convergence step removes if one
+// is present.
+func desiredSyncprovCheckpoint(sd *ldapv1alpha1.SlapdDatabase) string {
+	if sd == nil {
+		return ""
+	}
+	v := strings.TrimSpace(sd.Spec.Replication.SyncprovCheckpoint)
+	if strings.EqualFold(v, noneSentinel) {
+		return ""
+	}
+	return v
+}
+
+// overlayAttrAction is what planOverlayAttr decided to do with a single-valued
+// string attribute on an overlay entry.
+type overlayAttrAction int
+
+const (
+	overlayAttrNoop overlayAttrAction = iota
+	overlayAttrSet
+	overlayAttrRemove
+)
+
+// planOverlayAttr compares an overlay attribute's live values against the
+// desired one and returns the single write needed, if any. Pure — the LDAP half
+// only executes the verdict. Generalises planSessionlog (ADR-022) to the
+// string-valued overlay tunables: olcAccessLogPurge and olcSpCheckpoint.
+//
+// An empty want means the attribute should not be present. Comparison
+// normalises whitespace on both sides, because slapd echoes these values back
+// in its own spacing and a respacing is not a difference worth a write. More
+// than one live value is by definition not the single desired value, so it is
+// replaced.
+func planOverlayAttr(current []string, want string) (overlayAttrAction, string) {
+	want = normalizeOverlayAttrValue(want)
+
+	var live []string
+	for _, v := range current {
+		if n := normalizeOverlayAttrValue(v); n != "" {
+			live = append(live, n)
+		}
+	}
+
+	if want == "" {
+		if len(live) == 0 {
+			return overlayAttrNoop, ""
+		}
+		return overlayAttrRemove, ""
+	}
+	if len(live) == 1 && live[0] == want {
+		return overlayAttrNoop, ""
+	}
+	return overlayAttrSet, want
+}
+
+// normalizeOverlayAttrValue collapses leading, trailing and internal whitespace
+// runs to single spaces, so "500\t15" and " 500  15 " compare equal to "500 15".
+func normalizeOverlayAttrValue(v string) string {
+	return strings.Join(strings.Fields(v), " ")
+}
+
+// ensureOverlayAttr aligns one single-valued attribute on one overlay entry to
+// what planOverlayAttr wants: observe, compare, write only on a difference.
+//
+// The overlay's real DN carries a {N} ordering prefix assigned by slapd, so the
+// caller passes the DN it read back rather than one it reconstructed. Both
+// attributes handled here were verified live-modifiable on a running slapd
+// before being converged at all — the precondition ADR-024's amendments made
+// mandatory for this class, after olcDbMaxSize was found to segfault and
+// olcIdleTimeout to hang on exactly this kind of write.
+func ensureOverlayAttr(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, overlayDN, attr string,
+	current []string,
+	want string,
+) error {
+	log := logf.FromContext(ctx)
+
+	action, value := planOverlayAttr(current, want)
+	if action == overlayAttrNoop {
+		return nil
+	}
+
+	modReq := ldap.NewModifyRequest(overlayDN, nil)
+	switch action {
+	case overlayAttrSet:
+		log.Info("setting overlay attribute",
+			"host", host, "dn", overlayDN, "attr", attr, "value", value)
+		modReq.Replace(attr, []string{value})
+	case overlayAttrRemove:
+		log.Info("removing overlay attribute",
+			"host", host, "dn", overlayDN, "attr", attr)
+		modReq.Delete(attr, nil)
+	case overlayAttrNoop:
+		return nil
+	}
+
+	if err := conn.Modify(modReq); err != nil {
+		if action == overlayAttrRemove && ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchAttribute) {
+			return nil
+		}
+		return fmt.Errorf("set %s on %s: %w", attr, overlayDN, err)
+	}
+	return nil
 }
