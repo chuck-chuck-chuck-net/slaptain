@@ -272,3 +272,56 @@ Three consequences for the doctrine:
    that a new converged attribute stops writing once it matches is therefore part
    of landing it, and the check is cheap: the operator's own "aligning" log lines
    must go quiet.
+
+## Amendment (2026-09-13, same day): the vetting standard extends to what a value DOES at runtime
+
+The amendment above established that R1 membership is empirical: an attribute is
+converged only after a live modify left the pod serving. The syncrepl stanza
+hardening (finding 11) passed that test — writing `olcSyncRepl` with
+`timeout=300` in every stanza modifies cleanly — and still shipped a
+cluster-freezing defect, because the test answers only "does the *write*
+hurt slapd", not "does the *written value* hurt slapd afterwards".
+
+What `timeout=` actually does, verified in the 2.7.1 source after three
+measured ~300 s full-server freezes on a live three-site mesh: supplying it
+flips slapd's refresh-phase waiting discipline from a non-blocking peek to a
+blocking wait. `do_syncrep2` polls with `tout={0,0}` only in the persist phase
+and otherwise blocks a threadpool thread inside `ldap_result` for up to the
+timeout (`servers/slapd/syncrepl.c:1357-1362`); the task can honour a pause
+only between messages (`syncrepl.c:2128`); and every external `cn=config` MOD
+pauses the whole pool with listeners suspended (`bconfig.c:6512`). So while any
+consumer is in refresh phase — every bring-up, pod replacement, and
+stale-cookie full refresh, which is precisely when the operator writes
+`cn=config` most — each config write froze the entire server for the remainder
+of the blocking wait: `RESULT err=0 etime≈300`, nothing logged, nothing
+accepted, cascading across pods and sites whose consumers were mid-refresh
+against the frozen provider. The wait bought nothing in exchange: expiry maps
+to `SYNC_TIMEOUT` ("nothing to read, listen for more", `syncrepl.c:2352`),
+never an abort or a retry, so it was not even a failure detector. The landing
+analysis had source-verified the question it feared — "will `timeout=` abort
+the persistent search?" (it will not) — and never asked the question that
+mattered: "may a syncrepl pool task block at all?" Under slapd's
+cooperative-pause regime the answer is no; a blocking wait inside a pool task
+turns every config write into a server freeze of that wait's length, at any
+value, so no smaller number is safe either.
+
+The fix is the unconfigured default: no `timeout=` in any stanza, failure
+detection left to the socket-level mechanisms that act without occupying a
+pool thread — `network-timeout=10` for connect and TLS handshake, the
+keepalive triple for established flows. Accepted residual, documented rather
+than designed against: the synchronous syncrepl bind (`ldap_sasl_bind_s`) is
+unbounded against a provider that completes the TLS handshake and then hangs.
+That was the status quo for the project's entire pre-regression life; every
+hang state observed so far stalls the handshake itself, which
+`network-timeout` bounds; and the only bound available is `timeout=`, i.e.
+the defect.
+
+Consequence for the doctrine: **the empirical test is two-sided.** "We
+modified it on a running pod and the pod was still serving afterwards" clears
+the write; a value that changes slapd's *runtime execution behaviour* — a
+timeout, a wait, anything a worker thread consults while holding pool
+resources — must also be vetted for what the running system does with it, and
+the interaction to check first is the `cn=config` pause, because the operator
+converges every pod on every reconcile and therefore *will* write config while
+the value's worst case is live. The syncrepl ledger entry of the same date in
+`docs/reconcile-loop-fixes.md` carries the measurements.

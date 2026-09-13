@@ -5,6 +5,80 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-09-13: stanza `timeout=300` turns every cn=config write into a ~300 s server-wide freeze
+
+**Symptom:** `./tests/e2e.sh setup` against a three-site mesh times out
+reproducibly. One pod is kubelet-Ready (TCP accepts) yet every LDAP operation
+against it times out; the SlapdDatabase sits `Degraded`. Its log shows three
+**total-silence gaps of 299.85 s / 299.35 s / 297.13 s**, each opening on an
+operator cn=config MOD reaching `slap_queue_csn` (`olcSyncRepl`, `olcAccess`,
+`olcDbIndex` — three different attributes, so the trigger is *any* external
+config write) and closing with that MOD's `RESULT err=0 etime≈300`. The
+cluster self-heals in ~15 minutes as the operator's convergence MOD queue
+drains one freeze at a time.
+
+**Root cause:** the same-day syncrepl stanza hardening (`df3a7f7`, finding 11)
+added `timeout=300` to every stanza. That keyword is `sb_timeout_api` →
+`LDAP_OPT_TIMEOUT`, and in OpenLDAP it flips the refresh-phase waiting
+discipline from a non-blocking peek to a blocking wait: `do_syncrep2` uses
+`tout={0,0}` (poll, task yields) only in the persist phase, and in the
+**refresh phase blocks a threadpool thread inside `ldap_result` for up to
+300 s** (`servers/slapd/syncrepl.c:1357-1362`, 2.7.1). The task's
+pause-cooperation check sits *between* messages (`syncrepl.c:2128`), so a
+blocked thread can never reach it — while every external cn=config MOD sets
+`do_pause=1` and `slap_pause_server()` waits for **all** pool tasks with
+listeners suspended (`bconfig.c:6417-6517`). One refresh-phase consumer ⇒
+every config write freezes the whole server for the remainder of its wait.
+Sites froze each other in cascade: a paused provider is silent mid-refresh,
+which keeps its consumers' pods' pauses waiting in turn (one gap ended the
+exact instant an external consumer finally received its `REFRESH_DELETE`).
+Why it used to work: until that morning no stanza carried `timeout=`, so
+`sb_timeout_api` was 0 and refresh-phase waits were polls.
+
+**Why it was hard to spot at landing:** the analysis source-verified the
+feared failure — "will `timeout=` abort the persistent search?" (correctly:
+no, persist phase polls) — and never asked the load-bearing question, "may a
+syncrepl pool task block at all?" The expiry is not even a failure detector:
+`ldap_result` returning 0 maps to `SYNC_TIMEOUT` → "nothing to read, listen
+for more" (`syncrepl.c:2352`) — no abort, no retry. So the blocking wait
+bought zero protection at any value; dead-provider detection was already
+covered by `network-timeout=10` (connect + TLS handshake, observed bounding a
+bind against a frozen peer at ~10 s) and the keepalive triple (established
+flows, ≤ ~330 s — the same order as `timeout=300`, without the freeze).
+
+**Fix:** drop ` timeout=300` from `syncreplTimeoutOpts`
+(`scale_tunables.go`) — stick to slapd's unconfigured default and leave
+failure detection to the socket-level mechanisms. One constant feeds all three
+stanza builders (in-cluster RW, external, read-only), and `syncreplMatch`
+full-Replaces `olcSyncRepl` on any divergence, so existing clusters have the
+keyword actively **removed** on the first reconcile after the operator
+upgrade — with one last freeze of up to ~300 s per pod possible during that
+removal MOD, impossible thereafter. Accepted residual, documented: the
+synchronous syncrepl bind (`ldap_sasl_bind_s`) is unbounded against a provider
+that completes the TLS handshake and then hangs — the lifelong pre-regression
+status quo; every observed hang state stalls the handshake itself, which
+`network-timeout` bounds.
+
+**Coverage:** the unit assertion in
+`TestBuildDatabaseSyncRepl_StanzaTimeouts` and the e2e assertion in
+`tunables_test.go` both flipped to require ` timeout=` **absent** (leading
+space so `network-timeout=` cannot satisfy it); both observed red before the
+constant changed — the unit red on all three stanza kinds, the e2e red
+verified read-only against a live cluster still carrying `timeout=300`.
+`timelimit=` stays asserted absent.
+
+**Lesson:** ADR-024's live-modifiability test is two-sided — a value that
+changes slapd's *runtime execution behaviour* must be vetted for what the
+running server does with it, not just for whether the write survives. Under
+slapd's cooperative-pause regime, a blocking wait inside a threadpool task is
+a config-write freeze of that wait's length. The operator converges cn=config
+(compare first, write only on divergence — ADR-002), so steady state issues no
+MODs and no pauses; but a bring-up, upgrade, or spec change issues a queue of
+legitimate writes at exactly the moment consumers are refreshing, which is the
+worst case. See the ADR-024 amendment of the same date.
+
+---
+
 ## 2026-08-26: filtering the SlapdCluster watch stopped per-pod convergence — the churn was the resync
 
 **Not a shipped bug** — caught by the e2e suite during an optimisation attempt and
