@@ -764,7 +764,7 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 	}
 	addReq.Attribute("olcDbMaxSize", []string{strconv.FormatInt(maxSize, 10)})
 
-	if sd.Spec.NoSync {
+	if desiredNoSync(sd, sc) {
 		addReq.Attribute("olcDbNoSync", []string{"TRUE"})
 	}
 

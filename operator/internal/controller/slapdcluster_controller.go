@@ -719,7 +719,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		replicas = 0
 	}
 
-	logLevel := strconv.Itoa(int(sc.Spec.LogLevel))
+	logLevel := strconv.Itoa(int(desiredLogLevel(sc)))
 	// Three orthogonal gates:
 	//
 	//   accesslogMountNeeded — mount /accesslog into init + main containers.

@@ -113,6 +113,117 @@ type SlapdTLSConfig struct {
 	// requiring client certificate authentication, or when cross-site
 	// syncrepl peers present certs from an internal CA.
 	SecretName string `json:"secretName,omitempty"`
+	// protocolMin is the minimum TLS protocol version slapd will negotiate
+	// (olcTLSProtocolMin), in slapd's "<major>.<minor>" SSL/TLS version
+	// spelling: 3.1 = TLS 1.0, 3.2 = TLS 1.1, 3.3 = TLS 1.2, 3.4 = TLS 1.3.
+	//
+	// Unset means the operator's default, "3.3" — a TLS 1.2 floor (ADR-024 R5).
+	// Without it slapd's own default is 0.0, i.e. "whatever the runtime image's
+	// OpenSSL happens to permit today", which is a policy that changes silently
+	// with a base-image bump. Set "0.0" to ask for that behaviour explicitly.
+	//
+	// Converged per pod, and written whether or not TLS is enabled: it costs one
+	// attribute and it means turning TLS on later cannot land on an unpinned
+	// floor.
+	// +kubebuilder:validation:Pattern=`^[0-9]+\.[0-9]+$`
+	// +optional
+	ProtocolMin *string `json:"protocolMin,omitempty"`
+	// cipherSuite is the OpenSSL cipher specification slapd offers
+	// (olcTLSCipherSuite), e.g. "HIGH:!aNULL:!MD5". Unset writes nothing and
+	// leaves the OpenSSL default list in force.
+	//
+	// Deliberately NOT operator-defaulted: a cipher list is the one TLS
+	// parameter where our opinion ages badly and OpenSSL's own default — which
+	// tracks the distribution's crypto policy — is better maintained than a
+	// string frozen in an operator release. The protocol floor above is the part
+	// that is worth pinning. Converged per pod when set; clearing the field
+	// removes the attribute.
+	// +optional
+	CipherSuite *string `json:"cipherSuite,omitempty"`
+}
+
+// SlapdTuningConfig is the server-global tuning family: attributes that live on
+// cn=config itself rather than on a database (ADR-024 R6). All of them are
+// converged per pod on every reconcile — verified live on OpenLDAP 2.7.1, each
+// one takes an ldapmodify against a running slapd without incident.
+//
+// The thread and buffer knobs the production-config review also listed
+// (olcThreads, olcListenerThreads, olcConcurrency, olcSockbufMaxIncoming,
+// olcSockbufMaxIncomingAuth, olcConnMaxPending) are deliberately NOT here:
+// upstream's defaults are defensible, the reference production platform leaves
+// them alone too, and a thread count we cannot measure is a knob we would be
+// guessing at. They stay recorded in docs/BACKLOG.md as escape hatches to add
+// when a measurement asks for one.
+type SlapdTuningConfig struct {
+	// idleTimeout is how many seconds slapd keeps an idle client connection
+	// before closing it (olcIdleTimeout). Unset means the operator's default,
+	// 3600 (ADR-024 R5). slapd's own default is 0 — never close — so a pod
+	// behind a stateful firewall, or one serving a client that wedges,
+	// accumulates connections whose peer is long gone until it exhausts its
+	// file-descriptor budget. Set 0 to ask for the never-close behaviour.
+	// Converged per pod.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	IdleTimeout *int32 `json:"idleTimeout,omitempty"`
+	// writeTimeout is how many seconds slapd waits for a blocked write to a
+	// client before closing the connection (olcWriteTimeout). Unset means the
+	// operator's default, 300 (ADR-024 R5); slapd's own is 0, never. A client
+	// that stops reading mid-result otherwise pins a worker thread and its
+	// connection indefinitely. Set 0 for the never-close behaviour.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	WriteTimeout *int32 `json:"writeTimeout,omitempty"`
+	// toolThreads is how many threads slapd's offline tools use for indexing
+	// (olcToolThreads). It is read by slapadd, which is how a SlapdRestore or a
+	// bootstrapFrom restore loads its LDIF — with the cluster scaled to zero for
+	// the whole window, so the load time is downtime. Unset means the operator's
+	// default, 2: enough to overlap index building with entry parsing,
+	// conservative enough not to thrash a pod whose CPU limit is small. slapd's
+	// own default is 1.
+	//
+	// Written on cn=config and therefore converged per pod, even though only the
+	// tools read it — the restore Job runs `slapadd -F /config/slapd.d` against
+	// that same config directory, so this is where slapadd finds it.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	ToolThreads *int32 `json:"toolThreads,omitempty"`
+	// noSync is the cluster-wide durability default every SlapdDatabase inherits
+	// unless it sets spec.noSync of its own (ADR-024 R6): true disables the
+	// per-write fsync (olcDbNoSync) on every database in the cluster, trading
+	// durability on an unclean shutdown for write throughput, on the argument
+	// that the replication mesh is the redundancy.
+	//
+	// Unset means false — fsync after every write. This is a posture, not a
+	// tuning detail: turn it on for the whole cluster or not at all, and read
+	// SlapdDatabase.spec.checkpoint before you do.
+	// +optional
+	NoSync *bool `json:"noSync,omitempty"`
+}
+
+// SlapdMonitoringConfig configures slapd's native monitor backend
+// (back_monitor), the cn=monitor tree that exposes connection, operation and
+// per-database counters an exporter can scrape.
+//
+// The identity that reads it is the EXISTING replication identity
+// (cn=replication,<suffix>) of each database in the cluster, not a new one:
+// ADR-008 already establishes that identity as the operator's read-only
+// in-cluster credential, and minting a second monitoring identity would mean a
+// second password, a second Secret and a second ACL contract for a strictly
+// smaller privilege. The monitor database's rootDN is cn=admin,cn=config.
+type SlapdMonitoringConfig struct {
+	// enabled controls whether the operator loads back_monitor and creates the
+	// monitor database on every pod. Unset means true (ADR-024 R5): a directory
+	// with no operation counters is one whose only health signal is the
+	// operator's CSN polling, which by ADR-008's own amendment cannot see an
+	// idle-but-broken link. Set false to opt out.
+	//
+	// Converged per pod. Turning it off does NOT delete an existing monitor
+	// database — a cn=config database delete renumbers every database ordered
+	// after it (ADR-019's DN-reuse rule), which is not a price worth paying to
+	// honour an opt-out; the operator logs that it is leaving the existing
+	// database in place.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // CnConfigCredentials references the Secret containing the cn=config admin password.
@@ -138,6 +249,25 @@ type SlapdLDAPConfig struct {
 	// tls configures TLS/LDAPS.
 	// +optional
 	TLS SlapdTLSConfig `json:"tls,omitempty"`
+	// passwordHash is the scheme slapd uses when it hashes a password on a
+	// user's behalf — a userPassword written in clear by a client with the right
+	// to do so, or one changed through the password-modify extended operation
+	// (olcPasswordHash). It does NOT govern the root passwords the operator
+	// generates: those are hashed by the operator itself before they ever reach
+	// slapd.
+	//
+	// Unset means the operator's default, "{SSHA}" (ADR-024 R5). slapd's own
+	// frontend default is also {SSHA}, so this pins rather than changes it — the
+	// point is that the policy is stated in cn=config and converged, instead of
+	// being whatever the build happened to compile in. Converged per pod.
+	//
+	// Stronger schemes ({ARGON2} in particular) need their module present in the
+	// runtime image; slaptain's does not ship pw-argon2 today, so asking for one
+	// here would produce a slapd that rejects every password write. That is why
+	// this field is a small pinned default rather than a menu — see
+	// docs/BACKLOG.md for the module question.
+	// +optional
+	PasswordHash *string `json:"passwordHash,omitempty"`
 }
 
 // SlapdPVCConfig holds sizing and storage class settings for a single PVC.
@@ -525,10 +655,10 @@ type SlapdClusterSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	ReadReplicas int32 `json:"readReplicas,omitempty"`
-	// logLevel is the slapd -d debug bitmask. Default 256 ("stats") logs the
-	// startup banner, connection accept/close, bind, and operation results —
-	// the bare minimum to know slapd is alive and to debug why a client got
-	// rejected. Higher levels add detail (see slapd.conf(5) "loglevel"):
+	// logLevel is the slapd -d debug bitmask. Unset means the operator's default,
+	// 16640 = 256 ("stats") + 16384 ("sync"): operation results plus the
+	// consumer-side replication trace. Higher levels add detail (see
+	// slapd.conf(5) "loglevel"):
 	//
 	//   0   no debug output at all (slapd is healthy but kubectl logs is empty
 	//       — useful only when log volume itself is the problem)
@@ -536,14 +666,41 @@ type SlapdClusterSpec struct {
 	//   32  search filter processing
 	//   64  configuration processing
 	//   128 access control list processing
-	//   256 stats — recommended default
+	//   256 stats
 	//   16384 sync replication (consumer side)
 	//   32768 sync replication (provider side)
 	//   -1  everything (firehose; only for one-off debugging)
 	//
 	// Bitmasks combine, e.g. 256+128=384 for stats+ACL.
-	// +kubebuilder:default=256
-	LogLevel int32 `json:"logLevel,omitempty"`
+	//
+	// Why the sync bit is in the DEFAULT and not just documented: a replication
+	// incident is diagnosed from what slapd logged while it was going wrong, and
+	// at 256 that record does not exist. "Restart it with sync logging on" both
+	// loses the history and changes the state you were trying to observe — the
+	// restart re-establishes every syncrepl connection. The volume is
+	// per-replication-event, not per-operation; the firehose is 32768 (provider
+	// side) and -1, and those stay opt-in. This is the alpha
+	// best-config-by-default stance (ADR-024 R5, ADR-022): the value that is
+	// right for every deployment we can name is the one we ship.
+	//
+	// A pointer, not a plain int, precisely so that 0 is reachable: with
+	// `omitempty` an explicit `logLevel: 0` serialises to nothing, and a
+	// kubebuilder default would then silently overwrite it with ours — the way
+	// back to silence has to be asking for it, never being unable to ask.
+	//
+	// Changing this field rewrites the StatefulSet's argument list and therefore
+	// rolls the pods; slapd takes -d at startup only.
+	// +optional
+	LogLevel *int32 `json:"logLevel,omitempty"`
+	// tuning holds the server-global tuning family — connection lifetimes, tool
+	// threads, the cluster-wide durability posture. Converged per pod; see
+	// SlapdTuningConfig.
+	// +optional
+	Tuning SlapdTuningConfig `json:"tuning,omitempty"`
+	// monitoring configures slapd's native cn=monitor backend. On by default;
+	// see SlapdMonitoringConfig.
+	// +optional
+	Monitoring SlapdMonitoringConfig `json:"monitoring,omitempty"`
 	// backend configures the back-mdb BACKEND (olcBackend={0}mdb), as opposed
 	// to the individual databases. Bootstrap-time only — see SlapdMdbBackendConfig.
 	// +optional
