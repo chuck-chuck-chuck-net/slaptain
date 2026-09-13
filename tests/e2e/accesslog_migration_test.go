@@ -319,10 +319,19 @@ func makeLegacyAccesslogLayout(pod string, dbNames []string, dbSuffixes map[stri
 }
 
 // cfgSearch runs one cn=config search on a pod over a fresh connection.
+//
+// These cfg* helpers dial via tryDialPodConfig and RETURN the error into their
+// Eventually poll — a fatal dial would bypass the retry envelope entirely (see
+// tryDialPodConfig). The 2-minute window matches dialPodConfigEventually, the
+// suite's post-churn dial budget; a pod that never recovers still fails loudly
+// at expiry with the last error attached.
 func cfgSearch(pod, base string, scope int, filter string) []*ldap.Entry {
 	var out []*ldap.Entry
 	Eventually(func() error {
-		conn := dialPodConfig(pod)
+		conn, err := tryDialPodConfig(pod)
+		if err != nil {
+			return err
+		}
 		defer conn.Close()
 		res, err := conn.Search(ldap.NewSearchRequest(
 			base, scope, ldap.NeverDerefAliases, 0, 0, false, filter,
@@ -336,7 +345,7 @@ func cfgSearch(pod, base string, scope int, filter string) []*ldap.Entry {
 		}
 		out = res.Entries
 		return nil
-	}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(Succeed(),
+	}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
 		"search %s under %s on %s", filter, base, pod)
 	return out
 }
@@ -357,28 +366,34 @@ func cfgMdbDatabases(pod string) []observedMdb {
 // cfgAdd adds one cn=config entry; an existing entry counts as success.
 func cfgAdd(pod string, req *ldap.AddRequest) {
 	Eventually(func() error {
-		conn := dialPodConfig(pod)
+		conn, err := tryDialPodConfig(pod)
+		if err != nil {
+			return err
+		}
 		defer conn.Close()
-		err := conn.Add(req)
+		err = conn.Add(req)
 		if err != nil && ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 			return nil
 		}
 		return err
-	}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(Succeed(),
+	}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
 		"add %s on %s", req.DN, pod)
 }
 
 // cfgDel deletes one cn=config entry; a missing entry counts as success.
 func cfgDel(pod, dn string) {
 	Eventually(func() error {
-		conn := dialPodConfig(pod)
+		conn, err := tryDialPodConfig(pod)
+		if err != nil {
+			return err
+		}
 		defer conn.Close()
-		err := conn.Del(ldap.NewDelRequest(dn, nil))
+		err = conn.Del(ldap.NewDelRequest(dn, nil))
 		if err != nil && ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
 			return nil
 		}
 		return err
-	}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(Succeed(),
+	}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
 		"delete %s on %s", dn, pod)
 }
 
@@ -390,7 +405,12 @@ func cfgDel(pod, dn string) {
 func cfgDelSubtreeBestEffort(pod, dn string) {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		conn := dialPodConfig(pod)
+		conn, err := tryDialPodConfig(pod)
+		if err != nil {
+			fmt.Fprintf(GinkgoWriter, "cfgDelSubtree(%s on %s): %v — retrying\n", dn, pod, err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
 		children, err := conn.Search(ldap.NewSearchRequest(
 			dn, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
 			0, 0, false, "(objectClass=*)", []string{"dn"}, nil))

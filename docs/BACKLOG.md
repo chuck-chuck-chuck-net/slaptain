@@ -637,3 +637,29 @@ precondition ADR-024's amendments made mandatory for this class — and both
 still accepting data writes afterwards, zero restarts. So no R2/R3 downgrade was
 needed and ADR-024 needed no further amendment; the probe confirmed the class
 rather than refuting it.
+
+## restore_replay_test.go cleanup targets the root DSE when the spec skips early
+
+**What:** the replay spec's `AfterAll` (`tests/e2e/restore_replay_test.go`)
+is gated only on `E2E_BACKUP=1`, but `markerDN` is assigned near the *end* of
+`BeforeAll` — after two `Skip` exits (non-replicated cluster; external peers
+present, ADR-014 amendment). When either skip fires, cleanup runs with
+`markerDN == ""`, so the marker delete becomes `Del("")` — the root DSE — and
+slapd answers err 53 `cannot delete the root DSE`. The handler then prints a
+**false** `!!! CLEANUP FAILED … The shared fixture is off baseline; delete it
+by hand`, sending a human hunting for fixture drift that does not exist
+(observed on the 2026-09-13 run, where the spec skipped on the two external
+peers). The trailing `crdClient.Delete` calls for the SlapdRestore/SlapdBackup
+CRs are likewise issued with empty names, errors discarded.
+
+**Why deferred:** discovered while root-causing the accesslog-migration dial
+flake (branch `test/accesslog-migration-dial-hardening`); same broad family —
+test scaffolding not safe against a path that did not run — but a different
+mechanism (uninitialized state on a skip path, not a fatal dial inside a retry
+envelope), different file, different gate. Folding it in would blur both
+changes; it is a trivially separable one-commit fix.
+
+**How:** guard the `AfterAll` on `markerDN == ""` (nothing was created, nothing
+to clean) — or assign `markerDN`/names before the skippable preflight checks.
+While there, skip the empty-name CR deletes too. No red-first ceremony needed
+beyond re-running the skip path and seeing the warning gone.
