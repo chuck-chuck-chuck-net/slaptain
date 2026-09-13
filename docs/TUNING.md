@@ -77,17 +77,18 @@ path is always the same: back up, delete the database, restore into a fresh one
 | `spec.rtxnSize` | 10000 | converged |
 | `spec.indices` | none beyond the operator's baseline | converged, **additive only** |
 | `spec.replication.syncprovSessionlog` | 5000 | converged |
-| `spec.replication.syncprovCheckpoint` | none | written at overlay creation |
-| `spec.replication.accesslogPurge` | **none — the journal grows unbounded** | written at accesslog overlay creation |
+| `spec.replication.syncprovCheckpoint` | none | converged |
+| `spec.replication.accesslogPurge` | `7+00:00 1+00:00` | converged |
 
 `spec.maxSize` takes a Kubernetes quantity (`32Gi`) or a bare byte count; the
 operator converts. A value it cannot parse is an error, not a fallback.
 
-`syncprovCheckpoint` and `accesslogPurge` are written when the operator creates the
-overlay and are not converged afterwards — editing either on a database that already
-has its overlays changes nothing, and nothing reports it. That is debt against
-ADR-024 R4 — [`docs/BACKLOG.md`](BACKLOG.md) records it for `syncprovCheckpoint`;
-`accesslogPurge` has the same shape. Set both when you create the database.
+`syncprovCheckpoint` and `accesslogPurge` are converged on every reconcile: editing
+either reaches pods whose overlays already exist, and clearing the field removes the
+attribute. Both were verified live-modifiable on a running slapd before being
+converged at all — replace and delete, no crash, no hang — which is the precondition
+ADR-024 now puts on this class. (They used to be written only at overlay creation,
+so edits were silently ignored; that debt is paid.)
 
 `spec.indices` is additive: the operator adds index definitions the database is
 missing and never removes one, because back-mdb rejects a second definition for an
@@ -185,12 +186,26 @@ The operator gives every accesslog DB an 8Gi map and a `2048 15` checkpoint, nei
 of them configurable — the journal is a derived, purged artefact, so losing its tail
 costs a consumer a full refresh rather than data.
 
-`spec.replication.accesslogPurge` has **no default**. Unset means no purge at all and
-a journal that grows until the volume or the map runs out. Set it. The example fixture
-uses `"2+00:00 1+00:00"` — purge records older than two days, check daily — which is a
-sane starting point for a cluster whose consumers are never offline longer than that.
-The window has to cover your worst realistic consumer outage: a consumer whose cookie
-predates the purge falls back to a full refresh.
+`spec.replication.accesslogPurge` defaults to `"7+00:00 1+00:00"` — keep seven days of
+journal, sweep once a day. Unset gets that default; the explicit sentinel `"none"`
+opts out of purging entirely; any other value is used verbatim.
+
+There is a default because "no opinion" is not a neutral setting here. An unpurged
+journal grows until it reaches its 8Gi map ceiling, and the accesslog overlay sits in
+the **data** database's write path — so the moment the journal cannot take a write,
+neither can the data. That is a slow-motion outage rather than a tuning wart, which is
+why the field is defaulted rather than left to be remembered.
+
+Seven days is chosen to cover a weekend-plus consumer outage. The window is precisely
+how long a consumer may stay away and still resume from a delta: one whose cookie
+predates the purge falls back to a full refresh. Lengthen it if your worst realistic
+outage is longer, and size `persistence.accesslog.size` to match.
+
+On the 2.7-default images the interaction between purging and a dormant consumer
+(upstream ITS#9580 — a purge can leave a returning consumer's cookie unanswerable) is
+mitigated by the cookie-flush fix. Clusters still on the `-ol26` image pair carry
+elevated exposure: there, treat a consumer outage approaching the purge window as
+something to verify resynced rather than assume.
 
 Size `persistence.accesslog.size` from the same arithmetic, with the same headroom
 logic as the data volume.

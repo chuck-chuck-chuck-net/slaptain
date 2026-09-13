@@ -336,15 +336,14 @@ amendment (2026-08-24), section "Not decided: hub-and-spoke orchestration".
 
 ---
 
-## ADR-022 follow-ups: syncprov tuning convergence is inconsistent
+## ADR-022 follow-ups: the persistent sessionlog source
 
-`olcSpSessionlog` now converges on every reconcile (set / replace / delete —
-ADR-022), but `olcSpCheckpoint` is still written only when the syncprov overlay
-is first added: a later `syncprovCheckpoint` spec change is silently ignored on
-pods whose overlay already exists. Align the checkpoint with the sessionlog's
-converge-always pattern (the pure `planSessionlog` seam generalizes).
+**The checkpoint half is DONE (2026-09-13).** `olcSpCheckpoint` now converges on
+every reconcile alongside `olcSpSessionlog`, off a single search of the syncprov
+overlay; the `planSessionlog` seam did generalize, as `planOverlayAttr`. See the
+R4-debt entry above.
 
-Separately: `syncprov-sessionlog-source` (the persistent, accesslog-backed
+Still open: `syncprov-sessionlog-source` (the persistent, accesslog-backed
 sessionlog) was rejected in ADR-022 because it reads the change journal — the
 artifact that is contaminated or purged in exactly the scenarios where a
 persistent log would pay off. Revisit once the journal's trustworthiness across
@@ -555,14 +554,17 @@ document.
 
 ---
 
-## R4 debt: syncprovCheckpoint and accesslogPurge are silently write-once; purge has no default
+## ~~R4 debt: syncprovCheckpoint and accesslogPurge are silently write-once; purge has no default~~ — DONE (2026-09-13)
 
-Both are written only into the overlay-creation addReq and ignore later spec
-edits — the exact anti-pattern ADR-024 R4 forbids (found while writing
-docs/TUNING.md; BACKLOG previously recorded only the checkpoint half). Converge
-them like the sessionlog. Separately: `accesslogPurge` unset means NO purge —
-the journal grows unbounded toward its 8Gi map ceiling and then stops taking
-writes, which halts delta replication. Per ADR-024 R5 slaptain should probably
-have an opinion (a default purge window); decide the value with the maintainer
-before defaulting — it interacts with dormancy (ADR-008 amendment) and backup
-retention expectations.
+Both now converge on every reconcile through a shared pure planner
+(`planOverlayAttr`, generalising `planSessionlog`) plus a thin LDAP executor, on
+both the syncprov and the accesslog overlay. `accesslogPurge` gained the R5
+default `"7+00:00 1+00:00"` (7-day window, daily sweep) with `"none"` as the
+explicit opt-out sentinel, consistent with `keepalive`.
+
+Both attributes were put through the live-modifiability probe first — the
+precondition ADR-024's amendments made mandatory for this class — and both
+**passed**: replace and delete, each instantaneous, the pod still serving and
+still accepting data writes afterwards, zero restarts. So no R2/R3 downgrade was
+needed and ADR-024 needed no further amendment; the probe confirmed the class
+rather than refuting it.
