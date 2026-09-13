@@ -374,3 +374,77 @@ func TestAccesslogACL(t *testing.T) {
 		t.Errorf("ACL names the log suffix instead of the data suffix: %s", got)
 	}
 }
+
+// A syncrepl stanza that carries no timeouts notices a half-open provider only
+// when TCP gives up, which on Linux defaults to a quarter of an hour of a
+// consumer silently not consuming (production-config review, finding 11).
+//
+// The keepalive triple is asserted at its source — desiredKeepalive, in
+// scale_tunables_test.go — because the builder takes it as a parameter; what is
+// asserted here is that every stanza the builder emits, of every kind, carries
+// the timeouts and passes a keepalive through.
+func TestBuildDatabaseSyncRepl_StanzaTimeouts(t *testing.T) {
+	const (
+		clusterName   = "slapd"
+		headlessSvc   = "slapd-headless"
+		namespace     = "ns"
+		clusterDomain = "cluster.local"
+		suffix        = "dc=ex,dc=com"
+		dbName        = "primary"
+		replicas      = int32(3)
+		replPW        = "pw"
+		ridBase       = int32(100)
+		retry         = "10 +"
+	)
+	keepalive := defaultKeepalive
+
+	sd := &ldapv1alpha1.SlapdDatabase{}
+	sd.Name = dbName
+	external := []resolvedExternalPeer{{
+		Name:            "site-b",
+		URIs:            []string{"ldaps://10.9.9.9:1025"},
+		ReplicasPerPeer: 1,
+		BindDN:          "cn=replication," + suffix,
+		Password:        "epw",
+	}}
+
+	groups := map[string][]string{
+		"RW (in-cluster + external)": buildDatabaseSyncRepl(
+			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
+			replicas, 0, replPW,
+			true, ridBase, retry, keepalive, true,
+			ldapv1alpha1.ExternalLogBase(sd),
+			external, nil, false,
+		),
+		"read-only replica": buildDatabaseSyncReplRO(
+			clusterName, headlessSvc, namespace, clusterDomain, suffix, dbName,
+			replicas, replPW,
+			true, ridBase, retry, keepalive, true,
+			nil,
+		),
+	}
+
+	for what, stanzas := range groups {
+		if len(stanzas) == 0 {
+			t.Fatalf("%s: no stanzas emitted", what)
+		}
+		for _, s := range stanzas {
+			for _, want := range []string{
+				"network-timeout=10",
+				"timeout=300",
+				"keepalive=" + defaultKeepalive,
+			} {
+				if !strings.Contains(s, want) {
+					t.Errorf("%s stanza missing %q:\n  %s", what, want, s)
+				}
+			}
+			// timelimit= maps to LDAP_OPT_TIMELIMIT, a server-side search time
+			// limit that would abort a refreshAndPersist connection. It must
+			// never appear, however tempting the name looks next to timeout=.
+			if strings.Contains(s, "timelimit=") {
+				t.Errorf("%s stanza carries timelimit=, which would kill the "+
+					"persistent search:\n  %s", what, s)
+			}
+		}
+	}
+}

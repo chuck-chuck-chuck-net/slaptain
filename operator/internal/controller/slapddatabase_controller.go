@@ -122,6 +122,18 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
+	// 4a. Refuse a durability posture that loses writes without saying so:
+	// noSync with the checkpoint explicitly disabled. ADR-024 R4 in its
+	// "rejected" form — the alternative is writing it and letting the operator
+	// discover the trade during an incident. Checked before anything touches a
+	// pod, so the CR reports Error without a half-applied configuration.
+	if err := validateDurability(sd, sc); err != nil {
+		log.Info("rejecting durability configuration", "err", err)
+		r.setStatus(ctx, sd, ldapv1alpha1.DatabasePhaseError, nil, nil,
+			"UnsafeDurability", err.Error())
+		return ctrl.Result{}, nil
+	}
+
 	// 5. Reconcile credentials secret.
 	if err := r.reconcileCredentials(ctx, sd, sc); err != nil {
 		r.setStatus(ctx, sd, ldapv1alpha1.DatabasePhaseError, nil, nil,
@@ -527,6 +539,21 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		return fmt.Errorf("ensure limits at %s: %w", host, err)
 	}
 
+	// Durability and read-transaction tunables (ADR-024 R1): fsync mode,
+	// checkpoint interval, read-txn bound, per-database monitor counters. noSync
+	// used to be create-only — flipping it on a live database was a silent
+	// no-op, the R4 violation this converges away.
+	if err := r.ensureBackendTunables(ctx, conn, host, dataDN, sd, sc, ""); err != nil {
+		return fmt.Errorf("ensure backend tunables at %s: %w", host, err)
+	}
+
+	// LMDB environment flags (ADR-024 R2/R4): create-only, so a divergence is
+	// reported through TunablesConverged rather than written. Writing it is not
+	// an option — adding writemap to a live database segfaults slapd.
+	if err := r.checkEnvFlags(ctx, conn, host, dataDN, sd); err != nil {
+		return err
+	}
+
 	// Manage the data DB's replication infrastructure. Two independent gates:
 	//
 	//   wantsSyncProv  — this cluster acts as a syncrepl provider. True in
@@ -634,7 +661,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 			}
 		}
 		if wantsAccesslog {
-			if err := r.ensureAccesslogDB(ctx, conn, host, sd); err != nil {
+			if err := r.ensureAccesslogDB(ctx, conn, host, sd, sc); err != nil {
 				return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
 			}
 			// ADR-019 R8: converge a cluster that still carries the legacy
@@ -766,6 +793,17 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 
 	if desiredNoSync(sd, sc) {
 		addReq.Attribute("olcDbNoSync", []string{"TRUE"})
+	}
+	if v, write := desiredCheckpoint(sd); write {
+		addReq.Attribute("olcDbCheckpoint", []string{v})
+	}
+	addReq.Attribute("olcDbRtxnSize", []string{strconv.FormatInt(int64(desiredRtxnSize(sd)), 10)})
+
+	// LMDB environment flags are the one tunable here that MUST be set at
+	// creation: adding "writemap" to olcDbEnvFlags on a live database segfaults
+	// slapd (see desiredEnvFlags). Written once, compared forever.
+	if flags := desiredEnvFlags(sd); len(flags) > 0 {
+		addReq.Attribute("olcDbEnvFlags", flags)
 	}
 
 	// Search limits: slaptain's defaults, not slapd's 500-entry / 3600-second
@@ -1373,6 +1411,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	conn *ldap.Conn,
 	host string,
 	sd *ldapv1alpha1.SlapdDatabase,
+	sc *ldapv1alpha1.SlapdCluster,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -1413,6 +1452,14 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		// And the replication identity must be able to read all of it — the
 		// ACL says who, this says how much (ADR-020 amendment).
 		addReq.Attribute("olcLimits", []string{replicationLimits(sd.Spec.Suffix)})
+		// The journal inherits the cluster's durability posture — it is written
+		// on the same hot path as the data it journals, so an fsync per record
+		// on one and not the other buys nothing — on its own, longer checkpoint
+		// interval (defaultAccesslogCheckpoint).
+		if desiredNoSync(sd, sc) {
+			addReq.Attribute("olcDbNoSync", []string{"TRUE"})
+		}
+		addReq.Attribute("olcDbCheckpoint", []string{defaultAccesslogCheckpoint})
 		if err := conn.Add(addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add accesslog DB %s: %w", logSuffix, err)
@@ -1456,6 +1503,14 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	if err := r.ensureLimits(ctx, conn, host, dbDN,
 		[]string{replicationLimits(sd.Spec.Suffix)}); err != nil {
 		return fmt.Errorf("ensure accesslog limits at %s: %w", host, err)
+	}
+
+	// Durability on the journal, on its own longer checkpoint interval. Same
+	// convergence as the data database; the journal has no envFlags surface
+	// because it has no CRD field to diverge from.
+	if err := r.ensureBackendTunables(ctx, conn, host, dbDN, sd, sc,
+		defaultAccesslogCheckpoint); err != nil {
+		return fmt.Errorf("ensure accesslog tunables at %s: %w", host, err)
 	}
 
 	// Read this log DB's children once, and use them for two things: reaping
@@ -2329,7 +2384,11 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	if retryInterval == "" {
 		retryInterval = "10 +"
 	}
-	keepalive := sc.Spec.Replication.Keepalive
+	// Keepalive gets an operator default rather than staying empty (ADR-024 R5,
+	// finding 11): a refreshAndPersist connection is idle by design between
+	// writes, and an idle flow silently dropped by a firewall leaves a consumer
+	// that has stopped consuming while still reporting itself Synced.
+	keepalive := desiredKeepalive(sc)
 
 	useDeltaSync := sd.DeltaSyncEnabled()
 
@@ -2532,10 +2591,10 @@ func buildDatabaseSyncRepl(
 			" bindmethod=simple"+
 			" binddn=\"cn=replication,%s\""+
 			" credentials=%s"+
-			"%s%s%s"+
+			"%s%s%s%s"+
 			" retry=\"%s\"",
 			rid, providerURI, suffix, suffix, replPassword,
-			deltaSyncOpts, peerTLSOpt, keepaliveOpt, retryInterval)
+			deltaSyncOpts, peerTLSOpt, keepaliveOpt, syncreplTimeoutOpts, retryInterval)
 		stanzas = append(stanzas, stanza)
 	}
 
@@ -2590,10 +2649,10 @@ func buildDatabaseSyncRepl(
 				" bindmethod=simple"+
 				" binddn=\"%s\""+
 				" credentials=%s"+
-				"%s%s%s"+
+				"%s%s%s%s"+
 				" retry=\"%s\"",
 				rid, uri, suffix, ep.BindDN, ep.Password,
-				epDeltaOpts, epTLSOpt, keepaliveOpt, retryInterval)
+				epDeltaOpts, epTLSOpt, keepaliveOpt, syncreplTimeoutOpts, retryInterval)
 			stanzas = append(stanzas, stanza)
 		}
 	}
@@ -2661,10 +2720,10 @@ func buildDatabaseSyncReplRO(
 			" bindmethod=simple"+
 			" binddn=\"cn=replication,%s\""+
 			" credentials=%s"+
-			"%s%s%s"+
+			"%s%s%s%s"+
 			" retry=\"%s\"",
 			rid, providerURI, suffix, suffix, replPassword,
-			deltaSyncOpts, peerTLSOpt, keepaliveOpt, retryInterval)
+			deltaSyncOpts, peerTLSOpt, keepaliveOpt, syncreplTimeoutOpts, retryInterval)
 		stanzas = append(stanzas, stanza)
 	}
 

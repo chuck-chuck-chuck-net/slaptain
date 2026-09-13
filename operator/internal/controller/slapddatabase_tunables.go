@@ -493,6 +493,152 @@ func (r *SlapdDatabaseReconciler) checkMaxSize(
 	return nil
 }
 
+// ensureBackendTunables converges the back-mdb tunables a running slapd will
+// accept: the fsync mode, the checkpoint interval, the read-transaction bound
+// and — when the cluster runs the monitor backend — this database's operation
+// counters.
+//
+// All four were verified modifiable against a live OpenLDAP 2.7.1 database
+// before being classified R1; olcDbEnvFlags was verified the same way and
+// failed, which is why it is handled by checkEnvFlags instead.
+//
+// noSync is the one that closes an existing ADR-024 R4 hole: the field shipped
+// create-only, so flipping it on a live SlapdDatabase used to be a silent no-op.
+//
+// checkpointDefault lets the caller pass the accesslog database's longer
+// interval; pass "" to use whatever desiredCheckpoint resolves for the data
+// database.
+func (r *SlapdDatabaseReconciler) ensureBackendTunables(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dbDN string,
+	sd *ldapv1alpha1.SlapdDatabase,
+	sc *ldapv1alpha1.SlapdCluster,
+	checkpointOverride string,
+) error {
+	log := logf.FromContext(ctx)
+
+	noSync := "FALSE"
+	if desiredNoSync(sd, sc) {
+		noSync = "TRUE"
+	}
+
+	checkpoint, writeCheckpoint := desiredCheckpoint(sd)
+	if checkpointOverride != "" {
+		checkpoint, writeCheckpoint = checkpointOverride, true
+	}
+
+	monitoring := "FALSE"
+	if monitoringEnabled(sc) {
+		monitoring = "TRUE"
+	}
+
+	// Each attribute is read and compared before it is written. The read is the
+	// point: an unconditional Replace would rewrite cn=config on every reconcile
+	// of every pod, and every one of those writes is a cn=config modification
+	// slapd logs and journals.
+	type want struct {
+		attr  string
+		value string
+		write bool
+	}
+	for _, w := range []want{
+		{"olcDbNoSync", noSync, true},
+		{"olcDbCheckpoint", checkpoint, writeCheckpoint},
+		{"olcDbRtxnSize", strconv.FormatInt(int64(desiredRtxnSize(sd)), 10), true},
+		{"olcMonitoring", monitoring, true},
+	} {
+		current, err := readConfigAttr(conn, dbDN, w.attr)
+		if err != nil {
+			return err
+		}
+		if !w.write {
+			// Nothing desired. Only delete when something is actually stored —
+			// a delete of an absent attribute is an error.
+			if len(current) == 0 {
+				continue
+			}
+			log.Info("removing tunable", "host", host, "dn", dbDN, "attr", w.attr)
+			modReq := ldap.NewModifyRequest(dbDN, nil)
+			modReq.Delete(w.attr, nil)
+			if err := conn.Modify(modReq); err != nil {
+				return fmt.Errorf("delete %s on %s: %w", w.attr, dbDN, err)
+			}
+			continue
+		}
+		if len(current) == 1 && strings.EqualFold(strings.TrimSpace(current[0]), w.value) {
+			continue
+		}
+		log.Info("aligning tunable", "host", host, "dn", dbDN, "attr", w.attr,
+			"from", current, "to", w.value)
+		modReq := ldap.NewModifyRequest(dbDN, nil)
+		modReq.Replace(w.attr, []string{w.value})
+		if err := conn.Modify(modReq); err != nil {
+			return fmt.Errorf("set %s on %s: %w", w.attr, dbDN, err)
+		}
+	}
+	return nil
+}
+
+// checkEnvFlags reports — and never fixes — a divergence between spec.envFlags
+// and what a live database carries. The twin of checkMaxSize, for the same
+// reason: writing it can kill the process.
+//
+// The evidence is a captured crash rather than a manual's claim. On t3e, an
+// ldapmodify replacing olcDbEnvFlags with "writemap nometasync" on a running
+// 2.7.1 database produced `ldap_result: Can't contact LDAP server (-1)` on the
+// client and exit code 139 on the pod, with the MOD as the last thing logged.
+// MDB_WRITEMAP is an mdb_env_open flag; LMDB has no path to add it to an open
+// environment, and back-mdb's config handler does not refuse the attempt.
+//
+// Like checkMaxSize this reports rather than errors: the database is otherwise
+// healthy and failing its reconcile would wedge replication over a condition no
+// reconcile can clear.
+func (r *SlapdDatabaseReconciler) checkEnvFlags(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dbDN string,
+	sd *ldapv1alpha1.SlapdDatabase,
+) error {
+	log := logf.FromContext(ctx)
+
+	desired := desiredEnvFlags(sd)
+	current, err := readConfigAttr(conn, dbDN, "olcDbEnvFlags")
+	if err != nil {
+		return err
+	}
+	if envFlagsMatch(current, desired) {
+		return nil
+	}
+
+	shown := "none"
+	if len(current) > 0 {
+		shown = strings.Join(current, ",")
+	}
+	wanted := "none"
+	if len(desired) > 0 {
+		wanted = strings.Join(desired, ",")
+	}
+	msg := fmt.Sprintf(
+		"the data database on %s has olcDbEnvFlags %s; spec.envFlags asks for %s. "+
+			"LMDB environment flags are fixed once the database exists — adding "+
+			"writemap to a running back-mdb database segfaults slapd, so the "+
+			"operator will not write them. Recreate the database (back up, delete, "+
+			"restore into a fresh one) to apply them.", host, shown, wanted)
+
+	log.Info("olcDbEnvFlags diverges from spec and cannot be applied to a live database",
+		"host", host, "dn", dbDN, "current", shown, "desired", wanted)
+	setCondition(&sd.Status.Conditions, metav1.Condition{
+		Type:               tunablesConvergedCondition,
+		Status:             metav1.ConditionFalse,
+		Reason:             "RecreateRequired",
+		Message:            msg,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: sd.Generation,
+	})
+	return nil
+}
+
 // ensureDataBaselineIndices adds whatever planDataBaselineIndices finds missing
 // on a data DB. Converged on every reconcile, independent of spec.indices:
 // entryCSN and entryUUID implement replication, so they must not depend on the
