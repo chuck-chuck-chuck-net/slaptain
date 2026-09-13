@@ -73,12 +73,12 @@ const (
 
 func TestRouteCovers(t *testing.T) {
 	cases := []struct {
-		name       string
-		routes     string
-		ip         string
-		want       bool
-		wantVia    string // expected covering dst ("" when want=false)
-		wantErr    bool
+		name    string
+		routes  string
+		ip      string
+		want    bool
+		wantVia string // expected covering dst ("" when want=false)
+		wantErr bool
 	}{
 		{name: "default route only", routes: fibDefaultOnly, ip: "10.233.192.53", want: false},
 		{name: "specific static route covers", routes: fibRoutedLab, ip: "10.233.192.53", want: true, wantVia: "10.233.192.0/24"},

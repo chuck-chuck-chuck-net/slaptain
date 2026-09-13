@@ -192,7 +192,6 @@ type SlapdTuningConfig struct {
 	NoSync *bool `json:"noSync,omitempty"`
 }
 
-
 // CnConfigCredentials references the Secret containing the cn=config admin password.
 type CnConfigCredentials struct {
 	// secretName references an existing Secret containing a "root-password" key
