@@ -230,11 +230,26 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//    recovery from peers — no operator action needed. For total data loss
 	//    (single-pod or all peers lost), the right answer is restore-from-backup
 	//    or explicit CR-and-PVC delete, not silent re-seed. See ADR-012.
+	//    ADR-025 belt (withhold-create only): when pod-0's suffix entry was
+	//    already created by ANOTHER cluster in the mesh (a foreign serverID —
+	//    the founder site's seed arrived via replication first), the local seed
+	//    is withheld wholesale and SeedApplied latches: seeding the same DNs
+	//    with fresh entryUUIDs is the multi-site seed race that manufactures a
+	//    permanent glue suffix. This is the OPPOSITE direction of the reverted
+	//    verifySeedExists (which re-created on absence): we only ever DECLINE
+	//    to create on positive evidence of a foreign creator, never re-apply.
 	if sd.Spec.Seed != nil && len(sd.Spec.Seed.Entries) > 0 && !sd.Status.SeedApplied {
-		if err := r.applySeedData(ctx, sc, sd, rootPW); err != nil {
+		withheld, err := r.applySeedData(ctx, sc, sd, rootPW)
+		switch {
+		case err != nil:
 			log.Info("seed data not yet applied (will retry)", "err", err)
 			pendingWork = true
-		} else {
+		case withheld:
+			log.Info("seed withheld: suffix entry already created by a foreign serverID "+
+				"(founder site's seed replicated in first — ADR-025); latching SeedApplied",
+				"suffix", sd.Spec.Suffix)
+			sd.Status.SeedApplied = true
+		default:
 			sd.Status.SeedApplied = true
 		}
 	}
@@ -2063,12 +2078,20 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 // returns error and Status.SeedApplied stays false; the next reconcile retries.
 // Only on a complete, verified run does the caller flip SeedApplied=true. Seed
 // is one-shot per cluster lifetime — the latch never reverts.
+//
+// withheld=true (ADR-025): pod-0's suffix entry already exists and carries a
+// FOREIGN serverID in its entryCSN — another mesh member (the founder site)
+// created this DIT and replication delivered it. No entry is written; the
+// caller latches SeedApplied. Positive evidence only: an absent suffix, an
+// unreadable entryCSN, or a local-sid creator all proceed with the normal
+// idempotent per-entry loop (the local-sid case is our own earlier partial
+// run, which per-entry idempotence already handles).
 func (r *SlapdDatabaseReconciler) applySeedData(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	rootPW string,
-) error {
+) (withheld bool, err error) {
 	log := logf.FromContext(ctx)
 
 	headlessSvc := sc.Name + "-headless"
@@ -2085,19 +2108,28 @@ func (r *SlapdDatabaseReconciler) applySeedData(
 		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
 	)
 	if err != nil {
-		return fmt.Errorf("dial pod-0 (%s): %w", addr, err)
+		return false, fmt.Errorf("dial pod-0 (%s): %w", addr, err)
 	}
 	defer conn.Close()
 	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind(rootDN, rootPW); err != nil {
-		return fmt.Errorf("bind %s on pod-0: %w", rootDN, err)
+		return false, fmt.Errorf("bind %s on pod-0: %w", rootDN, err)
+	}
+
+	// ADR-025 withhold probe: does the suffix already have a foreign creator?
+	// Best-effort — any failure to read positive evidence falls through to the
+	// normal seed path. (A GLUE suffix is invisible to this ordinary search;
+	// seeding then aborts loudly on the added-but-not-visible verification
+	// below, which is the deliberate failure direction: a human looks.)
+	if csn, found := suffixEntryCSN(conn, sd.Spec.Suffix); found && seedCreatorIsForeign(csn, sc) {
+		return true, nil
 	}
 
 	for i, entry := range sd.Spec.Seed.Entries {
 		dn, err := r.applySeedEntry(conn, entry)
 		if err != nil {
-			return fmt.Errorf("seed entry %d (%s): %w", i, dn, err)
+			return false, fmt.Errorf("seed entry %d (%s): %w", i, dn, err)
 		}
 		// Verify persistence: a successful Add doesn't guarantee the entry is
 		// readable (server-side rejection that returned success, ACL quirk,
@@ -2105,15 +2137,33 @@ func (r *SlapdDatabaseReconciler) applySeedData(
 		// connection catches all of these before we move on.
 		exists, err := ldapEntryExists(conn, dn)
 		if err != nil {
-			return fmt.Errorf("verify seed entry %d (%s): %w", i, dn, err)
+			return false, fmt.Errorf("verify seed entry %d (%s): %w", i, dn, err)
 		}
 		if !exists {
-			return fmt.Errorf("seed entry %d (%s) added but not visible — aborting", i, dn)
+			return false, fmt.Errorf("seed entry %d (%s) added but not visible — aborting", i, dn)
 		}
 	}
 
 	log.Info("seed data applied and verified", "host", host, "entries", len(sd.Spec.Seed.Entries))
-	return nil
+	return false, nil
+}
+
+// suffixEntryCSN base-searches the suffix entry and returns its entryCSN.
+// found=false when the entry is absent, hidden, or the attribute unreadable —
+// callers must treat that as "no evidence", never as a verdict.
+func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
+	res, err := conn.Search(ldap.NewSearchRequest(
+		suffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
+		"(objectClass=*)", []string{"entryCSN"}, nil,
+	))
+	if err != nil || len(res.Entries) == 0 {
+		return "", false
+	}
+	csn := res.Entries[0].GetEqualFoldAttributeValue("entryCSN")
+	if csn == "" {
+		return "", false
+	}
+	return csn, true
 }
 
 // evaluateDataPresent computes the DataPresent status condition: is the
