@@ -542,22 +542,23 @@ type observedMdb struct {
 
 func (m observedMdb) String() string { return fmt.Sprintf("%s[%s @ %s]", m.dn, m.suffix, m.dir) }
 
-// dialPodConfig connects to one pod and binds as the cn=config rootDN — the
+// tryDialPodConfig connects to one pod and binds as the cn=config rootDN — the
 // only identity that can read an accesslog DB's own configuration (and, per
 // ADR-020 R3, the log's contents; the *data* rootDN is a different database's
-// and is denied).
-func dialPodConfig(pod string) *ldap.Conn {
-	conn, err := tryDialPodConfig(pod)
-	Expect(err).NotTo(HaveOccurred(), "dial+bind cn=config on %s", pod)
-	return conn
-}
-
-// tryDialPodConfig is the non-fatal form. Use it inside an Eventually closure:
-// dialPodConfig's Expect calls abort the whole spec on the first transient
-// failure instead of letting the poll retry, which is how a momentary
-// `connection refused` on one pod's NodePort — a pod mid-restart, or a
-// reconfiguration dropping connections — turned into a hard failure of the
-// migration spec rather than one wasted poll.
+// and is denied). Errors are returned, never asserted; wrap the call in your
+// own retry (an Eventually returning the error) or use dialPodConfigEventually.
+//
+// There is deliberately no fatal one-shot form. A bare Expect failure inside an
+// Eventually closure does not feed the poll — gomega only retries on returned
+// errors or assertions against an injected `g Gomega`; a default-Gomega failure
+// panics straight through the envelope and aborts the spec (gomega
+// internal/async_assertion.go, recover path). That class — a fatal assertion
+// inside a retry closure defeats the retry — bit this suite twice: first when
+// the migration spec's direct dials died on a momentary `connection refused`
+// from a pod mid-restart, then on 2026-09-13 when the cfg* manufacture helpers'
+// embedded dials aborted the spec 22s into their 60s retry window on a
+// post-churn bind timeout. The fatal form is gone so the compiler enforces the
+// rule.
 func tryDialPodConfig(pod string) (*ldap.Conn, error) {
 	addr := podNodePortAddr(pod, "E2E_POD_NODEPORT_BASE")
 	if addr == "" {
