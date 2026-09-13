@@ -79,3 +79,33 @@ func TestBuildRestoreJobNoAccesslogWipeWhenStandalone(t *testing.T) {
 		t.Errorf("standalone restore script must not reference /accesslog:\n%s", script)
 	}
 }
+
+// A restore runs with the whole cluster scaled to zero, so its duration is
+// downtime; on a multi-GB LDIF the difference between slapadd's normal mode and
+// its bulk mode is tens of minutes versus hours (production-config review,
+// finding 12).
+//
+// The assertion is paired deliberately: -q is only sound against an empty
+// database, so the test pins BOTH that the flag is there AND that the wipe still
+// precedes the load. A future edit that reorders them, or drops the wipe,
+// turns a safe optimisation into a corrupting one.
+func TestBuildRestoreJobUsesBulkLoadAfterWiping(t *testing.T) {
+	script, sd := newRestoreJobFixture(restorePodTarget{
+		jobName: "j", dataPVC: "data-slapd-0", configPVC: "config-slapd-0",
+		accesslogPVC: "accesslog-slapd-0", loadData: true,
+	})
+
+	if !strings.Contains(script, "slapadd -q ") {
+		t.Errorf("restore must use slapadd bulk mode, got:\n%s", script)
+	}
+
+	wipeAt := strings.Index(script, "rm -f")
+	loadAt := strings.Index(script, "slapadd")
+	if wipeAt < 0 || loadAt < 0 || wipeAt > loadAt {
+		t.Errorf("the wipe must precede the bulk load — -q is only sound against "+
+			"an empty database (wipe at %d, load at %d):\n%s", wipeAt, loadAt, script)
+	}
+	if !strings.Contains(script, `rm -f "/data/$DATADIR/data.mdb"`) {
+		t.Errorf("the wipe must target this database's directory (%s):\n%s", sd.Name, script)
+	}
+}
