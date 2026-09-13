@@ -41,12 +41,6 @@ const (
 	// explicitly so it is visible in cn=config and cannot move underneath a
 	// running cluster when the base image's OpenLDAP changes.
 	defaultRtxnSize int32 = 10000
-	// defaultIdleTimeout / defaultWriteTimeout close connections slapd would
-	// otherwise hold forever (its own default for both is 0, never). The failure
-	// they prevent is descriptor exhaustion on a pod behind a stateful firewall
-	// that drops the connection without telling either end.
-	defaultIdleTimeout  int32 = 3600
-	defaultWriteTimeout int32 = 300
 	// defaultToolThreads is what slapadd uses for index building during a
 	// restore, which happens with the cluster scaled to zero. 2 overlaps index
 	// building with entry parsing without thrashing a small CPU limit.
@@ -220,20 +214,6 @@ func envFlagsMatch(current, desired []string) bool {
 }
 
 // ── Server-global tuning (finding 10) ───────────────────────────────────────
-
-func desiredIdleTimeout(sc *ldapv1alpha1.SlapdCluster) int32 {
-	if sc == nil || sc.Spec.Tuning.IdleTimeout == nil {
-		return defaultIdleTimeout
-	}
-	return *sc.Spec.Tuning.IdleTimeout
-}
-
-func desiredWriteTimeout(sc *ldapv1alpha1.SlapdCluster) int32 {
-	if sc == nil || sc.Spec.Tuning.WriteTimeout == nil {
-		return defaultWriteTimeout
-	}
-	return *sc.Spec.Tuning.WriteTimeout
-}
 
 func desiredToolThreads(sc *ldapv1alpha1.SlapdCluster) int32 {
 	if sc == nil || sc.Spec.Tuning.ToolThreads == nil {

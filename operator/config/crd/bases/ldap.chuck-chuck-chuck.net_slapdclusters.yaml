@@ -996,18 +996,6 @@ spec:
                   threads, the cluster-wide durability posture. Converged per pod; see
                   SlapdTuningConfig.
                 properties:
-                  idleTimeout:
-                    description: |-
-                      idleTimeout is how many seconds slapd keeps an idle client connection
-                      before closing it (olcIdleTimeout). Unset means the operator's default,
-                      3600 (ADR-024 R5). slapd's own default is 0 — never close — so a pod
-                      behind a stateful firewall, or one serving a client that wedges,
-                      accumulates connections whose peer is long gone until it exhausts its
-                      file-descriptor budget. Set 0 to ask for the never-close behaviour.
-                      Converged per pod.
-                    format: int32
-                    minimum: 0
-                    type: integer
                   noSync:
                     description: |-
                       noSync is the cluster-wide durability default every SlapdDatabase inherits
@@ -1035,16 +1023,6 @@ spec:
                       that same config directory, so this is where slapadd finds it.
                     format: int32
                     minimum: 1
-                    type: integer
-                  writeTimeout:
-                    description: |-
-                      writeTimeout is how many seconds slapd waits for a blocked write to a
-                      client before closing the connection (olcWriteTimeout). Unset means the
-                      operator's default, 300 (ADR-024 R5); slapd's own is 0, never. A client
-                      that stops reading mid-result otherwise pins a worker thread and its
-                      connection indefinitely. Set 0 for the never-close behaviour.
-                    format: int32
-                    minimum: 0
                     type: integer
                 type: object
             type: object

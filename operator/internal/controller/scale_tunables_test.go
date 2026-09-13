@@ -159,32 +159,12 @@ func TestEnvFlagsMatch(t *testing.T) {
 
 func TestGlobalTuningDefaults(t *testing.T) {
 	sc := clusterFor()
-	if got := desiredIdleTimeout(sc); got != defaultIdleTimeout {
-		t.Errorf("idleTimeout = %d, want %d", got, defaultIdleTimeout)
-	}
-	if got := desiredWriteTimeout(sc); got != defaultWriteTimeout {
-		t.Errorf("writeTimeout = %d, want %d", got, defaultWriteTimeout)
-	}
 	if got := desiredToolThreads(sc); got != defaultToolThreads {
 		t.Errorf("toolThreads = %d, want %d", got, defaultToolThreads)
 	}
-	// slapd's own values are "never close" — the whole point of the defaults is
-	// that they are NOT these.
-	if defaultIdleTimeout == 0 || defaultWriteTimeout == 0 {
-		t.Error("a timeout default of 0 is slapd's never-close behaviour, not an opinion")
-	}
-}
-
-func TestGlobalTuningExplicitZeroSurvives(t *testing.T) {
-	sc := clusterFor()
-	sc.Spec.Tuning.IdleTimeout = ptrI32(0)
-	sc.Spec.Tuning.WriteTimeout = ptrI32(0)
-	if got := desiredIdleTimeout(sc); got != 0 {
-		t.Errorf("explicit idleTimeout 0 = %d, want 0 — the way back to slapd's "+
-			"behaviour is asking for it (ADR-024 R5)", got)
-	}
-	if got := desiredWriteTimeout(sc); got != 0 {
-		t.Errorf("explicit writeTimeout 0 = %d, want 0", got)
+	sc.Spec.Tuning.ToolThreads = ptrI32(8)
+	if got := desiredToolThreads(sc); got != 8 {
+		t.Errorf("explicit toolThreads = %d, want 8", got)
 	}
 }
 

@@ -74,20 +74,12 @@ var _ = Describe("scale and operations tunables", Label("tunables"), Ordered, Co
 			By("inspecting cn=config on " + pod)
 			conn := dialPodConfigEventually(ctx, pod)
 
-			// Both timeouts default to "never" in slapd. A pod behind a
-			// stateful firewall then accumulates connections whose peer is gone
-			// until it runs out of descriptors — a failure with no warning and a
-			// long fuse (finding 10).
-			idle := singleConfigValue(conn, "cn=config", "olcIdleTimeout")
-			Expect(idle).NotTo(Equal("0"),
-				"pod %s: olcIdleTimeout is 0 — slapd's never-close default. A dead "+
-					"client's connection is then held until the process restarts", pod)
-			Expect(atoi(idle)).To(BeNumerically(">", 0))
-
-			write := singleConfigValue(conn, "cn=config", "olcWriteTimeout")
-			Expect(write).NotTo(Equal("0"),
-				"pod %s: olcWriteTimeout is 0 — a client that stops reading "+
-					"mid-result pins a worker thread indefinitely", pod)
+			// NOT asserted: olcIdleTimeout and olcWriteTimeout. The
+			// production-config review wanted both converged; writing either on
+			// a running slapd 2.7.1 hangs the process (see
+			// ensureGlobalTunables for the captured evidence), so the operator
+			// does not write them and there is nothing here to guard. They stay
+			// in docs/BACKLOG.md as a bootstrap-time item.
 
 			// slapadd reads this during a restore, with the cluster at zero
 			// replicas for the whole window (finding 12).

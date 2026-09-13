@@ -130,13 +130,42 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 
 	cipher, writeCipher := desiredTLSCipherSuite(sc)
 
+	// NOT here, deliberately: olcIdleTimeout and olcWriteTimeout.
+	//
+	// The production-config review proposed both as converged cluster tunables
+	// and this function shipped them that way for exactly one deployment. On
+	// t3e they took down the entire cluster twice: an ldapmodify of either
+	// attribute against a running slapd 2.7.1 HANGS the process — not a crash, a
+	// hang. The modify's CSN is queued and the operation never returns:
+	//
+	//	conn=1050 op=2 MOD dn="cn=config"
+	//	conn=1050 op=2 MOD attr=olcIdleTimeout
+	//	slap_get_csn: conn=1050 op=2 generated new csn=…
+	//	slap_queue_csn: queueing …
+	//	<nothing, ever>
+	//
+	// From then on the pod answers nothing at all — not even an anonymous
+	// rootDSE — and a SIGTERM sticks in "slapd shutdown: waiting for 2
+	// operations/tasks to finish". Observed on three of four pods in one
+	// deployment and on all three RW pods in another; recovered only by
+	// restarting every pod. The mechanism is the daemon thread: writing a
+	// non-zero global_idletimeout arms connections_timeout_idle, which walks the
+	// connection table (connections_mutex, then each connection's own mutex)
+	// from the daemon loop while the modify that armed it is still executing
+	// inside one of those connections.
+	//
+	// Both values are FINE when they come from the boot config — slapd-0 ran for
+	// twenty minutes with olcIdleTimeout 3600 and olcWriteTimeout 300 loaded at
+	// startup and served normally throughout. So the finding is real and the
+	// placement is wrong: these are ADR-024 R2, bootstrap-time, not R1. They are
+	// recorded in docs/BACKLOG.md with this evidence rather than shipped as an
+	// API field that does nothing (ADR-024 R4 — a field that cannot be honoured
+	// is not offered).
 	wants := []struct {
 		attr  string
 		value string
 		write bool
 	}{
-		{"olcIdleTimeout", strconv.FormatInt(int64(desiredIdleTimeout(sc)), 10), true},
-		{"olcWriteTimeout", strconv.FormatInt(int64(desiredWriteTimeout(sc)), 10), true},
 		{"olcToolThreads", strconv.FormatInt(int64(desiredToolThreads(sc)), 10), true},
 		{"olcTLSProtocolMin", desiredTLSProtocolMin(sc), true},
 		{"olcPasswordHash", desiredPasswordHash(sc), true},

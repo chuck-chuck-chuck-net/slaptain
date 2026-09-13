@@ -147,32 +147,24 @@ type SlapdTLSConfig struct {
 // converged per pod on every reconcile — verified live on OpenLDAP 2.7.1, each
 // one takes an ldapmodify against a running slapd without incident.
 //
-// The thread and buffer knobs the production-config review also listed
-// (olcThreads, olcListenerThreads, olcConcurrency, olcSockbufMaxIncoming,
-// olcSockbufMaxIncomingAuth, olcConnMaxPending) are deliberately NOT here:
+// The two connection lifetimes the production-config review put at the head of
+// this family — olcIdleTimeout and olcWriteTimeout — are deliberately ABSENT.
+// They are a real gap (slapd's default for both is "never close", so a pod
+// behind a stateful firewall accumulates dead connections until it runs out of
+// descriptors) but they cannot be converged: an ldapmodify of either against a
+// running slapd 2.7.1 HANGS the process outright. See ensureGlobalTunables for
+// the captured evidence, and docs/BACKLOG.md for the bootstrap-time (ADR-024
+// R2) path that remains open to them. Offering a field the operator cannot
+// honour is what ADR-024 R4 forbids.
+//
+// The thread and buffer knobs the review also listed (olcThreads,
+// olcListenerThreads, olcConcurrency, olcSockbufMaxIncoming,
+// olcSockbufMaxIncomingAuth, olcConnMaxPending) are NOT here either:
 // upstream's defaults are defensible, the reference production platform leaves
 // them alone too, and a thread count we cannot measure is a knob we would be
 // guessing at. They stay recorded in docs/BACKLOG.md as escape hatches to add
 // when a measurement asks for one.
 type SlapdTuningConfig struct {
-	// idleTimeout is how many seconds slapd keeps an idle client connection
-	// before closing it (olcIdleTimeout). Unset means the operator's default,
-	// 3600 (ADR-024 R5). slapd's own default is 0 — never close — so a pod
-	// behind a stateful firewall, or one serving a client that wedges,
-	// accumulates connections whose peer is long gone until it exhausts its
-	// file-descriptor budget. Set 0 to ask for the never-close behaviour.
-	// Converged per pod.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	IdleTimeout *int32 `json:"idleTimeout,omitempty"`
-	// writeTimeout is how many seconds slapd waits for a blocked write to a
-	// client before closing the connection (olcWriteTimeout). Unset means the
-	// operator's default, 300 (ADR-024 R5); slapd's own is 0, never. A client
-	// that stops reading mid-result otherwise pins a worker thread and its
-	// connection indefinitely. Set 0 for the never-close behaviour.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	WriteTimeout *int32 `json:"writeTimeout,omitempty"`
 	// toolThreads is how many threads slapd's offline tools use for indexing
 	// (olcToolThreads). It is read by slapadd, which is how a SlapdRestore or a
 	// bootstrapFrom restore loads its LDIF — with the cluster scaled to zero for
