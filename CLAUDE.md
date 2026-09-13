@@ -144,6 +144,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── restore_replay_test.go  # in-place restore under replication: marker written to the backup's SOURCE pod, asserted present in the artifact + source-honesty status; stale accesslog delete must not replay (gated: E2E_BACKUP=1)
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
         ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
+        ├── tunables_test.go         # ADR-024 degrades/hygiene tunables: cn=config posture per pod (ungated)
+        ├── scale_test.go            # many-entries fixture: 1200-entry seed + churn (gated: E2E_SCALE=1; knobs E2E_SCALE_ENTRIES/E2E_SCALE_CHURN)
         ├── accesslog_migration_test.go # ADR-019 R8 convergence off a hand-made legacy shared log (gated: E2E_ACCESSLOG_MIGRATION=1)
         └── scaleup_test.go         # standalone → HA transition: schema/modules/serverID runtime convergence (gated: E2E_SCALEUP=1)
 ```
@@ -205,12 +207,15 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `spec.ldap.tls.{enabled,secretName}` | `SlapdTLSConfig` | TLS Secret must contain `tls.crt` and `tls.key`; `ca.crt` optional (public-CA certs skip it and use OpenSSL system trust) |
 | `spec.replicas` | int32 | Default 1; replication is only active when `replicas > 1` AND `replication.enabled=true` |
 | `spec.readReplicas` | int32 | Default 0; number of read-only consumer replicas. Requires `replication.enabled=true`. Creates a second StatefulSet `<name>-readonly` |
-| `spec.logLevel` | int32 | slapd `-d` flag, default 0 |
+| `spec.logLevel` | *int32 | slapd `-d` flag; default **16640** (stats+sync, ADR-024); explicit `0` = silence |
 | `spec.persistence.{config,data,accesslog}` | `SlapdPersistenceConfig` | PVC sizes / storage class / access mode (per ADR-013, persistence is mandatory; the `enabled` field was removed) |
 | `spec.service.{type,ldapPort,ldapsPort}` | `SlapdServiceConfig` | ClusterIP service config, defaults 389/636 |
 | `spec.resources` | `corev1.ResourceRequirements` | Container resource requests/limits |
 | `spec.securityContext` | `*corev1.PodSecurityContext` | Defaults to runAsUser/runAsGroup/fsGroup=1024 |
 | `spec.replication.{enabled,externalPeers}` | `SlapdReplicationConfig` | N-way multi-master delta-syncrepl; active when `enabled=true` and `replicas > 1` |
+| `spec.tuning.{toolThreads,noSync}` | — | Cluster-level tuning: slapadd/slapindex tool threads; durability default inherited by DBs (ADR-024) |
+| `spec.ldap.passwordHash` | string | Default `{SSHA}`, converged (ADR-024) |
+| `spec.ldap.tls.{protocolMin,cipherSuite}` | — | TLS floor default `3.3`; cipher policy opt-in, deliberately undefaulted (ADR-024) |
 | `spec.backend.idlExponent` | `*int32` | back-mdb IDL exponent — **bootstrap-time** (ADR-024 R2): applied by the init container before any DB exists; no operator default (a later default change would split a cluster); change path is the documented recreate |
 | `spec.replication.network.mode` | string | Cross-cluster transport: `pod-routed` (default; primary pod IPs on a natively cross-site-routed pod network, no NAD/operator-NIC, ADR-016) or `multus` (net1 IPs, ADR-007). When unset, defaults to pod-routed unless `multusNetwork` is set (then multus) |
 | `spec.replication.network.multusNetwork` | string | NAD reference for dedicated replication network (e.g. `infra/replication-net`). Required for `mode: multus`; omit for `pod-routed`. See ADR-007 |
@@ -223,7 +228,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 | `externalPeers[].discovery.clusterName` | string | Remote SlapdCluster name (default: local name) |
 | `externalPeers[].replicasPerPeer` | `*int32` | Cross-site fan-out (default 1). Local pod `i`, connection `k` → remote pod `(i+k) % N`. Capped at address count. Ignored in `uri` mode |
 
-Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs.
+Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs. Per-DB tunables (`maxSize` — recreate-only, slapd segfaults on live modify; `sizeLimit`/`timeLimit`/`limits` default unlimited; checkpoint, `noSync`, `envFlags`, `accesslogPurge` default `7+00:00 1+00:00` with `"none"` opt-out, `syncprovCheckpoint`) follow ADR-024's placement classes — see `docs/TUNING.md`.
 
 **Status fields:** `phase` (Bootstrapping/Running/Degraded/Error/**Restoring**), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `replicationNetworkIPs` (discovered Multus IPs per pod), `externalPeerStatuses` (per-peer: `replicationState` Synced/Lagging/Unreachable, `lagSeconds`, `lastChecked`, `discoveredAddresses`), `restore` (in-progress bootstrapFrom restore: sub-`phase`, `originalReplicas`, `databases` — ADR-014), `conditions` (including `ReplicationConverged` for local CSN convergence).
 
