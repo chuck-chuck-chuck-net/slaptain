@@ -552,3 +552,17 @@ re-entered below with their evidence.
 per-database accesslog separation as missing. They are not: ADR-019, ADR-022 and
 the syncprov overlay code cover all of them. Do not re-raise them from that
 document.
+
+---
+
+## R4 debt: syncprovCheckpoint and accesslogPurge are silently write-once; purge has no default
+
+Both are written only into the overlay-creation addReq and ignore later spec
+edits — the exact anti-pattern ADR-024 R4 forbids (found while writing
+docs/TUNING.md; BACKLOG previously recorded only the checkpoint half). Converge
+them like the sessionlog. Separately: `accesslogPurge` unset means NO purge —
+the journal grows unbounded toward its 8Gi map ceiling and then stops taking
+writes, which halts delta replication. Per ADR-024 R5 slaptain should probably
+have an opinion (a default purge window); decide the value with the maintainer
+before defaulting — it interacts with dormancy (ADR-008 amendment) and backup
+retention expectations.

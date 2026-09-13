@@ -126,6 +126,12 @@ kubectl get pvc -n <namespace>
 Keep this. It is your rollback target: re-pinning `<tag>-ol26` and restoring the
 same backup puts you back where you started.
 
+This migration wipes the config and data volumes and reloads from a backup, so it
+is also the one window in which you can change the tunables that are fixed once a
+database or a `/config` volume exists — the map size, the LMDB environment flags
+and the back-mdb IDL exponent. If any of them is wrong for your directory, set it
+now rather than paying for a second wipe. See [Tuning & Sizing](TUNING.md).
+
 ### 3. Pin the 2.7 images
 
 ```bash
