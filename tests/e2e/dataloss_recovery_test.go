@@ -241,9 +241,9 @@ var _ = Describe("data loss recovery via replication",
 			var sc ldapv1alpha1.SlapdCluster
 			Expect(crdClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "slapd"}, &sc)).
 				To(Succeed())
-			if sc.Spec.LogLevel&256 == 0 {
+			if effectiveLogLevel(&sc)&256 == 0 {
 				Skip(fmt.Sprintf("cluster logLevel=%d has no stats bit (256): slapd never logs "+
-					"operation results, so %q cannot be observed", sc.Spec.LogLevel, needle))
+					"operation results, so %q cannot be observed", effectiveLogLevel(&sc), needle))
 			}
 
 			pods := rwPodNames(ctx, "slapd")
