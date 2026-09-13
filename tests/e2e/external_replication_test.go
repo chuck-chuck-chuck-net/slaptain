@@ -483,3 +483,160 @@ func dumpReplDiagnostics(addr, adminPassword, configPassword string) string {
 
 	return b.String()
 }
+
+// ── Every replicated database converges cross-site ────────────────────────────
+//
+// The primary-database specs above cannot see a second database's breakage,
+// and nothing else can either: per ADR-008 an idle broken link reads Synced
+// (lag is only observable while writes flow), and the peer CSN check computes
+// its verdict from whichever database's query succeeds — a failing database is
+// silently skipped. That combination let example-db2's cross-site replication
+// stay broken from the day the fixture gained a second database (2026-08-25)
+// until 2026-09-13: the cluster-level ExternalPeer.bindDN bound every
+// database's external stanzas as the FIRST database's replication identity,
+// which ADR-020's accesslog ACL rightly denies on the second database's log
+// (err=32 on the logbase search → the consumer halts and retries forever),
+// and the second database's credentials Secret was never pre-created shared,
+// so each site minted its own password for an entry that lives INSIDE the
+// replicated DIT. See docs/reconcile-loop-fixes.md 2026-09-13.
+//
+// Red observed 2026-09-13 against the pre-fix lab (three-site mesh): a db1
+// control marker replicated siteA→siteB within 90 s while the db2 marker never
+// arrived (rid=251/252 looping `SYNC RESULT err=32 … rc -101 retrying`), and a
+// remote bind as db2's replication identity failed with err=49.
+//
+// The primary database stays in the iteration deliberately: it is the built-in
+// positive control. If it goes red too, the failure is not database-specific.
+
+var _ = Describe("external replication of every database", Label("external-replication"), Ordered, func() {
+
+	type crossSiteDB struct {
+		name    string
+		suffix  string
+		adminPW string
+		replPW  string
+	}
+
+	var (
+		remoteAddr string
+		dbs        []crossSiteDB
+	)
+
+	BeforeAll(func(ctx SpecContext) {
+		if os.Getenv("E2E_EXTERNAL_REPL") != "1" {
+			Skip("E2E_EXTERNAL_REPL not set; skipping external replication tests")
+		}
+		remoteAddr = os.Getenv("E2E_REMOTE_LDAP_ADDR")
+		Expect(remoteAddr).NotTo(BeEmpty(), "E2E_REMOTE_LDAP_ADDR must be set")
+
+		db2Name := os.Getenv("DB2_CR_NAME")
+		if db2Name == "" {
+			Skip("DB2_CR_NAME not set — the resource set declares a single SlapdDatabase; " +
+				"the primary-database specs above already cover cross-site convergence")
+		}
+
+		// Primary database: suffix and admin password are suite-wide; the
+		// replication password comes from its (shared, pre-created) Secret.
+		sec1Name := envOrDefault("DB_CREDENTIALS_SECRET", dbCRName+"-credentials")
+		sec1, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, sec1Name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec1.Data["replication-password"]).NotTo(BeEmpty())
+		dbs = append(dbs, crossSiteDB{
+			name:    dbCRName,
+			suffix:  baseDN,
+			adminPW: adminPW,
+			replPW:  string(sec1.Data["replication-password"]),
+		})
+
+		// Second database: suffix from its CR, credentials from its Secret.
+		db2 := &ldapv1alpha1.SlapdDatabase{}
+		Expect(crdClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: db2Name}, db2)).To(Succeed())
+		Expect(db2.Spec.Suffix).NotTo(BeEmpty())
+		sec2Name := envOrDefault("DB2_CREDENTIALS_SECRET", db2Name+"-credentials")
+		sec2, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, sec2Name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec2.Data["root-password"]).NotTo(BeEmpty())
+		Expect(sec2.Data["replication-password"]).NotTo(BeEmpty())
+		dbs = append(dbs, crossSiteDB{
+			name:    db2Name,
+			suffix:  db2.Spec.Suffix,
+			adminPW: string(sec2.Data["root-password"]),
+			replPW:  string(sec2.Data["replication-password"]),
+		})
+	}, NodeTimeout(60*time.Second))
+
+	// (a) Marker propagation, both directions. A fresh mesh replicates each
+	// database's seed via the initial refresh even over a broken delta link, so
+	// only a write made AFTER convergence proves the delta path — a
+	// convergence-of-seed assertion would stay green against a halted journal.
+	It("a write to each database on siteA appears on siteB", func(ctx SpecContext) {
+		for _, db := range dbs {
+			localConn := connectLDAP(localLDAPAddr, db.suffix, db.adminPW)
+			defer localConn.Close()
+			remoteConn := connectLDAP(remoteAddr, db.suffix, db.adminPW)
+			defer remoteConn.Close()
+
+			uid := fmt.Sprintf("xsite-a2b-%s-%d", db.name, GinkgoRandomSeed())
+			dn := addPersonEntry(localConn, db.suffix, uid)
+			defer localConn.Del(ldap.NewDelRequest(dn, nil)) //nolint:errcheck
+
+			GinkgoLogr.Info("wrote cross-site marker on siteA", "db", db.name, "dn", dn)
+			Eventually(ctx, func() bool {
+				return ldapExists(remoteConn, dn)
+			}).WithTimeout(90*time.Second).WithPolling(3*time.Second).Should(BeTrue(),
+				"database %s: entry %s should replicate from siteA to siteB within 90 s — "+
+					"a red here with the primary database green means THIS database's "+
+					"cross-site syncrepl is down (check its consumers for err=32/err=49 loops)",
+				db.name, dn)
+		}
+	}, NodeTimeout(5*time.Minute))
+
+	It("a write to each database on siteB appears on siteA", func(ctx SpecContext) {
+		for _, db := range dbs {
+			localConn := connectLDAP(localLDAPAddr, db.suffix, db.adminPW)
+			defer localConn.Close()
+			remoteConn := connectLDAP(remoteAddr, db.suffix, db.adminPW)
+			defer remoteConn.Close()
+
+			uid := fmt.Sprintf("xsite-b2a-%s-%d", db.name, GinkgoRandomSeed())
+			dn := addPersonEntry(remoteConn, db.suffix, uid)
+			defer remoteConn.Del(ldap.NewDelRequest(dn, nil)) //nolint:errcheck
+
+			GinkgoLogr.Info("wrote cross-site marker on siteB", "db", db.name, "dn", dn)
+			Eventually(ctx, func() bool {
+				return ldapExists(localConn, dn)
+			}).WithTimeout(90*time.Second).WithPolling(3*time.Second).Should(BeTrue(),
+				"database %s: entry %s should replicate from siteB to siteA within 90 s",
+				db.name, dn)
+		}
+	}, NodeTimeout(5*time.Minute))
+
+	// (b) The whole credential chain, per database: the remote site's
+	// cn=replication,<suffix> entry exists, carries a userPassword, and that
+	// password matches this site's Secret. Catches what (a) cannot: markers
+	// carry no userPassword, so a mesh whose replication entry lost its
+	// password to an ACL strip (the 2026-04-17 class, re-reached through a
+	// wrong bind identity) still propagates markers while every future
+	// consumer bind is doomed.
+	It("each database's replication identity can bind on the remote site", func(ctx SpecContext) {
+		for _, db := range dbs {
+			bindDN := fmt.Sprintf("cn=replication,%s", db.suffix)
+			Eventually(ctx, func() error {
+				c, err := ldap.DialURL("ldap://"+remoteAddr, ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}))
+				if err != nil {
+					return fmt.Errorf("dial %s: %w", remoteAddr, err)
+				}
+				defer c.Close()
+				c.SetTimeout(10 * time.Second)
+				if err := c.Bind(bindDN, db.replPW); err != nil {
+					return fmt.Errorf("bind %s on %s: %w", bindDN, remoteAddr, err)
+				}
+				return nil
+			}).WithTimeout(90*time.Second).WithPolling(5*time.Second).Should(Succeed(),
+				"database %s: the shared replication password must bind as %s on the remote "+
+					"site — err=49 here means the sites do not share this database's "+
+					"credentials Secret, or the replicated entry diverged from it",
+				db.name, bindDN)
+		}
+	}, NodeTimeout(5*time.Minute))
+})
