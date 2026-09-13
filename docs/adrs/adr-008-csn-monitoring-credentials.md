@@ -208,3 +208,15 @@ They stay deferred anyway, for different reasons now:
 If we ever build it regardless: opt-in, one entry per pod, not per site — the
 mechanism keys on SID, and RW pods within a site each hold their own — at an
 interval well inside `accesslogPurge` maxage.
+
+## Amendment (2026-09-13): the per-database identity is now also the syncrepl stanzas' default
+
+The external syncrepl stanzas derive the same per-database identity this ADR
+chose for CSN monitoring — `cn=replication,<suffix>` with the database's own
+`replication-password` — whenever `ExternalPeer.bindDN`/`bindPasswordSecretName`
+are unset; the peer fields are the explicit override (ADR-011 foreign sources).
+See the ADR-019 amendment of the same date for why the identity is per-database
+(a cluster-level value spans every SlapdDatabase and can be right for at most
+one), and `docs/reconcile-loop-fixes.md` (2026-09-13) for the breakage that
+proved it. The uniform-password assumption above carries over unchanged: it now
+underwrites the stanzas' default bind, not just monitoring.

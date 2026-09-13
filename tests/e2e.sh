@@ -300,10 +300,6 @@ for net in data:
 configure_multus_external_peers_static() {
     [[ -z "$MULTUS_NETWORK" ]] && return
 
-    # Helm --set treats commas as value separators — escape for LDAP DNs.
-    local helm_suffix="${DB_SUFFIX//,/\\,}"
-    local helm_bind_dn="cn=replication\\,${helm_suffix}"
-
     local site_idx=0
     for ctx in "${CONTEXTS[@]}"; do
         local server_id_base=$((site_idx * 100))
@@ -314,12 +310,17 @@ configure_multus_external_peers_static() {
         for other in "${CONTEXTS[@]}"; do
             [[ "$other" == "$ctx" ]] && continue
             IFS=',' read -ra other_ips <<< "${MULTUS_IPS[$other]}"
+            # No bindDN / bindPasswordSecretName: the operator derives the bind
+            # identity per database (cn=replication,<suffix> + that database's
+            # replication password). A peer-level value spans every
+            # SlapdDatabase, so with two replicated databases at most one could
+            # bind as its own identity — ADR-019 R9's axis argument, amendment
+            # 2026-09-13. The fields remain the ADR-011 override for foreign
+            # sources (see tests/e2e-migration.sh).
             peer_sets+=(
                 --set "replication.externalPeers[$peer_idx].name=site-${other}"
                 --set "replication.externalPeers[$peer_idx].port=1025"
                 --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
-                --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
-                --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
             )
             for addr_idx in "${!other_ips[@]}"; do
                 peer_sets+=(
@@ -484,6 +485,12 @@ generate_shared_credentials() {
     log "Generating shared database credentials..."
     SHARED_ROOT_PW=$(openssl rand -base64 18)
     SHARED_REPL_PW=$(openssl rand -base64 24)
+    # Distinct pair for the second database: per-database credentials are the
+    # documented model (one <dbname>-credentials Secret per SlapdDatabase), and
+    # reusing db1's values would make a wrong-secret-wiring bug invisible — a
+    # bind carrying db1's password against db2's entry would falsely succeed.
+    SHARED_ROOT_PW2=$(openssl rand -base64 18)
+    SHARED_REPL_PW2=$(openssl rand -base64 24)
 }
 
 setup_foundation() {
@@ -507,6 +514,24 @@ setup_foundation() {
             --from-literal=replication-password="$SHARED_REPL_PW" \
             --dry-run=client -o yaml \
             | kctl "$ctx" apply -f -
+
+        # The second database needs its Secret pre-created and shared for the
+        # same reason the first does: cn=replication,<suffix> is an entry
+        # INSIDE the replicated DIT, so exactly one password can match across
+        # the mesh (ADR-008's uniform-password assumption — "the Secret is
+        # copied between clusters before deploying the SlapdDatabase CR").
+        # Without this, each site's SlapdDatabase controller auto-generates its
+        # own random pair and db2's cross-site binds fail with err=49 —
+        # reconcile-loop-fixes.md 2026-09-13.
+        if [[ -n "$DB2_CR_NAME" ]]; then
+            log "[$ctx] Pre-creating shared database credentials ($DB2_CREDENTIALS_SECRET)..."
+            kctl "$ctx" create secret generic "$DB2_CREDENTIALS_SECRET" \
+                -n "$NAMESPACE_TESTING" \
+                --from-literal=root-password="$SHARED_ROOT_PW2" \
+                --from-literal=replication-password="$SHARED_REPL_PW2" \
+                --dry-run=client -o yaml \
+                | kctl "$ctx" apply -f -
+        fi
 
         # TLS certificate: node IPs for NodePort access. SAN both the runner-facing
         # address (internal NIC, for the test runner's ldaps) and the InternalIP
@@ -571,11 +596,6 @@ setup_cross_trust() {
 }
 
 setup_slapd_clusters() {
-    # Helm --set treats commas as value separators. Escape them with \, for
-    # values that contain literal commas (LDAP DNs like dc=example,dc=org).
-    local helm_suffix="${DB_SUFFIX//,/\\,}"
-    local helm_bind_dn="cn=replication\\,${helm_suffix}"
-
     local site_idx=0
     for ctx in "${CONTEXTS[@]}"; do
         # Per-site serverIDBase keeps slapd's multimaster CSN tracking
@@ -598,12 +618,17 @@ setup_slapd_clusters() {
                 # the CA volumes right away — no second Helm upgrade needed. The
                 # operator's network.mode decides whether discovery reads the net1 IP
                 # (multus) or the primary pod IP (pod-routed) — the peer spec is the same.
+                # No bindDN / bindPasswordSecretName: the operator derives the
+                # bind identity per database (cn=replication,<suffix> + that
+                # database's replication password) — a peer-level value spans
+                # every SlapdDatabase and can be right for at most one of them
+                # (ADR-019 R9 axis argument, amendment 2026-09-13). The fields
+                # remain the ADR-011 override for foreign sources (see
+                # tests/e2e-migration.sh).
                 peer_sets+=(
                     --set "replication.externalPeers[$peer_idx].name=site-${other}"
                     --set "replication.externalPeers[$peer_idx].port=1025"
                     --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
-                    --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
-                    --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
                     --set "replication.externalPeers[$peer_idx].discovery.kubeconfigSecret.name=${other}-kubeconfig"
                 )
             elif [[ -z "$MULTUS_NETWORK" ]]; then
@@ -612,8 +637,6 @@ setup_slapd_clusters() {
                     --set "replication.externalPeers[$peer_idx].name=site-${other}"
                     --set "replication.externalPeers[$peer_idx].uri=ldaps://${NODE_IPS[$other]}:${NODEPORT_LDAPS}"
                     --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
-                    --set "replication.externalPeers[$peer_idx].bindDN=${helm_bind_dn}"
-                    --set "replication.externalPeers[$peer_idx].bindPasswordSecretName=${DB_CREDENTIALS_SECRET}"
                 )
             fi
             # Static podAddresses mode: no peers yet — added after pods are

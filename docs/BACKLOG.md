@@ -554,6 +554,75 @@ document.
 
 ---
 
+## ReplicationConverged compares CSN sets ACROSS databases — structurally ~always False on a multi-DB cluster
+
+**What:** `checkLocalCSNConvergence` (`slapdcluster_controller.go`) appends every
+(pod × database) contextCSN set into one flat list and `csnConverged` compares
+them all pairwise. Two databases have different CSN sets *by construction*
+(independent write histories), so on any cluster with two replicated
+SlapdDatabases the condition compares db1's CSNs against db2's and reads
+`CSNsDiverged` with a meaningless "lag" — the age difference between two
+different databases' last writes. Single-site included; the two-database
+`example` fixture triggers it everywhere.
+
+**Evidence (2026-09-13, while root-causing the db2 cross-site breakage):** a
+run's backup spec recorded `SourceConverged=False (ClusterDiverged: …
+CSNsDiverged … local CSN divergence: 372.8s lag across 3 pods (2 query
+errors))`; the live lab showed `8.8s lag across 3 pods (1 query errors)` while
+db1 was genuinely converged on all pods. 372.8 s and 8.8 s are db1-newest minus
+db2-newest, not replication lag. The same flattening feeds
+`checkPeerCSNConvergence`'s `localNewestTime`, so peer lag can also mix
+databases; and a failing database's queries are silently `continue`d, so the
+peer verdict is computed from whichever database answers.
+
+**Impact:** every backup on a multi-database cluster records
+`SourceConverged=False` regardless of health (ADR-014 amendment 2026-09-12
+consumes this condition), and the designed-but-deferred `requireConverged` gate
+would wait forever. The condition is a shipped status field reporting a falsehood.
+
+**How:** converge per database — group CSN sets by database, a database is
+converged when its own sets match across pods, the condition is the AND with a
+per-database message. Red-first unit on the grouping (two healthy DBs' distinct
+sets must read converged; one DB diverged across pods must not). Class: one
+structure answering two questions — a per-database verdict flattened into a
+per-cluster list. Separate fix by decision (2026-09-13): it visibly changes
+backup `SourceConverged` semantics and deserves its own red-first pass.
+
+---
+
+## The replication credential lives in two stores with no reconciliation between them
+
+**What:** `cn=replication,<suffix>`'s password exists as (a) a per-site k8s
+Secret (`<dbname>-credentials`, create-only, ADR-008) and (b) a `userPassword`
+on an entry INSIDE the replicated DIT. The DIT converges mesh-wide on its own
+(CSN conflict resolution picks winners); the Secrets don't, and nothing detects
+or repairs the skew: `ensureReplicationUser` is create-if-missing on the entry's
+existence — it never verifies or converges the password, so a stale, foreign, or
+even **passwordless** entry (observed live 2026-09-13: an ACL-stripped copy with
+no `userPassword` at all — a state that locks every consumer out and satisfies
+the existence check forever) is permanent until the DIT is wiped.
+
+**Consequences, all currently by-design-unsupported rather than handled:**
+rotation of `replication-password` breaks the mesh silently; re-running
+`tests/e2e.sh setup` over retained DITs rotates the Secrets but not the entries
+(same class — the supported reset is a full teardown including PVCs); and a
+mesh that ever ran with divergent Secrets (the 2026-09-13 db2 breakage) cannot
+self-heal because the repair channel is the broken channel.
+
+**Why deferred:** a converge-the-password path is its own design pass —
+multi-master needs a single-writer rule (every site rewriting the entry to its
+own Secret is a churn storm; the passwords must already be uniform per
+ADR-008), a bind-probe as the drift detector, and decided rotation semantics.
+ADR-008 explicitly says create-only/never-rotates today; changing that is an
+ADR amendment, not a bug fix.
+
+**How, when picked up:** detect first (a per-database self-bind as
+`cn=replication,<suffix>` from the operator; surface a condition on
+SlapdDatabase when it fails — cheap, no writes, catches all of the above
+loudly), and only then decide whether/where a repair write belongs.
+
+---
+
 ## ~~R4 debt: syncprovCheckpoint and accesslogPurge are silently write-once; purge has no default~~ — DONE (2026-09-13)
 
 Both now converge on every reconcile through a shared pure planner

@@ -938,7 +938,6 @@ func (r *SlapdDatabaseReconciler) applyIndices(
 	return conn.Modify(modReq)
 }
 
-
 // ── Seed Data ────────────────────────────────────────────────────────────────
 
 // dataDBOverlays returns which replication-related overlays are currently
@@ -2400,6 +2399,10 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			rpp = *ep.ReplicasPerPeer
 		}
 
+		// Per-database bind identity: derived unless the peer overrides it.
+		bindDN, bindPassword := externalBindIdentity(
+			ep.BindDN, ep.BindPasswordSecretName, password, sd.Spec.Suffix, replPassword)
+
 		if len(podAddrs) > 0 {
 			port := ep.Port
 			if port == 0 {
@@ -2420,8 +2423,8 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				Name:            ep.Name,
 				URIs:            uris,
 				ReplicasPerPeer: rpp,
-				BindDN:          ep.BindDN,
-				Password:        password,
+				BindDN:          bindDN,
+				Password:        bindPassword,
 				TLSCACertPath:   tlsCACertPath,
 				PlainSyncRepl:   ep.SyncMode == "plain",
 			})
@@ -2430,8 +2433,8 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 				Name:            ep.Name,
 				URIs:            []string{ep.URI},
 				ReplicasPerPeer: 1,
-				BindDN:          ep.BindDN,
-				Password:        password,
+				BindDN:          bindDN,
+				Password:        bindPassword,
 				TLSCACertPath:   tlsCACertPath,
 				PlainSyncRepl:   ep.SyncMode == "plain",
 			})
@@ -2541,6 +2544,37 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	}
 
 	return skipped, nil
+}
+
+// externalBindIdentity returns the bind DN and password an external peer's
+// syncrepl stanzas use for THIS database.
+//
+// The bind identity is a per-database value, exactly like logbase: the same
+// ExternalPeer list is applied to every SlapdDatabase, so a single peer-level
+// value cannot be right for more than one of them (ADR-019 R9's axis argument,
+// extended to the bind identity by the 2026-09-13 amendment). When the
+// peer-level fields are unset, the identity therefore derives per database —
+// cn=replication,<suffix> with the database's own replication password, the
+// same identity the in-cluster stanzas bind as and the one ADR-020 R2 requires
+// external consumers to present. Derived at the point of use, never written
+// back (ADR-019 R10 pattern).
+//
+// Set fields win verbatim — the ADR-011 escape for foreign sources with their
+// own bind accounts. The two fields default independently, with one deliberate
+// asymmetry: a bindPasswordSecretName that was named but yielded no password
+// (missing keys) keeps the empty credential rather than borrowing the per-DB
+// one — "could not read it" is not "not set", and a silent substitution would
+// mask the broken override; the stanza fails loudly at the consumer instead.
+func externalBindIdentity(overrideBindDN, overrideSecretName, overridePassword, suffix, dbReplPassword string) (string, string) {
+	bindDN := overrideBindDN
+	if bindDN == "" {
+		bindDN = "cn=replication," + suffix
+	}
+	password := overridePassword
+	if overrideSecretName == "" {
+		password = dbReplPassword
+	}
+	return bindDN, password
 }
 
 // resolvedExternalPeer holds an external peer with its full address list and
