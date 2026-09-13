@@ -172,6 +172,48 @@ func TestSourceConvergedCondition(t *testing.T) {
 // The status copy of the source's contextCSN vector must be stable across
 // reconciles: the same vector read twice in a different order must not churn
 // the status (and therefore must not re-trigger SSA writes).
+// TestSourceSuffixHealthyCondition pins the ADR-025 C2 record: a backup taken
+// from a pod whose suffix entry is a hidden glue produces an artifact that
+// restore preflight will reject, and the SlapdBackup must say so — record-only,
+// never refusing the backup. Silence (a failed probe) is Unknown, not True.
+func TestSourceSuffixHealthyCondition(t *testing.T) {
+	now := metav1.Now()
+	tests := []struct {
+		name       string
+		outcome    suffixProbeOutcome
+		detail     string
+		wantStatus metav1.ConditionStatus
+		wantReason string
+		wantInMsg  string
+	}{
+		{"visible entry is healthy", suffixProbeVisible, "", metav1.ConditionTrue, "SuffixEntryVisible", ""},
+		{"glue suffix recorded", suffixProbeGlue, "entryUUID 1a914f3a-43f0-1041-9ed3-896165d17446",
+			metav1.ConditionFalse, "GlueSuffix", "1a914f3a"},
+		{"glue message warns about restore", suffixProbeGlue, "", metav1.ConditionFalse, "GlueSuffix", "preflight"},
+		{"missing suffix recorded", suffixProbeMissing, "", metav1.ConditionFalse, "SuffixMissing", ""},
+		{"probe failure is unknown", suffixProbeError, "dial tcp: timeout",
+			metav1.ConditionUnknown, "CheckFailed", "timeout"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cond := sourceSuffixHealthyCondition(tc.outcome, tc.detail, 3, now)
+			if cond.Type != backupSuffixHealthyCondition {
+				t.Errorf("condition type = %q, want %q", cond.Type, backupSuffixHealthyCondition)
+			}
+			if cond.Status != tc.wantStatus || cond.Reason != tc.wantReason {
+				t.Errorf("condition = (%s, %s, %q), want (%s, %s)",
+					cond.Status, cond.Reason, cond.Message, tc.wantStatus, tc.wantReason)
+			}
+			if tc.wantInMsg != "" && !strings.Contains(cond.Message, tc.wantInMsg) {
+				t.Errorf("message %q does not mention %q", cond.Message, tc.wantInMsg)
+			}
+			if cond.ObservedGeneration != 3 {
+				t.Errorf("observedGeneration = %d, want 3", cond.ObservedGeneration)
+			}
+		})
+	}
+}
+
 func TestNormalizedCSNVector(t *testing.T) {
 	tests := []struct {
 		name string

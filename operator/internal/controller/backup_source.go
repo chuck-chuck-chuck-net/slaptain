@@ -106,6 +106,71 @@ func sourceConvergedCondition(sc *ldapv1alpha1.SlapdCluster, generation int64, n
 	return cond
 }
 
+// backupSuffixHealthyCondition is the condition a SlapdBackup carries to record
+// whether the source pod's suffix entry was a real, restorable entry at backup
+// time (ADR-025). Record-only, like SourceConverged: nothing here can refuse,
+// delay or fail a backup — a backup always takes a backup.
+const backupSuffixHealthyCondition = "SourceSuffixHealthy"
+
+// suffixProbeOutcome is the result of probing the backup source pod's suffix
+// entry: an ordinary base search first, and — when that hides the entry — a
+// ManageDSAIT base search to tell a hidden glue from a genuinely absent entry.
+type suffixProbeOutcome int
+
+const (
+	// suffixProbeVisible — the ordinary base search returned the entry.
+	suffixProbeVisible suffixProbeOutcome = iota
+	// suffixProbeGlue — hidden from ordinary search, and ManageDSAIT revealed a
+	// glue entry (ADR-025: the multi-site seed-race artifact). The artifact this
+	// backup produces will FAIL restore preflight.
+	suffixProbeGlue
+	// suffixProbeMissing — hidden from ordinary search and ManageDSAIT found
+	// nothing either: the suffix entry does not exist on the source pod.
+	suffixProbeMissing
+	// suffixProbeError — the probe itself failed (dial, bind, search error).
+	// Silence is not evidence of health.
+	suffixProbeError
+)
+
+// sourceSuffixHealthyCondition shapes the SourceSuffixHealthy condition from a
+// probe outcome. detail carries the probe's specifics (glue entryUUID, error
+// text) into the message.
+func sourceSuffixHealthyCondition(outcome suffixProbeOutcome, detail string, generation int64, now metav1.Time) metav1.Condition {
+	cond := metav1.Condition{
+		Type:               backupSuffixHealthyCondition,
+		LastTransitionTime: now,
+		ObservedGeneration: generation,
+	}
+	withDetail := func(msg string) string {
+		if detail == "" {
+			return msg
+		}
+		return msg + " (" + detail + ")"
+	}
+	switch outcome {
+	case suffixProbeVisible:
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = "SuffixEntryVisible"
+		cond.Message = withDetail("the source pod's suffix entry is a real entry, visible to ordinary searches")
+	case suffixProbeGlue:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "GlueSuffix"
+		cond.Message = withDetail("the source pod's suffix entry is a hidden GLUE entry " +
+			"(multi-site seed race, ADR-025) — this artifact will FAIL restore preflight; " +
+			"take the backup from a pod whose suffix entry is real")
+	case suffixProbeMissing:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "SuffixMissing"
+		cond.Message = withDetail("the source pod has no suffix entry at all — the artifact is empty or truncated")
+	default:
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = "CheckFailed"
+		cond.Message = withDetail("could not probe the source pod's suffix entry; " +
+			"silence is not evidence of health")
+	}
+	return cond
+}
+
 // isReplicationParticipant reports whether writes can reach this cluster's data
 // anywhere other than the pod a backup reads. False only for a genuinely
 // standalone cluster.
