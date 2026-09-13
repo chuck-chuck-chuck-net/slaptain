@@ -179,50 +179,7 @@ var _ = Describe("scale and operations tunables", Label("tunables"), Ordered, Co
 		}
 	}, NodeTimeout(8*time.Minute))
 
-	// ── cn=monitor (finding 13) ─────────────────────────────────────────────
-
-	It("runs the monitor backend on every pod, readable only by the replication identity", func(ctx SpecContext) {
-		replPW := replicationPassword(ctx)
-
-		for _, pod := range pods {
-			By("checking the monitor database on " + pod)
-			conn := dialPodConfigEventually(ctx, pod)
-			res, err := conn.Search(ldap.NewSearchRequest(
-				"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-				0, 0, false, "(objectClass=olcMonitorConfig)", []string{"dn"}, nil))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(res.Entries).To(HaveLen(1),
-				"pod %s: no monitor database. Monitoring today is the operator's CSN "+
-					"polling, which by ADR-008's own amendment cannot see an "+
-					"idle-but-broken link", pod)
-			conn.Close()
-
-			// The identity that reads it is the EXISTING replication identity,
-			// not a new one (ADR-008 reuse).
-			mon := dialPodAs(pod, "cn=replication,"+baseDN, replPW)
-			counters, err := mon.Search(ldap.NewSearchRequest(
-				"cn=Monitor", ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-				0, 10, false, "(objectClass=*)", []string{"monitoredInfo"}, nil))
-			Expect(err).NotTo(HaveOccurred(),
-				"pod %s: the replication identity must be able to read cn=monitor", pod)
-			Expect(counters.Entries).To(HaveLen(1))
-			mon.Close()
-
-			// And nobody else. cn=monitor exposes bind DNs and connection peers,
-			// so it is at least as restrictive as the databases it reflects —
-			// ADR-020's rule applied to a different tree.
-			anon := dialPodAnonymous(pod)
-			_, err = anon.Search(ldap.NewSearchRequest(
-				"cn=Monitor", ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-				0, 10, false, "(objectClass=*)", []string{"monitoredInfo"}, nil))
-			Expect(err).To(HaveOccurred(),
-				"pod %s: cn=monitor must not be readable anonymously — it lists the "+
-					"DN of every current bind", pod)
-			anon.Close()
-		}
-	}, NodeTimeout(8*time.Minute))
 })
-
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 // singleConfigValue reads one attribute expected to carry exactly one value,
@@ -250,32 +207,7 @@ func atoi(s string) int {
 
 func accesslogSuffixFor(db string) string { return "cn=accesslog-" + db }
 
-func replicationPassword(ctx SpecContext) string {
-	sec, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx,
-		envOrDefault("DB_CREDENTIALS_SECRET", dbCRName+"-credentials"), metav1.GetOptions{})
-	Expect(err).NotTo(HaveOccurred())
-	pw := string(sec.Data["replication-password"])
-	Expect(pw).NotTo(BeEmpty())
-	return pw
-}
 
-// dialPodAnonymous connects to one pod without binding. Separate from dialPodAs
-// because go-ldap's simple bind with an empty password is an unauthenticated
-// bind, which some servers treat differently from no bind at all.
-func dialPodAnonymous(pod string) *ldap.Conn {
-	addr := podNodePortAddr(pod, "E2E_POD_NODEPORT_BASE")
-	Expect(addr).NotTo(BeEmpty(), "E2E_NODE_IP and E2E_POD_NODEPORT_BASE must be set")
-	var conn *ldap.Conn
-	Eventually(func() error {
-		c, err := ldap.Dial("tcp", addr)
-		if err != nil {
-			return err
-		}
-		conn = c
-		return nil
-	}).WithTimeout(time.Minute).WithPolling(3 * time.Second).Should(Succeed())
-	return conn
-}
 
 // effectiveLogLevel resolves what slapd is actually running at: spec.logLevel
 // when set, the operator's default otherwise. The field is a pointer precisely

@@ -494,9 +494,8 @@ func (r *SlapdDatabaseReconciler) checkMaxSize(
 }
 
 // ensureBackendTunables converges the back-mdb tunables a running slapd will
-// accept: the fsync mode, the checkpoint interval, the read-transaction bound
-// and — when the cluster runs the monitor backend — this database's operation
-// counters.
+// accept: the fsync mode, the checkpoint interval and the read-transaction
+// bound.
 //
 // All four were verified modifiable against a live OpenLDAP 2.7.1 database
 // before being classified R1; olcDbEnvFlags was verified the same way and
@@ -528,11 +527,6 @@ func (r *SlapdDatabaseReconciler) ensureBackendTunables(
 		checkpoint, writeCheckpoint = checkpointOverride, true
 	}
 
-	monitoring := "FALSE"
-	if monitoringEnabled(sc) {
-		monitoring = "TRUE"
-	}
-
 	// Each attribute is read and compared before it is written. The read is the
 	// point: an unconditional Replace would rewrite cn=config on every reconcile
 	// of every pod, and every one of those writes is a cn=config modification
@@ -546,7 +540,6 @@ func (r *SlapdDatabaseReconciler) ensureBackendTunables(
 		{"olcDbNoSync", noSync, true},
 		{"olcDbCheckpoint", checkpoint, writeCheckpoint},
 		{"olcDbRtxnSize", strconv.FormatInt(int64(desiredRtxnSize(sd)), 10), true},
-		{"olcMonitoring", monitoring, true},
 	} {
 		current, err := readConfigAttr(conn, dbDN, w.attr)
 		if err != nil {

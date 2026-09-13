@@ -267,41 +267,6 @@ func desiredLogLevel(sc *ldapv1alpha1.SlapdCluster) int32 {
 	return *sc.Spec.LogLevel
 }
 
-// ── cn=monitor (finding 13) ─────────────────────────────────────────────────
-
-func monitoringEnabled(sc *ldapv1alpha1.SlapdCluster) bool {
-	if sc == nil || sc.Spec.Monitoring.Enabled == nil {
-		return true
-	}
-	return *sc.Spec.Monitoring.Enabled
-}
-
-// monitorACL is the single olcAccess rule on the monitor database: read for the
-// replication identities that already exist, nothing for anyone else. The
-// rootDN (cn=admin,cn=config) bypasses it.
-//
-// Reusing the ADR-008 replication identity rather than minting a monitoring one
-// is deliberate: that identity is already the operator's read-only in-cluster
-// credential, already has a password, a Secret and an ACL contract, and a second
-// identity for a strictly smaller privilege would be a second thing to rotate.
-//
-// The closed tail is ADR-020's shape applied to a different tree: cn=monitor
-// exposes connection peers, bind DNs and operation counts, so it is at least as
-// restrictive as the databases it reflects. Order matters — slapd takes the
-// first matching `by` clause — but every clause here has an exact-DN selector
-// except the terminal one, so there is nothing to shadow.
-func monitorACL(replicationDNs []string) string {
-	var b strings.Builder
-	b.WriteString("to *")
-	for _, dn := range replicationDNs {
-		if dn = strings.TrimSpace(dn); dn != "" {
-			fmt.Fprintf(&b, ` by dn.exact=%q read`, dn)
-		}
-	}
-	b.WriteString(" by * none")
-	return b.String()
-}
-
 // ── Syncrepl stanza hardening (finding 11) ──────────────────────────────────
 
 // desiredKeepalive resolves spec.replication.keepalive. Unset gets the

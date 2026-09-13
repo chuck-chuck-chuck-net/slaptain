@@ -226,44 +226,6 @@ func TestDesiredLogLevel(t *testing.T) {
 	}
 }
 
-// ── cn=monitor (finding 13) ─────────────────────────────────────────────────
-
-func TestMonitoringEnabled(t *testing.T) {
-	sc := clusterFor()
-	if !monitoringEnabled(sc) {
-		t.Error("monitoring must default on (ADR-024 R5)")
-	}
-	sc.Spec.Monitoring.Enabled = ptrBool(false)
-	if monitoringEnabled(sc) {
-		t.Error("explicit false must opt out")
-	}
-}
-
-// The monitor ACL grants read to the EXISTING replication identities and
-// nothing else — ADR-008 reuse, and ADR-020's shape (a journal/monitor tree is
-// at least as restrictive as the database it reflects).
-func TestMonitorACL(t *testing.T) {
-	got := monitorACL(nil)
-	if got != "to * by * none" {
-		t.Errorf("with no databases the monitor tree must be closed, got %q", got)
-	}
-
-	got = monitorACL([]string{"cn=replication,dc=example,dc=org"})
-	want := `to * by dn.exact="cn=replication,dc=example,dc=org" read by * none`
-	if got != want {
-		t.Errorf("monitorACL =\n  %q\nwant\n  %q", got, want)
-	}
-
-	got = monitorACL([]string{"cn=replication,dc=a", "cn=replication,dc=b"})
-	if !strings.Contains(got, `dn.exact="cn=replication,dc=a" read`) ||
-		!strings.Contains(got, `dn.exact="cn=replication,dc=b" read`) {
-		t.Errorf("every database's replication identity must be granted read, got %q", got)
-	}
-	if !strings.HasSuffix(got, "by * none") {
-		t.Errorf("the ACL must end closed, got %q", got)
-	}
-}
-
 // ── Syncrepl stanza hardening (finding 11) ──────────────────────────────────
 
 func TestDesiredKeepalive(t *testing.T) {

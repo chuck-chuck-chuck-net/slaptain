@@ -303,26 +303,6 @@ spec:
                   rolls the pods; slapd takes -d at startup only.
                 format: int32
                 type: integer
-              monitoring:
-                description: |-
-                  monitoring configures slapd's native cn=monitor backend. On by default;
-                  see SlapdMonitoringConfig.
-                properties:
-                  enabled:
-                    description: |-
-                      enabled controls whether the operator loads back_monitor and creates the
-                      monitor database on every pod. Unset means true (ADR-024 R5): a directory
-                      with no operation counters is one whose only health signal is the
-                      operator's CSN polling, which by ADR-008's own amendment cannot see an
-                      idle-but-broken link. Set false to opt out.
-
-                      Converged per pod. Turning it off does NOT delete an existing monitor
-                      database — a cn=config database delete renumbers every database ordered
-                      after it (ADR-019's DN-reuse rule), which is not a price worth paying to
-                      honour an opt-out; the operator logs that it is leaving the existing
-                      database in place.
-                    type: boolean
-                type: object
               persistence:
                 description: persistence configures persistent storage for config
                   and data volumes.

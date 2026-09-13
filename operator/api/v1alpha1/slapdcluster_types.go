@@ -192,31 +192,6 @@ type SlapdTuningConfig struct {
 	NoSync *bool `json:"noSync,omitempty"`
 }
 
-// SlapdMonitoringConfig configures slapd's native monitor backend
-// (back_monitor), the cn=monitor tree that exposes connection, operation and
-// per-database counters an exporter can scrape.
-//
-// The identity that reads it is the EXISTING replication identity
-// (cn=replication,<suffix>) of each database in the cluster, not a new one:
-// ADR-008 already establishes that identity as the operator's read-only
-// in-cluster credential, and minting a second monitoring identity would mean a
-// second password, a second Secret and a second ACL contract for a strictly
-// smaller privilege. The monitor database's rootDN is cn=admin,cn=config.
-type SlapdMonitoringConfig struct {
-	// enabled controls whether the operator loads back_monitor and creates the
-	// monitor database on every pod. Unset means true (ADR-024 R5): a directory
-	// with no operation counters is one whose only health signal is the
-	// operator's CSN polling, which by ADR-008's own amendment cannot see an
-	// idle-but-broken link. Set false to opt out.
-	//
-	// Converged per pod. Turning it off does NOT delete an existing monitor
-	// database — a cn=config database delete renumbers every database ordered
-	// after it (ADR-019's DN-reuse rule), which is not a price worth paying to
-	// honour an opt-out; the operator logs that it is leaving the existing
-	// database in place.
-	// +optional
-	Enabled *bool `json:"enabled,omitempty"`
-}
 
 // CnConfigCredentials references the Secret containing the cn=config admin password.
 type CnConfigCredentials struct {
@@ -689,10 +664,6 @@ type SlapdClusterSpec struct {
 	// SlapdTuningConfig.
 	// +optional
 	Tuning SlapdTuningConfig `json:"tuning,omitempty"`
-	// monitoring configures slapd's native cn=monitor backend. On by default;
-	// see SlapdMonitoringConfig.
-	// +optional
-	Monitoring SlapdMonitoringConfig `json:"monitoring,omitempty"`
 	// backend configures the back-mdb BACKEND (olcBackend={0}mdb), as opposed
 	// to the individual databases. Bootstrap-time only — see SlapdMdbBackendConfig.
 	// +optional

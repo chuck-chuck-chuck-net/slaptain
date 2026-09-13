@@ -308,12 +308,12 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Uses the replication bind DN/password since ACLs may deny anonymous access.
 	dbInfos := r.listDatabaseInfo(ctx, sc)
 
-	// Server-global tunables and the monitor backend, converged on every pod
-	// (ADR-002, ADR-024 R1/R6). Only attempted once at least one pod is ready:
-	// during bootstrap there is nothing to bind to, and the reconcile is
-	// requeued every 10s until Running anyway.
+	// Server-global tunables, converged on every pod (ADR-002, ADR-024 R1/R6).
+	// Only attempted once at least one pod is ready: during bootstrap there is
+	// nothing to bind to, and the reconcile is requeued every 10s until Running
+	// anyway.
 	if ready > 0 {
-		r.reconcileTunables(ctx, sc, dbInfos)
+		r.reconcileTunables(ctx, sc)
 	}
 	var localNewestTime time.Time
 	if sc.Spec.Replication.Enabled && ready >= 2 && len(dbInfos) > 0 {
