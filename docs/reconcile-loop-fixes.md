@@ -5,6 +5,92 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-09-13: the second database's cross-site replication was silently dead — the external bind identity lived on the wrong axis
+
+**Symptom:** `example-db2`'s cross-site replication never worked, from the day the
+two-database fixture landed (2026-08-25) until found — 19 days, across every
+multi-site run. On the live three-site mesh: the second database's external
+consumers looped `SYNC RESULT err=32 … rc -101 retrying` every ~10 s on every
+pod, remote binds as `cn=replication,<db2 suffix>` failed with err=49, and a
+marker written into db2 on siteA never appeared on siteB while a db1 control
+marker replicated within 90 s. Meanwhile `status.externalPeerStatuses` read
+`Synced`/`Lagging` off the *first* database and `status.phase` stayed `Running`.
+
+**Root cause — two stacked causes, both necessary to fix:**
+
+1. **Operator: the external stanza's bind identity is a cluster-level value
+   applied to every database.** External stanzas bound as `ExternalPeer.bindDN`
+   + `bindPasswordSecretName` — one identity for ALL SlapdDatabases — while
+   in-cluster stanzas correctly derive `cn=replication,<suffix>` + the per-DB
+   secret. e2e.sh set the peer bindDN to db1's identity, so db2's external
+   stanzas bound as `cn=replication,<db1 suffix>`. The bind *succeeds* (db1's
+   password is shared), the data-DB refresh even works — but ADR-020's log ACL
+   rightly denies that DN on db2's accesslog, an unreadable search base reads
+   as `noSuchObject`, and per ADR-019's corrected Consequences a failed logbase
+   search **halts** delta-syncrepl outright (err=32 → rc -101, retried forever,
+   no fallback). Captured on the provider: `BIND dn="cn=replication,<db1>"
+   err=0` → `SRCH base="cn=accesslog-example-db2"` → `err=32 nentries=0`.
+   This is ADR-019 R9's class — *one value on the cluster axis answering a
+   per-database question* — for the bind identity; R9 fixed only `logbase`.
+2. **Test infra: db2's credentials Secret was never pre-created shared.**
+   `setup_foundation` pre-created the shared Secret only for db1;
+   `DB2_CREDENTIALS_SECRET` was computed but never created, so each site's
+   SlapdDatabase controller minted its own random pair (measured: three
+   different `replication-password` values on three sites, while db1's was
+   identical everywhere). `cn=replication,<suffix>` is an entry INSIDE the
+   replicated DIT, so exactly one password can match mesh-wide — ADR-008's
+   uniform-password assumption says the Secret is copied between clusters
+   before the CR is deployed; the e2e violated its own documented model for
+   the second database.
+
+**Downstream tangle (measured, consequence not cause):** the entry itself
+replicates, so the mesh converged it to per-link winners while the Secrets
+stayed divergent — including a **passwordless** copy (the wrong-identity
+session matched db2's `userPassword … by * none` ACL, the 2026-04-17
+strip class re-reached through cause 1) that landed on one of siteA's own
+pods and broke part of siteA's *in-cluster* db2 replication (the RO pod's
+binds to that pod fail err=49). Nothing self-heals: `ensureReplicationUser`
+is create-if-missing and never converges the password — the healing channel
+is the broken channel.
+
+**Why it hid for 19 days:** no e2e asserted db2 cross-site
+(`external_replication_test.go` exercised only db1; `accesslog_test.go` is
+in-cluster); per ADR-008 an idle broken link reads `Synced`; the peer CSN
+check silently `continue`s a failing database's queries and computes its
+verdict from whichever database answers — evidence that degrades to empty on a
+read failure; and multi-site runs were deferred during the 2.7 migration
+(ADR-021).
+
+**Fix:** (1) the external bind identity is derived **per database** —
+`externalBindIdentity` in `slapddatabase_controller.go` returns
+`cn=replication,<suffix>` + the database's own replication password when the
+peer-level fields are unset; set fields win verbatim (the ADR-011 override for
+foreign sources). A bindPasswordSecretName that was named but unreadable keeps
+its empty credential rather than borrowing the per-DB one — "could not read
+it" is not "not set". (2) e2e.sh pre-creates `DB2_CREDENTIALS_SECRET` shared
+across sites with a distinct pair, and stops setting `bindDN`/
+`bindPasswordSecretName` on peers so the derived default is what multi-site
+e2e exercises (`e2e-migration.sh` keeps its explicit override — that is the
+override's real use case). Unit red-first on `externalBindIdentity`; e2e
+red captured live pre-fix (marker + bind, above); the generalized spec —
+"external replication of every database", `external_replication_test.go` —
+keeps db1 in the iteration as the built-in positive control.
+
+**Recorded, not fixed here** (see `docs/BACKLOG.md`): `ReplicationConverged`
+flattens every (pod × database) CSN set into one comparison, so it is
+structurally ~always False on any multi-database cluster; and the class
+"a credential living in two stores — per-site Secret and replicated DIT —
+with no reconciliation between them" (rotation unsupported, a stale or
+passwordless entry is permanent until DIT wipe).
+
+**Lesson:** anything a syncrepl stanza names is per-database semantics — the
+bind identity exactly as much as `logbase` (ADR-019 R9) — and a cluster-level
+field that feeds a per-database stanza can be right for at most one database.
+And: a health check that skips a failing database's evidence reports the
+health of the databases that answered, which is not the health of the cluster.
+
+---
+
 ## 2026-08-26: filtering the SlapdCluster watch stopped per-pod convergence — the churn was the resync
 
 **Not a shipped bug** — caught by the e2e suite during an optimisation attempt and

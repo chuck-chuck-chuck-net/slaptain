@@ -519,3 +519,44 @@ attribute), which upgrades log DBs created by earlier operators in place — per
 slapd-mdb(5), a cn=config `olcDbIndex` modify rebuilds the indices online in a
 background task, so no restart and no `slapindex`. Performance, not
 correctness: this ADR's decisions are unchanged.
+
+## Amendment (2026-09-13): the external stanza's bind identity is per-database too
+
+R9 established that `logbase` is per-database because `externalPeers[]` lives on
+`SlapdCluster` and carries no database selector — the same peer list is applied
+to every `SlapdDatabase`, so a per-peer field is one value spanning all
+databases, the wrong axis for per-database semantics. The bind identity has the
+identical disease and was not fixed with it: external stanzas bound as
+`ExternalPeer.bindDN` with the password from `bindPasswordSecretName`, one
+identity for every database, while in-cluster stanzas derive
+`cn=replication,<suffix>` + the database's own secret.
+
+With two replicated databases at most one of them can bind as its own
+replication identity. The other's consumers bind as a *foreign* database's
+identity — which ADR-020's log ACL rightly denies on this database's accesslog,
+so the log-mode search fails `noSuchObject` and, per this ADR's corrected
+Consequences, **its delta-syncrepl halts outright** (err=32 → rc -101, retried
+forever). The data-DB refresh half-works in the meantime and strips every
+attribute the database's ACLs deny that foreign DN — measured live: a
+`cn=replication,<suffix>` entry replicated cross-site *without its
+`userPassword`* (the 2026-04-17 strip class). Found on a three-site mesh where
+the second fixture database had been silently non-replicating cross-site since
+the fixture landed; full record in `docs/reconcile-loop-fixes.md` (2026-09-13).
+
+The rule, extending R9/R10 to the bind identity: **when
+`ExternalPeer.bindDN` / `bindPasswordSecretName` are unset, the external
+stanza's bind identity derives per database — `cn=replication,<suffix>` with
+that database's replication password, the identity ADR-020 R2 already requires
+external consumers to present and the one the in-cluster stanzas use.** Set
+fields win verbatim: they remain the ADR-011 escape for a foreign source with
+its own bind account (where one peer serves one database, so the cluster-level
+axis is harmless). Derived at the point of use, never written back (R10). One
+deliberate asymmetry: a `bindPasswordSecretName` that was named but yielded no
+password keeps the empty credential rather than borrowing the per-database
+one — "could not read it" is not "not set", and a silent substitution would
+mask the broken override instead of failing loudly at the consumer.
+
+Same accepted limitation as R9: the override is one value per peer across all
+databases, so a mesh peer override cannot be right for two databases at once —
+in a slaptain↔slaptain mesh, leave the fields unset. Per-peer-per-database is
+deliberately not pre-built.

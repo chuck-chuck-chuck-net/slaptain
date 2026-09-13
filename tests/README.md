@@ -165,6 +165,20 @@ Specs skip themselves when the resource set declares a single database
 (`DB2_CR_NAME` unset). Adding the second database raises the default-suite
 runtime; that is expected.
 
+On multi-site runs the second database's credentials Secret is pre-created
+**shared across sites** exactly like the first one's (distinct password pair,
+same mechanism): `cn=replication,<suffix>` is an entry inside the replicated
+DIT, so exactly one password can match mesh-wide (ADR-008). It was not shared
+before 2026-09-13, which — together with the cluster-level `ExternalPeer.bindDN`
+binding every database's external stanzas as the *first* database's identity —
+left db2's cross-site replication silently dead for 19 days; see
+`docs/reconcile-loop-fixes.md` (2026-09-13). The e2e no longer sets
+`bindDN`/`bindPasswordSecretName` on peers at all: the operator derives the
+per-database identity, and `external_replication_test.go`'s "every replicated
+database converges cross-site" specs guard both halves (per-database marker
+writes in both directions, plus a remote bind as each database's replication
+identity).
+
 **Sessionlog (ADR-022).** `tests/e2e/sessionlog_test.go` (standard suite,
 label `sessionlog`) asserts that every RW pod's *data* DB syncprov overlay
 carries `olcSpSessionlog` at the CR-derived value (unset → the operator default
@@ -364,8 +378,6 @@ replication:
     - name: site-b
       uri: "ldaps://10.0.1.50:30636"
       tlsSecretName: "site-b-ca"
-      bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
-      bindPasswordSecretName: "slapd-credentials"
 ```
 
 ```yaml
@@ -376,13 +388,17 @@ replication:
     - name: site-a
       uri: "ldaps://10.0.0.50:30636"
       tlsSecretName: "site-a-ca"
-      bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
-      bindPasswordSecretName: "slapd-credentials"
 ```
 
-Note: `bindPasswordSecretName` points to a Secret containing a `password` or
-`replication-password` key. If you use the shared `slapd-credentials` Secret, the
-operator reads the `replication-password` key from it.
+Note on bind credentials: leave `bindDN`/`bindPasswordSecretName` **unset** for
+a slaptain↔slaptain mesh. The operator derives the bind identity per database —
+`cn=replication,<suffix>` with that database's own `replication-password` — so
+every replicated database binds as its own identity (ADR-019 amendment
+2026-09-13; a single peer-level value can be right for at most one database).
+The fields are the override for a *foreign* source with its own bind account
+(ADR-011; see `tests/e2e-migration.sh`): when set they win verbatim, and
+`bindPasswordSecretName` points to a Secret containing a `password` or
+`replication-password` key.
 
 **Alternative: Dynamic discovery with Multus (recommended)**
 
@@ -401,8 +417,7 @@ replication:
         kubeconfigSecret:
           name: siteB-kubeconfig     # Created by scripts/create-remote-kubeconfig.sh
       tlsSecretName: "site-b-ca"
-      bindDN: "cn=replication,dc=chuck-chuck-chuck,dc=net"
-      bindPasswordSecretName: "slapd-credentials"
+      # bindDN/bindPasswordSecretName unset: per-database identity derived
 ```
 
 Provision the kubeconfig Secrets:
@@ -493,6 +508,8 @@ same `credentialsSecretName`.
 | 3 | siteB → siteA | Write on siteB appears on siteA within 60 s |
 | 4 | Peer removal | *(skipped — requires live CR modification)* |
 | 5 | Status reporting | *(skipped — requires typed CRD client)* |
+| 6 | Every database, A → B and B → A | Per-database marker writes replicate both ways for **each** replicated database (db1 stays in the iteration as the positive control; skips when `DB2_CR_NAME` is unset) |
+| 7 | Per-database replication identity | `cn=replication,<suffix>` binds on the **remote** site with the shared per-database password — catches unshared Secrets (err=49) and ACL-stripped `userPassword` on the replicated entry, which marker propagation alone cannot see |
 
 ### Troubleshooting
 
