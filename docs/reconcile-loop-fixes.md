@@ -71,9 +71,11 @@ verified read-only against a live cluster still carrying `timeout=300`.
 changes slapd's *runtime execution behaviour* must be vetted for what the
 running server does with it, not just for whether the write survives. Under
 slapd's cooperative-pause regime, a blocking wait inside a threadpool task is
-a config-write freeze of that wait's length; the operator writes cn=config on
-every reconcile, so it will always collide with the worst case. See the
-ADR-024 amendment of the same date.
+a config-write freeze of that wait's length. The operator converges cn=config
+(compare first, write only on divergence — ADR-002), so steady state issues no
+MODs and no pauses; but a bring-up, upgrade, or spec change issues a queue of
+legitimate writes at exactly the moment consumers are refreshing, which is the
+worst case. See the ADR-024 amendment of the same date.
 
 ---
 
