@@ -143,7 +143,27 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 			Name:            "restore",
 			Image:           initImage,
 			ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
-			Command:         []string{"bash", "-c", "set -eo pipefail\n" + wipe + "\ngunzip -c " + restoreLDIFFile + ` | slapadd -F /config/slapd.d -b "$SUFFIX"`},
+			// slapadd -q is bulk-load mode: it skips the per-entry schema and
+			// referential checks and batches the index writes, which on a
+			// multi-GB LDIF is the difference between a restore measured in tens
+			// of minutes and one measured in hours — with the cluster scaled to
+			// zero for the whole window, so that time is downtime.
+			//
+			// Why it is safe HERE specifically, and would not be in general: -q
+			// is only sound when the target database is empty and the input is
+			// trusted. Both hold. The wipe above deletes this database's
+			// data.mdb/lock.mdb (and the journal's) immediately before, so
+			// slapadd opens a fresh environment with nothing to be inconsistent
+			// with; and the input is a slapcat of a slapd that enforced the
+			// schema when the entries were written, not user-supplied LDIF. What
+			// -q gives up is catching corruption that would have to have been
+			// introduced between slapcat and here — which the S3 object's own
+			// integrity covers.
+			//
+			// The thread count slapadd uses for index building comes from
+			// olcToolThreads in the cn=config this reads with -F; the operator
+			// converges it from SlapdCluster.spec.tuning.toolThreads.
+			Command: []string{"bash", "-c", "set -eo pipefail\n" + wipe + "\ngunzip -c " + restoreLDIFFile + ` | slapadd -q -F /config/slapd.d -b "$SUFFIX"`},
 			Env: []corev1.EnvVar{
 				{Name: "SUFFIX", Value: sd.Spec.Suffix},
 				{Name: "DATADIR", Value: dataDir},

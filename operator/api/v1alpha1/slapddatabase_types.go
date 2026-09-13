@@ -323,10 +323,82 @@ type SlapdDatabaseSpec struct {
 	// +optional
 	Limits []string `json:"limits,omitempty"`
 	// noSync disables fsync after each write (olcDbNoSync). Improves write
-	// performance at the cost of durability on unclean shutdown. Replicas
-	// provide redundancy. Default false (fsync enabled).
-	// +kubebuilder:default=false
-	NoSync bool `json:"noSync,omitempty"`
+	// throughput at the cost of durability on an unclean shutdown; replicas and
+	// the delta-syncrepl journal provide the redundancy that makes the trade
+	// defensible.
+	//
+	// Unset inherits SlapdCluster.spec.tuning.noSync, whose own default is false
+	// (fsync after every write). Durability posture is usually a cluster-wide
+	// property — every member trading fsync for throughput because replication
+	// provides the redundancy — so the cluster field is the normal place to set
+	// it and this one is the per-database override (ADR-024 R6).
+	//
+	// Converged per pod on every reconcile: unlike maxSize, slapd takes
+	// olcDbNoSync at runtime (verified live on 2.7.1 — the modify is accepted
+	// and the process survives), so flipping this field applies. It used to be
+	// silently dropped on an existing database, which is the ADR-024 R4
+	// violation this field's convergence pays off.
+	//
+	// noSync without a checkpoint loses an unbounded window of writes. The
+	// operator will not let you reach that silently: spec.checkpoint defaults to
+	// a value, and explicitly disabling it (checkpoint: "") while noSync is on
+	// is rejected.
+	// +optional
+	NoSync *bool `json:"noSync,omitempty"`
+	// checkpoint is the back-mdb disk-buffer flush interval (olcDbCheckpoint),
+	// spelled "<kbyte> <min>" — flush after that many kilobytes have been
+	// written or that many minutes have passed, whichever comes first. It is
+	// what bounds the write window noSync exposes; per slapd-mdb(5) it only
+	// takes effect when noSync is in force, but it is written unconditionally so
+	// that turning noSync on is a one-field change that is safe by construction.
+	//
+	// Unset means the operator's default, "1024 5" (ADR-024 R5). Set to the
+	// empty string to write no checkpoint at all — which the operator rejects
+	// while noSync is on, because that combination is the unbounded-loss one.
+	//
+	// This database's accesslog journal gets its own, longer interval; it is
+	// operator-set and not configurable, like the journal's map size.
+	// Converged per pod.
+	// +kubebuilder:validation:Pattern=`^$|^[0-9]+ [0-9]+$`
+	// +optional
+	Checkpoint *string `json:"checkpoint,omitempty"`
+	// rtxnSize bounds how many entries one back-mdb read transaction covers
+	// before it is broken up and restarted (olcDbRtxnSize). A long-running read
+	// transaction — a syncrepl full refresh or a bulk export is exactly that —
+	// pins free pages for its whole duration and forces the map to grow rather
+	// than reuse them.
+	//
+	// Unset means the operator's default, 10000, which is also slapd's own: we
+	// write it explicitly so the value is visible in cn=config and cannot move
+	// underneath a cluster on a base-image bump. Converged per pod. 0 restores
+	// "no limit".
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	RtxnSize *int32 `json:"rtxnSize,omitempty"`
+	// envFlags is the list of LMDB environment flags for this database
+	// (olcDbEnvFlags). Valid values: "writemap", "nometasync", "nosync",
+	// "mapasync". They are the standard high-write-rate levers for back-mdb;
+	// "writemap" in particular changes the write-path cost profile materially on
+	// a large map. Unset means none, which is slapd's own behaviour — this is a
+	// knob for a measured problem, not a default we hold an opinion about.
+	//
+	// SET WHEN THE DATABASE IS CREATED, and fixed from then on — the same class
+	// as maxSize, for the same reason and on the same evidence. An ldapmodify of
+	// olcDbEnvFlags adding "writemap" against a running database SEGFAULTS slapd
+	// (observed on OpenLDAP 2.7.1, exit 139, reproduced on a live pod):
+	// MDB_WRITEMAP is an mdb_env_open flag and LMDB cannot add it to an open
+	// environment. "nometasync"/"nosync" alone modify cleanly, but the attribute
+	// is one multi-valued list and nothing stops a later edit from adding
+	// "writemap" to it, so the whole attribute is create-only.
+	//
+	// Editing it on an existing SlapdDatabase therefore changes nothing: it sets
+	// TunablesConverged=False with the current value, the desired value and the
+	// change path (recreate the database — back up, delete, restore into a fresh
+	// one, ADR-014). Reported, never silently dropped: ADR-024 R4 with R2's
+	// change-path documentation. See the ADR-024 amendment of 2026-09-13.
+	// +kubebuilder:validation:items:Enum=writemap;nometasync;nosync;mapasync
+	// +optional
+	EnvFlags []string `json:"envFlags,omitempty"`
 	// acls is the list of OpenLDAP ACL rules (olcAccess entries) to apply to
 	// this database on every pod. Rules are in standard slapd.conf "access to ..."
 	// format, without the {N} index prefix. The operator numbers them and applies

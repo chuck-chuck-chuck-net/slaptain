@@ -454,73 +454,90 @@ baseline indices on data databases, and `spec.backend.idlExponent`. The
 many-entries fixture class ADR-024 asks for is `tests/e2e/scale_test.go`, gated
 `E2E_SCALE=1` — every one of the five is structurally invisible without it.
 
-- **`olcDbCheckpoint` never set** (degrades). No mdb checkpoint interval on any
-  database, and it interacts with `noSync`: no checkpoint plus `noSync` loses an
-  unbounded window of writes on unclean shutdown. *Surface:* converged
-  `SlapdDatabase` field with an operator default, on the data and the accesslog
-  database (the log tolerates a longer interval); validated against `noSync` so
-  the unsafe combination is not silently reachable.
-- **`noSync` is create-only and has no cluster-level policy** (degrades).
-  Flipping `spec.noSync` on a live database does nothing — an ADR-024 R4
-  violation, same family as `maxSize`. Durability posture is also a
-  cluster-wide property. *Surface:* converge the existing per-DB field; consider
-  a `SlapdCluster` default it inherits.
-- **`olcDbEnvFlags` not exposed** (degrades). The LMDB environment flags
-  (`writemap`, `nometasync`, `nosync`) are the standard high-write-rate lever;
-  `writemap` materially changes the write-path cost on a large map. Not
-  production-proven — a known-missing knob, better exposed next to `noSync` now
-  than invented under incident pressure. *Surface:* converged `SlapdDatabase`
-  list, defaulted empty.
-- **`olcDbRtxnSize` not exposed** (degrades). Bounds how many entries one read
-  transaction covers; a long read transaction — a syncrepl full refresh or a
-  bulk export — pins free pages and grows the map. *Surface:* converged, with an
-  operator default; low user-visibility, could reasonably be operator-set only.
-- **No connection-lifetime or concurrency surface at all** (degrades; the
-  timeouts are the urgent half). None of `olcIdleTimeout`, `olcWriteTimeout`,
-  `olcThreads`, `olcListenerThreads`, `olcConcurrency`, `olcToolThreads`,
-  `olcSockbufMaxIncoming*`, `olcConnMaxPending` is set or exposed. Both timeouts
-  default to *never*, so a pod behind a stateful firewall accumulates dead
-  connections until it runs out of descriptors. *Surface:* a converged
-  `SlapdCluster.spec.tuning` block; start with the two timeouts and leave the
-  thread counts as documented escape hatches at upstream defaults.
-- **Syncrepl stanzas carry no timeouts, and `keepalive` has no default**
-  (degrades). `buildDesiredSyncRepl` emits no `network-timeout` and no
-  `timeout`, so a half-open provider connection is noticed only when TCP gives
-  up; `spec.replication.keepalive` exists but is optional and undefaulted, so an
-  unconfigured cluster gets neither. *Surface:* operator-set defaults in the
-  stanza builder, overridable by the existing fields.
-- **Restore does not use bulk-load mode** (degrades). `restore_job.go` runs
-  `slapadd` with no quick/bulk mode and no tool threads, with the cluster scaled
-  to zero for the whole window — on a multi-GB LDIF that is tens of minutes
-  versus hours. *Surface:* operator-set in the restore Job builder, optional
-  escape hatch on the restore CR, with a documented caveat about what bulk mode
-  skips.
-- **No `cn=monitor`, no native metrics** (hygiene). The monitor backend module
-  is not loaded, no monitor database exists, `olcMonitoring` is never set — so
-  there are no per-database operation counters and nothing an exporter can read.
-  Monitoring today is the operator's CSN polling, which by ADR-008's own
-  amendment cannot see an idle-but-broken link. *Surface:* a `SlapdCluster`
-  toggle defaulting on, an operator-created monitor DB with an operator-managed
-  identity and ACL, converged per pod. This is also the substrate the
-  heartbeat/observability gap ADR-008 deferred would want.
-- **Log level defaults to silence** (hygiene). `spec.logLevel` defaults to 0, so
-  a pod logs essentially nothing and every replication incident starts with
-  "restart it with logging on" — which changes the state you were trying to
-  observe. *Surface:* change the operator default to the sync level (ADR-024 R5),
-  keep the field.
-- **TLS posture is unpinned** (hygiene). Only certificate, key and CA paths are
-  written: no `olcTLSProtocolMin` floor, no cipher policy, no CRL policy, no
-  `olcLocalSSF`/`olcSecurity`. Whatever the runtime image's OpenSSL happens to
-  default to is our policy, and it changes silently with a base-image bump.
-  *Surface:* converged `SlapdCluster.spec.ldap.tls` fields — pin a modern
-  protocol floor, leave cipher policy empty but available.
-- **Password hashing policy not exposed** (hygiene). `olcPasswordHash` is never
-  set, so the frontend default applies to anything the directory hashes on a
-  user's behalf; no surface for a stronger scheme (the memory-hard module modern
-  OpenLDAP ships) or `olcPasswordCryptSaltFormat`. The operator's own generated
-  root passwords use a salted SHA variant and are fine. *Surface:* a converged
-  `SlapdCluster` field; document-only is an acceptable first step, but answer
-  the module-availability question for the runtime image either way.
+**Landed 2026-09-13** (the degrades-and-hygiene half): `olcDbCheckpoint`,
+`olcDbNoSync` (now converged and inheriting a cluster-wide
+`spec.tuning.noSync`), `olcDbRtxnSize`, `olcDbEnvFlags` (create-only and
+reported), the syncrepl stanza timeouts and a default keepalive,
+`slapadd -q` + `spec.tuning.toolThreads` for restores,
+`spec.ldap.tls.{protocolMin,cipherSuite}`, `spec.ldap.passwordHash`, and a
+`logLevel` default of 16640. Guarded by `tests/e2e/tunables_test.go` (ungated).
+Three of the review's items did NOT survive contact with a live cluster and are
+re-entered below with their evidence.
+
+- **Connection lifetimes cannot be converged — `olcIdleTimeout` and
+  `olcWriteTimeout`** (degrades; was the urgent half of the review's finding
+  10). slapd's default for both is *never close*, so a pod behind a stateful
+  firewall accumulates connections whose peer is long gone until it runs out of
+  file descriptors. The gap is real. The **placement was wrong**: an
+  `ldapmodify` of either attribute against a running OpenLDAP 2.7.1 does not
+  fail and does not crash — **it hangs the server**. The modify's CSN is queued
+  and never graduates, the pod then answers nothing at all (not even an
+  anonymous rootDSE), and `SIGTERM` sticks in `slapd shutdown: waiting for 2
+  operations/tasks to finish`:
+
+  ```
+  conn=1050 op=2 MOD dn="cn=config"
+  conn=1050 op=2 MOD attr=olcIdleTimeout
+  slap_get_csn: conn=1050 op=2 generated new csn=…
+  slap_queue_csn: queueing …
+  <nothing, ever>
+  ```
+
+  Reproduced twice on a healthy three-pod cluster (three of four pods the first
+  time, all three RW pods the second); recovery was restarting every pod. The
+  mechanism is the daemon thread: a non-zero `global_idletimeout` arms
+  `connections_timeout_idle`, which walks the connection table from the daemon
+  loop while the modify that armed it is still executing inside one of those
+  connections. Both values are **fine when they come from the boot config** — a
+  pod that *started* with `olcIdleTimeout 3600` / `olcWriteTimeout 300` served
+  normally for twenty minutes. *Surface:* ADR-024 **R2**, bootstrap-time —
+  `idletimeout`/`writetimeout` directives in the init container's generated
+  `slapd.conf`, with R2's documented recreate path. No CRD field until then: a
+  field the operator cannot honour is what R4 forbids.
+- **Thread and buffer counts** (degrades, unmeasured). `olcThreads`,
+  `olcListenerThreads`, `olcConcurrency`, `olcSockbufMaxIncoming`,
+  `olcSockbufMaxIncomingAuth`, `olcConnMaxPending` are neither set nor exposed.
+  Upstream's defaults are defensible and the reference production platform
+  leaves them alone too, so these wait for a measurement that asks for one.
+  `spec.tuning` is the home when one does.
+- **No `cn=monitor`, no native metrics** (hygiene; *attempted 2026-09-13 and
+  withdrawn*). The monitor backend module is not loaded, no monitor database
+  exists, `olcMonitoring` is never set — so there are no per-database operation
+  counters and nothing an exporter can read. Monitoring today is the operator's
+  CSN polling, which by ADR-008's own amendment cannot see an idle-but-broken
+  link.
+
+  An implementation landed and was reverted the same day. Individually every
+  piece works on a running 2.7.1 pod: `olcModuleLoad: back_monitor` is accepted,
+  `olcDatabase=monitor` can be added live, `cn=Monitor` answers immediately, and
+  an ACL granting read to the existing `cn=replication,<suffix>` identity
+  (ADR-008 reuse) enforces correctly — anonymous gets `No such object`. What
+  does **not** work is converging it: with a monitor database present, an
+  `ldapmodify` of its `olcAccess` hangs slapd with the same signature as the
+  connection timeouts above (CSN queued, never graduates, pod dead to all
+  clients), observed on three of four pods. The operator rewrote that ACL every
+  reconcile because its comparison of what it wrote against what slapd stores
+  never matched — so steady state was one modify away from bricking the cluster.
+
+  *Surface when picked up again:* fix the ACL comparison FIRST and prove the
+  operator reaches a no-write steady state, then establish whether an `olcAccess`
+  modify on a monitor database is safe at all. Until both are answered this is
+  not a hygiene feature, it is an outage generator. The e2e assertions (monitor
+  database present per pod; readable by the replication identity; denied
+  anonymously) are worth restoring from commit `07b89af`'s parent.
+- **TLS: no CRL policy, no `olcLocalSSF`/`olcSecurity`** (hygiene; the protocol
+  floor and cipher policy landed 2026-09-13 as `spec.ldap.tls.protocolMin` /
+  `.cipherSuite`). `olcTLSCRLCheck` and a minimum-SSF statement are still
+  unstated, so a revoked peer certificate is accepted and there is nothing
+  forcing a client onto TLS. *Surface:* the same converged block.
+- **A stronger password-hashing scheme is not available** (hygiene; the policy
+  field landed 2026-09-13 as `spec.ldap.passwordHash`, pinned to `{SSHA}` and
+  converged). The module-availability question the review asked is answered:
+  slaptain's runtime image does **not** ship `pw-argon2`, so `{ARGON2}` cannot be
+  selected today — asking for it would produce a slapd that rejects every
+  password write. Nor is `olcPasswordCryptSaltFormat` exposed. *Surface:* build
+  the module into `images/slapd/Containerfile` first; the CRD field is already
+  there to point at it.
 - **Overlay surface beyond replication** (hygiene, document-only). We manage
   `syncprov` and `accesslog` and nothing else; the production platform also runs
   password-policy, uniqueness, dynamic-list and member-of overlays plus

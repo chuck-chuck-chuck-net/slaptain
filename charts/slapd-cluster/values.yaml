@@ -40,7 +40,7 @@ readReplicas: 0
 # -- slapd -d debug bitmask. 256 = "stats" (startup banner + connection/op lines).
 # Set to 0 to silence slapd entirely. See SlapdCluster.spec.logLevel godoc for
 # the full bit table.
-logLevel: 256
+# logLevel: 0                       # unset → the operator default (16640, stats+sync; ADR-024)
 
 # -- Persistent storage (PVC sizes / storage classes). Persistence itself is
 # mandatory per ADR-013 — there is no opt-out.

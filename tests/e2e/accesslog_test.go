@@ -134,7 +134,7 @@ var _ = Describe("per-database accesslog", Label("accesslog"), Ordered, Continue
 		// Sync debug is what makes the behavioural spec observable at all.
 		sc := &ldapv1alpha1.SlapdCluster{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "slapd"}, sc)).To(Succeed())
-		logLevelSet = sc.Spec.LogLevel&16384 != 0
+		logLevelSet = effectiveLogLevel(sc)&16384 != 0
 	}, NodeTimeout(7*time.Minute))
 
 	// ── 1. Structural ────────────────────────────────────────────────────────
