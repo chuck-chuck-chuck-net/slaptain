@@ -2177,11 +2177,20 @@ func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 //
 //	NotSeeded         — Status.SeedApplied=false. Bootstrap hasn't finished;
 //	                    absence is expected. ConditionUnknown.
-//	RootEntryVisible  — root entry found on at least one pod. ConditionTrue.
+//	RootEntryVisible  — root entry found on EVERY reached RW pod. ConditionTrue.
 //	NoReachablePod    — could not bind on any pod (cluster churning, all
 //	                    pods crash-looping). ConditionUnknown.
 //	DataMissing       — SeedApplied=true, bound successfully somewhere, root
 //	                    entry not visible anywhere. ConditionFalse — alert.
+//	DataMissingOnPods — root entry visible on some reached pods, hidden on
+//	                    others (ADR-025: the glue-suffix signature — a glue is
+//	                    invisible to ordinary searches on exactly the broken
+//	                    pod). ConditionFalse — alert.
+//
+// Every reached pod must show the entry (ADR-025 D1): the previous
+// any-pod-visible verdict read True across the 2026-09-13 incident, where one
+// pod's suffix had been demoted to a hidden glue while its peers looked
+// healthy. Aggregation itself is the pure aggregateDataPresent.
 func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
@@ -2211,50 +2220,36 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 	}
 	headlessSvc := sc.Name + "-headless"
 
-	reachedAny := false
+	results := make([]podPresence, 0, replicas)
 	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s",
-			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
+		pod := fmt.Sprintf("%s-%d", sc.Name, i)
+		host := fmt.Sprintf("%s.%s.%s.svc.%s",
+			pod, headlessSvc, sc.Namespace, r.ClusterDomain)
 		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
 
 		conn, err := ldap.DialURL("ldap://"+addr,
 			ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
 		)
 		if err != nil {
+			results = append(results, podPresence{pod: pod})
 			continue
 		}
 		conn.SetTimeout(ldapRequestTimeout)
 		if err := conn.Bind(rootDN, rootPW); err != nil {
 			conn.Close()
+			results = append(results, podPresence{pod: pod})
 			continue
 		}
-		reachedAny = true
 		exists, err := ldapEntryExists(conn, sd.Spec.Suffix)
 		conn.Close()
 		if err != nil {
+			results = append(results, podPresence{pod: pod})
 			continue
 		}
-		if exists {
-			cond.Status = metav1.ConditionTrue
-			cond.Reason = "RootEntryVisible"
-			cond.Message = fmt.Sprintf("root entry %s visible on %s", sd.Spec.Suffix, host)
-			return cond
-		}
+		results = append(results, podPresence{pod: pod, reached: true, present: exists})
 	}
 
-	if !reachedAny {
-		cond.Status = metav1.ConditionUnknown
-		cond.Reason = "NoReachablePod"
-		cond.Message = "could not reach any RW pod to verify data presence"
-		return cond
-	}
-
-	cond.Status = metav1.ConditionFalse
-	cond.Reason = "DataMissing"
-	cond.Message = fmt.Sprintf(
-		"root entry %s not visible on any reachable RW pod — possible data loss; "+
-			"this condition is informational and does not trigger operator action (see ADR-012)",
-		sd.Spec.Suffix)
+	cond.Status, cond.Reason, cond.Message = aggregateDataPresent(sd.Spec.Suffix, results)
 	return cond
 }
 
