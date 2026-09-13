@@ -213,3 +213,62 @@ reason `RecreateRequired`, with current value, desired value and the change
 path — never written. R4 stands: the field is not ignored, it is answered.
 The same condition is the home for any future tunable that turns out to be
 recreate-only in practice.
+
+## Amendment (2026-09-13): "slapd forbids the change" includes "slapd hangs on it"
+
+The 2026-09-12 amendment widened R2/R3's membership criterion from "slapd
+rejects the runtime write" to include "slapd crashes on it", on the evidence of
+the `olcDbMaxSize` segfault. Implementing the degrades-and-hygiene half of the
+findings widened it again, and this time the failure mode is worse than a crash.
+
+Three attributes the config review proposed as converged (R1) failed the
+live-modifiability check that every attribute in this batch was put through
+before it was classified. All three were verified on a running OpenLDAP 2.7.1
+pod, and the check is now a precondition of the class, not a nicety:
+
+- **`olcDbEnvFlags`** — adding `writemap` to it on a running back-mdb database
+  **segfaults slapd** (exit 139, captured mid-MOD). `MDB_WRITEMAP` is an
+  `mdb_env_open` flag and LMDB cannot add it to an open environment.
+  `nometasync`/`nosync` alone modify cleanly, but slapd's granularity is the
+  attribute, so the whole attribute is create-only-and-reported, exactly like the
+  map size. → **R2/R3**, `TunablesConverged=False` / `RecreateRequired`.
+
+- **`olcIdleTimeout` and `olcWriteTimeout`** — modifying either on a running
+  slapd **hangs the process**. Not an error, not a crash: the modify's CSN is
+  queued, never graduates, and from that moment the pod answers nothing, not even
+  an anonymous rootDSE. `SIGTERM` sticks in `slapd shutdown: waiting for 2
+  operations/tasks to finish`. Reproduced twice on a healthy three-pod cluster;
+  recovery was restarting every pod. Both values are fine when they come from
+  the boot config. → **R2**, bootstrap-time, and unimplemented until the init
+  container carries them; no CRD field in the meantime, because R4 forbids
+  offering one that cannot be honoured.
+
+- **`cn=monitor`** — every individual step works live (module load, database
+  add, ACL, `cn=Monitor` answering the replication identity, anonymous denied),
+  but modifying an existing monitor database's `olcAccess` hangs slapd with the
+  same signature. Withdrawn to `docs/BACKLOG.md`.
+
+Three consequences for the doctrine:
+
+1. **R1 membership is empirical, and the test is per attribute.** The criterion
+   is no longer "slapd-config(5) does not say it is fixed" but "we modified it on
+   a running pod and the pod was still serving afterwards". Of nine attributes
+   put through it in this batch, three failed — a third. Reasoning from the
+   manual would have shipped all three.
+
+2. **The hang is the dangerous class, not the crash.** A crashing pod restarts
+   and rejoins; Kubernetes handles it. A hung pod keeps its listener open, passes
+   a TCP readiness probe, reports `1/1 Running`, and answers nothing — and
+   because the operator converges every pod on every reconcile, it hangs *all* of
+   them within a minute. An operator-written attribute that can hang slapd is a
+   cluster-wide outage with no self-healing, which is a different risk tier from
+   anything R1 previously contained.
+
+3. **A converged attribute must reach a proven no-write steady state.** The
+   monitor ACL was rewritten every reconcile because the operator's comparison of
+   what it wrote against what slapd stores never matched. On any other attribute
+   that is a wasteful log line; on this one it was the difference between "a
+   modify that hangs slapd" being a one-off risk and being a certainty. Verifying
+   that a new converged attribute stops writing once it matches is therefore part
+   of landing it, and the check is cheap: the operator's own "aligning" log lines
+   must go quiet.
