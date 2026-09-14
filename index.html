@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>slaptain — a Kubernetes operator for multi-site multi-master OpenLDAP</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 3rem 1.25rem;
+    background: #111214; color: #e5e7eb;
+    font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 42rem; margin: 0 auto; }
+  h1 { font-size: 2.5rem; margin: 0 0 .25rem; font-weight: 600; letter-spacing: -.02em; }
+  .sub { color: #9ca3af; font-size: 1.125rem; margin: 0 0 2rem; }
+  .repo {
+    display: block; background: #1f2937; border-radius: .5rem;
+    padding: 1.25rem 1.5rem; margin: 2rem 0 1.5rem;
+    text-decoration: none; border: 1px solid #374151;
+  }
+  .repo:hover { border-color: #2dd4bf; }
+  .repo .label { display: block; color: #9ca3af; font-size: .875rem; margin-bottom: .35rem; }
+  .repo .url {
+    display: block; color: #2dd4bf; font-size: 1.375rem; font-weight: 600;
+    font-family: ui-monospace, "Fira Code", monospace; word-break: break-word;
+  }
+  .status { color: #6b7280; font-size: .9375rem; }
+  a { color: #2dd4bf; }
+  footer { color: #6b7280; font-size: .875rem; margin-top: 3rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>slaptain</h1>
+  <p class="sub">A Kubernetes operator for a multi-site, multi-master replicating OpenLDAP cluster.</p>
+
+  <p>slaptain manages the lifecycle of an OpenLDAP cluster on Kubernetes: cluster
+  bootstrap, N-way multi-master replication within a site and between sites,
+  databases, schemas and ACLs as custom resources, backup and restore.</p>
+
+  <a class="repo" href="https://github.com/chuck-chuck-chuck-net/slaptain">
+    <span class="label">Source and documentation</span>
+    <span class="url">github.com/chuck-chuck-chuck-net/slaptain</span>
+  </a>
+
+  <p class="status">An early, experimental, one-person spare-time project.</p>
+
+  <p>Talk at LDAPCon — <em>slaptain: A Kubernetes Operator for Multi-Site
+  Multi-Master OpenLDAP</em>. The slides will be published here after the talk.</p>
+
+  <footer>Apache-2.0 &middot; Dominik Epple</footer>
+</main>
+</body>
+</html>
