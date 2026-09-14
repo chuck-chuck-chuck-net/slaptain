@@ -696,15 +696,36 @@ type SlapdClusterSpec struct {
 }
 
 // ExternalPeerReplicationState summarises the replication health of one external peer.
-// +kubebuilder:validation:Enum=Synced;Lagging;Unreachable
+// +kubebuilder:validation:Enum=Synced;Lagging;PartiallyVerified;Unreachable
 type ExternalPeerReplicationState string
 
 const (
-	// ReplicationSynced means the peer's newest contextCSN is within the sync threshold.
+	// ReplicationSynced means every database's newest contextCSN on the peer is
+	// within the sync threshold — and every database was actually read.
 	ReplicationSynced ExternalPeerReplicationState = "Synced"
-	// ReplicationLagging means the peer's newest contextCSN is behind the local newest.
+	// ReplicationLagging means at least one database's newest contextCSN on the
+	// peer is behind the local newest for that same database.
 	ReplicationLagging ExternalPeerReplicationState = "Lagging"
-	// ReplicationUnreachable means the operator could not query contextCSN on the peer.
+	// ReplicationPartiallyVerified means the peer answered and every database
+	// that could be read is within the sync threshold, but at least one database
+	// yielded no readable evidence at all (lastError names it).
+	//
+	// It exists because "we know nothing" and "we know some of it" are different
+	// states, and the second one is what the operator actually observes: CSN
+	// queries are per-database LDAP operations with per-database bind identities
+	// (ADR-008), so one database can fail while another on the same host
+	// succeeds — measured on 2026-09-13, where db1 bound and answered while db2's
+	// bind returned err=49 against the same pod. Folding that into Unreachable
+	// would state something false about the peer (it WAS reached) and seed a
+	// wrong decision in anything acting on the field; folding it into Synced is
+	// the defect this state was introduced to fix, a verdict computed from
+	// whichever database happened to answer.
+	//
+	// Named for what is known rather than what is not: "Unknown" would discard
+	// the verified half, which is the informative half.
+	ReplicationPartiallyVerified ExternalPeerReplicationState = "PartiallyVerified"
+	// ReplicationUnreachable means no database on the peer yielded any readable
+	// contextCSN — nothing about it could be verified.
 	ReplicationUnreachable ExternalPeerReplicationState = "Unreachable"
 )
 
@@ -723,14 +744,18 @@ type ExternalPeerStatus struct {
 	// consumes these the same way as static podAddresses.
 	// +optional
 	DiscoveredAddresses []string `json:"discoveredAddresses,omitempty"`
-	// replicationState reports the CSN convergence state of this peer.
-	// Synced: remote CSN is within threshold of local CSN.
-	// Lagging: remote CSN is behind local CSN by more than the threshold.
-	// Unreachable: operator could not query contextCSN on any remote pod.
+	// replicationState reports the CSN convergence state of this peer, judged
+	// per database (a contextCSN vector is only comparable within one suffix).
+	// Synced: every database was read and each is within threshold of ours.
+	// Lagging: a database that WAS read is behind ours by more than the threshold.
+	// PartiallyVerified: the peer answered and everything read is current, but at
+	// least one database yielded no readable contextCSN (lastError names it).
+	// Unreachable: no database on the peer could be read at all.
 	// +optional
 	ReplicationState ExternalPeerReplicationState `json:"replicationState,omitempty"`
-	// lagSeconds reports the max CSN timestamp delta between local and remote
-	// as a decimal string (e.g. "3.2"). Only set when replicationState is Lagging.
+	// lagSeconds reports the max per-database CSN timestamp delta between local
+	// and remote as a decimal string (e.g. "3.2"). Only set when replicationState
+	// is Lagging.
 	// +optional
 	LagSeconds string `json:"lagSeconds,omitempty"`
 	// lastChecked is the time the CSN check last ran.

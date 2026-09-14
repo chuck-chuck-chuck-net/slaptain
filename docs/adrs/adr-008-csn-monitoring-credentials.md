@@ -220,3 +220,60 @@ See the ADR-019 amendment of the same date for why the identity is per-database
 one), and `docs/reconcile-loop-fixes.md` (2026-09-13) for the breakage that
 proved it. The uniform-password assumption above carries over unchanged: it now
 underwrites the stanzas' default bind, not just monitoring.
+
+## Amendment (2026-09-14): the convergence verdict is per database, and unreadable evidence is its own state
+
+This ADR chose the credentials; the 2026-08-26 and 2026-09-11 amendments bounded
+what the comparison can see. Neither said what the unit of comparison *is*, and
+the implementation had it wrong: every `(pod × database)` `contextCSN` vector was
+flattened into one set-identity comparison.
+
+**A `contextCSN` vector is a property of one database on one pod.** Two databases
+have different vectors by construction — independent write histories, disjoint
+serverID activity, last writes at unrelated times — so a comparison across
+suffixes asks a question with no true answer. On any cluster with two
+`SlapdDatabase` CRs the `ReplicationConverged` condition therefore read
+`False/CSNsDiverged` permanently, reporting a "lag" that was the age gap between
+two databases' last writes. Measured on a healthy three-pod mesh (2026-09-14):
+`local CSN divergence: 0.0s lag across 3 pods` while both databases were
+byte-identical on all three pods; captured earlier at `372.8s` and `578.7s`, the
+latter propagated onto a completed backup as `SourceConverged=False`.
+
+Decisions:
+
+1. **Convergence is judged per database and ANDed.** A database is converged when
+   its own readable pods report identical vectors; the cluster condition is the
+   AND over databases, naming the offending database(s) and their per-database
+   lag. The same grouping is the cross-site baseline: a peer's database is
+   compared against *that* database here, never against whichever of ours wrote
+   last.
+
+2. **Unreadable evidence never counts toward the good verdict, and does not
+   vanish.** Locally, any unreadable `(pod, database)` pair caps the condition at
+   `Unknown/CSNQueriesIncomplete`, naming the pairs; an observed divergence still
+   wins as `False` (a problem we can see is reported as a problem). Previously a
+   failed query only decorated the message with a count, and a run where fewer
+   than two readings survived left the previous verdict standing untouched.
+
+3. **Peer-side, "some databases verified, some not" is its own state:
+   `PartiallyVerified`.** Per-database CSN queries are independent LDAP
+   operations with per-database bind identities (this ADR's amendment of
+   2026-09-13), so one database can fail while another on the same host succeeds.
+   That is not theoretical: on 2026-09-13 a peer's db1 bound and answered while
+   db2's bind returned `err=49` against the same pod, and the peer verdict was
+   computed from db1 alone and read `Synced` — the "evidence that degrades to
+   empty on a read failure" class. Folding it into `Unreachable` would state
+   something false (the peer *was* reached) and would seed a wrong decision in
+   anything acting on the field; folding it into `Synced` is the defect. Severity
+   order: `Unreachable` (nothing answered) and `Lagging` (a measured lag on a
+   database that *was* read) both outrank `PartiallyVerified`, which applies only
+   when every verified database is within threshold and at least one database has
+   no readable evidence. `lastError` names the unverifiable databases. The
+   `connected` derivation is unchanged (`state != Unreachable`), so a
+   `PartiallyVerified` peer reads `connected: true` — LDAP-level contact did
+   happen.
+
+**What this does not change:** the bounds above stand unaltered. Per-database
+equality on an idle database still means "everything replicable has replicated",
+not "the link works", and the check remains consumer-side and one-directional —
+mesh health is still only readable by reading every site's CR.

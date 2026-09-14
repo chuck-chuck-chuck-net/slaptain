@@ -923,6 +923,18 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 					detail += fmt.Sprintf(" (%ss)", eps.LagSeconds)
 				}
 				csnIssues = append(csnIssues, detail)
+			case "PartiallyVerified":
+				// The peer answered, and everything that could be read is
+				// current — but at least one database yielded no evidence.
+				// Surfaced rather than swallowed: a state nobody renders is a
+				// state that silently reads as healthy.
+				anyCSNData = true
+				csnOK = false
+				detail := eps.Name + ": PartiallyVerified"
+				if eps.LastError != "" {
+					detail += " (" + eps.LastError + ")"
+				}
+				csnIssues = append(csnIssues, detail)
 			case "Unreachable":
 				anyCSNData = true
 				csnOK = false
@@ -1056,6 +1068,11 @@ func printInspectResult(result inspectJSON) {
 						replStr = fmt.Sprintf("Lagging (%ss)", ep.LagSeconds)
 					} else {
 						replStr = "Lagging"
+					}
+				case "PartiallyVerified":
+					replStr = "PartiallyVerified"
+					if ep.LastError != "" {
+						replStr += " (" + ep.LastError + ")"
 					}
 				case "Unreachable":
 					replStr = "Unreachable"
