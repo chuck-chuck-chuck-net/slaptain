@@ -47,10 +47,16 @@ var _ = Describe("cleanupPolicy", Label("cleanup-policy"), Ordered, func() {
 		delDB     = "cleanup-del-db"   // replicated + Delete — the defect
 		plainDB   = "cleanup-plain-db" // NOT replicated + Delete — positive control
 		keepDB    = "cleanup-keep-db"  // replicated + Retain — positive control
-		delSuffix = "dc=cleanupdel,dc=example,dc=org"
-		plainSfx  = "dc=cleanupplain,dc=example,dc=org"
-		keepSfx   = "dc=cleanupkeep,dc=example,dc=org"
+		delSuffix = "dc=cleanupdel,dc=cleanup,dc=test"
+		plainSfx  = "dc=cleanupplain,dc=cleanup,dc=test"
+		keepSfx   = "dc=cleanupkeep,dc=cleanup,dc=test"
 
+		// The suffixes deliberately live in their OWN tree, NOT under the
+		// fixture's dc=example,dc=org. slapd refuses a database whose suffix
+		// is already served by a preceding one ("already served by a preceding
+		// mdb database", LDAP 80), and a subordinate naming context is served
+		// by its parent database — so dc=cleanupdel,dc=example,dc=org can
+		// never be created while example-db exists. Measured on t3e 2026-09-14.
 		settle = 8 * time.Minute
 	)
 
