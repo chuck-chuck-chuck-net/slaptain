@@ -265,6 +265,52 @@ re-initial-syncing from a still-glued provider replicates the glue again).
 7. Re-run `slctl inspect` on every site; take a fresh backup and confirm
    `SourceSuffixHealthy=True`.
 
+## Amendment (2026-09-14): partition safety stays convention-plus-detection; migration clusters simply omit `spec.seed`
+
+**Cross-site seed withhold rejected as an accepted tradeoff.** A stronger belt
+was considered after acceptance: a seed-carrying SlapdDatabase withholds while
+any *reachable* external peer already holds the suffix under a foreign
+entryUUID, and defers seeding while a configured peer is unreachable. Rejected.
+The deferral half is undecidable at bootstrap — "peer not yet created" and
+"peer down" look identical from the founder, so the guard that closes the
+partitioned-double-seed window also deadlocks every legitimate first
+bring-up (a guard that denies a legitimate own state is a permanent stall).
+The reachable-peer half alone closes nothing the existing per-pod belt
+(Decision 2) does not already cover once the link is up.
+
+The residual is therefore **accepted and named**: founder-only seeding is
+enforced by configuration (`spec.seed` on exactly one site's CR — the same
+distribution-discipline class as ADR-008's replication-credentials Secret),
+not by construction. Two seed-carrying CRs bootstrapped under a partition
+re-create the same-DN/different-UUID conflict on heal. What has changed since
+the incident is that this state is now **loud** at every layer: `DataPresent`
+degrades on the first pod that hides the suffix, restore preflight rejects the
+artifact before scale-to-0, backups carry `SourceSuffixHealthy=False`, and
+`slctl inspect` names the glued pods and disagreeing UUIDs. Loud-and-rare was
+chosen over a guard whose false-positive mode is a silent-forever stall.
+
+(`slapadd`-everywhere with fabricated identities was re-examined in the same
+discussion and stays rejected — see Options considered; in short: it moves
+bootstrap offline, mints a dormant SID (the ITS#9580 surface ADR-021 exists to
+avoid), and its drift failure mode — identical CSN, different content — is
+silent, which is strictly worse than the loud class accepted here.)
+
+**Migration scenario (ADR-011): the legacy provider is the founder.** In a hot
+migration, no slaptain site seeds at all — the control is spec-level and
+already exists: **omit `spec.seed`** on the slaptain-side SlapdDatabase and
+let the DIT replicate in from the legacy provider (this is exactly what
+`tests/e2e-migration.sh` does: only the fake legacy provider's database
+carries `seed:`). Deliberately never auto-detected — whether a cluster is
+joining existing data is a statement of intent that belongs in the CR, not an
+inference. The Decision-2 withhold additionally covers the misconfiguration:
+a seed present while the legacy DIT replicated in first is withheld and
+latched with a log line referencing this ADR.
+
+**Recorded limitation** (docs/BACKLOG.md): on a never-seeded database,
+`Status.SeedApplied` never latches, so `DataPresent` stays
+`NotSeeded/Unknown` and the per-pod suffix-visibility check (Decision 3)
+never engages — migration-shaped clusters currently forgo that signal.
+
 ## Related
 
 - ADR-012 — seed one-shot, pod-0-pinned (the intra-site version of this

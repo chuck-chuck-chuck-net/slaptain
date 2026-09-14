@@ -663,3 +663,24 @@ changes; it is a trivially separable one-commit fix.
 to clean) — or assign `markerDN`/names before the skippable preflight checks.
 While there, skip the empty-name CR deletes too. No red-first ceremony needed
 beyond re-running the skip path and seeing the warning gone.
+
+## DataPresent never engages on a never-seeded database (migration-shaped clusters)
+
+**What:** `Status.SeedApplied` only latches when `spec.seed` is set and
+applied (or withheld). A database that deliberately carries no seed — the
+ADR-011 hot-migration pattern, where the legacy provider is the founder and
+the DIT replicates in — keeps `SeedApplied=false` forever, so
+`evaluateDataPresent` reports `NotSeeded/Unknown` and the per-pod
+suffix-visibility check (ADR-025 Decision 3) never runs. A migration cluster
+with a hidden glue suffix on one pod would not degrade.
+
+**Why it matters:** the ADR-025 detection layer is the accepted substitute for
+construction-grade partition safety; migration-shaped clusters currently forgo
+it exactly where a foreign (legacy-SID) DIT makes suffix anomalies most
+plausible.
+
+**How (sketch):** decouple the visibility check from the seed latch — e.g.
+once the suffix has been observed present on any pod, remember that
+(`DataObserved`-style latch) and from then on require it on every reached pod.
+Needs its own red-first pass; do not fold into unrelated work. See ADR-025
+Amendment 2026-09-14.
