@@ -96,7 +96,12 @@ the race between two sites seeding simultaneously — the founder rule does.
 
 Detection and the manual heal runbook for an existing glue live in ADR-025;
 `slctl inspect` (`suffix-visibility`, `suffix-uuid-agreement`) and the
-database's `DataPresent` condition surface it.
+database's `DataPresent` condition surface it. `DataPresent` runs on peer sites
+too, even though they carry no `spec.seed`: an unseeded database with no data
+anywhere yet reads `Unknown/NoDataYet` (waiting for its first refresh — not an
+alert), turns `True` once the suffix is visible on every pod, and never returns
+to `NoDataYet` afterwards, so a later disappearance reads as the data-loss
+alert it is.
 
 ---
 

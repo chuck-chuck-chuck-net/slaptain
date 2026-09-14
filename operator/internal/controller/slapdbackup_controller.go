@@ -37,6 +37,7 @@ import (
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/backup"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/suffixprobe"
 )
 
 const backupFieldManager = "slapdbackup-controller"
@@ -268,11 +269,12 @@ func (r *SlapdBackupReconciler) recordSource(ctx context.Context, sb *ldapv1alph
 	sb.Status.SourceContextCSN = normalizedCSNVector(csns)
 }
 
-// probeSourceSuffix checks the backup source pod's suffix entry: an ordinary
-// base search first (binding as cn=replication, the ADR-008 identity), and —
-// when the entry is hidden — a ManageDSAIT base search (RFC 3296) to tell a
-// glue entry (invisible to ordinary searches, ADR-025) from a genuinely absent
-// one. Best-effort: any transport failure reports suffixProbeError.
+// probeSourceSuffix classifies the backup source pod's suffix entry, binding as
+// cn=replication (the ADR-008 identity). The classification itself is the
+// shared suffixprobe.Probe — ordinary base search, then ManageDsaIT to tell a
+// hidden glue from a genuinely absent entry (ADR-025). What lives here is only
+// how to reach that pod. Best-effort: any transport failure reports
+// suffixProbeError.
 func (r *SlapdBackupReconciler) probeSourceSuffix(ctx context.Context, ns string, sd *ldapv1alpha1.SlapdDatabase, sc *ldapv1alpha1.SlapdCluster, sourcePod string) (suffixProbeOutcome, string) {
 	if sd.Spec.Suffix == "" {
 		return suffixProbeError, fmt.Sprintf("database %q has no suffix", sd.Name)
@@ -307,46 +309,8 @@ func (r *SlapdBackupReconciler) probeSourceSuffix(ctx context.Context, ns string
 		return suffixProbeError, err.Error()
 	}
 
-	// Ordinary base search: a real suffix entry is visible; a glue is not.
-	res, err := conn.Search(ldap.NewSearchRequest(
-		sd.Spec.Suffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-		"(objectClass=*)", []string{"objectClass"}, nil,
-	))
-	if err == nil && len(res.Entries) > 0 {
-		return suffixProbeVisible, ""
-	}
-	if err != nil && !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
-		return suffixProbeError, err.Error()
-	}
-
-	// Hidden. ManageDSAIT reveals glue entries (slapd hides them from ordinary
-	// searches at the frontend; the control lifts that, not ACLs).
-	mRes, err := conn.Search(ldap.NewSearchRequest(
-		sd.Spec.Suffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-		"(objectClass=*)", []string{"objectClass", "structuralObjectClass", "entryUUID"},
-		[]ldap.Control{ldap.NewControlManageDsaIT(false)},
-	))
-	if err != nil {
-		if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
-			return suffixProbeMissing, ""
-		}
-		return suffixProbeError, err.Error()
-	}
-	if len(mRes.Entries) == 0 {
-		return suffixProbeMissing, ""
-	}
-	e := mRes.Entries[0]
-	for _, oc := range e.GetEqualFoldAttributeValues("objectClass") {
-		if strings.EqualFold(strings.TrimSpace(oc), "glue") {
-			return suffixProbeGlue, "entryUUID " + e.GetEqualFoldAttributeValue("entryUUID")
-		}
-	}
-	if strings.EqualFold(e.GetEqualFoldAttributeValue("structuralObjectClass"), "glue") {
-		return suffixProbeGlue, "entryUUID " + e.GetEqualFoldAttributeValue("entryUUID")
-	}
-	// Visible with the control but not without it, and not glue: exotic
-	// (referral/subentry); report the probe as failed rather than guess.
-	return suffixProbeError, "suffix entry hidden from ordinary search but not a glue entry"
+	obs := suffixprobe.Probe(conn, sd.Spec.Suffix)
+	return obs.Outcome, obs.Detail
 }
 
 // readSourceContextCSN reads contextCSN off the backup's source pod, using the

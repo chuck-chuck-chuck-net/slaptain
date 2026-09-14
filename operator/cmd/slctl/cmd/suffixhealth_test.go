@@ -19,6 +19,8 @@ package cmd
 import (
 	"strings"
 	"testing"
+
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/suffixprobe"
 )
 
 const testSuffix = "dc=example,dc=org"
@@ -27,8 +29,25 @@ func suffixPod(name string, obs ...suffixObservation) podState {
 	return podState{name: name, ready: true, suffixEntries: obs}
 }
 
+// obs builds one pod's observation in the vocabulary these checks reason in:
+// visible / glue / hidden. Hidden means the probe positively found nothing
+// (ManageDsaIT included) — a FAILED probe is obsUnassessable, which is a
+// different thing and must not count as hidden.
 func obs(visible, glue bool, uuid string) suffixObservation {
-	return suffixObservation{Suffix: testSuffix, Visible: visible, Glue: glue, UUID: uuid}
+	o := suffixObservation{Suffix: testSuffix, UUID: uuid, Outcome: suffixprobe.OutcomeMissing}
+	switch {
+	case glue:
+		o.Outcome = suffixprobe.OutcomeGlue
+	case visible:
+		o.Outcome = suffixprobe.OutcomeVisible
+	}
+	return o
+}
+
+// obsUnassessable is a probe that could not reach a verdict: a denied read, a
+// search error, or an entry hidden without being glue.
+func obsUnassessable() suffixObservation {
+	return suffixObservation{Suffix: testSuffix, Outcome: suffixprobe.OutcomeError}
 }
 
 var testDBs = []dbIdentity{{Name: "example-db", Suffix: testSuffix, WantLog: true}}
@@ -86,6 +105,20 @@ func TestCheckSuffixVisibility(t *testing.T) {
 			suffixPod("slapd-0", obs(false, true, "u-glue")),
 			suffixPod("slapd-1", obs(false, true, "u-glue")),
 		}, "fail", "glue"},
+
+		// A pod whose probe FAILED (denied read, search error) is not "hidden":
+		// treating it as hidden turned a failed read into a per-pod divergence
+		// FAIL. Evidence that degrades to empty on a read failure is the class
+		// this repo has been bitten by; it now reads as not-assessed.
+		{"unassessable pod does not manufacture divergence", []podState{
+			suffixPod("slapd-0", obsUnassessable()),
+			suffixPod("slapd-1", obs(true, false, "u1")),
+		}, "pass", ""},
+
+		{"unassessable everywhere warns", []podState{
+			suffixPod("slapd-0", obsUnassessable()),
+			suffixPod("slapd-1", obsUnassessable()),
+		}, "warn", ""},
 
 		// Unqueryable pods are pod-readiness's problem, not this check's.
 		{"skipped pod ignored", []podState{

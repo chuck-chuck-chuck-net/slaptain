@@ -99,6 +99,29 @@ var _ = func() bool {
 				"alice never reached slaptain via syncrepl from fake-prod")
 		})
 
+		// The migration shape is the archetypal NEVER-SEEDED database: the
+		// legacy provider is the founder and the slaptain-side SlapdDatabase
+		// carries no spec.seed at all (ADR-025 amendment 2026-09-14). Until
+		// 2026-09-14 DataPresent gated itself on Status.SeedApplied, which such
+		// a database never latches — so the ADR-025 per-pod suffix-visibility
+		// detector was permanently disabled on exactly the topology where a
+		// foreign-SID DIT makes suffix anomalies most plausible. This spec is
+		// the standing guard that the detector engages here at all.
+		It("reports DataPresent on a database that is never seeded (ADR-025 D5)", func() {
+			dbName := envOrDefault("E2E_MIGRATION_DB_CR_NAME", "slaptain-db")
+			var last *metav1.Condition
+			Eventually(func() bool {
+				last = dataPresentCondition(crdClient, nsSlap, dbName)
+				return last != nil && last.Status == metav1.ConditionTrue
+			}, 120*time.Second, 5*time.Second).Should(BeTrue(),
+				"SlapdDatabase %s/%s never reported DataPresent=True — the DIT has replicated in "+
+					"(the previous spec read alice), so a non-True verdict here means either the "+
+					"suffix is hidden on a pod (ADR-025 glue) or the condition is not being "+
+					"evaluated at all: %s", nsSlap, dbName, describeDataPresent(last))
+			Expect(last.Reason).To(Equal("RootEntryVisible"),
+				"DataPresent True must be reasoned RootEntryVisible, got %s", describeDataPresent(last))
+		})
+
 		It("preserves operational attributes from the source (entryUUID matches fakeprod)", func() {
 			// Direct source-vs-target equality: read alice from BOTH clusters and
 			// assert the entryUUIDs (and other operational attributes) are

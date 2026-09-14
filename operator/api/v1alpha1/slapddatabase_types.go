@@ -500,6 +500,21 @@ type SlapdDatabaseStatus struct {
 	// seedApplied (ADR-012 one-shot discipline).
 	// +optional
 	RestoreApplied bool `json:"restoreApplied,omitempty"`
+	// dataObserved records that the suffix's root entry has at some point been
+	// seen on at least one pod of this database. A one-way latch, set by
+	// positive evidence only and never cleared.
+	//
+	// It exists so the DataPresent condition can tell "data has not arrived
+	// yet" from "data was lost" on databases that are never seeded — a
+	// non-founder site of a mesh (ADR-025 decision 1 tells peers to omit
+	// spec.seed), a hot-migration cluster fed by the legacy provider
+	// (ADR-011), or a consumer-only cluster (ADR-010). For seeded and restored
+	// databases seedApplied and restoreApplied already answer that question.
+	//
+	// Observability only (ADR-012): the reconciler never reads this to decide
+	// whether to write anything — in particular it is NOT an input to seeding.
+	// +optional
+	DataObserved bool `json:"dataObserved,omitempty"`
 	// observedGeneration is the .metadata.generation the controller last reconciled.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

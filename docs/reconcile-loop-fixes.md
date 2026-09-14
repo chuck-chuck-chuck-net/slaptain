@@ -82,6 +82,98 @@ weeks: if a status field is worth shipping, it is worth one e2e.
 
 ---
 
+## 2026-09-14: following ADR-025 D1 switched OFF ADR-025 D5 — `DataPresent` never engaged on a never-seeded database
+
+**Symptom (measured, not argued).** On a healthy three-site mesh, read-only
+right after a fully green suite (86 passed / 0 failed), founder-only seeding in
+effect:
+
+| site | databases | `DataPresent` | `seedApplied` |
+|---|---|---|---|
+| founder | `example-db`, `example-db2` | True/`RootEntryVisible` | true |
+| peer 2 | `example-db`, `example-db2` | **Unknown/`NotSeeded`** | unset |
+| peer 3 | `example-db`, `example-db2` | **Unknown/`NotSeeded`** | unset |
+
+**4 of 6 databases on a fully replicated, fully healthy mesh had the ADR-025
+Decision-5 detector disabled — because they had followed ADR-025 Decision 1.**
+Peer sites omit `spec.seed` (that is the founder-only rule, and `tests/e2e.sh`
+strips the block for every context after the first), `Status.SeedApplied`
+therefore never latches, and `evaluateDataPresent` returned early on
+`!SeedApplied` before probing any pod. A hidden glue suffix on a peer site would
+have produced no operator-side signal at all — on the sites where a foreign-SID
+DIT makes the anomaly most plausible.
+
+**Root cause.** A guard scoped narrower than the invariant it protects — the
+same class as the incident it was built for, one level down. `SeedApplied`
+answers *"did WE write the initial data"*; the condition needed *"is data
+expected here"*. Those were the same question only while the operator's own seed
+was the sole way data could arrive, and ADR-011 (migration), ADR-010
+(consumer-only), ADR-014 (`bootstrapFrom`) and finally ADR-025 D1 each broke
+that equivalence without the gate being revisited. It was written that way
+honestly: the original commit (`b73e7ec`, 2026-05-13) defined the condition as
+"seeded once, root entry now gone" — for which `SeedApplied` was the correct
+trigger. The gap was raised once before, on 2026-05-14 as open question #4 of
+`docs/BUG-ANALYSIS-database-dirs-rolling-restart.md`, and never decided; its
+suggested fix (drop the gate entirely) would have been wrong by itself — under
+ADR-025's all-pods rule it makes every legitimately-empty peer site report
+`False/DataMissing` on first bring-up.
+
+**Affected shapes** (every never-seeded database, not just migration): each
+non-founder site of a mesh; hot-migration clusters (ADR-011); consumer-only
+clusters (ADR-010); `bootstrapFrom`-restored databases (ADR-014) — a database
+the operator had *itself* just loaded with a full DIT reported "has not been
+seeded yet" forever, since `markRestored` sets only `restoreApplied`.
+
+**Fix (ADR-025 amendment 2026-09-14).** The probe runs on every reconcile of
+every database. Seed state informs exactly one branch: what an *all-empty*
+reading means. `False/DataMissing` needs `seedApplied || restoreApplied ||
+dataObserved`; without any of those the verdict is `Unknown/NoDataYet` — a peer
+waiting for its first refresh is not a data-loss alert. `dataObserved` is a new
+one-way latch set only by seeing the root entry (a glue does not set it; an
+unreadable pod does not either). Split visibility needs no latch at all, and a
+ManageDsaIT-confirmed glue now reports `False/GlueSuffix` on its own — which
+also covers a whole site that initial-synced from a glued provider. **No timer
+anywhere:** emptiness becomes alarming through evidence that data once existed,
+never through elapsed time.
+
+The three ADR-025 probes had drifted into two divergent copies; they are now one
+(`internal/suffixprobe`). slctl gains the distinction between "probe failed" and
+"entry absent" — a failed read used to be tallied as *hidden*, which could
+manufacture a per-pod-divergence FAIL out of a denied search (evidence that
+degrades to empty on a read failure: the class the 2026-09-13 db2 finding named).
+The backup probe is behaviour-identical bar an entryUUID now carried in the
+healthy message.
+
+**ADR-012 boundary.** `DataObserved` is memory of data's *presence*, the input
+that could resurrect the reverted `verifySeedExists` (re-create on *absence*).
+Nothing on the write path reads it; `seedNeeded` is extracted and unit-pinned in
+both directions — observing data must not trigger a seed, and must not suppress
+a founder's first seed either.
+
+**Red-first record.** Unit reds on the new `aggregateDataPresent` contract
+(seedless-and-empty must be `NoDataYet`, not `DataMissing`; glue must report
+`GlueSuffix` in three shapes) — pasted in the commit. Honest note: the
+*seedless split-visibility* row could not go red at unit level, because the
+aggregation already handled it — the gate sat one layer up in
+`evaluateDataPresent`, which is I/O-bound; that row's red is the e2e. The e2e
+reds are red-by-construction on the two seedless lanes: `migration_test.go`
+(`slaptain-db` carries no `spec.seed`) and `restore_test.go` (bootstrapFrom),
+both asserting `DataPresent=True` where pre-fix code reports `Unknown/NotSeeded`
+— plus a cross-site check in `tests/e2e.sh` asserting every site's databases
+report True, which is the measured table above turned into a gate. Tests that
+were green from birth (`seedNeeded`, the latch, the classifier) were
+mutation-checked by running; each mutation's failure is pasted in the commit.
+
+**Not covered:** RO pods are still outside `DataPresent` (slctl and the per-pod
+e2e spec do cover them) — recorded in `docs/BACKLOG.md`.
+
+**Lesson:** when a decision changes *how data gets in* (founder-only seeding,
+migration, restore), re-read every guard that keys on *how data got in*. And a
+detector whose precondition is switched off by the very convention it was
+written to support is worse than no detector, because the dashboard is green.
+
+---
+
 ## 2026-09-13: multi-site seed race leaves one pod a permanent hidden GLUE suffix — and every backup from it unrestorable
 
 **Symptom (two, apparently unrelated):** every restore Job in a multi-site e2e

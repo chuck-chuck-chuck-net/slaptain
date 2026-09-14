@@ -310,6 +310,74 @@ latched with a log line referencing this ADR.
 `Status.SeedApplied` never latches, so `DataPresent` stays
 `NotSeeded/Unknown` and the per-pod suffix-visibility check (Decision 3)
 never engages — migration-shaped clusters currently forgo that signal.
+*Closed by the amendment below.*
+
+## Amendment (2026-09-14): `DataPresent` engages on every database, seeded or not
+
+The limitation recorded above turned out to be wider than "migration-shaped
+clusters", and measurable. On a healthy three-site mesh, right after a fully
+green suite, with founder-only seeding in effect:
+
+| site | databases | `DataPresent` | `seedApplied` |
+|---|---|---|---|
+| founder | `example-db`, `example-db2` | True/`RootEntryVisible` | true |
+| peer 2 | `example-db`, `example-db2` | **Unknown/`NotSeeded`** | unset |
+| peer 3 | `example-db`, `example-db2` | **Unknown/`NotSeeded`** | unset |
+
+Four of six databases on a fully replicated, fully healthy mesh had this ADR's
+own Decision 5 detector switched off — **because they had followed Decision 1**.
+Peers omit `spec.seed`, so `Status.SeedApplied` never latches, and
+`evaluateDataPresent` returned early on `!SeedApplied` before probing anything.
+The same shape covers hot migration (ADR-011), consumer-only clusters
+(ADR-010), and `bootstrapFrom`-restored databases (ADR-014), which are never
+seeded by construction — a database the operator had itself just loaded with a
+full DIT reported "has not been seeded yet" forever.
+
+The root cause is a guard scoped narrower than its invariant, one level down
+from this ADR's own: `SeedApplied` answers *"did we write the initial data"*,
+which stopped being the same question as *"is data expected here"* the moment
+data began arriving by replication — i.e. the moment Decision 1 was adopted.
+
+**Decision 5 is restated:** the per-pod suffix probe runs on every reconcile of
+every database, regardless of how (or whether) it was seeded. The seed latch is
+no longer a gate on the probe. What needs memory is only the *all-empty*
+reading, and only to tell two states apart that look identical on the wire:
+
+- `True/RootEntryVisible` — visible on every assessed RW pod.
+- `False/GlueSuffix` — a ManageDsaIT probe positively identified a glue on at
+  least one pod. Absolute: it needs no healthy peer to contrast with and no
+  knowledge of the database's history, so it fires on a whole site that
+  initial-synced from a glued provider (evidence item 5). The operator's probe
+  is now the same one `slctl inspect` and the backup source check use.
+- `False/DataMissingOnPods` — visible on some assessed pods, absent on others.
+- `False/DataMissing` — absent everywhere on a database known to have held data.
+- `Unknown/NoDataYet` — absent everywhere on a database that has never been
+  seeded, restored, or observed holding data: a peer site waiting for its first
+  refresh. **Not an alert** — nothing is known to have been lost. This replaces
+  `NotSeeded`, and it is the only branch the seed latch still informs.
+- `Unknown/NoReachablePod` — nothing could be assessed.
+
+"Known to have held data" is `seedApplied || restoreApplied || dataObserved`,
+the last being a new one-way latch on `SlapdDatabase.status`, set the first time
+the root entry is seen on any pod and never cleared. A glue does not set it (it
+is the corpse of an entry, not data), and neither does an unreadable pod —
+positive evidence only. There is deliberately **no timer**: what makes emptiness
+alarming is evidence that data once existed, never elapsed time.
+
+**The ADR-012 boundary is unchanged and now has a test.** `DataObserved` is
+memory of data's *presence*, which is exactly the input that could resurrect the
+reverted `verifySeedExists` (re-create on *absence*). Nothing on the write path
+reads it: `seedNeeded` takes `spec.seed` and `SeedApplied` alone, and a unit
+control pins both directions — a seedless database whose data was observed and
+then lost must not seed, and a founder whose data is already visible must not
+have its first seed suppressed either (withholding remains Decision 2's job,
+keyed on a foreign creator's serverID).
+
+**Known gap, recorded rather than closed:** `DataPresent` still probes RW pods
+only, while a glue provably propagates to RO pods (evidence item 5). `slctl
+inspect` and the per-pod e2e spec do cover RO pods. Including them here widens
+the transient `False` window during a legitimate RO initial sync, so it was left
+as a separate decision (docs/BACKLOG.md).
 
 ## Related
 

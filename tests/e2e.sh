@@ -1035,6 +1035,55 @@ run_tests() {
             -timeout 65m \
             "${ginkgo_flags[@]}"
     )
+
+    check_data_present_every_site
+}
+
+# check_data_present_every_site asserts that EVERY site's every SlapdDatabase
+# reports DataPresent=True.
+#
+# It lives here rather than in the Go suite because only this script knows about
+# the other sites: the suite reaches remote sites over LDAP only, and has no
+# client for their Kubernetes API. And the non-founder sites are exactly the
+# interesting ones — founder-only seeding (ADR-025 decision 1) means sites 2..N
+# deploy seed-stripped, which is the shape whose DataPresent used to sit at
+# Unknown/NotSeeded forever, with the per-pod suffix-visibility detector
+# (decision 5) therefore never running. Measured on a healthy three-site mesh on
+# 2026-09-14: 4 of 6 databases had the detector disabled that way.
+#
+# A short retry window absorbs the settling after the destructive specs (the
+# case-2 PVC delete rebuilds a pod, and a pod that is still initial-syncing
+# legitimately reads False/DataMissingOnPods until it converges).
+check_data_present_every_site() {
+    local deadline=$((SECONDS + 180))
+    local ctx db status reason pending
+
+    log "Verifying DataPresent on every site's databases (ADR-025 D5)..."
+    while true; do
+        pending=""
+        for ctx in "${CONTEXTS[@]}"; do
+            for db in $(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net \
+                -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+                status=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net "$db" \
+                    -o jsonpath='{.status.conditions[?(@.type=="DataPresent")].status}' 2>/dev/null || true)
+                if [[ "$status" != "True" ]]; then
+                    reason=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net "$db" \
+                        -o jsonpath='{.status.conditions[?(@.type=="DataPresent")].reason}' 2>/dev/null || true)
+                    pending+="  [$ctx] $db: ${status:-<absent>}/${reason:-<none>}"$'\n'
+                fi
+            done
+        done
+        [[ -z "$pending" ]] && break
+        if (( SECONDS >= deadline )); then
+            printf '%s' "$pending" >&2
+            die "DataPresent is not True on every site's databases (see above). \
+A never-seeded peer site reporting Unknown/NotSeeded means the ADR-025 detector is disabled there; \
+False/GlueSuffix or False/DataMissingOnPods means a pod is hiding the suffix entry \
+(check with: slctl inspect -n $NAMESPACE_TESTING slapd)."
+        fi
+        sleep 5
+    done
+    log "DataPresent=True on every site's databases."
 }
 
 # ── Teardown ─────────────────────────────────────────────────────────────────

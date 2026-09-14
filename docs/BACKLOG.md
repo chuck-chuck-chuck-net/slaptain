@@ -672,52 +672,31 @@ still accepting data writes afterwards, zero restarts. So no R2/R3 downgrade was
 needed and ADR-024 needed no further amendment; the probe confirmed the class
 rather than refuting it.
 
-## restore_replay_test.go cleanup targets the root DSE when the spec skips early
+## `DataPresent` does not cover read-only replica pods
 
-**What:** the replay spec's `AfterAll` (`tests/e2e/restore_replay_test.go`)
-is gated only on `E2E_BACKUP=1`, but `markerDN` is assigned near the *end* of
-`BeforeAll` — after two `Skip` exits (non-replicated cluster; external peers
-present, ADR-014 amendment). When either skip fires, cleanup runs with
-`markerDN == ""`, so the marker delete becomes `Del("")` — the root DSE — and
-slapd answers err 53 `cannot delete the root DSE`. The handler then prints a
-**false** `!!! CLEANUP FAILED … The shared fixture is off baseline; delete it
-by hand`, sending a human hunting for fixture drift that does not exist
-(observed on the 2026-09-13 run, where the spec skipped on the two external
-peers). The trailing `crdClient.Delete` calls for the SlapdRestore/SlapdBackup
-CRs are likewise issued with empty names, errors discarded.
+**What:** `evaluateDataPresent` probes RW pods only (`0..spec.replicas`), while
+a hidden glue suffix provably propagates to RO pods — ADR-025 evidence item 5
+measured the affected site's RO pod carrying the **same glue with the same
+entryUUID**, because a consumer initial-syncing from a glued provider
+replicates the glue faithfully. So an RO-only glue is invisible to the standing
+operator signal.
 
-**Why deferred:** discovered while root-causing the accesslog-migration dial
-flake (branch `test/accesslog-migration-dial-hardening`); same broad family —
-test scaffolding not safe against a path that did not run — but a different
-mechanism (uninitialized state on a skip path, not a fatal dial inside a retry
-envelope), different file, different gate. Folding it in would blur both
-changes; it is a trivially separable one-commit fix.
+**Why it is not a hole in the wall:** `slctl inspect`'s `suffix-visibility` /
+`suffix-uuid-agreement` checks and the per-pod e2e spec in `ldap_test.go` both
+cover RO pods, and all three now share one probe (`internal/suffixprobe`), so
+this is reach, not divergence.
 
-**How:** guard the `AfterAll` on `markerDN == ""` (nothing was created, nothing
-to clean) — or assign `markerDN`/names before the skippable preflight checks.
-While there, skip the empty-name CR deletes too. No red-first ceremony needed
-beyond re-running the skip path and seeing the warning gone.
+**Why deferred (2026-09-14, decided with the seedless-DataPresent fix):**
+including RO pods widens the transient `False/DataMissingOnPods` window — an RO
+pod doing its initial sync legitimately lacks the suffix while the RW pods have
+it, and ADR-025 D5's all-pods rule turns that into an alert. That is already
+accepted for RW pod rebuilds (ADR-012 case 2); extending it to the RO fleet is a
+separate call about alert noise, not a mechanism question.
 
-## DataPresent never engages on a never-seeded database (migration-shaped clusters)
-
-**What:** `Status.SeedApplied` only latches when `spec.seed` is set and
-applied (or withheld). A database that deliberately carries no seed — the
-ADR-011 hot-migration pattern, where the legacy provider is the founder and
-the DIT replicates in — keeps `SeedApplied=false` forever, so
-`evaluateDataPresent` reports `NotSeeded/Unknown` and the per-pod
-suffix-visibility check (ADR-025 Decision 3) never runs. A migration cluster
-with a hidden glue suffix on one pod would not degrade.
-
-**Why it matters:** the ADR-025 detection layer is the accepted substitute for
-construction-grade partition safety; migration-shaped clusters currently forgo
-it exactly where a foreign (legacy-SID) DIT makes suffix anomalies most
-plausible.
-
-**How (sketch):** decouple the visibility check from the seed latch — e.g.
-once the suffix has been observed present on any pod, remember that
-(`DataObserved`-style latch) and from then on require it on every reached pod.
-Needs its own red-first pass; do not fold into unrelated work. See ADR-025
-Amendment 2026-09-14.
+**How:** it is the same loop — add the `<name>-readonly-N` hosts (they use the
+RO headless service) to the probe list in `evaluateDataPresent`, and decide
+whether their verdict should be reported under a distinct reason so an RO-only
+divergence is distinguishable from an RW one.
 
 ---
 
