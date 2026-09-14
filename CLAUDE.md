@@ -231,7 +231,15 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 
 Database-level config (ACLs, schemas, indices, replication per-DB) is declared on `SlapdDatabase` and `SlapdSchema` CRs. Per-DB tunables (`maxSize` — recreate-only, slapd segfaults on live modify; `sizeLimit`/`timeLimit`/`limits` default unlimited; checkpoint, `noSync`, `envFlags`, `accesslogPurge` default `7+00:00 1+00:00` with `"none"` opt-out, `syncprovCheckpoint`) follow ADR-024's placement classes — see `docs/TUNING.md`.
 
-**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error/**Restoring**), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `replicationNetworkIPs` (discovered Multus IPs per pod), `externalPeerStatuses` (per-peer: `replicationState` Synced/Lagging/Unreachable, `lagSeconds`, `lastChecked`, `discoveredAddresses`), `restore` (in-progress bootstrapFrom restore: sub-`phase`, `originalReplicas`, `databases` — ADR-014), `conditions` (including `ReplicationConverged` for local CSN convergence).
+**Status fields:** `phase` (Bootstrapping/Running/Degraded/Error/**Restoring**), `readyReplicas`, `replicas`, `readOnlyReadyReplicas`, `readOnlyReplicas`, `observedGeneration`, `replicationNetworkIPs` (discovered Multus IPs per pod), `externalPeerStatuses` (per-peer: `replicationState` Synced/Lagging/**PartiallyVerified**/Unreachable, `lagSeconds`, `lastChecked`, `discoveredAddresses`), `restore` (in-progress bootstrapFrom restore: sub-`phase`, `originalReplicas`, `databases` — ADR-014), `conditions` (including `ReplicationConverged` for local CSN convergence).
+
+**CSN convergence is judged per database** (ADR-008 amendment 2026-09-14). A `contextCSN`
+vector belongs to one database on one pod and is only comparable to the same database's
+vector elsewhere; `ReplicationConverged` is the AND over databases (`CSNsMatch` /
+`CSNsDiverged` naming the database / `CSNQueriesIncomplete` when a pod×database pair could
+not be read — unreadable evidence never counts toward True). `PartiallyVerified` is the
+peer-side counterpart: the peer answered and everything read is current, but at least one
+database yielded no readable contextCSN (`lastError` names it).
 
 **Reconcile order (SlapdCluster controller):**
 1. Fetch `SlapdCluster` — NotFound → return nil (deleted)

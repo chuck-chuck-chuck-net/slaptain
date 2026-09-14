@@ -554,7 +554,15 @@ document.
 
 ---
 
-## ReplicationConverged compares CSN sets ACROSS databases — structurally ~always False on a multi-DB cluster
+## ~~ReplicationConverged compares CSN sets ACROSS databases — structurally ~always False on a multi-DB cluster~~ — DONE (2026-09-14)
+
+Fixed per database, together with the two sibling instances in the same
+functions (query errors that only decorated the message; the peer verdict
+computed from whichever database answered). New `replicationState:
+PartiallyVerified` for a peer whose evidence is incomplete. Unit red-first on
+both seams plus a live e2e red; see `docs/reconcile-loop-fixes.md` (2026-09-14)
+and the ADR-008 amendment of the same date. The original entry follows for its
+evidence.
 
 **What:** `checkLocalCSNConvergence` (`slapdcluster_controller.go`) appends every
 (pod × database) contextCSN set into one flat list and `csnConverged` compares
@@ -587,6 +595,32 @@ sets must read converged; one DB diverged across pods must not). Class: one
 structure answering two questions — a per-database verdict flattened into a
 per-cluster list. Separate fix by decision (2026-09-13): it visibly changes
 backup `SourceConverged` semantics and deserves its own red-first pass.
+
+---
+
+## `slctl inspect`'s CSN check only ever looks at the FIRST data suffix
+
+**What:** `inspect.go` picks one suffix via `dataSuffixFromNamingContexts`
+(first non-`cn=` naming context) and reads `contextCSN` for that one only. So
+the `csn-convergence` check — and the per-pod `contextCSN` shown in the
+detailed output — covers db1 and is blind to every other database on the
+cluster. The two-database fixture has had no slctl CSN coverage for db2 since
+it landed (2026-08-25).
+
+**Why it matters:** same class as the operator-side defect fixed 2026-09-14
+(a per-database quantity handled on a single-value axis), and slctl is the tool
+a human reaches for when the operator's condition says something is wrong —
+it currently cannot confirm or deny it for any database but the first.
+
+**Why deferred:** found while fixing the operator half; folding it in would
+blur a controller fix with a CLI change in a different binary, and the CLI
+wants a decision of its own (per-suffix sections in the human output, a
+`contextCSN` map in `--json`, and what `--short` prints).
+
+**How:** probe every non-`cn=` naming context, key the check by suffix, and
+report per-database (pass/fail naming the suffix). The ADR-025 suffix-health
+probes in the same function already iterate all naming contexts — follow that
+shape.
 
 ---
 

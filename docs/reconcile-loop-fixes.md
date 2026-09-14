@@ -5,6 +5,83 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-09-14: `ReplicationConverged` compared CSN sets ACROSS databases — a shipped condition that was ~always False
+
+**Symptom:** on any cluster with two `SlapdDatabase` CRs — the standard `example`
+fixture, single-site included — `ReplicationConverged` reads
+`False/CSNsDiverged` regardless of health, and every backup mirrors it as
+`SourceConverged=False/ClusterDiverged` (ADR-014 amendment 2026-09-12 consumes
+the condition verbatim). Measured live 2026-09-14 on a healthy three-pod mesh:
+`local CSN divergence: 0.0s lag across 3 pods` — *diverged with zero lag* —
+while db1's five-CSN vector and db2's three-CSN vector were each byte-identical
+on all three pods. Earlier captures: `372.8s lag ... (2 query errors)` on a
+completed backup, and `578.7s lag` on a freshly set-up mesh.
+
+**Root cause:** `checkLocalCSNConvergence` appended every `(pod × database)`
+vector into one flat list and `csnConverged` demanded pairwise identity across
+the whole list — so it additionally required db1's vector to equal db2's, which
+is false *by construction*: independent write histories, disjoint serverID
+activity, last writes at unrelated times. The reported "lag" was
+newest-across-all-databases minus oldest-across-all-databases, i.e. the age gap
+between two different databases' last writes, not replication lag. Not a
+regression: the function was born this shape (2026-04-28, `b564bf5`) with a
+single-database mental model and was correct while exactly one database existed;
+the two-database fixture landed 2026-08-25 and nothing asserted on the condition,
+so it stayed false for 19 days until the db2 investigation tripped over it.
+
+Two more instances of the same family lived in the same functions:
+
+- The local verdict *decorated* its message with a query-error count but never
+  changed on one, and a pass with fewer than two readable sets returned early,
+  leaving the previous verdict standing untouched.
+- `checkPeerCSNConvergence` silently `continue`d a database whose remote query
+  failed and computed Synced/Lagging from whichever database answered — the
+  db2 breakage read `Synced` off db1 while db2's remote binds failed err=49 on
+  the same hosts. URI mode was worse: it returned on the *first* database that
+  produced a CSN, and fell through to `Synced` when none did.
+
+**Fix:** both verdicts move into pure seams (`csn_convergence.go`:
+`evaluateLocalConvergence`, `evaluatePeerConvergence`) that group readings by
+suffix. A database is converged when its own readable pods agree; the condition
+is the AND over databases, `False/CSNsDiverged` naming the database(s) and their
+per-database lag. Unreadable `(pod, database)` pairs cap the local verdict at
+`Unknown/CSNQueriesIncomplete` and are named — positive evidence only — while an
+observed divergence still wins as False. Peer-side, lag is computed within a
+suffix, and a peer with an unverifiable database gets the new
+`replicationState: PartiallyVerified` (severity: Unreachable and Lagging outrank
+it; `lastError` names the databases) rather than borrowing the verdict of
+whichever database answered. `csnConverged` itself is reused per group, not
+re-derived. `connected` is untouched. See the ADR-008 amendment of the same date.
+
+**Why it was hard to spot:** the condition is informational, so nothing broke
+loudly; no e2e read it (the suite proves replication functionally, by
+write-here-read-there); and the message *looked* like a real measurement —
+"372.8s lag across 3 pods" reads as a diagnosis, not as a category error. The
+live tell was absurd rather than alarming: `0.0s lag` on a cluster reported
+diverged.
+
+**Red-first record:** unit reds on both seams before the fix — the incident row
+(`two healthy databases with different vectors are converged`) failed with
+`Status = "False", want "True" ... "local CSN divergence: 96.5s lag across 3
+pods"`; the strictness rows failed `Status = "True", want "Unknown"`; the peer
+rows failed `State = "Synced", want "PartiallyVerified"` and, for the
+cross-database row, `State = "Lagging" (lag "96.5"), want "PartiallyVerified"` —
+lag fabricated out of two healthy databases. Live e2e red against the running
+pre-fix operator: `ReplicationConverged=False (CSNsDiverged): local CSN
+divergence: 0.0s lag across 3 pods`. The one row that was green from birth
+(empty remote database → Lagging) was mutation-checked by running: breaking the
+branch flipped it to `State = "Synced", want "Lagging"`; mutation reverted.
+`tests/e2e/replication_converged_test.go` is the permanent guard (ungated).
+
+**Lesson:** a health verdict must be computed on the axis its evidence lives on.
+`contextCSN` is per database, exactly as `logbase` and the syncrepl bind identity
+are (ADR-019 R9; 2026-09-13) — this is the third finding in a month where one
+structure answered a per-database question on a cluster-wide axis. And a
+condition nobody asserts on is a condition that can report a falsehood for
+weeks: if a status field is worth shipping, it is worth one e2e.
+
+---
+
 ## 2026-09-13: multi-site seed race leaves one pod a permanent hidden GLUE suffix — and every backup from it unrestorable
 
 **Symptom (two, apparently unrelated):** every restore Job in a multi-site e2e
