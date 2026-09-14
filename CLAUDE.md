@@ -463,6 +463,14 @@ Applied per tier:
    accepted). Design corollary: push the *decision* into a thin pure function (e.g.
    `desiredServerID`) so it is unit-TDD-able fast, leaving e2e a thin integration shell.
 
+**Replication-path changes see a mesh before merge.** A change that alters
+syncrepl stanzas, overlays, or anything else on the replication path gets one
+multi-site e2e cycle before merging — or the commit message states explicitly
+that multi-site is unvalidated. Single-site fixtures structurally lack the long
+refresh windows and convergence write-bursts where this class of regression
+lives (the timeout= freeze was invisible on t3e and cost ~300 s full-server
+silences on the mesh).
+
 **Not dogmatic:** behavior-preserving refactors under already-green tests need no new red —
 the existing tests are the guard. Red-first applies to new behavior and bug fixes. If a test
 will not go red for the intended reason, treat it as a broken test and say so — do not paper

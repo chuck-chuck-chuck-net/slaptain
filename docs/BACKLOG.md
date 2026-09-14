@@ -684,3 +684,26 @@ once the suffix has been observed present on any pod, remember that
 (`DataObserved`-style latch) and from then on require it on every reached pod.
 Needs its own red-first pass; do not fold into unrelated work. See ADR-025
 Amendment 2026-09-14.
+
+---
+
+## e2e needs a liveness assertion class (found via the timeout= freeze)
+
+The suite asserts end states through Eventually with generous budgets, so a
+self-resolving full-server freeze passes green: the timeout= regression's three
+~299 s silence gaps per convergence pass — etime≈300 sitting right there in the
+logs — tripped nothing, and was found by a human noticing silence in a manual
+run. Wanted: assertions that bound liveness during convergence — operator LDAP
+op etimes under a threshold, and/or a probe writer asserting no
+all-pods-silent gap longer than N seconds during setup/convergence. Cheap
+first cut: parse etime from slapd stats logs in the tunables spec.
+
+## PRIORITY RAISED: the big-DIT initial-sync e2e
+
+Deferred twice; the tax keeps arriving. A >500-entry (now: multi-second
+refresh-window) initial full sync exercises exactly the long refresh phases
+where the timeout= freeze had its collision window, on top of its original
+purpose (the sizelimit class). E2E_SCALE seeds entries into a LIVE mesh (small
+deltas); this lane must instead create a FRESH consumer against a populated
+provider — pod-recreate or bootstrapFrom against a big artifact. Next e2e
+investment, before further replication-path changes.
