@@ -28,6 +28,31 @@ errcheck 40, lll 31, modernize 15, goconst 13, prealloc 13, gocyclo 9, unused 4,
 unparam 2, revive 1 (uncapped counts, unchanged by this change). Worth a separate
 sweep.
 
+## `make -C operator lint` cannot run under Go 1.27
+
+**What:** the pinned `golangci-lint` v2.7.2 cannot read Go 1.27's export data
+(`export data version 4 is greater than maximum supported version 2`). It fails
+with 5 bogus `typecheck` errors and never reaches the real linters, so the
+target is unusable on a machine whose default toolchain is 1.27.
+
+**Workaround in use:** run `operator/bin/golangci-lint` with `GOROOT`/`PATH`
+pointed at a go1.26.x toolchain (one is already in the module cache).
+
+**Why it matters:** the lint gate silently reports nothing useful rather than
+failing loudly as a version problem, so a contributor can believe the tree is
+lint-clean when the linters never ran. Found 2026-09-14 while closing the
+`client.Apply` deprecation, where the before/after counts had to be produced
+through the workaround.
+
+**How:** bump the pinned golangci-lint to a release that supports the current
+Go export format, and re-pin deliberately rather than floating. While there,
+note that golangci caps identical messages at 3 by default — the uncapped
+counts (`--max-same-issues=0 --max-issues-per-linter=0`) are the honest ones,
+and the remaining debt is 128 findings (errcheck 40, lll 31, modernize 15,
+goconst 13, prealloc 13, gocyclo 9, unused 4, unparam 2, revive 1).
+
+---
+
 ## e2e framework: specs cannot provision their own topology
 
 **What:** the Go e2e suite cannot stand up the environment it runs against. The
