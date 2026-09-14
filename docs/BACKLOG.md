@@ -605,7 +605,22 @@ backup `SourceConverged` semantics and deserves its own red-first pass.
 
 ---
 
-## `slctl inspect`'s CSN check only ever looks at the FIRST data suffix
+## ~~`slctl inspect`'s CSN check only ever looks at the FIRST data suffix~~ — DONE (2026-09-14)
+
+Fixed per database, mirroring the operator-side fix above: `inspect` probes
+`contextCSN` for every non-`cn=` naming context, the verdict moved into a pure
+seam (`cmd/slctl/cmd/csncheck.go`) keyed by suffix, and the cluster verdict is
+the worst per-database one, naming the database it indicts. `--json` carries
+`pods[].contextCSNBySuffix` (replacing the flat `contextCSN` array, which only
+ever held the first suffix's vector) and the per-pod display gets one section
+per database. The `dataSuffixFromNamingContexts` helper — the trap itself — is
+deleted, and `debug-dump`'s identical first-suffix-only dump is fixed with it.
+Also reworded the misleading "never synced?" on a pod with no contextCSN: a
+hidden glue suffix entry takes `contextCSN` with it (ADR-025) and this probe is
+anonymous, so the check no longer asserts a cause it cannot know. Unit
+red-first, live-verified on a two-database cluster. The original entry follows
+for its evidence.
+
 
 **What:** `inspect.go` picks one suffix via `dataSuffixFromNamingContexts`
 (first non-`cn=` naming context) and reads `contextCSN` for that one only. So

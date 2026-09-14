@@ -302,17 +302,31 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 	if rootDSE != nil && len(rootDSE.Entries) > 0 {
 		namingContexts = rootDSE.Entries[0].GetEqualFoldAttributeValues("namingContexts")
 	}
-	dataSuffix := dataSuffixFromNamingContexts(namingContexts)
-
-	// contextCSN
-	if dataSuffix != "" {
+	// contextCSN, for EVERY data suffix. A vector belongs to one database
+	// (ADR-008 amendment 2026-09-14), so dumping only the first naming
+	// context leaves every other database absent from the post-mortem —
+	// exactly when a dump is the only evidence left.
+	var csnDump []string
+	for _, nc := range namingContexts {
+		if strings.HasPrefix(strings.ToLower(nc), "cn=") {
+			continue // accesslog / internal DBs
+		}
 		csnResult, err := conn.Search(ldap.NewSearchRequest(
-			dataSuffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
+			nc, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
 			"(objectClass=*)", []string{"contextCSN"}, nil,
 		))
-		if err == nil && len(csnResult.Entries) > 0 {
-			write(fmt.Sprintf("contextcsn-%s.txt", podName), formatLDAPEntry(csnResult.Entries[0]))
+		if err != nil {
+			csnDump = append(csnDump, fmt.Sprintf("# %s: %v\n", nc, err))
+			continue
 		}
+		if len(csnResult.Entries) == 0 {
+			csnDump = append(csnDump, fmt.Sprintf("# %s: no entry returned\n", nc))
+			continue
+		}
+		csnDump = append(csnDump, formatLDAPEntry(csnResult.Entries[0]))
+	}
+	if len(csnDump) > 0 {
+		write(fmt.Sprintf("contextcsn-%s.txt", podName), strings.Join(csnDump, "\n"))
 	}
 	conn.Close()
 
