@@ -204,6 +204,18 @@ var _ = Describe("in-place restore under replication (accesslog replay)", Label(
 		if os.Getenv("E2E_BACKUP") != "1" {
 			return
 		}
+		// BeforeAll assigns markerDN LAST, after three Skip exits (not
+		// replicated; external peers present — ADR-014 amendment). On any of
+		// those paths nothing was created, and this AfterAll — gated only on
+		// E2E_BACKUP — used to run anyway with markerDN == "": conn.Del("") is
+		// a delete of the ROOT DSE, slapd answers err 53, and the handler
+		// printed "!!! CLEANUP FAILED ... The shared fixture is off baseline;
+		// delete it by hand" — sending a human hunting for fixture drift that
+		// does not exist. Observed on every multi-site run (the external-peers
+		// skip), most recently 2026-09-14.
+		if !replayCleanupNeeded(markerDN) {
+			return
+		}
 		if (anySpecFailed || CurrentSpecReport().Failed()) && keepOnFailure() {
 			fmt.Fprintf(GinkgoWriter,
 				"\n=== KEEPING FAILED REPLAY STATE: marker %s, SlapdRestore %s, SlapdBackup %s "+
@@ -368,3 +380,10 @@ var _ = Describe("in-place restore under replication (accesslog replay)", Label(
 			"marker must remain on all RW pods; if it vanishes, a stale accesslog delta was replayed")
 	})
 })
+
+// replayCleanupNeeded reports whether this spec's AfterAll has anything to
+// clean up. It is false exactly when BeforeAll took one of its Skip exits
+// before assigning markerDN — nothing was created, so deleting anything (in
+// particular the empty DN, which slapd reads as the root DSE) is both wrong and
+// a source of false "cleanup failed" alarms.
+func replayCleanupNeeded(markerDN string) bool { return markerDN != "" }
