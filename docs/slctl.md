@@ -60,7 +60,7 @@ SlapdCluster: slaptain-testing/slapd
 
   Pod: slapd-0  [Running, ready]
     namingContexts: cn=accesslog-default, dc=chuck-chuck-chuck,dc=net
-    contextCSN:
+    contextCSN (dc=chuck-chuck-chuck,dc=net):
       20260416143539.536592Z#000000#000#000000
     syncRepl:
       {0}rid=002 provider=ldaps://slapd-1.slapd-headless...
@@ -76,7 +76,7 @@ Checks:
   [OK  ] bootstrap                  complete
   [OK  ] naming-contexts            RW: data + 1 accesslog(s), RO: data only
   [OK  ] accesslog-consistency      2 database/pod pair(s): logbase = olcAccessLogDB = log olcSuffix
-  [OK  ] csn-convergence            all 4 pods report identical CSN
+  [OK  ] csn-convergence            2 database(s): all 4 pods report identical contextCSN for each
   [OK  ] syncrepl-stanza-count      RW: 2 each, RO: 3 each
   [OK  ] syncrepl-skip-self         no RW pod replicates from itself
   [OK  ] multi-provider             TRUE on RW, absent on RO
@@ -100,7 +100,7 @@ slctl inspect --short -n slaptain slapd || echo "UNHEALTHY"
 | Field | Source | What it tells you |
 |---|---|---|
 | **namingContexts** | rootDSE (anonymous) | Which databases the pod serves. RW pods should have the data suffix plus one `cn=accesslog-<database>` per replicated database (ADR-019). RO pods should have only the data suffix. |
-| **contextCSN** | Base entry (anonymous) | The replication state vector — see [Understanding contextCSN](#understanding-contextcsn). |
+| **contextCSN** | Each data suffix's base entry (anonymous) | The replication state vector, one section per database — see [Understanding contextCSN](#understanding-contextcsn). `none readable` means the pod serves that database but the probe got nothing back. |
 | **syncRepl** | cn=config (config admin) | The `olcSyncRepl` stanzas — which peers this pod replicates from. |
 | **multiProvider** | cn=config (config admin) | `TRUE` on RW pods (N-way multi-master). Absent on RO pods. |
 
@@ -118,7 +118,7 @@ corresponding checks are skipped.
 | **bootstrap** | `status.bootstrapComplete == true` | Not complete | — |
 | **naming-contexts** | RW: one `cn=accesslog-<database>` per replicated database + data suffix. RO: data suffix only. | Missing or unexpected DB | Legacy shared `cn=accesslog` still present (mid-migration), or an orphan log with no `SlapdDatabase` |
 | **accesslog-consistency** | Per replicated DB: `logbase` = `olcAccessLogDB` = log `olcSuffix`; no two DBs share a log | Local disagreement, missing overlay, absent log DB, or two DBs sharing one log (ADR-019) | Legacy shared `cn=accesslog` still in use by a single DB. External-peer `logbase` is reported as information — it is evaluated on the peer (ADR-019 R9) and never fails |
-| **csn-convergence** | All pods report identical contextCSN vectors | — | Shows divergent groups |
+| **csn-convergence** | Per database: all pods report identical contextCSN vectors for that suffix | A database readable on some pods and not on others | Divergence on a database (groups + lag), or a database with no contextCSN anywhere |
 | **syncrepl-stanza-count** | RW: `(replicas-1) + externalPeers` stanzas. RO: `replicas` stanzas. | Mismatch | — |
 | **syncrepl-skip-self** | No RW pod has a syncrepl stanza pointing to itself | Self-replication detected | — |
 | **multi-provider** | `TRUE` on all RW pods; absent/FALSE on RO pods | Wrong value | — |
@@ -172,14 +172,25 @@ from every originator. This is the steady state for an idle or lightly loaded cl
 
 ### What divergence means
 
-If pods report different CSNs, replication is lagging. The `inspect` command groups pods by their
-CSN vector and reports it as a warning:
+A `contextCSN` vector belongs to **one database on one pod** (ADR-008 amendment
+2026-09-14), so the check compares each suffix only against itself and reports a
+verdict per database — the cluster verdict is the worst of them, and every
+non-passing segment names its suffix. Two databases are never compared to each
+other: their vectors differ by construction, and the "lag" such a comparison
+produces is the age gap between two unrelated write histories.
+
+If a database's pods report different CSNs, replication is lagging on that
+database. `inspect` groups the pods by CSN vector and warns:
 
 ```
-[WARN] csn-convergence  2 distinct CSN vectors:
-  [slapd-0,slapd-2]: 20260416143539.536592Z#000000#000#000000
-  [slapd-1]: 20260416143500.000000Z#000000#000#000000
+[WARN] csn-convergence  dc=example,dc=org: 2 distinct CSN vectors (slapd-1 behind slapd-0 by 39.5s): [slapd-0,slapd-2] vs [slapd-1]
 ```
+
+A database that is readable on some pods but not on others **fails** the check
+(exit code non-zero) and names the silent pods. The cause is not knowable from
+here: an initial sync that never completed, a hidden glue suffix entry, which
+takes `contextCSN` with it (ADR-025), or an ACL denying this probe's anonymous
+read — `suffix-visibility` discriminates the second.
 
 This means slapd-1 hasn't received the latest write yet. In practice:
 - **Transient divergence** (seconds): Normal during active writes. Recheck after a pause.
@@ -237,7 +248,7 @@ slctl inspect --short -n slaptain slapd
 
 ### Investigating replication lag
 ```bash
-slctl inspect -n slaptain slapd --json | jq '.[].pods[] | {name, contextCSN}'
+slctl inspect -n slaptain slapd --json | jq '.[].pods[] | {name, contextCSNBySuffix}'
 ```
 
 ### Collecting a support bundle

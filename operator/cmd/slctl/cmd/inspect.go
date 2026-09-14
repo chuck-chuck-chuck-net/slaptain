@@ -53,15 +53,18 @@ type externalPeerInfo struct {
 }
 
 type podJSON struct {
-	Name             string   `json:"name"`
-	Ready            bool     `json:"ready"`
-	Phase            string   `json:"phase"`
-	NamingContexts   []string `json:"namingContexts,omitempty"`
-	ContextCSN       []string `json:"contextCSN,omitempty"`
-	SyncRepl         []string `json:"syncRepl,omitempty"`
-	MultiProvider    string   `json:"multiProvider,omitempty"`
-	ConfigQueryError string   `json:"configQueryError,omitempty"`
-	Error            string   `json:"error,omitempty"`
+	Name           string   `json:"name"`
+	Ready          bool     `json:"ready"`
+	Phase          string   `json:"phase"`
+	NamingContexts []string `json:"namingContexts,omitempty"`
+	// ContextCSNBySuffix is keyed by data suffix: a contextCSN vector belongs
+	// to ONE database (ADR-008 amendment 2026-09-14). Replaces the former flat
+	// "contextCSN" array, which only ever carried the first suffix's vector.
+	ContextCSNBySuffix map[string][]string `json:"contextCSNBySuffix,omitempty"`
+	SyncRepl           []string            `json:"syncRepl,omitempty"`
+	MultiProvider      string              `json:"multiProvider,omitempty"`
+	ConfigQueryError   string              `json:"configQueryError,omitempty"`
+	Error              string              `json:"error,omitempty"`
 }
 
 type checkResult struct {
@@ -77,9 +80,11 @@ type podState struct {
 	ready          bool
 	phase          string
 	namingContexts []string
-	contextCSN     []string
-	syncRepl       []string
-	multiProvider  string
+	// contextCSN is keyed by data suffix. A key present with an empty vector
+	// means the pod serves that database but no contextCSN could be read.
+	contextCSN    map[string][]string
+	syncRepl      []string
+	multiProvider string
 	// dbs is every olcMdbConfig entry this pod serves — data and accesslog
 	// alike — with each data DB's accesslog overlay resolved onto it. The
 	// per-database accesslog checks need the whole set (ADR-019); syncRepl and
@@ -95,15 +100,15 @@ type podState struct {
 
 func (ps podState) toJSON() podJSON {
 	return podJSON{
-		Name:             ps.name,
-		Ready:            ps.ready,
-		Phase:            ps.phase,
-		NamingContexts:   ps.namingContexts,
-		ContextCSN:       ps.contextCSN,
-		SyncRepl:         ps.syncRepl,
-		MultiProvider:    ps.multiProvider,
-		ConfigQueryError: ps.configError,
-		Error:            ps.err,
+		Name:               ps.name,
+		Ready:              ps.ready,
+		Phase:              ps.phase,
+		NamingContexts:     ps.namingContexts,
+		ContextCSNBySuffix: ps.contextCSN,
+		SyncRepl:           ps.syncRepl,
+		MultiProvider:      ps.multiProvider,
+		ConfigQueryError:   ps.configError,
+		Error:              ps.err,
 	}
 }
 
@@ -384,30 +389,36 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 		ps.namingContexts = rootDSE.Entries[0].GetEqualFoldAttributeValues("namingContexts")
 	}
 
-	// Discover data suffix from namingContexts (skip cn= internal DBs)
-	dataSuffix := dataSuffixFromNamingContexts(ps.namingContexts)
-
-	// contextCSN (anonymous) — only if we found a data suffix
-	if dataSuffix != "" {
+	// Per-data-suffix probes, anonymous. EVERY data suffix: a contextCSN
+	// vector belongs to one database (ADR-008 amendment 2026-09-14), so
+	// reading one suffix's vector and reporting it as the pod's leaves every
+	// other database unexamined — which is what this did until the suffix
+	// axis was added.
+	//
+	//  - contextCSN, keyed by suffix. The key is recorded even when the read
+	//    yields nothing, so "this pod holds the database but no contextCSN
+	//    could be read" stays distinguishable from "this pod does not hold
+	//    the database" — the check needs that difference.
+	//  - suffix-entry health (ADR-025): ordinary base search first (a real
+	//    entry is visible, a glue is not), then ManageDSAIT (RFC 3296) when
+	//    hidden, which reveals glue entries (slapd hides them at the
+	//    frontend, not via ACLs). Per-pod DISAGREEMENT is the check's signal,
+	//    so an ACL that hides the entry uniformly only downgrades it to warn.
+	ps.contextCSN = map[string][]string{}
+	for _, nc := range ps.namingContexts {
+		if strings.HasPrefix(strings.ToLower(nc), "cn=") {
+			continue // accesslog / internal DBs: journals, no seed identity of their own
+		}
+		var csns []string
 		csnResult, err := conn.Search(ldap.NewSearchRequest(
-			dataSuffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
+			nc, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
 			"(objectClass=*)", []string{"contextCSN"}, nil,
 		))
 		if err == nil && len(csnResult.Entries) > 0 {
-			ps.contextCSN = csnResult.Entries[0].GetEqualFoldAttributeValues("contextCSN")
+			csns = csnResult.Entries[0].GetEqualFoldAttributeValues("contextCSN")
 		}
-	}
+		ps.contextCSN[nc] = csns
 
-	// Suffix-entry health (ADR-025): for every data suffix, probe the base
-	// entry — ordinary search first (a real entry is visible, a glue is not),
-	// then ManageDSAIT (RFC 3296) when hidden, which reveals glue entries
-	// (slapd hides them at the frontend, not via ACLs). Anonymous, like the
-	// contextCSN probe above; per-pod DISAGREEMENT is the check's signal, so
-	// an ACL that hides the entry uniformly only downgrades the check to warn.
-	for _, nc := range ps.namingContexts {
-		if strings.HasPrefix(strings.ToLower(nc), "cn=") {
-			continue // accesslog / internal DBs journal, they have no seed identity
-		}
 		ps.suffixEntries = append(ps.suffixEntries, suffixprobe.Probe(conn, nc))
 	}
 
@@ -562,85 +573,20 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		checkSuffixUUIDAgreement(dbs, suffixPods),
 	)
 
-	// ── contextCSN convergence ──
+	// ── contextCSN convergence, per database ──
+	// The verdict lives in a pure seam (csncheck.go) keyed by suffix: a
+	// contextCSN vector belongs to one database on one pod (ADR-008 amendment
+	// 2026-09-14), so the check reports per database and the cluster verdict
+	// is the worst of them.
 	allPods := append(rwPods, roPods...)
-	var csnSets []string
-	csnPodMap := make(map[string][]string)
-	// Pods that are reachable but report NO contextCSN at all. When other pods
-	// DO report one, this is not "no data yet" — it is a pod that never
-	// completed an initial sync (e.g. the provider it consumes from has no
-	// working syncprov). Treating these as skippable once green-lit a cluster
-	// where 2 of 3 RW pods had never synced ("all 1 pods report identical
-	// CSN") — see reconcile-loop-fixes.md 2026-07-15.
-	var csnMissing []string
-	// Track newest CSN timestamp per pod for lag calculation
-	podNewest := make(map[string]time.Time)
+	var csnReadings []csnPodReading
 	for _, ps := range allPods {
 		if ps.err != "" {
-			continue
+			continue // unreachable pods are pod-readiness's problem
 		}
-		if len(ps.contextCSN) == 0 {
-			csnMissing = append(csnMissing, ps.name)
-			continue
-		}
-		normalized := normalizeCSN(ps.contextCSN)
-		csnSets = append(csnSets, normalized)
-		csnPodMap[normalized] = append(csnPodMap[normalized], ps.name)
-		// Find newest CSN timestamp for this pod
-		var newest time.Time
-		for _, csn := range ps.contextCSN {
-			if t, err := parseCSNTime(csn); err == nil && t.After(newest) {
-				newest = t
-			}
-		}
-		if !newest.IsZero() {
-			podNewest[ps.name] = newest
-		}
+		csnReadings = append(csnReadings, csnPodReading{Pod: ps.name, BySuffix: ps.contextCSN})
 	}
-	if len(csnSets) == 0 {
-		// Nobody reports a contextCSN: legitimate for a fresh/empty database.
-		check("csn-convergence", "warn", "no contextCSN data available")
-	} else if len(csnMissing) > 0 {
-		// Some pods report, some don't: the data exists but never reached the
-		// silent pods. Broken replication, not an empty cluster.
-		sort.Strings(csnMissing)
-		check("csn-convergence", "fail",
-			fmt.Sprintf("%d of %d pods report no contextCSN at all (never synced?): %s",
-				len(csnMissing), len(csnMissing)+len(csnSets), strings.Join(csnMissing, ", ")))
-	} else {
-		unique := uniqueStrings(csnSets)
-		if len(unique) == 1 {
-			check("csn-convergence", "pass",
-				fmt.Sprintf("all %d pods report identical CSN", len(csnSets)))
-		} else {
-			// Find newest and oldest across all pods to compute lag
-			var newest, oldest time.Time
-			var newestPod, oldestPod string
-			for pod, t := range podNewest {
-				if newest.IsZero() || t.After(newest) {
-					newest = t
-					newestPod = pod
-				}
-				if oldest.IsZero() || t.Before(oldest) {
-					oldest = t
-					oldestPod = pod
-				}
-			}
-			lag := newest.Sub(oldest)
-
-			var groups []string
-			for _, csn := range unique {
-				pods := csnPodMap[csn]
-				groups = append(groups, fmt.Sprintf("[%s]", strings.Join(pods, ",")))
-			}
-			sort.Strings(groups)
-
-			detail := fmt.Sprintf("%d distinct CSN vectors (%s behind %s by %s): %s",
-				len(unique), oldestPod, newestPod, formatDuration(lag),
-				strings.Join(groups, " vs "))
-			check("csn-convergence", "warn", detail)
-		}
-	}
+	checks = append(checks, checkCSNConvergence(csnReadings))
 
 	// ── syncRepl stanza count ──
 	// Each ExternalPeer contributes 1 stanza (URI mode) or min(replicasPerPeer,
@@ -990,9 +936,17 @@ func printInspectResult(result inspectJSON) {
 				fmt.Printf("    namingContexts: %s\n", strings.Join(pod.NamingContexts, ", "))
 			}
 
-			if len(pod.ContextCSN) > 0 {
-				fmt.Println("    contextCSN:")
-				for _, csn := range pod.ContextCSN {
+			// One section per database: two databases' vectors differ by
+			// construction, so an unlabelled list of CSNs invites exactly the
+			// cross-database comparison ADR-008 rules out.
+			for _, suffix := range sortedKeys(pod.ContextCSNBySuffix) {
+				csns := pod.ContextCSNBySuffix[suffix]
+				if len(csns) == 0 {
+					fmt.Printf("    contextCSN (%s): none readable\n", suffix)
+					continue
+				}
+				fmt.Printf("    contextCSN (%s):\n", suffix)
+				for _, csn := range csns {
 					fmt.Printf("      %s\n", csn)
 				}
 			}
@@ -1171,16 +1125,11 @@ func parseCSNTime(csn string) (time.Time, error) {
 	return time.Parse("20060102150405.000000", ts)
 }
 
-// dataSuffixFromNamingContexts returns the first non-internal (non cn=) naming
-// context, which is the data suffix. Returns "" if none found.
-func dataSuffixFromNamingContexts(contexts []string) string {
-	for _, nc := range contexts {
-		if !strings.HasPrefix(nc, "cn=") {
-			return nc
-		}
-	}
-	return ""
-}
+// NOTE: there is deliberately no "first data suffix" helper any more. A
+// cluster has as many data suffixes as it has SlapdDatabase CRs, and every
+// per-database quantity (contextCSN, the ADR-025 suffix probe, accesslog
+// layout) must be gathered for all of them. Picking the first one is what
+// made this file's CSN check blind to db2 for 19 days.
 
 // formatDuration produces a human-friendly duration string.
 func formatDuration(d time.Duration) string {
