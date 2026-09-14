@@ -83,7 +83,49 @@ admin can manually remove the finalizer to force deletion.
 - Finalizer may block CR deletion if pods are unreachable — admin can force by removing
   the finalizer.
 
+## Amendment (2026-09-14): what "remove the olcDatabase entry" actually takes
+
+The implementation did not match this ADR, in the one case the policy exists for.
+`deleteDatabaseFromPod` issued a bare `Del` of the data database's
+`olcDatabase={N}` DN. A replicated data database is never a leaf — it carries
+`olcOverlay={N}syncprov` and `olcOverlay={N}accesslog` — and slapd refuses to
+delete a non-leaf (`notAllowedOnNonLeaf`, `bconfig.c`'s `ce->ce_kids` branch).
+The failure was logged and the finalizer released anyway, so the CR vanished and
+the database stayed served, unmanaged, on every pod. Mechanism and evidence:
+`docs/reconcile-loop-fixes.md`, same date.
+
+**The decision above is unchanged.** Three points of it are now implemented as
+written, and one is extended:
+
+- *Children first.* The teardown deletes the database's whole `cn=config`
+  subtree, deepest first. Deleting a child while keeping its parent would be a
+  different act with a different rule (see `unwantedLogDBChildren`); here the
+  parent is going away on explicit request, so leaving a child behind does not
+  preserve it, it only makes the delete fail.
+- *"Each pod's cn=config" includes the read-only StatefulSet.* An RO replica
+  carries its own copy of the data database; `cn=config` is node-local (ADR-002).
+- *The finalizer blocks, as this ADR always said it should.* A teardown that
+  could not complete on some pod keeps the finalizer and retries; the error names
+  the finalizer so an admin can force deletion. Previously it was removed
+  unconditionally, which made a failed cleanup indistinguishable from a
+  successful one.
+- **Extension:** `Delete` also removes the database's own accesslog database
+  (`cn=accesslog-<dbname>`), which did not exist when this ADR was written.
+  ADR-019 gives each data database its own journal, so it has exactly one
+  referent and the CR being finalized is it — the delete is authorised by state
+  the operator owns, satisfying ADR-026 R2. The data database goes **first**, so
+  its `olcAccessLogDB` reference dies with its referrer rather than dangling
+  (ADR-026). Consistent with the "no destructive filesystem operations" stance
+  above, the LMDB files under `/accesslog/<dbname>` are left on disk.
+
 ## Related
 
 - ADR-004: Multi-resource CRD architecture — `SlapdDatabase` is one of the three CRDs.
+- ADR-002: `cn=config` is node-local — why teardown is per pod, RO pods included.
+- ADR-013: hot database add/remove is deferred — a `Delete` teardown still rolls
+  the cluster, because `DATABASE_DIRS` shrinks with the CR.
+- ADR-019: one accesslog DB per data DB — why the journal has exactly one
+  referent and can be reaped with its database.
+- ADR-026: R1 (re-resolve after any database delete) and R2 (never destroy
+  shared state on foreign evidence) — both load-bearing for the teardown order.
 - mariadb-operator `Database` CR — prior art for the cleanup policy pattern.

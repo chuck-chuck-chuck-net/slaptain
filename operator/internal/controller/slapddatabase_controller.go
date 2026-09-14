@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -2932,11 +2933,25 @@ func (r *SlapdDatabaseReconciler) handleDeletion(ctx context.Context, sd *ldapv1
 			// Cluster already gone — can't clean up, just remove finalizer.
 			log.Info("cluster not found, skipping database cleanup")
 		} else {
+			// The cluster is still there, so the teardown is owed. A failure
+			// past this point keeps the finalizer and retries with backoff —
+			// ADR-005: "The finalizer is not removed until all reachable pods
+			// have been processed. If a pod is permanently unreachable, the
+			// finalizer blocks CR deletion — this is intentional [...] An admin
+			// can manually remove the finalizer to force deletion." Removing it
+			// on a failed teardown was the silent half of this defect: the CR
+			// vanished and the database stayed served on every pod, which is
+			// neither of the two policies the user can choose between.
 			configPW, err := r.getClusterConfigPassword(ctx, sc)
 			if err != nil {
-				log.Info("cannot read config password for cleanup, removing finalizer anyway", "err", err)
-			} else {
-				r.deleteFromAllPods(ctx, sc, sd, configPW)
+				return ctrl.Result{}, fmt.Errorf(
+					"read config password for cleanup (remove the %s finalizer by hand to force deletion): %w",
+					databaseFinalizer, err)
+			}
+			if err := r.deleteFromAllPods(ctx, sc, sd, configPW); err != nil {
+				return ctrl.Result{}, fmt.Errorf(
+					"delete database from pods (remove the %s finalizer by hand to force deletion): %w",
+					databaseFinalizer, err)
 			}
 		}
 	} else {
@@ -2950,31 +2965,61 @@ func (r *SlapdDatabaseReconciler) handleDeletion(ctx context.Context, sd *ldapv1
 	return ctrl.Result{}, nil
 }
 
-// deleteFromAllPods removes the olcDatabase entry from each reachable pod's cn=config.
+// deleteFromAllPods removes the database from every pod's cn=config (ADR-002:
+// cn=config is node-local, so this is once per pod — RO replicas included, see
+// databasePodHosts).
+//
+// Every pod is attempted even after one fails, so a single unreachable pod does
+// not hide the state of the others; the joined error is returned so the caller
+// keeps the finalizer and retries.
 func (r *SlapdDatabaseReconciler) deleteFromAllPods(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	configPW string,
-) {
+) error {
 	log := logf.FromContext(ctx)
 
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-	headlessSvc := sc.Name + "-headless"
-
-	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s:%d",
-			sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain, ldapContainerPort)
-		if err := r.deleteDatabaseFromPod(host, configPW, sd.Spec.Suffix); err != nil {
-			log.Info("failed to delete database from pod (best effort)", "ordinal", i, "err", err)
+	var errs []error
+	for _, pod := range databasePodHosts(sc, r.ClusterDomain) {
+		addr := fmt.Sprintf("%s:%d", pod.Host, ldapContainerPort)
+		if err := r.deleteDatabaseFromPod(ctx, addr, configPW, sd); err != nil {
+			log.Info("failed to delete database from pod (will retry)",
+				"pod", pod.Name, "err", err)
+			errs = append(errs, fmt.Errorf("pod %s: %w", pod.Name, err))
 		}
 	}
+	return kerrors.NewAggregate(errs)
 }
 
-func (r *SlapdDatabaseReconciler) deleteDatabaseFromPod(addr, configPW, suffix string) error {
+// deleteDatabaseFromPod removes one database and its accesslog DB from one
+// pod's cn=config.
+//
+// Order is load-bearing, and it is the data database first. The accesslog
+// overlay on the data DB carries olcAccessLogDB naming the log — deleting the
+// log first would leave that reference dangling, and slapd validates
+// olcAccessLogDB online but resolves it offline at accesslog_db_open, so the
+// pod would keep serving and then refuse to start (ADR-026, the exact state
+// that withdrew the ADR-019 R8 migration). Taking the data DB first means the
+// reference dies with its referrer: a teardown interrupted between the two
+// steps leaves an unreferenced log DB, which is inert and reaped on the retry.
+//
+// Deleting the data DB renumbers every olcDatabase={N} ordered after it
+// (bconfig.c's "renumber siblings" loop) — on t3e the log sat at {2} above its
+// data DB at {1} and would slide to {1}. ADR-026 R1 therefore forbids carrying
+// a DN across step 1, and removeAccesslogDB satisfies that by construction: it
+// resolves the log by its olcSuffix with its own search. Nothing else survives
+// the call — the connection is closed on return and each pod gets a fresh one.
+//
+// Idempotent: a database already absent is success, so a retry after a partial
+// teardown converges.
+func (r *SlapdDatabaseReconciler) deleteDatabaseFromPod(
+	ctx context.Context,
+	addr, configPW string,
+	sd *ldapv1alpha1.SlapdDatabase,
+) error {
+	log := logf.FromContext(ctx)
+
 	conn, err := ldap.DialURL("ldap://"+addr,
 		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
 	)
@@ -2988,18 +3033,66 @@ func (r *SlapdDatabaseReconciler) deleteDatabaseFromPod(addr, configPW, suffix s
 		return err
 	}
 
-	dataDN, err := findDataDBDN(conn, suffix)
+	// 1. The data DB, children first — slapd does not cascade.
+	dataDN, err := findDataDBDNOptional(conn, sd.Spec.Suffix)
 	if err != nil {
-		return err // Database doesn't exist, nothing to delete.
+		return err
+	}
+	if dataDN != "" {
+		sr, err := conn.Search(ldap.NewSearchRequest(
+			dataDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases,
+			0, 0, false, "(objectClass=*)", []string{"dn"}, nil,
+		))
+		if err != nil {
+			return fmt.Errorf("search subtree of %s: %w", dataDN, err)
+		}
+		dns := make([]string, 0, len(sr.Entries))
+		for _, e := range sr.Entries {
+			dns = append(dns, e.DN)
+		}
+		for _, dn := range planSubtreeDeletion(dns) {
+			log.Info("removing database entry", "host", addr, "dn", dn)
+			if err := conn.Del(ldap.NewDelRequest(dn, nil)); err != nil {
+				if !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
+					return fmt.Errorf("delete %s: %w", dn, err)
+				}
+			}
+		}
 	}
 
-	return conn.Del(ldap.NewDelRequest(dataDN, nil))
+	// 2. This database's own accesslog DB (ADR-019: one log per data DB, so it
+	// has exactly one referent and the CR being finalized is it). Authorised by
+	// the operator's own evidence — the log's suffix is derived from the CR
+	// name, not counted off other databases' overlays — so ADR-026 R2 is
+	// satisfied where the withdrawn R8 reference count was not. Skipped on RO
+	// pods by nature: they have no log, and removeAccesslogDB finds nothing.
+	if _, err := r.removeAccesslogDB(ctx, conn, addr, sd.Name); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ── Shared Helpers ───────────────────────────────────────────────────────────
 
-// findDataDBDN searches cn=config for the MDB database entry matching the suffix.
+// findDataDBDN searches cn=config for the MDB database entry matching the
+// suffix. Absence is an error: every caller but the teardown path needs the
+// database to exist.
 func findDataDBDN(conn *ldap.Conn, suffix string) (string, error) {
+	dn, err := findDataDBDNOptional(conn, suffix)
+	if err != nil {
+		return "", err
+	}
+	if dn == "" {
+		return "", fmt.Errorf("no database entry with olcSuffix=%s in cn=config", suffix)
+	}
+	return dn, nil
+}
+
+// findDataDBDNOptional is findDataDBDN for callers that treat absence as a
+// legitimate answer rather than a failure — the teardown path, where a database
+// already gone is the goal state and must not be confused with a search that
+// could not be performed. Returns ("", nil) when no such database exists.
+func findDataDBDNOptional(conn *ldap.Conn, suffix string) (string, error) {
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
 		0, 0, false,
@@ -3010,7 +3103,7 @@ func findDataDBDN(conn *ldap.Conn, suffix string) (string, error) {
 		return "", fmt.Errorf("search cn=config for olcSuffix=%s: %w", suffix, err)
 	}
 	if len(sr.Entries) == 0 {
-		return "", fmt.Errorf("no database entry with olcSuffix=%s in cn=config", suffix)
+		return "", nil
 	}
 	return sr.Entries[0].DN, nil
 }
