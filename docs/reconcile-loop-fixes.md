@@ -5,6 +5,131 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-09-14: the R8 accesslog migration stranded an olcAccessLogDB and made a pod permanently unbootable
+
+**Symptom:** a full e2e run with `E2E_ACCESSLOG_MIGRATION=1` left `slapd-2` on
+one site in CrashLoopBackOff; 16 specs failed, all downstream of that one
+unreachable pod.
+
+```
+accesslog: "logdb <suffix>" missing or invalid.
+backend_startup_one (type=mdb, suffix="dc=second,dc=example,dc=net"): bi_db_open failed! (1)
+slapd stopped.
+```
+
+Its persisted `cn=config`, read off the config PVC: `olcDatabase={1}mdb` (db2's
+data) carried `olcAccessLogDB: cn=accesslog` — **a database that was no longer in
+the config**. Its own log `cn=accesslog-example-db2` existed at `{4}`, orphaned
+and unreferenced. db1's data at `{2}` was correct. The pod had served normally
+for ~45 minutes before the restart that killed it.
+
+**Root cause — two defects stacked, both now named as classes (ADR-026):**
+
+1. **C1 — a refcount over state you do not own is a TOCTOU.** R8's delete of the
+   shared log was reference-counted over the accesslog overlays of *other*
+   databases (ADR-019 R8 amendment 2). `planAccesslogMigration` took one
+   observation; `migrateLegacyAccesslog` then ran `removeDataDBOverlay` and only
+   afterwards `removeAccesslogDBAt`. In that gap another writer re-created a
+   reference. Reconcile serialization is irrelevant and was verified so:
+   `MaxConcurrentReconciles` is unset, so every `SlapdDatabase` reconcile is
+   already serialised — **the competing writer was not a reconcile.** Here it was
+   the R8 e2e's own pre-state manufacture (`makeLegacyAccesslogLayout` deletes
+   both overlays, inserts the legacy log, then re-adds both); in production it is
+   a hand edit, which ADR-002 sanctions.
+2. **C2 — the repair is keyed on the artifact you delete.** `DropOverlay` fired
+   only when the legacy *database* was found, so the moment the delete succeeded
+   the plan was empty by construction — and `ensureAccesslogOverlay` deliberately
+   never converges `olcAccessLogDB` on an existing overlay. "Overlay names a
+   database that does not exist" was an **absorbing state**: nothing observed it,
+   reported it, or repaired it, ever.
+
+**The interleaving, forced by the surviving `{N}` ordering** (the operator log
+from the original fresh setup on that pod gives the creation order, and slapd
+appends new databases at the end):
+
+| step | resulting `olcDatabase={N}` order |
+|---|---|
+| fresh setup | `{1}`db2 data, `{2}`db2 log, `{3}`db1 data, `{4}`db1 log |
+| manufacture drops both per-DB logs | `{1}`db2 data, `{2}`db1 data |
+| manufacture inserts legacy at the lowest data index | `{1}`**legacy**, `{2}`db2 data, `{3}`db1 data |
+| db1 reconcile: `ensureAccesslogDB` appends db1's log | … `{4}`db1 log |
+| db1 reconcile: `migrateLegacyAccesslog` — refcount reads 0 because db2's overlay is absent *right now* — deletes `{1}` | `{1}`db2 data, `{2}`db1 data, `{3}`db1 log |
+| db1 reconcile: re-adds its own overlay → `cn=accesslog-example-db` ✓ | |
+| manufacture re-adds db2's overlay → `cn=accesslog` (legacy still existed at this instant — see below) | |
+| db2 reconcile: appends its log; the fast-path search finds no `cn=accesslog`, so the plan is never formed; `ensureAccesslogOverlay` sees an overlay present and no-ops | `{4}`db2 log — **dangling, permanently** |
+
+The final numbering — db1's log *below* db2's, despite db2 having been created
+first — matches this and only this ordering.
+
+**Why the timing is pinned rather than guessed:** slapd validates `logdb` twice,
+differently. Online (an LDAP add/modify) `accesslog_cf_gen` calls
+`select_backend` and **rejects** a suffix with no backend —
+`CONFIG_ONLINE_ADD(ca)` is `!(ca->lineno)` and `bconfig.c` fakes `lineno = 0`
+exactly when the write arrives as an LDAP operation. Offline (reading `slapd.d`
+at startup, `lineno = 1`) it only stashes the suffix, and `accesslog_db_open`
+resolves it — NULL backend → the message above → return 1 → `bi_db_open failed`
+→ exit. So the manufacture's re-add **must** have happened while the legacy
+database still existed, which places the operator's delete after it. You cannot
+create a dangling reference over the wire; you can strand one by deleting its
+target, and nothing notices until the restart it then prevents.
+
+**Why it was hard to spot:** every layer read healthy. The write that caused the
+damage was a *delete on another database's behalf*, not a write to the broken
+one. The running server kept serving off its already-resolved `li_db` for 45
+minutes. `slctl inspect` classified the surviving legacy-naming `olcAccessLogDB`
+as an informational "legacy" note (legitimate mid-migration) and, worse,
+suppressed its own "log database absent from cn=config" issue precisely when that
+note fired — both halves muted. And the R8 unit tests are a pure predicate over
+observed state, so they cannot see either a DN lifetime or an evidence lifetime.
+
+**Fix: R8 is withdrawn** (ADR-019 amendment 2026-09-14), and the rule is written
+down as ADR-026 (R1 positional DNs — already implemented; R2 no destruction on
+unowned evidence; R3 trigger the repair on the condition it repairs). Removed:
+`migrateLegacyAccesslog`, `planAccesslogMigration` and their helpers, the unit
+test, the gated e2e and its `E2E_ACCESSLOG_MIGRATION` plumbing. Kept, with
+rewritten rationale: `removeAccesslogDB`/`removeAccesslogDBAt` (the ADR-010
+demotion reap, still the live renumbering path) and `unwantedLogDBChildren` (the
+mis-attached-overlay reaper, now cited against the renumbering class rather than
+against R8). Added: `slctl inspect` reports an `olcAccessLogDB` naming a database
+the pod does not have as an **issue** naming the consequence, instead of a note.
+
+**Red-first record.** Two reds, both observed before any implementation.
+The first is the defect itself — a temporary assertion on the pure seam, deleted
+with the function it indicts:
+
+```
+--- FAIL: TestPlanAccesslogMigration_DanglingOverlayIsUnrepairable (0.00s)
+    accesslog_migration_test.go:166: planAccesslogMigration = {DropOverlay:false DeleteLegacyDN:}, want DropOverlay=true: the overlay names cn=accesslog, which is not a database on this pod — slapd will refuse to start
+```
+
+The second survives as committed coverage, and is the replacement for the
+withdrawn automation:
+
+```
+--- FAIL: TestCheckAccesslogConsistency/an_olcAccessLogDB_naming_a_database_absent_from_the_pod_fails (0.00s)
+    accesslog_test.go:484: status = "warn", want "fail" (detail: slapd-0/dbA: olcAccessLogDB still names the legacy cluster-shared log cn=accesslog)
+    accesslog_test.go:488: detail "slapd-0/dbA: olcAccessLogDB still names the legacy cluster-shared log cn=accesslog" does not contain "not a database"
+```
+
+**Regresses / not covered:** nothing automatically converges a pre-ADR-019
+cluster any more — the migration is a manual runbook (ADR-019 amendment) run with
+the operator scaled to zero, and `slctl inspect` diagnoses the layout. The
+interleaving table above is reconstructed from the persisted `cn=config` plus the
+setup-time operator log, not from a logged `deleteLegacyDB=` line; the lab was
+torn down before that could be pulled. Two defects found in passing are recorded
+in `docs/BACKLOG.md` and deliberately not fixed here: `deleteDatabaseFromPod`
+issues a childless `conn.Del`, so `cleanupPolicy: Delete` should fail
+`notAllowedOnNonLeaf` on any replicated database (argued from code, never
+observed); and the pre-existing `cn=replication` two-store item is unchanged.
+
+**Lesson:** idempotence across your own repeated passes is necessary and not
+sufficient — a second *writer* is not a second pass, and `cn=config` is a shared,
+hand-editable, non-transactional store where any refcount you compute is already
+stale when you act on it. And when a migration deletes the thing that triggers
+its own repair, a partial migration stops being retryable and becomes permanent.
+
+---
+
 ## 2026-09-14: `ReplicationConverged` compared CSN sets ACROSS databases — a shipped condition that was ~always False
 
 **Symptom:** on any cluster with two `SlapdDatabase` CRs — the standard `example`

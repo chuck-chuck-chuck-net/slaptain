@@ -236,7 +236,12 @@ Neither controller requeues on its success path, so neither re-examines per-pod
 `checkPeerCSNConvergence` stamps `lastChecked` every 60 s, that changes the
 `SlapdCluster` status, and the unfiltered watch re-reconciles every database in the
 namespace. Everything that converges without a CR change rides on it — drift, hand
-edits, the ADR-019 R8 migration, re-applied ACLs.
+edits, re-applied ACLs.
+
+*(Amended 2026-09-14: the ADR-019 R8 migration used to be the fourth item on
+that list and is gone with R8. This does **not** unblock the watch filter — the
+reverted `5dd5e3f` failed four specs, three of which had nothing to do with R8,
+and the remaining three reasons are unchanged.)*
 
 Two things follow:
 
@@ -298,8 +303,10 @@ The 2026-08-25 "syncrepl stanzas written to a pod whose accesslog DB does not
 exist" fix is proven only by hand-run live scenarios. A permanent regression test
 needs pods whose init container predates the per-database accesslog directory
 creation, because the missing thing is a *directory on a PVC the operator cannot
-touch* (ADR-018) — it is not manufacturable from `cn=config` the way the legacy
-shared log is (`E2E_ACCESSLOG_MIGRATION=1` does exactly that trick).
+touch* (ADR-018) — unlike a `cn=config` shape, which a spec can manufacture by
+hand. (The gated ADR-019 R8 migration spec did exactly that trick; it was
+removed with R8 on 2026-09-14, and manufacturing a `cn=config` pre-state against
+a live operator is part of what went wrong there — see ADR-026 C1.)
 
 What is missing is a fixture capability: deploying a cluster with `spec.images`
 pinned to a chosen older init tag, then upgrading the operator underneath it.
@@ -720,3 +727,26 @@ purpose (the sizelimit class). E2E_SCALE seeds entries into a LIVE mesh (small
 deltas); this lane must instead create a FRESH consumer against a populated
 provider — pod-recreate or bootstrapFrom against a big artifact. Next e2e
 investment, before further replication-path changes.
+
+---
+
+## `cleanupPolicy: Delete` cannot delete a replicated database (argued from code)
+
+`deleteDatabaseFromPod` (`slapddatabase_controller.go`) resolves the data DB's
+`olcDatabase={N}` DN and issues a bare `conn.Del` with no child removal. A
+replicated data database carries `olcOverlay=syncprov` and `olcOverlay=accesslog`
+children, and slapd does not cascade — `removeAccesslogDBAt` deletes children
+first for exactly this reason. So the delete should answer `notAllowedOnNonLeaf`
+(66) on every database with `replication.deltaSync: true`, i.e. ADR-005's opt-in
+`cleanupPolicy: Delete` silently fails on precisely the databases it matters for.
+It also leaves `cn=accesslog-<db>` and `/accesslog/<db>` behind unreferenced.
+
+**Label: argued from code, never observed** — found 2026-09-14 while root-causing
+the dangling-logdb defect (ADR-026), deliberately not folded into that change.
+
+**The fix:** reuse the children-first pattern (`removeAccesslogDBAt`), reap the
+database's own accesslog DB in the same pass, and re-resolve nothing afterwards
+(the connection is closed immediately). **Red-first:** a unit assertion on a
+teardown planner, plus an e2e that sets `cleanupPolicy: Delete` on a replicated
+`SlapdDatabase`, deletes the CR, and asserts the suffix is gone from every pod's
+`cn=config` — red against current code.
