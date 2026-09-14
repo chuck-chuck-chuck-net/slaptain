@@ -930,15 +930,6 @@ run_tests() {
         test_env+=("E2E_BACKUP=1")
     fi
 
-    # Legacy-accesslog migration e2e (ADR-019 R8): manufactures the pre-ADR-019
-    # cluster-shared cn=accesslog in cn=config on every RW pod and asserts the
-    # operator converges it to per-database logs. Rewrites cn=config by hand and
-    # discards the cluster's journals, so it is opt-in rather than standard.
-    if [[ "${E2E_ACCESSLOG_MIGRATION:-}" == "1" ]]; then
-        log "[$ctx0] E2E_ACCESSLOG_MIGRATION=1 — enabling the ADR-019 R8 migration scenario"
-        test_env+=("E2E_ACCESSLOG_MIGRATION=1")
-    fi
-
     # Scale-up e2e: standalone → HA transition (replicas 1→2 + replication
     # flip) on a second, self-contained cluster. Needs no extra infrastructure.
     # Opt-in via E2E_SCALEUP=1 in the environment.
@@ -1015,7 +1006,7 @@ run_tests() {
     # multi-site pod-routed run each of them may sit for up to
     # crossSiteRecoveryBudget (8m, sized off measurements of 140-268s) while the
     # peer sites rediscover the new pod IPs. Four such waits plus the gated
-    # backup/restore/scaleup/accesslog-migration scenarios can outrun 25m
+    # backup/restore/scaleup scenarios can outrun 25m
     # without anything actually being wrong.
     local ginkgo_flags=(--ginkgo.v --ginkgo.timeout=60m "--ginkgo.seed=$seed")
     if [[ -n "${E2E_LABEL_FILTER:-}" ]]; then

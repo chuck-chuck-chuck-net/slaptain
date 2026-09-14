@@ -208,10 +208,14 @@ func checkNamingContexts(dbs []dbIdentity, pods []podAccesslogState) checkResult
 //     before any fallback, and that consumer's replication halts outright
 //     (observed live, ADR-019 Consequences correction 2026-08-25).
 //
-// A value still naming the legacy cluster-shared log warns instead of failing
-// (mid-migration is legitimate — ADR-019 R8 — and one database on one log is
-// behaviourally correct, just misnamed), *unless* two databases share it, which
-// is the forbidden condition and fails whatever the log is called.
+// A value naming the legacy cluster-shared log warns instead of failing *while
+// that log still exists*: one database on one log is behaviourally correct,
+// just misnamed, and the operator no longer migrates it (ADR-019 R8 withdrawn,
+// 2026-09-14) — the note points at the manual runbook. Two databases sharing it
+// is the forbidden condition and fails whatever the log is called. And an
+// olcAccessLogDB naming a database this pod does not have fails unconditionally:
+// slapd resolves logdb offline at accesslog_db_open, so that pod is already
+// unbootable and nothing in cn=config says so (ADR-026).
 func checkAccesslogConsistency(dbs []dbIdentity, pods []podAccesslogState, externalNeedles []string) checkResult {
 	var issues, legacyNotes, infoNotes []string
 	checked := 0
@@ -255,10 +259,12 @@ func checkAccesslogConsistency(dbs []dbIdentity, pods []podAccesslogState, exter
 				case od.AccessLogDB == "":
 					issues = append(issues, fmt.Sprintf("%s/%s: no accesslog overlay",
 						ps.Name, db.Name))
-				case isLegacySharedAccesslog(od.AccessLogDB):
+				case isLegacySharedAccesslog(od.AccessLogDB) &&
+					logsPresent[strings.ToLower(strings.TrimSpace(od.AccessLogDB))]:
 					legacy = true
 					legacyNotes = append(legacyNotes, fmt.Sprintf(
-						"%s/%s: olcAccessLogDB still names the legacy cluster-shared log %s",
+						"%s/%s: olcAccessLogDB names the legacy cluster-shared log %s — "+
+							"unsupported layout; see ADR-019 for the manual runbook",
 						ps.Name, db.Name, od.AccessLogDB))
 				case !strings.EqualFold(od.AccessLogDB, want):
 					issues = append(issues, fmt.Sprintf("%s/%s: olcAccessLogDB=%s (want %s)",
@@ -267,6 +273,17 @@ func checkAccesslogConsistency(dbs []dbIdentity, pods []podAccesslogState, exter
 				if od.AccessLogDB != "" {
 					k := strings.ToLower(strings.TrimSpace(od.AccessLogDB))
 					sharers[k] = append(sharers[k], db.Name)
+					// A dangling reference is fatal at the pod's NEXT restart and
+					// invisible until then (ADR-026): slapd validates logdb
+					// online at ldapmodify but resolves it offline in
+					// accesslog_db_open, which exits the server. Report what the
+					// overlay actually names, not what we wanted it to name.
+					if !logsPresent[k] {
+						issues = append(issues, fmt.Sprintf(
+							"%s/%s: olcAccessLogDB=%s is not a database on this pod — "+
+								"slapd will refuse to start (bi_db_open failed)",
+							ps.Name, db.Name, od.AccessLogDB))
+					}
 				}
 				if !legacy && od.AccessLogDB != "" && !logsPresent[strings.ToLower(want)] {
 					issues = append(issues, fmt.Sprintf("%s/%s: log database %s absent from cn=config",
