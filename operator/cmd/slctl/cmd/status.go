@@ -176,6 +176,11 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 					} else {
 						replStr = "Lagging"
 					}
+				case "PartiallyVerified":
+					replStr = "PartiallyVerified"
+					if eps.LastError != "" {
+						replStr += " (" + eps.LastError + ")"
+					}
 				case "Unreachable":
 					replStr = "Unreachable"
 				}
