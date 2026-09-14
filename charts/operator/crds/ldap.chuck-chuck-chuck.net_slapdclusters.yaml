@@ -1108,8 +1108,9 @@ spec:
                       type: array
                     lagSeconds:
                       description: |-
-                        lagSeconds reports the max CSN timestamp delta between local and remote
-                        as a decimal string (e.g. "3.2"). Only set when replicationState is Lagging.
+                        lagSeconds reports the max per-database CSN timestamp delta between local
+                        and remote as a decimal string (e.g. "3.2"). Only set when replicationState
+                        is Lagging.
                       type: string
                     lastChecked:
                       description: lastChecked is the time the CSN check last ran.
@@ -1124,13 +1125,17 @@ spec:
                       type: string
                     replicationState:
                       description: |-
-                        replicationState reports the CSN convergence state of this peer.
-                        Synced: remote CSN is within threshold of local CSN.
-                        Lagging: remote CSN is behind local CSN by more than the threshold.
-                        Unreachable: operator could not query contextCSN on any remote pod.
+                        replicationState reports the CSN convergence state of this peer, judged
+                        per database (a contextCSN vector is only comparable within one suffix).
+                        Synced: every database was read and each is within threshold of ours.
+                        Lagging: a database that WAS read is behind ours by more than the threshold.
+                        PartiallyVerified: the peer answered and everything read is current, but at
+                        least one database yielded no readable contextCSN (lastError names it).
+                        Unreachable: no database on the peer could be read at all.
                       enum:
                       - Synced
                       - Lagging
+                      - PartiallyVerified
                       - Unreachable
                       type: string
                   required:
