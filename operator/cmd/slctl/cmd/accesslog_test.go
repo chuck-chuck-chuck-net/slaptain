@@ -396,6 +396,25 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			wantDetail: []string{"legacy", legacySharedAccesslogSuffix},
 		},
 		{
+			// The 2026-09-14 defect (ADR-026): the overlay names the legacy
+			// shared log, but that database is GONE from this pod's cn=config.
+			// slapd resolves logdb offline at accesslog_db_open, so this pod
+			// serves fine until its next restart and then exits with
+			// `accesslog: "logdb <suffix>" missing or invalid`. It must be an
+			// issue, not a "legacy" note: the pod is already unbootable.
+			name: "an olcAccessLogDB naming a database absent from the pod fails",
+			dbs:  []dbIdentity{idA()},
+			pods: []podAccesslogState{{
+				Name: "slapd-0",
+				DBs: []observedDB{
+					dataDB(1, sufA, legacySharedAccesslogSuffix, logA),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+				},
+			}},
+			wantStatus: "fail",
+			wantDetail: []string{"slapd-0", legacySharedAccesslogSuffix, "not a database"},
+		},
+		{
 			name: "two databases still sharing the legacy log is the forbidden condition and fails",
 			dbs:  []dbIdentity{idA(), idB()},
 			pods: []podAccesslogState{{

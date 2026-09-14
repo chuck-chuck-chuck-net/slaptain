@@ -560,3 +560,126 @@ Same accepted limitation as R9: the override is one value per peer across all
 databases, so a mesh peer override cannot be right for two databases at once —
 in a slaptain↔slaptain mesh, leave the fields unset. Per-peer-per-database is
 deliberately not pre-built.
+
+## Amendment (2026-09-14): R8 is withdrawn — the operator no longer migrates a legacy shared log
+
+R8 said migration is a teardown and gave it four ordered steps. Two later
+amendments hardened it: create the new log first, and reference-count the delete
+of the old one so a pod with two databases on one log could not have the log
+yanked out from under a live overlay. **Both hold as analysis. The
+reference-counted delete is nevertheless unsafe, and it is withdrawn along with
+the rest of the automation.**
+
+### What went wrong, mechanically
+
+Measured 2026-09-14 on a three-site lab: one pod left in CrashLoopBackOff, 16
+downstream specs failed.
+
+```
+accesslog: "logdb <suffix>" missing or invalid.
+backend_startup_one (type=mdb, suffix="…"): bi_db_open failed! (1)
+```
+
+Its persisted `cn=config` held a data database whose `olcAccessLogDB` named
+`cn=accesslog` — a database that was no longer there. Its own per-database log
+existed, orphaned, and the pod had served normally for ~45 minutes before the
+restart that killed it.
+
+Three facts compose it:
+
+1. **The delete authorises itself from evidence the operator does not own.**
+   `remainingRefs` counted the accesslog overlays of *other* databases, observed
+   at one instant and acted on later — `planAccesslogMigration` produced a plan,
+   then `removeDataDBOverlay` ran, then `removeAccesslogDBAt`. Between the
+   snapshot and the delete another writer re-created a reference. `cn=config` is
+   node-local and hand-editable (ADR-002), so "nobody else will touch it" was
+   never a property this design could assume; here the other writer was the R8
+   e2e's own pre-state manufacture, which drops and re-adds both overlays.
+2. **The repair is keyed on the artifact the delete removes.** `DropOverlay` —
+   the step that would have fixed the surviving overlay — fired only when the
+   legacy *database* was found. Once it is gone the plan is empty by
+   construction, and `ensureAccesslogOverlay` deliberately does not converge
+   `olcAccessLogDB` on an existing overlay. So the state "an overlay names a
+   database that does not exist" was **absorbing**: nothing observed it, nothing
+   reported it, nothing repaired it.
+3. **slapd validates `logdb` in two places with two strictnesses.** Online
+   (LDAP add/modify) `accesslog_cf_gen` calls `select_backend` and rejects a
+   suffix with no backend — `CONFIG_ONLINE_ADD(ca)` is `!(ca->lineno)` and
+   `bconfig.c` sets `lineno = 0` exactly when the write arrives as an LDAP
+   operation. Offline (reading `slapd.d` at startup) it only stashes the suffix,
+   and `accesslog_db_open` resolves it — a NULL backend prints the line above and
+   returns 1, which exits the server. **You cannot create a dangling reference
+   over the wire; you can strand an existing one by deleting its target, and
+   nothing notices until the next restart, which it then prevents.**
+
+The generalised rule is ADR-026.
+
+### Why removal rather than repair
+
+Fixing (2) is cheap — key `DropOverlay` on the overlay's reference rather than on
+the legacy database's existence. Fixing (1) is not: `cn=config` offers no
+compare-and-delete and no transaction, so an authorisation that stays true
+through the delete needs either a per-pod ownership marker in `cn=config` (new
+persisted state, own lifecycle, own failure modes) or a delete that never
+happens. That is real machinery bought for one population: a slaptain cluster
+created before this ADR (2026-08-25) that still carries a shared `cn=accesslog`.
+
+Against that: the project is alpha at v0.1.0; ADR-012 already makes a cluster
+wipe an ordinary Kubernetes resource-lifecycle operation; and ADR-011's hot
+migration never needed R8 — the slaptain side is built fresh with per-database
+logs, and the legacy system's own accesslog is never converged by us. Removal
+also deletes the fast-path `(&(objectClass=olcMdbConfig)(olcSuffix=cn=accesslog))`
+search that every healthy reconcile paid on every pod, and a nondeterministic way
+to make a pod unbootable.
+
+### What replaces it
+
+**Diagnosis, not automation.** `slctl inspect` keeps recognising the legacy
+suffix and now separates two cases: an `olcAccessLogDB` naming the legacy log
+*that still exists* is a note pointing at the runbook below (unsupported layout,
+behaviourally correct, just misnamed); an `olcAccessLogDB` naming a database the
+pod does **not** have is an **issue** stating the consequence — slapd will refuse
+to start. That is the check that would have turned this incident into one red
+line instead of 45 silent minutes.
+
+**The manual runbook**, for anyone who does meet such a cluster. Scale the
+operator to zero first — the concurrent writer is the entire defect — then, per
+pod, as `cn=admin,cn=config`:
+
+1. create `cn=accesslog-<dbname>` at `/accesslog/<dbname>` (the directory must
+   exist; `back-mdb` will not create it, so the pod's init container must have
+   run with that database in `DATABASE_DIRS`);
+2. delete the data database's `olcOverlay=…accesslog` entry;
+3. delete the `cn=accesslog` database — **children first**, slapd does not
+   cascade — once no overlay on that pod still names it;
+4. re-add the accesslog overlay with `olcAccessLogDB: cn=accesslog-<dbname>`.
+
+Then scale the operator back up; it converges the ACL (ADR-020), the index set,
+the limits and the syncprov overlay on the new log. Every `olcDatabase={N}` DN
+you hold is invalidated by step 3 — re-read them (ADR-026 R1). Recreating the
+cluster (ADR-012) is the supported alternative and is usually cheaper.
+
+### Recorded and deliberately not taken
+
+`ensureAccesslogOverlay` used to claim an existing overlay's `olcAccessLogDB`
+"cannot be" converged. That is **wrong**: `olcSuffix`/`olcDbDirectory` on a
+*database* are immutable, but the overlay attribute is live-modifiable and is
+validated on the online path. A live repoint is therefore expressible — and it is
+not taken, because it changes what a running slapd does with an already-resolved
+`li_db` (`accesslog_db_open` has registered an `accesslog_db_root` runqueue task
+against it), which is exactly the class ADR-024's amendment requires be vetted on
+a running server, and the only thing it would buy is the path being withdrawn
+here. Written down so nobody re-derives it as an obvious fix.
+
+### What is unchanged
+
+R1-R7, R9 and R10 stand. R8's *analysis* stays on this page as the record of why
+a rename is impossible and why the four steps are ordered as they are — the
+manual runbook is those steps. The per-database reap on ADR-010 peer →
+consumer-only demotion (`removeAccesslogDB`) is untouched, including its
+`(bool, error)` contract and the caller's re-resolve; so is the reaper for an
+accesslog overlay mis-attached to an accesslog database, whose rationale now
+cites the renumbering class (ADR-026 R1) rather than this migration.
+
+**Regressed, knowingly:** nothing automatically converges a pre-ADR-019 cluster
+any more.

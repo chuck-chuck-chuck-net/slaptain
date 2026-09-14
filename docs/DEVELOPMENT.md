@@ -256,8 +256,8 @@ the first failure instead of letting the cascade bury its cause — nothing is
 torn down, so the cluster is left ready for `slctl`), and `E2E_SEED` (the
 suite shares one mutable cluster, so spec order matters; replaying the logged
 seed reproduces a run exactly). Heavier scenarios are behind their own gates —
-`E2E_BACKUP`, `E2E_EXTERNAL_REPL`, `E2E_RESILIENCE`, `E2E_SCALEUP`,
-`E2E_ACCESSLOG_MIGRATION` — all documented in `tests/README.md`.
+`E2E_BACKUP`, `E2E_EXTERNAL_REPL`, `E2E_RESILIENCE`, `E2E_SCALEUP` — all
+documented in `tests/README.md`.
 
 Two scenarios bring their own topology and have their own scripts:
 `tests/e2e-migration.sh` (consumer-only → peer promotion, wrapped by

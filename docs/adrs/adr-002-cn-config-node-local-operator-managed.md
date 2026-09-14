@@ -176,6 +176,11 @@ in the namespace, against every pod. **The re-convergence of hand edits, drift, 
 legacy shared accesslog (ADR-019 R8) and re-applied ACLs all depend on a timestamp
 written for an unrelated purpose.**
 
+*(Amended 2026-09-14: ADR-019 R8 is withdrawn, so the legacy-accesslog example is
+gone from that list. The finding is unchanged — the reverted `5dd5e3f` failed four
+specs, only one of which was the R8 migration — and the watch filter stays
+blocked on the same prerequisite.)*
+
 Two consequences:
 
 1. **It is a landmine for optimisation.** That churn reads as pure waste when
@@ -184,7 +189,8 @@ Two consequences:
    attempted: a watch predicate keyed on exactly the fields the controller reads
    (verified complete: `status.phase`, `status.externalPeerStatuses[].{name,
    discoveredAddresses}`, `status.replicationNetworkIPs`) failed four e2e specs —
-   the ADR-019 R8 migration never converged and ACL enforcement drifted. The
+   the (since-withdrawn) ADR-019 R8 migration never converged and ACL enforcement
+   drifted. The
    enumeration of *reads* was correct and complete; the load-bearing question was
    *what wakes this controller at all*. Reverted in `5dd5e3f`.
 2. **A cluster with `replication.enabled: false` gets no periodic resync at all.**
