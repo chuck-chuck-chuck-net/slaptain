@@ -290,7 +290,12 @@ were green from birth (`seedNeeded`, the latch, the classifier) were
 mutation-checked by running; each mutation's failure is pasted in the commit.
 
 **Not covered:** RO pods are still outside `DataPresent` (slctl and the per-pod
-e2e spec do cover them) — recorded in `docs/BACKLOG.md`.
+e2e spec do cover them) — recorded in `docs/BACKLOG.md`. *Closed the same day:
+the probe now visits the read-only fleet too, reporting an RO-only divergence
+under its own reason `DataMissingOnReadOnlyPods` (ADR-025 amendment
+"Decision 5's all-pods rule includes the read-only fleet"). No ledger entry of
+its own: it extends an observability signal's reach, it did not fix a
+reconcile-path defect.*
 
 **Lesson:** when a decision changes *how data gets in* (founder-only seeding,
 migration, restore), re-read every guard that keys on *how data got in*. And a

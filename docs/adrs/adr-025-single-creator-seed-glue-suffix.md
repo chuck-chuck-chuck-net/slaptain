@@ -377,7 +377,56 @@ keyed on a foreign creator's serverID).
 only, while a glue provably propagates to RO pods (evidence item 5). `slctl
 inspect` and the per-pod e2e spec do cover RO pods. Including them here widens
 the transient `False` window during a legitimate RO initial sync, so it was left
-as a separate decision (docs/BACKLOG.md).
+as a separate decision (docs/BACKLOG.md). *Closed by the amendment below.*
+
+## Amendment (2026-09-14): Decision 5's all-pods rule includes the read-only fleet
+
+The gap recorded immediately above is closed. **"Every reached pod" now means
+every RW pod *and* every read-only consumer pod** (`spec.readReplicas > 0`);
+with `readReplicas: 0` — the common case — nothing changes, not even a probe.
+
+The reason to close it is evidence item 5 itself: the incident site's RO pod
+carried the **same glue with the same entryUUID** as its provider. A consumer
+does not validate what it initial-syncs; it reproduces it. So an RO-only glue —
+the shape you get when the RO fleet is rebuilt against a glued provider, or when
+one site's RO pod syncs from that site's glued pod — was invisible to the only
+*standing* signal, even though `slctl inspect` and the per-pod e2e spec would
+have caught it in a human-initiated look. Reach, not divergence, but the reach
+is the point of a standing detector.
+
+**The deferral's concern was real and is answered by a distinct reason, not by
+suppression.** An RO pod legitimately lacks the suffix while it performs its
+initial sync, and the all-pods rule turns that into a False. Rather than
+excusing it (a timer, or an exemption while the pod is young — both forbidden:
+ADR-024's "no timers as safety mechanisms", and an exemption keyed on age cannot
+distinguish a slow sync from a broken one), the verdict is reported honestly and
+**named separately**:
+
+- `False/DataMissingOnReadOnlyPods` — every reached *writable* pod has the root
+  entry, at least one read-only pod does not. Expected transiently during an RO
+  initial sync; persistent means that replica is broken or its syncrepl stanzas
+  are not converging.
+- `False/DataMissingOnPods` — unchanged, and it **outranks** the RO reason: any
+  writable pod hiding the entry reports this whatever the RO fleet shows.
+- `False/GlueSuffix` — unchanged and role-blind. A glue is corruption, never a
+  sync stage, so a glued RO pod reports `GlueSuffix` and names itself.
+
+The split is what makes the wider window affordable: an operator's alert rule
+can page immediately on `DataMissingOnPods` / `GlueSuffix` and give
+`DataMissingOnReadOnlyPods` a fuse longer than an initial sync. A single
+undifferentiated reason would have forced the whole condition down to the
+slowest tolerable fuse — which is the real cost the deferral was worried about.
+
+**The RO verdict does not affect the `SlapdDatabase` phase**, following the
+`readOnlyReadyReplicas` precedent (informational, phase-neutral). Nor does
+anything here become a write: ADR-012's boundary is untouched, `dataObserved`
+still latches on positive evidence only (an RO sighting is evidence that data
+exists here — the latch is role-blind by design, and any later disappearance it
+makes alarming is genuinely alarming).
+
+Messages stay byte-identical on a cluster without read-only replicas, so a
+`readReplicas: 0` deployment sees no churn at all; the pod-list construction is
+a pure function (`suffixProbeTargets`) pinned by that positive control.
 
 ## Related
 

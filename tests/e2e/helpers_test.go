@@ -103,10 +103,11 @@ func slapdDatabaseRunning(c client.Client, ns, name string) bool {
 // or nil when the CR or the condition is absent.
 //
 // DataPresent is ADR-025 decision 5's standing detector: the suffix's root
-// entry must be visible to an ordinary base search on EVERY reached RW pod, so
-// a pod whose suffix was demoted to a hidden glue turns it False. Asserting it
-// True is therefore an assertion that no pod is silently broken — cheap, and
-// the operator has already done the per-pod work.
+// entry must be visible to an ordinary base search on EVERY reached pod — RW
+// pods and, since 2026-09-14, the read-only fleet too — so a pod whose suffix
+// was demoted to a hidden glue turns it False. Asserting it True is therefore
+// an assertion that no pod is silently broken — cheap, and the operator has
+// already done the per-pod work.
 func dataPresentCondition(c client.Client, ns, name string) *metav1.Condition {
 	db := &ldapv1alpha1.SlapdDatabase{}
 	if err := c.Get(context.Background(), client.ObjectKey{Name: name, Namespace: ns}, db); err != nil {

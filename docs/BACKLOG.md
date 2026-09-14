@@ -679,31 +679,19 @@ still accepting data writes afterwards, zero restarts. So no R2/R3 downgrade was
 needed and ADR-024 needed no further amendment; the probe confirmed the class
 rather than refuting it.
 
-## `DataPresent` does not cover read-only replica pods
+## ~~`DataPresent` does not cover read-only replica pods~~ — DONE (2026-09-14)
 
-**What:** `evaluateDataPresent` probes RW pods only (`0..spec.replicas`), while
-a hidden glue suffix provably propagates to RO pods — ADR-025 evidence item 5
-measured the affected site's RO pod carrying the **same glue with the same
-entryUUID**, because a consumer initial-syncing from a glued provider
-replicates the glue faithfully. So an RO-only glue is invisible to the standing
-operator signal.
-
-**Why it is not a hole in the wall:** `slctl inspect`'s `suffix-visibility` /
-`suffix-uuid-agreement` checks and the per-pod e2e spec in `ldap_test.go` both
-cover RO pods, and all three now share one probe (`internal/suffixprobe`), so
-this is reach, not divergence.
-
-**Why deferred (2026-09-14, decided with the seedless-DataPresent fix):**
-including RO pods widens the transient `False/DataMissingOnPods` window — an RO
-pod doing its initial sync legitimately lacks the suffix while the RW pods have
-it, and ADR-025 D5's all-pods rule turns that into an alert. That is already
-accepted for RW pod rebuilds (ADR-012 case 2); extending it to the RO fleet is a
-separate call about alert noise, not a mechanism question.
-
-**How:** it is the same loop — add the `<name>-readonly-N` hosts (they use the
-RO headless service) to the probe list in `evaluateDataPresent`, and decide
-whether their verdict should be reported under a distinct reason so an RO-only
-divergence is distinguishable from an RW one.
+The probe now visits the `<name>-readonly-N` pods too, so an RO-only glue
+(ADR-025 evidence item 5: a consumer initial-syncing from a glued provider
+replicates the glue with the same entryUUID) is visible to the standing signal
+and not only to `slctl inspect`. The deferred call — that including RO pods
+widens the transient False window during a legitimate initial sync — was
+answered by a distinct reason rather than by suppression:
+`False/DataMissingOnReadOnlyPods` when every writable pod has the entry and a
+read-only one does not, so an alert rule can hold it to a longer fuse than
+`DataMissingOnPods` / `GlueSuffix`. Phase-neutral (the `readOnlyReadyReplicas`
+precedent), observability-only (ADR-012), and byte-identical behaviour at
+`readReplicas: 0`. See the ADR-025 amendment of the same date.
 
 ---
 

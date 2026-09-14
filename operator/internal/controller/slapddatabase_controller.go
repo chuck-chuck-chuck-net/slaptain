@@ -2076,7 +2076,8 @@ func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 }
 
 // evaluateDataPresent computes the DataPresent status condition: is the
-// database suffix's root entry visible on every reached RW pod?
+// database suffix's root entry visible on every reached pod — every RW pod, and
+// every read-only consumer pod when the cluster has any?
 //
 // Pure observability. ADR-012 is emphatic that this signal NEVER drives
 // reconciler behaviour — no re-seed, no recreate, nothing. It exists so that
@@ -2084,13 +2085,21 @@ func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 // one reconcile interval instead of waiting for a user to report failing
 // queries. The reason field distinguishes:
 //
-//	RootEntryVisible  — root entry found on EVERY assessed RW pod. ConditionTrue.
+//	RootEntryVisible  — root entry found on EVERY assessed pod. ConditionTrue.
 //	GlueSuffix        — a ManageDsaIT probe positively identified a glue entry
 //	                    on at least one pod (ADR-025). ConditionFalse — alert.
-//	DataMissingOnPods — root entry visible on some assessed pods, hidden on
-//	                    others (the glue signature without the confirmation —
-//	                    e.g. the probe could not use the control).
-//	                    ConditionFalse — alert.
+//	DataMissingOnPods — root entry visible on some assessed pods, hidden on at
+//	                    least one WRITABLE one (the glue signature without the
+//	                    confirmation — e.g. the probe could not use the
+//	                    control). ConditionFalse — alert.
+//	DataMissingOnReadOnlyPods
+//	                  — every writable pod has it, a read-only replica does
+//	                    not. ConditionFalse, but its own reason: this is the
+//	                    one shape with a routine benign cause (an RO consumer
+//	                    still performing its initial sync), so an alert rule
+//	                    can hold it to a longer fuse than a writable pod's
+//	                    divergence. It does NOT affect the database phase,
+//	                    following the readOnlyReadyReplicas precedent.
 //	DataMissing       — the database is known to have held data, and the root
 //	                    entry is visible nowhere. ConditionFalse — alert.
 //	NoDataYet         — nothing anywhere, and nothing ever seeded, restored or
@@ -2105,6 +2114,13 @@ func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 //     any-pod-visible verdict read True across the 2026-09-13 incident, where
 //     one pod's suffix had been demoted to a hidden glue while its peers
 //     looked healthy.
+//   - Read-only pods are in scope (2026-09-14). A glue propagates to them: the
+//     incident site's RO pod carried the same glue with the same entryUUID as
+//     its provider, a consumer having initial-synced the corruption faithfully
+//     (ADR-025 evidence item 5). They are probed exactly like RW pods — the
+//     data rootDN and its password are configured on RO pods too — and a glue
+//     there reports GlueSuffix like anywhere else. Only the benign-transient
+//     shape is given its own reason.
 //   - The probe runs regardless of how (or whether) this database was seeded
 //     (2026-09-14). It used to return early on !SeedApplied, which meant a
 //     database that is never seeded — every non-founder site of a mesh, since
@@ -2134,30 +2150,24 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 	if rootDN == "" {
 		rootDN = "cn=admin," + sd.Spec.Suffix
 	}
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-	headlessSvc := sc.Name + "-headless"
+	targets := suffixProbeTargets(sc, r.ClusterDomain)
 
-	results := make([]podPresence, 0, replicas)
-	for i := int32(0); i < replicas; i++ {
-		pod := fmt.Sprintf("%s-%d", sc.Name, i)
-		host := fmt.Sprintf("%s.%s.%s.svc.%s",
-			pod, headlessSvc, sc.Namespace, r.ClusterDomain)
-		addr := host + ":" + strconv.Itoa(int(ldapContainerPort))
+	results := make([]podPresence, 0, len(targets))
+	for _, t := range targets {
+		pod := t.pod
+		addr := t.host + ":" + strconv.Itoa(int(ldapContainerPort))
 
 		conn, err := ldap.DialURL("ldap://"+addr,
 			ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
 		)
 		if err != nil {
-			results = append(results, podPresence{pod: pod})
+			results = append(results, podPresence{pod: pod, readOnly: t.readOnly})
 			continue
 		}
 		conn.SetTimeout(ldapRequestTimeout)
 		if err := conn.Bind(rootDN, rootPW); err != nil {
 			conn.Close()
-			results = append(results, podPresence{pod: pod})
+			results = append(results, podPresence{pod: pod, readOnly: t.readOnly})
 			continue
 		}
 		// The data rootDN bypasses ACLs, so a hidden entry here is hidden by
@@ -2167,6 +2177,7 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 		conn.Close()
 		results = append(results, podPresence{
 			pod:      pod,
+			readOnly: t.readOnly,
 			assessed: obs.Assessable(),
 			present:  obs.Visible(),
 			glued:    obs.Glue(),

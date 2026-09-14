@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
@@ -32,7 +33,7 @@ var _ = Describe("read-only replicas", Label("readonly"), func() {
 		// Wait for at least one RO pod to be ready.
 		Eventually(ctx, func() bool {
 			return statefulSetReady(k8sClient, namespace, "slapd-readonly")
-		}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue(),
+		}).WithTimeout(5*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
 			"slapd-readonly StatefulSet should become ready")
 	}, NodeTimeout(6*time.Minute))
 
@@ -61,7 +62,7 @@ var _ = Describe("read-only replicas", Label("readonly"), func() {
 		GinkgoLogr.Info("wrote test entry via RW, waiting for RO replica", "dn", dn)
 		Eventually(ctx, func() bool {
 			return ldapExists(roConn, dn)
-		}).WithTimeout(60 * time.Second).WithPolling(2 * time.Second).Should(BeTrue(),
+		}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(BeTrue(),
 			"entry %s should replicate from RW to slapd-readonly-0 within 60 s", dn)
 	}, NodeTimeout(2*time.Minute))
 
@@ -85,4 +86,27 @@ var _ = Describe("read-only replicas", Label("readonly"), func() {
 		Expect(err).To(HaveOccurred(), "write to read-only replica should fail")
 		GinkgoLogr.Info("write to RO pod correctly rejected", "err", err)
 	}, NodeTimeout(30*time.Second))
+
+	// ADR-025 D5, RO-fleet reach: the operator's standing DataPresent probe must
+	// visit the read-only pods, not just the writable ones. A glue suffix
+	// propagates to an RO consumer (ADR-025 evidence item 5 measured the same
+	// glue with the same entryUUID on the incident site's RO pod), so an
+	// RO-only glue would otherwise be invisible to the operator.
+	//
+	// The assertion is on the message rather than the status, because on a
+	// healthy fleet both the RW-only and the all-pods probe report
+	// True/RootEntryVisible — only the message discloses how many pods were
+	// actually reached. Red by construction before the change: it read
+	// "visible on all 3 reached RW pod(s)" with the RO pod never dialled.
+	It("DataPresent covers the read-only fleet", func(ctx SpecContext) {
+		var last *metav1.Condition
+		Eventually(ctx, func() bool {
+			last = dataPresentCondition(crdClient, namespace, dbCRName)
+			return last != nil && last.Status == metav1.ConditionTrue &&
+				strings.Contains(last.Message, "read-only pod(s)")
+		}).WithTimeout(3*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
+			"DataPresent should report the read-only pods as probed, got %s",
+			describeDataPresent(last))
+		GinkgoLogr.Info("DataPresent covers RO pods", "message", last.Message)
+	}, NodeTimeout(4*time.Minute))
 })
