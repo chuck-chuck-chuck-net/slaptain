@@ -331,7 +331,12 @@ func (r *SlapdSchemaReconciler) setStatus(
 		},
 	}
 	statusPatch.Status = ss.Status
-	if err := r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(schemaFieldManager)); err != nil {
+	ac, err := applyConfiguration(statusPatch)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to build SlapdSchema status apply configuration")
+		return
+	}
+	if err := r.Status().Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(schemaFieldManager)); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to patch SlapdSchema status")
 	}
 }

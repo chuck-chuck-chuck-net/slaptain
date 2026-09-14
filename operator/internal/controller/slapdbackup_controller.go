@@ -401,7 +401,12 @@ func (r *SlapdBackupReconciler) patchStatus(ctx context.Context, sb *ldapv1alpha
 		},
 	}
 	statusPatch.Status = sb.Status
-	if err := r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(backupFieldManager)); err != nil {
+	ac, err := applyConfiguration(statusPatch)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to build SlapdBackup status apply configuration")
+		return
+	}
+	if err := r.Status().Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(backupFieldManager)); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to patch SlapdBackup status")
 	}
 }

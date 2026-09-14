@@ -51,7 +51,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)
 │   ├── OPENLDAP-VERSIONS.md        # Dual 2.7/2.6 image pairs, tag scheme, 2.6→2.7 migration runbook (ADR-021)
 │   ├── BACKUP-PLAN.md              # ADR-014 implementation breakdown (phases)
-│   ├── BACKLOG.md                  # Cross-cutting tech debt (e.g. client.Apply deprecation)
+│   ├── BACKLOG.md                  # Cross-cutting tech debt (e.g. lint debt, e2e framework gaps)
 │   └── adrs/
 │       ├── adr-001-double-reconcile-runs.md
 │       ├── adr-002-cn-config-node-local-operator-managed.md

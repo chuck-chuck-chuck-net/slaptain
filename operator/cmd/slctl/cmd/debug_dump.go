@@ -334,7 +334,7 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 	// The data DB index varies: {1}mdb without accesslog, {2}mdb with accesslog.
 	// Search for all olcMdbConfig entries to find data DBs.
 	if configPW != "" {
-		configConn, err := ldap.Dial("tcp", addr)
+		configConn, err := ldap.DialURL("ldap://" + addr)
 		if err == nil {
 			if err := configConn.Bind("cn=admin,cn=config", configPW); err == nil {
 				// Find all data DB entries (non-internal suffixes)

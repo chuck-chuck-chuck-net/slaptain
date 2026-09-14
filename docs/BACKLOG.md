@@ -3,36 +3,30 @@
 Cross-cutting cleanup items that aren't tied to the migration plan
 (`docs/MIGRATION-PLAN.md`) or a single ADR. Keep entries small and actionable.
 
-## Deprecation cleanup: `client.Apply` → `client.Client.Apply()` / `SubResource().Apply()`
+## ~~Deprecation cleanup: `client.Apply` → `client.Client.Apply()` / `SubResource().Apply()`~~ — DONE (2026-09-14)
 
-**What:** controller-runtime deprecated the package-level `client.Apply` patch
-type (staticcheck `SA1019`). All controllers currently use it for server-side
-apply, e.g.:
+All twelve package-level `client.Apply` call sites are migrated to
+`client.Client.Apply()` (six object patches in `slapdcluster_controller.go`) and
+`r.Status().Apply()` — i.e. `SubResource("status").Apply()` — (six status
+patches across the cluster/restore, database, schema, backup and scheduled-backup
+controllers). `SA1019` is 0; the two `ldap.Dial` → `ldap.DialURL` sites in
+`slctl` went with it, being a literal substitution on a plaintext
+`localhost:<port>` port-forward.
 
-```go
-r.Patch(ctx, obj, client.Apply, client.ForceOwnership, client.FieldOwner(...))
-r.Status().Patch(ctx, p, client.Apply, client.ForceOwnership, client.FieldOwner(...))
-```
+The new API takes a `runtime.ApplyConfiguration` rather than a typed object.
+Generated apply configurations exist for the core kinds but not for our CRDs, so
+the objects are adapted through `client.ApplyConfigurationFromUnstructured` by
+the one `applyConfiguration()` helper in `internal/controller/apply.go`. Both
+paths send `json.Marshal` of the payload as an `application/apply-patch+yaml`
+body, and `apply_test.go` pins that the unstructured form marshals to the same
+JSON as the typed object — so the field set recorded for each field manager is
+unchanged, as are `FieldOwner` and `ForceOwnership` (both option types implement
+`ApplyToApply` / `ApplyToSubResourceApply` identically).
 
-`make -C operator lint` flags this in `slapdcluster_controller.go` (×6),
-`slapddatabase_controller.go`, `slapdschema_controller.go`, and
-`slapdbackup_controller.go` — a handful of `SA1019` hits.
-
-**Why deferred:** it's a uniform, mechanical migration to the newer
-`client.Client.Apply()` / `client.Client.SubResource("status").Apply()` API
-across every controller. Doing it wholesale in one focused change is cleaner
-(and easier to review) than touching it inline inside unrelated feature work.
-We are not ignoring it — it's parked here deliberately.
-
-**How:** migrate every `client.Apply` call site in one pass; re-run
-`make -C operator lint` to confirm the `SA1019` count drops to zero. Verify the
-field-manager ownership semantics are unchanged (same `FieldOwner`,
-`ForceOwnership`).
-
-**Note:** `make -C operator lint` currently reports broader pre-existing debt
-too (errcheck, gofmt, modernize, unused, gocyclo, lll — ~70 findings as of
-2026-06-08). Worth a separate sweep, but out of scope for this entry.
-
+**Still open:** the broader pre-existing lint debt this entry always excluded —
+errcheck 40, lll 31, modernize 15, goconst 13, prealloc 13, gocyclo 9, unused 4,
+unparam 2, revive 1 (uncapped counts, unchanged by this change). Worth a separate
+sweep.
 
 ## e2e framework: specs cannot provision their own topology
 

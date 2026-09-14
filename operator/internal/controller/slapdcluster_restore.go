@@ -581,7 +581,11 @@ func (r *SlapdClusterReconciler) markRestored(ctx context.Context, sc *ldapv1alp
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sc.Namespace},
 		}
 		patch.Status.RestoreApplied = true
-		if err := r.Status().Patch(ctx, patch, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+		ac, err := applyConfiguration(patch)
+		if err != nil {
+			return fmt.Errorf("mark %q restoreApplied: %w", name, err)
+		}
+		if err := r.Status().Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
 			return fmt.Errorf("mark %q restoreApplied: %w", name, err)
 		}
 	}
@@ -604,7 +608,11 @@ func (r *SlapdClusterReconciler) applyStatus(ctx context.Context, sc *ldapv1alph
 		},
 	}
 	statusPatch.Status = sc.Status
-	if err := r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+	ac, err := applyConfiguration(statusPatch)
+	if err != nil {
+		return err
+	}
+	if err := r.Status().Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
