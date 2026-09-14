@@ -147,6 +147,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
         ├── accesslog_test.go        # Per-database accesslog: structure, no cross-DB lost-sync, convergence, ADR-020 ACL
         ├── sessionlog_test.go       # ADR-022: olcSpSessionlog on every RW pod's data DB; none on accesslog DBs
         ├── tunables_test.go         # ADR-024 degrades/hygiene tunables: cn=config posture per pod (ungated)
+        ├── cleanup_policy_test.go   # ADR-005 cleanupPolicy: Delete tears a replicated DB (+ its accesslog DB) off EVERY pod; Retain leaves it; re-adoption (ungated, Label "cleanup-policy"; rolls the cluster per ADR-013)
         ├── scale_test.go            # many-entries fixture: 1200-entry seed + churn (gated: E2E_SCALE=1; knobs E2E_SCALE_ENTRIES/E2E_SCALE_CHURN)
         └── scaleup_test.go         # standalone → HA transition: schema/modules/serverID runtime convergence (gated: E2E_SCALEUP=1)
 ```
@@ -515,7 +516,7 @@ the original decision — the history of reasoning matters.
 - ADR-002: cn=config is node-local; the operator manages it per-pod — *amended 2026-08-26: per-pod convergence is event-driven and its only periodic trigger is incidental (the 60s `lastChecked` status churn); filtering the SlapdCluster watch stops convergence, and a non-replicated cluster has no periodic resync at all*
 - ADR-003: Operator owns all syncrepl configuration (RID scheme, single source of truth)
 - ADR-004: Multi-resource CRD architecture (SlapdCluster / SlapdSchema / SlapdDatabase)
-- ADR-005: SlapdDatabase cleanup policy (Retain default, Delete opt-in)
+- ADR-005: SlapdDatabase cleanup policy (Retain default, Delete opt-in) — *amended 2026-09-14: the decision was never implemented for the databases it exists for — a replicated data DB is not a leaf and slapd does not cascade, so `Delete` always failed and the finalizer was released anyway. Teardown is now subtree-deepest-first, reaps the database's own `cn=accesslog-<db>` (data DB first, so no dangling `olcAccessLogDB` — ADR-026), covers RO pods, and a failed teardown keeps the finalizer and retries as the ADR always said it would*
 - ADR-006: Schema lifecycle (additive-only, desired-minimum model)
 - ADR-007: Multus-based dedicated replication network for cross-site traffic (amended: dynamic peer discovery via remote kubeconfig)
 - ADR-008: CSN monitoring uses replication bind credentials (uniform-password assumption) — *amended 2026-08-26: what CSN comparison can and cannot observe — peer status is consumer-side and one-directional, and lag is only observable while writes flow, so an idle database reads `Synced` across a broken link; amended again 2026-09-11: the "heartbeats only help during idle periods, when nothing is at stake" premise was refuted by ITS#9580 dormancy (idleness lets a SID's minCSN go stale; the next reconnect pays with a stale-cookie full-refresh storm) — heartbeats stay deferred regardless, superseded by ADR-021 (OpenLDAP 2.7) and ADR-022 (syncprov sessionlog)*

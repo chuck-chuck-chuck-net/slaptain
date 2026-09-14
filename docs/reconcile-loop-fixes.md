@@ -5,6 +5,116 @@ Kept to prevent running in circles when debugging similar issues in the future.
 
 ---
 
+## 2026-09-14: `cleanupPolicy: Delete` could not delete the databases it exists for
+
+**Symptom:** none — and that is the point. `kubectl delete slapddatabase <x>`
+with `spec.cleanupPolicy: Delete` returned promptly, the CR disappeared, and the
+database kept being served by every pod with no CR left to manage it. Neither of
+the two policies the user can choose between. Found by code audit on 2026-09-14
+while root-causing the dangling-logdb defect (ADR-026), recorded in
+`docs/BACKLOG.md` as **argued from code, never observed**, and deliberately not
+folded into that change.
+
+**Verification of the recorded claim (it was true):**
+
+- *Observed live*, t3e, 3-replica replicated cluster, OpenLDAP 2.7.1: the data
+  database `olcDatabase={1}mdb,cn=config` carries two children,
+  `olcOverlay={0}syncprov` and `olcOverlay={1}accesslog`. Its journal
+  `cn=accesslog-example-db` sits **above** it at `{2}`.
+- *Source-confirmed* at the shipped version: `servers/slapd/bconfig.c:6931`,
+  `else if ( ce->ce_kids ) rs->sr_err = LDAP_NOT_ALLOWED_ON_NONLEAF;` — slapd
+  does not cascade. The branch is live because `servers/slapd/slap.h:73` defines
+  `SLAP_CONFIG_DELETE` unconditionally in the tree our `.deb`s are built from
+  (ADR-021); without it the whole delete path would answer
+  `unwillingToPerform`, which would have made *every* policy-Delete fail, not
+  just the replicated ones.
+- Still *argued*, not measured: the `66` on the wire. Confirming it needs a
+  destructive write, which is what the new e2e does.
+
+**Root cause:** `deleteDatabaseFromPod` resolved the data DB's
+`olcDatabase={N}` DN and issued a bare `conn.Del` on it. A replicated data
+database is never a leaf, so the delete could only ever fail — on precisely the
+databases the policy matters for. `removeAccesslogDBAt` had deleted
+children-first since ADR-019 for exactly this reason; the teardown path never
+learned it.
+
+Three defects sat on top of that one:
+
+1. **The failure was swallowed.** `deleteFromAllPods` logged "best effort" and
+   `handleDeletion` removed the finalizer regardless, so a teardown that
+   achieved nothing looked identical to one that worked. ADR-005 already said
+   the opposite: "The finalizer is not removed until all reachable pods have
+   been processed [...] An admin can manually remove the finalizer to force
+   deletion."
+2. **The accesslog DB was never reaped.** `cn=accesslog-<db>` and its
+   `/accesslog/<db>` LMDB survived with nothing referencing them.
+3. **RO pods were skipped.** The loop walked `spec.replicas` only, while an RO
+   replica carries its own copy of the data database (`cn=config` is node-local,
+   ADR-002). Even the non-replicated case — the one that did work — left the
+   database served on the RO fleet.
+
+**Why it was hard to spot:** no e2e ever deleted a `SlapdDatabase` with
+`cleanupPolicy: Delete`. Both fixture databases are `Retain`, and ADR-013 defers
+hot database add/remove, so the whole path had no coverage at all. Nothing logs
+above `Info`, and the CR vanishing looks exactly like success.
+
+**Fix:**
+
+- A pure planner, `planSubtreeDeletion`, orders one subtree search's DNs
+  deepest-first, so children (and any grandchildren) go before their parent.
+- The data database is taken **first**, then the accesslog DB. Order is
+  load-bearing in that direction only: the data DB's accesslog overlay carries
+  the `olcAccessLogDB` that names the log, so removing the log first would leave
+  a dangling reference — silently written, fatal at the pod's next startup, the
+  exact ADR-026 state. Taken this way round, an interrupted teardown leaves an
+  unreferenced log DB, which is inert and reaped on the retry.
+- ADR-026 R1 is honoured by construction, not by care: the data-DB delete
+  renumbers everything above it (`bconfig.c`'s "renumber siblings" loop — on
+  t3e the log would slide `{2}` → `{1}`), and `removeAccesslogDB` re-resolves
+  the log by `olcSuffix` with its own search. No DN crosses the delete. The
+  backlog's "re-resolve nothing afterwards, the connection is closed
+  immediately" holds for the *caller* but does not license pre-resolving both
+  DNs up front.
+- ADR-026 R2 is satisfied: with one log per data DB (ADR-019) the log has
+  exactly one referent and it is the CR being finalized. The authorisation is
+  the operator's own naming convention, not a reference count over other
+  databases' overlays — which is what made the withdrawn R8 migration an R2
+  violation.
+- Teardown failures now keep the finalizer and retry with backoff, with the
+  manual-override instruction in the error. Every pod is still attempted before
+  returning, so one unreachable pod does not hide the rest.
+- `databasePodHosts` enumerates RW **and** RO pods from the cluster CR.
+
+**Regresses:** nothing on the steady-state path — none of this code runs outside
+a `SlapdDatabase` deletion with `cleanupPolicy: Delete`. `Retain` is untouched
+(it never enters the branch). `findDataDBDN` keeps its contract; the teardown
+uses a new `findDataDBDNOptional` so "already gone" stays distinguishable from
+"could not look".
+
+**Newly reachable:** the teardown itself, which could not previously complete on
+a replicated database. And the finalizer can now genuinely block a CR deletion —
+intended by ADR-005, unreachable until now.
+
+**Not covered:** syncrepl stanzas on *external peers* that name a torn-down
+database. Out of scope: a peer's stanzas follow its own CRs, and ADR-013 defers
+hot database add/remove. In-cluster stanzas need nothing — they live on the data
+DB entry and die with it.
+
+**Coverage:** unit, red-first, on both seams (`planSubtreeDeletion`,
+`databasePodHosts`) against stubs encoding the old behaviour. e2e
+`tests/e2e/cleanup_policy_test.go` (`Label("cleanup-policy")`): replicated +
+`Delete`, non-replicated + `Delete` (positive control — this one always worked),
+`Retain` (positive control — must leave everything), then re-adoption per ADR-005
+so the fixture is left as found. Red by construction against the pre-fix build on
+two counts: the replicated database's suffix survives in `cn=config`, and so does
+`cn=accesslog-cleanup-del-db`.
+
+**Lesson:** an opt-in destructive policy with no e2e is a policy nobody has ever
+run. The bug was three lines from a correct implementation of the same rule
+(`removeAccesslogDBAt`) in the same file — proximity is not propagation.
+
+---
+
 ## 2026-09-14: the R8 accesslog migration stranded an olcAccessLogDB and made a pod permanently unbootable
 
 **Symptom:** a full e2e run with `E2E_ACCESSLOG_MIGRATION=1` left `slapd-2` on

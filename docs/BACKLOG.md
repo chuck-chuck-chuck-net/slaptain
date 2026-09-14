@@ -727,26 +727,3 @@ purpose (the sizelimit class). E2E_SCALE seeds entries into a LIVE mesh (small
 deltas); this lane must instead create a FRESH consumer against a populated
 provider — pod-recreate or bootstrapFrom against a big artifact. Next e2e
 investment, before further replication-path changes.
-
----
-
-## `cleanupPolicy: Delete` cannot delete a replicated database (argued from code)
-
-`deleteDatabaseFromPod` (`slapddatabase_controller.go`) resolves the data DB's
-`olcDatabase={N}` DN and issues a bare `conn.Del` with no child removal. A
-replicated data database carries `olcOverlay=syncprov` and `olcOverlay=accesslog`
-children, and slapd does not cascade — `removeAccesslogDBAt` deletes children
-first for exactly this reason. So the delete should answer `notAllowedOnNonLeaf`
-(66) on every database with `replication.deltaSync: true`, i.e. ADR-005's opt-in
-`cleanupPolicy: Delete` silently fails on precisely the databases it matters for.
-It also leaves `cn=accesslog-<db>` and `/accesslog/<db>` behind unreferenced.
-
-**Label: argued from code, never observed** — found 2026-09-14 while root-causing
-the dangling-logdb defect (ADR-026), deliberately not folded into that change.
-
-**The fix:** reuse the children-first pattern (`removeAccesslogDBAt`), reap the
-database's own accesslog DB in the same pass, and re-resolve nothing afterwards
-(the connection is closed immediately). **Red-first:** a unit assertion on a
-teardown planner, plus an e2e that sets `cleanupPolicy: Delete` on a replicated
-`SlapdDatabase`, deletes the CR, and asserts the suffix is gone from every pod's
-`cn=config` — red against current code.
