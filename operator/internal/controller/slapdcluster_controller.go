@@ -479,7 +479,11 @@ func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, s
 	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
 		return err
 	}
-	return r.Patch(ctx, svc, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+	ac, err := applyConfiguration(svc)
+	if err != nil {
+		return err
+	}
+	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // reconcileClusterIPService applies the ClusterIP Service via SSA.
@@ -529,7 +533,11 @@ func (r *SlapdClusterReconciler) reconcileClusterIPService(ctx context.Context, 
 	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
 		return err
 	}
-	return r.Patch(ctx, svc, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+	ac, err := applyConfiguration(svc)
+	if err != nil {
+		return err
+	}
+	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // reconcileStatefulSet applies the StatefulSet via SSA.
@@ -548,7 +556,11 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 	if err := r.adoptImmutableSTSFields(ctx, sts); err != nil {
 		return err
 	}
-	return r.Patch(ctx, sts, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+	ac, err := applyConfiguration(sts)
+	if err != nil {
+		return err
+	}
+	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // adoptImmutableSTSFields preserves the StatefulSet's immutable fields from
@@ -624,7 +636,11 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyHeadlessService(ctx context.Co
 	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
 		return err
 	}
-	return r.Patch(ctx, svc, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+	ac, err := applyConfiguration(svc)
+	if err != nil {
+		return err
+	}
+	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // reconcileReadOnlyService applies the read-only ClusterIP Service via SSA.
@@ -674,7 +690,11 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyService(ctx context.Context, s
 	if err := controllerutil.SetControllerReference(sc, svc, r.Scheme); err != nil {
 		return err
 	}
-	return r.Patch(ctx, svc, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+	ac, err := applyConfiguration(svc)
+	if err != nil {
+		return err
+	}
+	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // reconcileReadOnlyStatefulSet applies the read-only StatefulSet via SSA.
@@ -697,7 +717,11 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 	if err := r.adoptImmutableSTSFields(ctx, sts); err != nil {
 		return err
 	}
-	return r.Patch(ctx, sts, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager))
+	ac, err := applyConfiguration(sts)
+	if err != nil {
+		return err
+	}
+	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
 }
 
 // buildStatefulSetSpec constructs the StatefulSet spec for RW or RO replicas.

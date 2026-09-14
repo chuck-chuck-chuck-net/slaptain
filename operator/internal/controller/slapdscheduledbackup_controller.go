@@ -261,7 +261,12 @@ func (r *SlapdScheduledBackupReconciler) patchStatus(ctx context.Context, ssb *l
 		},
 	}
 	statusPatch.Status = ssb.Status
-	if err := r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(scheduledBackupFieldManager)); err != nil {
+	ac, err := applyConfiguration(statusPatch)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to build SlapdScheduledBackup status apply configuration")
+		return
+	}
+	if err := r.Status().Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(scheduledBackupFieldManager)); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to patch SlapdScheduledBackup status")
 	}
 }

@@ -3185,7 +3185,12 @@ func (r *SlapdDatabaseReconciler) setStatus(
 		},
 	}
 	statusPatch.Status = sd.Status
-	if err := r.Status().Patch(ctx, statusPatch, client.Apply, client.ForceOwnership, client.FieldOwner(databaseFieldManager)); err != nil {
+	ac, err := applyConfiguration(statusPatch)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to build SlapdDatabase status apply configuration")
+		return
+	}
+	if err := r.Status().Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(databaseFieldManager)); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to patch SlapdDatabase status")
 	}
 }

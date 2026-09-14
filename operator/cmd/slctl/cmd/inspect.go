@@ -428,7 +428,7 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 			ps.configError = "config password not available"
 		}
 	} else {
-		configConn, err := ldap.Dial("tcp", addr)
+		configConn, err := ldap.DialURL("ldap://" + addr)
 		if err != nil {
 			ps.configError = fmt.Sprintf("dial for cn=config: %v", err)
 		} else {
