@@ -191,6 +191,22 @@ var _ = Describe("restore", Label("restore"), Label("restore-bootstrap"), Ordere
 		entries := ldapSearch(conn, restoreSuffix, "(objectClass=*)", "dn")
 		Expect(entries).To(HaveLen(sourceCount), "restored entry count should equal the source")
 		Expect(ldapExists(conn, "ou=People,"+restoreSuffix)).To(BeTrue(), "ou=People should be restored")
+
+		// A bootstrapFrom database is never seeded — spec.seed is absent by
+		// construction (it is mutually exclusive with bootstrapFrom). Until
+		// 2026-09-14 DataPresent gated on Status.SeedApplied, so a database the
+		// operator had ITSELF just loaded with the full DIT reported
+		// "Unknown/NotSeeded" forever and the ADR-025 per-pod suffix-visibility
+		// check never ran on it. The full DIT is demonstrably present two
+		// assertions above, so this must now read True.
+		By("verifying DataPresent engages on the restored (never-seeded) database")
+		var dpCond *metav1.Condition
+		Eventually(ctx, func() bool {
+			dpCond = dataPresentCondition(crdClient, namespace, restoreDB)
+			return dpCond != nil && dpCond.Status == metav1.ConditionTrue
+		}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
+			"restored database never reported DataPresent=True although its DIT is fully restored: %s",
+			describeDataPresent(dpCond))
 	})
 
 	// ADR-025: an artifact whose suffix entry is a GLUE entry (the multi-site

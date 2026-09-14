@@ -21,6 +21,7 @@ import (
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 	k8scli "github.com/chuck-chuck-chuck-net/slaptain/operator/internal/cli/k8s"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/suffixprobe"
 )
 
 // ── Flags ─────────────────────────────────────────────────────────────────────
@@ -407,7 +408,7 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 		if strings.HasPrefix(strings.ToLower(nc), "cn=") {
 			continue // accesslog / internal DBs journal, they have no seed identity
 		}
-		ps.suffixEntries = append(ps.suffixEntries, probeSuffixEntry(conn, nc))
+		ps.suffixEntries = append(ps.suffixEntries, suffixprobe.Probe(conn, nc))
 	}
 
 	// cn=config (config admin bind)

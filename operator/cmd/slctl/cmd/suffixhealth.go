@@ -21,7 +21,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/go-ldap/ldap/v3"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/suffixprobe"
 )
 
 // Suffix-entry health checks (ADR-025). A multi-site seed race can demote one
@@ -32,59 +32,13 @@ import (
 // nothing on the glued one, and a ManageDSAIT base search (RFC 3296) reveals
 // the glue with objectClass top+glue and a DIFFERENT entryUUID than the peers'.
 
-// suffixObservation is one pod's view of one data suffix's base entry.
-type suffixObservation struct {
-	// Suffix is the data DB suffix probed.
-	Suffix string
-	// Visible: the ordinary (no-control) base search returned the entry.
-	Visible bool
-	// Glue: a ManageDSAIT base search revealed a glue entry (objectClass or
-	// structuralObjectClass "glue"). Only probed when Visible is false.
-	Glue bool
-	// UUID is the entry's entryUUID from whichever search returned it ("" when
-	// not readable).
-	UUID string
-}
-
-// probeSuffixEntry reads one data suffix's base entry off one pod: an ordinary
-// base search first, then — when hidden — a ManageDSAIT base search to reveal a
-// glue entry. Anonymous (same as the inspect contextCSN probe); a denied or
-// failed read leaves Visible=false/Glue=false/UUID="", which the checks treat
-// as "cannot assess" unless another pod disagrees.
-func probeSuffixEntry(conn *ldap.Conn, suffix string) suffixObservation {
-	o := suffixObservation{Suffix: suffix}
-	attrs := []string{"objectClass", "structuralObjectClass", "entryUUID"}
-
-	res, err := conn.Search(ldap.NewSearchRequest(
-		suffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-		"(objectClass=*)", attrs, nil,
-	))
-	if err == nil && len(res.Entries) > 0 {
-		o.Visible = true
-		o.UUID = res.Entries[0].GetEqualFoldAttributeValue("entryUUID")
-		return o
-	}
-
-	mRes, err := conn.Search(ldap.NewSearchRequest(
-		suffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-		"(objectClass=*)", attrs,
-		[]ldap.Control{ldap.NewControlManageDsaIT(false)},
-	))
-	if err != nil || len(mRes.Entries) == 0 {
-		return o
-	}
-	e := mRes.Entries[0]
-	o.UUID = e.GetEqualFoldAttributeValue("entryUUID")
-	for _, oc := range e.GetEqualFoldAttributeValues("objectClass") {
-		if strings.EqualFold(strings.TrimSpace(oc), "glue") {
-			o.Glue = true
-		}
-	}
-	if strings.EqualFold(e.GetEqualFoldAttributeValue("structuralObjectClass"), "glue") {
-		o.Glue = true
-	}
-	return o
-}
+// suffixObservation is one pod's view of one data suffix's base entry. The
+// probe and its classification are shared with the operator
+// (internal/suffixprobe): the SlapdDatabase controller's DataPresent condition
+// and the SlapdBackup controller's SourceSuffixHealthy condition ask the same
+// question of the same DN, and three copies of "what is a glue" would be three
+// chances to disagree.
+type suffixObservation = suffixprobe.Observation
 
 // checkSuffixVisibility verifies that every data suffix's base entry is
 // visible to an ordinary base search on every queryable pod (RW and RO — a
@@ -98,7 +52,7 @@ func checkSuffixVisibility(dbs []dbIdentity, pods []podState) checkResult {
 	assessed := 0
 
 	for _, db := range dbs {
-		var visible, hidden, glued []string
+		var visible, hidden, glued, unassessed []string
 		for _, ps := range pods {
 			if ps.err != "" {
 				continue // unreachable pods are pod-readiness's problem
@@ -107,17 +61,29 @@ func checkSuffixVisibility(dbs []dbIdentity, pods []podState) checkResult {
 				if !strings.EqualFold(o.Suffix, db.Suffix) {
 					continue
 				}
-				switch {
-				case o.Glue:
+				switch o.Outcome {
+				case suffixprobe.OutcomeGlue:
 					glued = append(glued, ps.name)
-				case o.Visible:
+				case suffixprobe.OutcomeVisible:
 					visible = append(visible, ps.name)
-				default:
+				case suffixprobe.OutcomeMissing:
 					hidden = append(hidden, ps.name)
+				default:
+					// The probe could not reach a verdict (denied read, search
+					// error, an entry hidden without being glue). Not evidence
+					// in either direction — leave this pod out of the tally
+					// rather than let it read as "hidden" and manufacture a
+					// per-pod divergence out of a failed read.
+					unassessed = append(unassessed, ps.name)
 				}
 			}
 		}
 		if len(visible)+len(hidden)+len(glued) == 0 {
+			if len(unassessed) > 0 {
+				warns = append(warns, fmt.Sprintf(
+					"%s: base entry could not be assessed on any pod (%s) — cannot assess",
+					db.Suffix, strings.Join(unassessed, ", ")))
+			}
 			continue // suffix not probed on any pod
 		}
 		assessed++

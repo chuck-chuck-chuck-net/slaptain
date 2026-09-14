@@ -228,6 +228,15 @@ this ADR's own contract:
 trigger) now requires the root entry visible on **every** reached RW pod —
 the any-pod verdict read `True` across a glued pod (ADR-025).
 
+*2026-09-14:* `DataPresent` is no longer gated on `SeedApplied` at all — it is
+triggered by *data ever having been observed*, not by this operator having
+written it, because under ADR-025's founder-only rule most databases are never
+seeded (ADR-025 amendment of that date). The role is untouched: still pure
+observability, still never read by the reconciler. In particular the new
+`status.dataObserved` latch is memory of data's **presence** and is deliberately
+not an input to seeding — re-creating on **absence** is what this ADR reverted,
+and `seedNeeded` has a unit control pinning that it never consults it.
+
 ## Related
 
 - ADR-002: cn=config is node-local — established the "operator-owned declarative

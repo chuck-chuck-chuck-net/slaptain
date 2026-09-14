@@ -99,6 +99,35 @@ func slapdDatabaseRunning(c client.Client, ns, name string) bool {
 	return db.Status.Phase == ldapv1alpha1.DatabasePhaseRunning
 }
 
+// dataPresentCondition returns the named SlapdDatabase's DataPresent condition,
+// or nil when the CR or the condition is absent.
+//
+// DataPresent is ADR-025 decision 5's standing detector: the suffix's root
+// entry must be visible to an ordinary base search on EVERY reached RW pod, so
+// a pod whose suffix was demoted to a hidden glue turns it False. Asserting it
+// True is therefore an assertion that no pod is silently broken — cheap, and
+// the operator has already done the per-pod work.
+func dataPresentCondition(c client.Client, ns, name string) *metav1.Condition {
+	db := &ldapv1alpha1.SlapdDatabase{}
+	if err := c.Get(context.Background(), client.ObjectKey{Name: name, Namespace: ns}, db); err != nil {
+		return nil
+	}
+	for i := range db.Status.Conditions {
+		if db.Status.Conditions[i].Type == "DataPresent" {
+			return &db.Status.Conditions[i]
+		}
+	}
+	return nil
+}
+
+// describeDataPresent renders the condition for a failure message.
+func describeDataPresent(cond *metav1.Condition) string {
+	if cond == nil {
+		return "<no DataPresent condition>"
+	}
+	return fmt.Sprintf("%s/%s: %s", cond.Status, cond.Reason, cond.Message)
+}
+
 // slapdSchemaApplied returns true when the named SlapdSchema CR has applied=true.
 func slapdSchemaApplied(c client.Client, ns, name string) bool {
 	ss := &ldapv1alpha1.SlapdSchema{}

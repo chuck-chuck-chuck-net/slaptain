@@ -40,6 +40,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/suffixprobe"
 )
 
 const (
@@ -238,7 +239,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//    permanent glue suffix. This is the OPPOSITE direction of the reverted
 	//    verifySeedExists (which re-created on absence): we only ever DECLINE
 	//    to create on positive evidence of a foreign creator, never re-apply.
-	if sd.Spec.Seed != nil && len(sd.Spec.Seed.Entries) > 0 && !sd.Status.SeedApplied {
+	if seedNeeded(sd) {
 		withheld, err := r.applySeedData(ctx, sc, sd, rootPW)
 		switch {
 		case err != nil:
@@ -294,8 +295,17 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// 10. Evaluate DataPresent (pure observability — never drives reconciler
 	//     behaviour, see ADR-012). Set before setStatus so the condition
 	//     rides along in the same status patch.
-	dataPresent := r.evaluateDataPresent(ctx, sc, sd, rootPW)
+	//
+	//     DataObserved latches here: once the suffix's root entry has been seen
+	//     on a pod, this database is known to have held data, and a later
+	//     all-empty reading is a data-loss alert rather than a database still
+	//     waiting for its first replication. One-way — nothing clears it, and
+	//     nothing on the write path reads it (see seedNeeded).
+	dataPresent, observed := r.evaluateDataPresent(ctx, sc, sd, rootPW)
 	setCondition(&sd.Status.Conditions, dataPresent)
+	if observed {
+		sd.Status.DataObserved = true
+	}
 
 	// 11. Update status.
 	phase := ldapv1alpha1.DatabasePhaseRunning
@@ -2067,6 +2077,20 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 	return fmt.Errorf("no reachable RW pod for replication user creation")
 }
 
+// seedNeeded decides whether this reconcile should attempt to apply seed data.
+//
+// Two inputs, both on this CR: the user declared seed entries, and the one-way
+// latch says they have not been settled yet. Nothing observed about the
+// directory's current contents appears here, and nothing may be added — that
+// is ADR-012's boundary: absence of data must never trigger a write (the
+// reverted verifySeedExists), so the observability latches (DataObserved,
+// RestoreApplied) are deliberately not consulted. Declining to seed on positive
+// evidence of a foreign creator is a different decision, made inside
+// applySeedData by the ADR-025 withhold belt.
+func seedNeeded(sd *ldapv1alpha1.SlapdDatabase) bool {
+	return sd.Spec.Seed != nil && len(sd.Spec.Seed.Entries) > 0 && !sd.Status.SeedApplied
+}
+
 // applySeedData applies seed entries to pod-0 deterministically. Targets pod-0
 // only — never falls back to higher ordinals — so we never end up writing the
 // same DNs from two different pods, which would create a CSN-conflict storm in
@@ -2167,7 +2191,7 @@ func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 }
 
 // evaluateDataPresent computes the DataPresent status condition: is the
-// database suffix's root entry visible on at least one reachable RW pod?
+// database suffix's root entry visible on every reached RW pod?
 //
 // Pure observability. ADR-012 is emphatic that this signal NEVER drives
 // reconciler behaviour — no re-seed, no recreate, nothing. It exists so that
@@ -2175,39 +2199,50 @@ func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 // one reconcile interval instead of waiting for a user to report failing
 // queries. The reason field distinguishes:
 //
-//	NotSeeded         — Status.SeedApplied=false. Bootstrap hasn't finished;
-//	                    absence is expected. ConditionUnknown.
-//	RootEntryVisible  — root entry found on EVERY reached RW pod. ConditionTrue.
-//	NoReachablePod    — could not bind on any pod (cluster churning, all
-//	                    pods crash-looping). ConditionUnknown.
-//	DataMissing       — SeedApplied=true, bound successfully somewhere, root
-//	                    entry not visible anywhere. ConditionFalse — alert.
-//	DataMissingOnPods — root entry visible on some reached pods, hidden on
-//	                    others (ADR-025: the glue-suffix signature — a glue is
-//	                    invisible to ordinary searches on exactly the broken
-//	                    pod). ConditionFalse — alert.
+//	RootEntryVisible  — root entry found on EVERY assessed RW pod. ConditionTrue.
+//	GlueSuffix        — a ManageDsaIT probe positively identified a glue entry
+//	                    on at least one pod (ADR-025). ConditionFalse — alert.
+//	DataMissingOnPods — root entry visible on some assessed pods, hidden on
+//	                    others (the glue signature without the confirmation —
+//	                    e.g. the probe could not use the control).
+//	                    ConditionFalse — alert.
+//	DataMissing       — the database is known to have held data, and the root
+//	                    entry is visible nowhere. ConditionFalse — alert.
+//	NoDataYet         — nothing anywhere, and nothing ever seeded, restored or
+//	                    observed: a database still waiting for its first data.
+//	                    ConditionUnknown.
+//	NoReachablePod    — no pod could be assessed (cluster churning, all pods
+//	                    crash-looping). ConditionUnknown.
 //
-// Every reached pod must show the entry (ADR-025 D1): the previous
-// any-pod-visible verdict read True across the 2026-09-13 incident, where one
-// pod's suffix had been demoted to a hidden glue while its peers looked
-// healthy. Aggregation itself is the pure aggregateDataPresent.
+// Two properties are load-bearing and were both bought with incidents:
+//
+//   - Every assessed pod must show the entry (ADR-025 D1). The previous
+//     any-pod-visible verdict read True across the 2026-09-13 incident, where
+//     one pod's suffix had been demoted to a hidden glue while its peers
+//     looked healthy.
+//   - The probe runs regardless of how (or whether) this database was seeded
+//     (2026-09-14). It used to return early on !SeedApplied, which meant a
+//     database that is never seeded — every non-founder site of a mesh, since
+//     ADR-025 D1 tells peers to omit spec.seed, plus hot-migration (ADR-011)
+//     and consumer-only (ADR-010) clusters — never ran the check at all. The
+//     seed latch answers "did WE write the initial data", which stopped being
+//     the same question as "is data expected here" the moment data started
+//     arriving by replication. What the latch is still needed for is narrow and
+//     lives in databaseKnownPopulated: telling an empty new database from one
+//     that lost its contents.
+//
+// Aggregation is the pure aggregateDataPresent; observed=true reports that the
+// root entry was seen on at least one pod this pass, for the caller's latch.
 func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	rootPW string,
-) metav1.Condition {
-	cond := metav1.Condition{
+) (cond metav1.Condition, observed bool) {
+	cond = metav1.Condition{
 		Type:               "DataPresent",
 		LastTransitionTime: metav1.Now(),
 		ObservedGeneration: sd.Generation,
-	}
-
-	if !sd.Status.SeedApplied {
-		cond.Status = metav1.ConditionUnknown
-		cond.Reason = "NotSeeded"
-		cond.Message = "Database has not been seeded yet; data-presence check is not meaningful"
-		return cond
 	}
 
 	rootDN := sd.Spec.RootDN
@@ -2240,17 +2275,22 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 			results = append(results, podPresence{pod: pod})
 			continue
 		}
-		exists, err := ldapEntryExists(conn, sd.Spec.Suffix)
+		// The data rootDN bypasses ACLs, so a hidden entry here is hidden by
+		// slapd's frontend — which is exactly what a glue is. The shared probe
+		// asks again with ManageDsaIT to say so positively (ADR-025).
+		obs := suffixprobe.Probe(conn, sd.Spec.Suffix)
 		conn.Close()
-		if err != nil {
-			results = append(results, podPresence{pod: pod})
-			continue
-		}
-		results = append(results, podPresence{pod: pod, reached: true, present: exists})
+		results = append(results, podPresence{
+			pod:      pod,
+			assessed: obs.Assessable(),
+			present:  obs.Visible(),
+			glued:    obs.Glue(),
+		})
 	}
 
-	cond.Status, cond.Reason, cond.Message = aggregateDataPresent(sd.Spec.Suffix, results)
-	return cond
+	cond.Status, cond.Reason, cond.Message = aggregateDataPresent(
+		sd.Spec.Suffix, results, databaseKnownPopulated(sd))
+	return cond, dataWasObserved(results)
 }
 
 // applySeedEntry parses a simplified LDIF entry and adds it via LDAP.

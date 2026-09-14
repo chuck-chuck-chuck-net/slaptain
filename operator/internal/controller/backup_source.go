@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
+	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/suffixprobe"
 )
 
 // backupSourceConvergedCondition is the condition a SlapdBackup carries to
@@ -112,24 +113,25 @@ func sourceConvergedCondition(sc *ldapv1alpha1.SlapdCluster, generation int64, n
 // delay or fail a backup — a backup always takes a backup.
 const backupSuffixHealthyCondition = "SourceSuffixHealthy"
 
-// suffixProbeOutcome is the result of probing the backup source pod's suffix
-// entry: an ordinary base search first, and — when that hides the entry — a
-// ManageDSAIT base search to tell a hidden glue from a genuinely absent entry.
-type suffixProbeOutcome int
+// The backup's suffix probe is the shared one (internal/suffixprobe), which the
+// DataPresent condition and slctl inspect also use — one implementation of
+// ADR-025's ordinary-then-ManageDsaIT classification, so the three cannot drift
+// apart on what counts as a glue. These aliases keep the local vocabulary.
+type suffixProbeOutcome = suffixprobe.Outcome
 
 const (
 	// suffixProbeVisible — the ordinary base search returned the entry.
-	suffixProbeVisible suffixProbeOutcome = iota
-	// suffixProbeGlue — hidden from ordinary search, and ManageDSAIT revealed a
+	suffixProbeVisible = suffixprobe.OutcomeVisible
+	// suffixProbeGlue — hidden from ordinary search, and ManageDsaIT revealed a
 	// glue entry (ADR-025: the multi-site seed-race artifact). The artifact this
 	// backup produces will FAIL restore preflight.
-	suffixProbeGlue
-	// suffixProbeMissing — hidden from ordinary search and ManageDSAIT found
+	suffixProbeGlue = suffixprobe.OutcomeGlue
+	// suffixProbeMissing — hidden from ordinary search and ManageDsaIT found
 	// nothing either: the suffix entry does not exist on the source pod.
-	suffixProbeMissing
-	// suffixProbeError — the probe itself failed (dial, bind, search error).
-	// Silence is not evidence of health.
-	suffixProbeError
+	suffixProbeMissing = suffixprobe.OutcomeMissing
+	// suffixProbeError — the probe itself failed (dial, bind, search error) or
+	// found something it cannot classify. Silence is not evidence of health.
+	suffixProbeError = suffixprobe.OutcomeError
 )
 
 // sourceSuffixHealthyCondition shapes the SourceSuffixHealthy condition from a
