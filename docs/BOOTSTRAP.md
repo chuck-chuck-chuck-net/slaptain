@@ -103,6 +103,19 @@ alert), turns `True` once the suffix is visible on every pod, and never returns
 to `NoDataYet` afterwards, so a later disappearance reads as the data-loss
 alert it is.
 
+**Read-only replicas are probed too** (`spec.readReplicas > 0`), because a glue
+suffix propagates to a consumer that initial-synced from a glued provider. They
+report under their own reason, `False/DataMissingOnReadOnlyPods`, which is
+expected **transiently**: a freshly created or rebuilt read-only pod has not
+received the suffix entry yet, so the condition goes False for the length of its
+initial sync and returns to True when the DIT lands. Writable-pod divergence
+keeps the existing `False/DataMissingOnPods`, and a confirmed glue on any pod —
+read-only included — is `False/GlueSuffix`. Alert on `DataMissingOnPods` and
+`GlueSuffix` immediately; give `DataMissingOnReadOnlyPods` a fuse longer than a
+read-only replica's initial sync takes in your deployment. None of the three
+affects the `SlapdDatabase` phase (ADR-012: observability only), and with
+`readReplicas: 0` nothing changes at all.
+
 ---
 
 ## Why Not slapadd with Replication?
