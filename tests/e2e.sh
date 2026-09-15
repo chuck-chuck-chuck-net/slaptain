@@ -238,6 +238,11 @@ Reproducibility and triage:
                          on failure ('test' never tears down; 'all' aborts before
                          teardown), so the cluster is left ready for
                          slctl inspect / slctl debug-dump.
+  E2E_TEARDOWN_TIMEOUT = Seconds any single blocking teardown step may take
+                         (default 180). Teardown never waits forever: a step that
+                         overruns is reported with the manual commands to finish
+                         it, the remaining contexts are still torn down, and the
+                         script exits non-zero.
 
 Cross-site replication transport (multi-site only):
   (default)            = NodePort URIs, one per remote site.
@@ -1079,6 +1084,96 @@ False/GlueSuffix or False/DataMissingOnPods means a pod is hiding the suffix ent
 
 # ── Teardown ─────────────────────────────────────────────────────────────────
 
+# Bound, in seconds, on any single blocking teardown step. Teardown must never
+# outlive the thing it is tearing down: the context loop is serial, so one site
+# that never finishes used to mean the remaining sites were never torn down at
+# all. 180s is roughly 3x the slowest healthy step measured on a lab (a 4-pod
+# cluster's StatefulSet deletion plus PVC release) — long enough that a busy
+# cluster is not declared stuck, short enough that a human notices the run ended.
+TEARDOWN_TIMEOUT="${E2E_TEARDOWN_TIMEOUT:-180}"
+
+# Contexts whose teardown did not complete. Collected rather than fatal, so the
+# remaining contexts are still torn down; reported and exited non-zero at the end.
+TEARDOWN_STUCK=()
+declare -A TEARDOWN_STUCK_CTX
+
+teardown_stuck() { # ctx message
+    TEARDOWN_STUCK+=("[$1] $2")
+    TEARDOWN_STUCK_CTX["$1"]=1
+    warn "[$1] $2"
+}
+
+# Owners before storage (ADR-018). Any pod object that names a PVC holds a
+# deletion lease on it — the pod's phase is irrelevant — so `kubectl delete pvc
+# --all` against a namespace that still runs a slapd pod marks the PVCs
+# Terminating and then blocks forever, which blocks the namespace, which blocks
+# every remaining context.
+#
+# Teardown only ever knew about the fixtures it created itself. A SlapdCluster
+# that a *spec* stood up and deliberately kept — E2E_KEEP_ON_FAILURE, see
+# tests/e2e/restore_test.go — is exactly such a pod, and is what hung teardown
+# on a three-site lab on 2026-09-15. So this deletes by --all, not by name.
+#
+# Order inside the step is not free either: a SlapdDatabase finalizer reconciles
+# cn=config on the live pods (ADR-005), so every database goes first, while its
+# cluster's pods are still running, and the clusters follow.
+delete_slapd_owners() { # ctx
+    local ctx="$1" kind names extra known n
+
+    for kind in slapddatabase slapdcluster; do
+        names=$(kctl "$ctx" get "$kind" -n "$NAMESPACE_TESTING" \
+            -o jsonpath='{range .items[*]}{.metadata.name} {end}' 2>/dev/null || true)
+        names="${names% }"
+        [[ -z "$names" ]] && continue
+
+        # Everything this script itself created. Anything else is debris from a
+        # spec, and is evidence somebody may have wanted — say so before it dies.
+        case "$kind" in
+            slapddatabase) known=" $DB_CR_NAME $DB2_CR_NAME " ;;
+            slapdcluster)  known=" slapd " ;;
+        esac
+        extra=""
+        for n in $names; do
+            [[ "$known" == *" $n "* ]] || extra+=" $n"
+        done
+        if [[ -n "$extra" ]]; then
+            warn "[$ctx] $kind not created by this script:$extra — deleting. If an earlier suite run kept it on purpose (E2E_KEEP_ON_FAILURE), its evidence goes now."
+        fi
+
+        log "[$ctx] Deleting $kind: $names"
+        kctl "$ctx" delete "$kind" --all -n "$NAMESPACE_TESTING" --ignore-not-found \
+            --timeout="${TEARDOWN_TIMEOUT}s" \
+            || teardown_stuck "$ctx" "$kind deletion did not finish within ${TEARDOWN_TIMEOUT}s"
+    done
+}
+
+# What is still standing, and how to finish the job by hand.
+report_stuck_namespace() { # ctx
+    local ctx="$1"
+    warn "[$ctx] $NAMESPACE_TESTING did not drain. Still present:"
+    kctl "$ctx" get slapdcluster,slapddatabase,statefulset,pod,pvc \
+        -n "$NAMESPACE_TESTING" >&2 2>/dev/null || true
+    cat >&2 <<EOF
+
+Finish it by hand — owners before storage, because a pod object is a PVC
+deletion lease (ADR-018) and deleting the PVCs first only makes them Terminating:
+
+  kubectl --context $ctx -n $NAMESPACE_TESTING delete slapddatabase --all
+  kubectl --context $ctx -n $NAMESPACE_TESTING delete slapdcluster --all
+  kubectl --context $ctx -n $NAMESPACE_TESTING delete pvc --all
+  kubectl --context $ctx delete namespace $NAMESPACE_TESTING
+
+A SlapdDatabase that will not go is holding its cleanup finalizer because a pod
+was unreachable — that is deliberate (ADR-005). Look at why first, then force it:
+
+  kubectl --context $ctx -n $NAMESPACE_TESTING patch slapddatabase <name> \\
+      --type=merge -p '{"metadata":{"finalizers":null}}'
+
+The operator and the CRDs are left installed on this context so the finalizer
+can still be released; re-run the teardown once the namespace is gone.
+EOF
+}
+
 teardown_all() {
     log "Tearing down deployment..."
 
@@ -1087,14 +1182,30 @@ teardown_all() {
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Removing resources from $NAMESPACE_TESTING..."
 
+        # A namespace left Terminating by an interrupted run — the Ctrl-C after
+        # the hang this ordering fixes — still accepts deletes, and needs them:
+        # nothing else will remove the pod whose lease holds its PVCs. So the
+        # owner deletes below run either way; only the namespace delete is
+        # skipped, since one is already in flight.
+        local ns_terminating=0
+        if [[ "$(kctl "$ctx" get namespace "$NAMESPACE_TESTING" \
+                 -o jsonpath='{.status.phase}' 2>/dev/null || true)" == "Terminating" ]]; then
+            ns_terminating=1
+            warn "[$ctx] $NAMESPACE_TESTING is already Terminating from an earlier run — clearing what holds it, not deleting it again."
+        fi
+
         # Test resources (SlapdDatabase, SlapdSchema, readpw secret).
         if [[ -d "$resource_dir" ]]; then
             kctl "$ctx" delete -n "$NAMESPACE_TESTING" -f "$resource_dir/" \
-                --ignore-not-found 2>/dev/null || true
+                --ignore-not-found --timeout="${TEARDOWN_TIMEOUT}s" 2>/dev/null || true
         fi
 
         # SlapdCluster.
         hctl "$ctx" uninstall slapd -n "$NAMESPACE_TESTING" 2>/dev/null || true
+
+        # Everything the fixtures above did not cover: spec-created SlapdDatabases
+        # and SlapdClusters. Owners before storage — see delete_slapd_owners.
+        delete_slapd_owners "$ctx"
 
         # NodePort services (main + per-pod).
         kctl "$ctx" delete svc slapd-external -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
@@ -1125,15 +1236,34 @@ teardown_all() {
         # CSR (cluster-scoped) — name includes the namespace.
         kctl "$ctx" delete csr "slapd-${NAMESPACE_TESTING}-csr" --ignore-not-found 2>/dev/null || true
 
-        # PVCs.
-        kctl "$ctx" delete pvc --all -n "$NAMESPACE_TESTING" 2>/dev/null || true
+        # PVCs. Safe to wait on now: every owner above is gone, so no pod object
+        # holds a lease on them.
+        kctl "$ctx" delete pvc --all -n "$NAMESPACE_TESTING" --timeout="${TEARDOWN_TIMEOUT}s" 2>/dev/null \
+            || teardown_stuck "$ctx" "PVC deletion did not finish within ${TEARDOWN_TIMEOUT}s"
 
         # Testing namespace.
-        kctl "$ctx" delete namespace "$NAMESPACE_TESTING" --ignore-not-found || true
+        if [[ "$ns_terminating" -eq 0 ]]; then
+            kctl "$ctx" delete namespace "$NAMESPACE_TESTING" --ignore-not-found \
+                --timeout="${TEARDOWN_TIMEOUT}s" \
+                || teardown_stuck "$ctx" "namespace $NAMESPACE_TESTING did not go within ${TEARDOWN_TIMEOUT}s"
+        elif kctl "$ctx" get namespace "$NAMESPACE_TESTING" >/dev/null 2>&1; then
+            teardown_stuck "$ctx" "namespace $NAMESPACE_TESTING was already Terminating and still is"
+        fi
+
+        [[ -n "${TEARDOWN_STUCK_CTX[$ctx]:-}" ]] && report_stuck_namespace "$ctx"
     done
 
     # Cluster-scoped resources: operator, CRDs, operator namespace.
     for ctx in "${CONTEXTS[@]}"; do
+        # Removing the operator or the CRDs under a namespace that has not
+        # drained is strictly destructive: the operator is the only thing that
+        # can still release a SlapdDatabase finalizer, and deleting a CRD out
+        # from under finalized CRs wedges them permanently.
+        if [[ -n "${TEARDOWN_STUCK_CTX[$ctx]:-}" ]]; then
+            warn "[$ctx] Leaving the operator and the CRDs installed — $NAMESPACE_TESTING is not clean."
+            continue
+        fi
+
         log "[$ctx] Removing cluster-scoped resources..."
 
         hctl "$ctx" uninstall slaptain-operator -n "$NAMESPACE" 2>/dev/null || true
@@ -1142,8 +1272,16 @@ teardown_all() {
         kctl "$ctx" delete crd slapddatabases.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
         kctl "$ctx" delete crd slapdschemas.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
 
-        kctl "$ctx" delete namespace "$NAMESPACE" --ignore-not-found || true
+        kctl "$ctx" delete namespace "$NAMESPACE" --ignore-not-found \
+            --timeout="${TEARDOWN_TIMEOUT}s" \
+            || teardown_stuck "$ctx" "namespace $NAMESPACE did not go within ${TEARDOWN_TIMEOUT}s"
     done
+
+    if [[ ${#TEARDOWN_STUCK[@]} -gt 0 ]]; then
+        warn "Teardown INCOMPLETE:"
+        for line in "${TEARDOWN_STUCK[@]}"; do warn "  $line"; done
+        return 1
+    fi
 
     log "Teardown complete."
 }
