@@ -14,6 +14,12 @@ LDAP_READONLY_REPLICA="${LDAP_READONLY_REPLICA:-false}"
 # The init container creates /data/<name>/ and /accesslog/<name>/ for each.
 DATABASE_DIRS="${DATABASE_DIRS:-}"
 
+# AUTH_DIR: the node-local authentication database's LMDB directory (ADR-027).
+# Mirrors the AuthDir constant in operator/api/v1alpha1/authdb.go; the two must
+# agree, because the operator writes it into olcDbDirectory and back-mdb does
+# not create the directory itself.
+AUTH_DIR="${DATA_DIR}/_slaptain-auth"
+
 echo "Bootstrapping OpenLDAP (cn=config infrastructure only)"
 echo "User: $(id)"
 echo "Config Dir: $CONFIG_DIR"
@@ -38,6 +44,31 @@ touch "$DATA_DIR/.writable" && rm "$DATA_DIR/.writable" || { echo "ERROR: $DATA_
 if [[ -d "$ACCESSLOG_DIR" ]]; then
     touch "$ACCESSLOG_DIR/.writable" && rm "$ACCESSLOG_DIR/.writable" || { echo "ERROR: $ACCESSLOG_DIR is not writable"; exit 1; }
 fi
+
+# ── Create the node-local auth database's directory (ADR-027) ─────────────────
+# UNCONDITIONAL and independent of DATABASE_DIRS, because this database is fixed
+# infrastructure rather than a user database: it holds the per-database syncrepl
+# bind identities that used to live in the replicated data tree, it exists on
+# every pod including read-only replicas, and it must be there before the
+# SlapdCluster controller can add the database to cn=config (back-mdb does not
+# create olcDbDirectory).
+#
+# Staying out of DATABASE_DIRS is the point, not an omission. DATABASE_DIRS is a
+# pod-template env var, so a change to it rolls the StatefulSet (ADR-013); a
+# fixed name written here changes never and therefore rolls nothing.
+#
+# It also cannot collide with a user database's /data/<dbname>. DATABASE_DIRS
+# entries are SlapdDatabase CR names, and a Kubernetes object name is an RFC
+# 1123 subdomain — it must start with a lowercase alphanumeric — so no CR can
+# ever be named "_slaptain-auth". The leading underscore makes the reservation
+# structural rather than a convention.
+#
+# Ownership needs no chown: this script runs as the slapd UID/GID (1024), the
+# same identity that later opens the LMDB environment, so mkdir produces a
+# directory slapd owns. Idempotent via mkdir -p — this runs on every pod start,
+# not only at first boot.
+echo "Ensuring auth database directory: $AUTH_DIR"
+mkdir -p "$AUTH_DIR"
 
 # ── Create per-database data and accesslog directories ────────────────────────
 # Each SlapdDatabase CR gets its own subdirectory under /data/ and, when this pod

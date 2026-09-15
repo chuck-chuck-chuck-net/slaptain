@@ -69,14 +69,37 @@ func (r *SlapdClusterReconciler) reconcileTunables(
 	for _, t := range targets {
 		host := fmt.Sprintf("%s.%s.%s.svc.%s", t.name, t.headless, sc.Namespace, r.ClusterDomain)
 		if err := r.reconcilePodTunables(ctx, host, configPW, sc); err != nil {
-			log.Info("tunable convergence skipped for pod (will retry)",
+			log.Info("per-pod infrastructure convergence skipped for pod (will retry)",
 				"pod", t.name, "err", err)
 		}
 	}
 }
 
-// reconcilePodTunables converges the server-global cn=config attributes on one
-// pod.
+// reconcilePodInfrastructure is the per-pod work this controller owns on an
+// already-bound connection. Kept separate from reconcilePodTunables so the
+// connection setup has one home and this list can grow without it.
+//
+// Order is intentional but not load-bearing: nothing here depends on anything
+// else here. It is best-effort as a whole — see reconcileTunables — so a pod
+// that is mid-restart costs a log line and a retry, never a failed reconcile.
+func (r *SlapdClusterReconciler) reconcilePodInfrastructure(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host string,
+	sc *ldapv1alpha1.SlapdCluster,
+) error {
+	if err := r.ensureGlobalTunables(ctx, conn, host, sc); err != nil {
+		return err
+	}
+	// The node-local authentication database (ADR-027 decision 7): this
+	// controller is its single creator, on every pod, read-write and read-only
+	// alike. Its per-database identity ENTRIES belong to the SlapdDatabase
+	// controller and are written separately.
+	return r.ensureAuthDB(ctx, conn, host)
+}
+
+// reconcilePodTunables dials one pod, binds as cn=admin,cn=config, and runs the
+// per-pod infrastructure convergence this controller owns.
 func (r *SlapdClusterReconciler) reconcilePodTunables(
 	ctx context.Context,
 	host, configPW string,
@@ -96,7 +119,7 @@ func (r *SlapdClusterReconciler) reconcilePodTunables(
 		return fmt.Errorf("bind cn=admin,cn=config at %s: %w", host, err)
 	}
 
-	return r.ensureGlobalTunables(ctx, conn, host, sc)
+	return r.reconcilePodInfrastructure(ctx, conn, host, sc)
 }
 
 // ensureGlobalTunables read-compare-writes the cn=config entry's own attributes:
