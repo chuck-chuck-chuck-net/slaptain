@@ -23,10 +23,18 @@ import (
 
 // ── Replication identity limits (ADR-024 R7, ADR-020 amendment) ─────────────
 
-// replicationLimits is the olcLimits value exempting a database's replication
-// identity from every search limit. It is written on BOTH the data database and
-// that database's accesslog database, beside the ACL that grants the same
-// identity read (accesslogACL / applyACLs).
+// replicationLimits is the olcLimits list exempting a database's replication
+// identities from every search limit. It is written on BOTH the data database
+// and that database's accesslog database, beside the ACL that grants the same
+// identities read (accesslogACL / applyACLs).
+//
+// One value per identity, because an olcLimits value carries exactly one
+// selector — so ADR-027's cutover doubles the list rather than editing a
+// string. The node-local identity (what stanzas now bind as) comes first, the
+// legacy cn=replication,<suffix> second, for as long as the ACLs still grant
+// it: an identity granted read without a matching exemption caps at slapd's
+// default 500 entries, which is the defect the 2026-09-12 ADR-020 amendment was
+// written from and is invisible in any fixture-sized directory.
 //
 // Why it is not optional and not a CRD field: slapd's default sizelimit is 500
 // entries, and a consumer's syncrepl search is an ordinary search subject to it.
@@ -42,9 +50,16 @@ import (
 // it either way, so writing it lets the convergence comparison be a string
 // compare rather than a limits parser.
 func replicationLimits(dbName, dataSuffix string) []string {
-	return []string{fmt.Sprintf(
-		`dn.exact="cn=replication,%s" time.soft=unlimited time.hard=unlimited `+
-			`size.soft=unlimited size.hard=unlimited`, dataSuffix)}
+	const unlimited = `" time.soft=unlimited time.hard=unlimited ` +
+		`size.soft=unlimited size.hard=unlimited`
+	out := make([]string, 0, 2)
+	for _, dn := range []string{
+		replicationBindDN(dbName),
+		legacyReplicationBindDN(dataSuffix),
+	} {
+		out = append(out, `dn.exact="`+dn+unlimited)
+	}
+	return out
 }
 
 // desiredLimits is the full olcLimits list a data database must carry: the

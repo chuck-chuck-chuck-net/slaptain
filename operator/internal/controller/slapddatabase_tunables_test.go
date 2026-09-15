@@ -20,6 +20,7 @@ func ptrStr(s string) *string { return &s }
 
 func dbWith(f func(*ldapv1alpha1.SlapdDatabaseSpec)) *ldapv1alpha1.SlapdDatabase {
 	sd := &ldapv1alpha1.SlapdDatabase{}
+	sd.Name = "exdb"
 	sd.Spec.Suffix = "dc=example,dc=org"
 	f(&sd.Spec)
 	return sd
@@ -78,7 +79,9 @@ func TestReplicationLimitsMatchesACLIdentity(t *testing.T) {
 }
 
 func TestDesiredLimits(t *testing.T) {
-	repl := replicationLimits("exdb", "dc=example,dc=org")[0]
+	// Both replication identities, in the order desiredLimits emits them
+	// (ADR-027: node-local first, legacy second — see replicationLimits).
+	repl := replicationLimits("exdb", "dc=example,dc=org")
 	user := `dn.exact="cn=bulk,dc=example,dc=org" size=unlimited`
 
 	cases := []struct {
@@ -88,8 +91,8 @@ func TestDesiredLimits(t *testing.T) {
 		want        []string
 	}{
 		{"no replication, no user limits", nil, false, nil},
-		{"replicating, no user limits", nil, true, []string{repl}},
-		{"replicating, user limits follow ours", []string{user}, true, []string{repl, user}},
+		{"replicating, no user limits", nil, true, repl},
+		{"replicating, user limits follow ours", []string{user}, true, append(append([]string{}, repl...), user)},
 		{"not replicating, user limits stand alone", []string{user}, false, []string{user}},
 	}
 	for _, tc := range cases {

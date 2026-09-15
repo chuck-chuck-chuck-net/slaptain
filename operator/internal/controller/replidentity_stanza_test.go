@@ -32,7 +32,7 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 	)
 	wantBind := `binddn="cn=repl-example-db,cn=slaptain-auth"`
 
-	extDN, _ := externalBindIdentity("", "", "", suffix, dbName, "pw")
+	extDN, _ := externalBindIdentity("", "", "", dbName, "pw")
 	rw := buildDatabaseSyncRepl(
 		cluster, headless, ns, domain, suffix, dbName,
 		3, 0, "pw", false, 100, "60 +", "", true,
@@ -74,7 +74,7 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 // migration window also how an operator pins a cross-site stanza back to the
 // legacy identity until the remote site upgrades.
 func TestExternalBindIdentityOverrideStillWins(t *testing.T) {
-	got, _ := externalBindIdentity("cn=syncuser,dc=legacy,dc=net", "", "", "dc=example,dc=org", "example-db", "pw")
+	got, _ := externalBindIdentity("cn=syncuser,dc=legacy,dc=net", "", "", "example-db", "pw")
 	if got != "cn=syncuser,dc=legacy,dc=net" {
 		t.Errorf("explicit bindDN must win verbatim, got %q", got)
 	}

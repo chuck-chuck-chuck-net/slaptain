@@ -1146,14 +1146,18 @@ func (r *SlapdClusterReconciler) listDatabaseNames(ctx context.Context, sc *ldap
 // databaseCSNInfo holds the suffix and replication credentials for CSN queries.
 type databaseCSNInfo struct {
 	suffix string
-	bindDN string // cn=replication,<suffix> — has read access via replication ACL
-	bindPW string
+	// bindDNs are the identities to try, in order (csnBindDNs): the node-local
+	// replication identity first, the legacy cn=replication,<suffix> second.
+	// Both are granted read by the replication ACL for the length of ADR-027's
+	// migration window.
+	bindDNs []string
+	bindPW  string
 }
 
 // listDatabaseInfo returns suffix and replication bind credentials for all
-// SlapdDatabase CRs referencing this cluster. The replication bind DN
-// (cn=replication,<suffix>) has read access granted by the replication ACL,
-// so CSN queries work even when anonymous access is denied.
+// SlapdDatabase CRs referencing this cluster. The replication bind identities
+// have read access granted by the replication ACL, so CSN queries work even
+// when anonymous access is denied.
 func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) []databaseCSNInfo {
 	log := logf.FromContext(ctx)
 	var dbList ldapv1alpha1.SlapdDatabaseList
@@ -1166,8 +1170,8 @@ func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv
 			continue
 		}
 		info := databaseCSNInfo{
-			suffix: db.Spec.Suffix,
-			bindDN: fmt.Sprintf("cn=replication,%s", db.Spec.Suffix),
+			suffix:  db.Spec.Suffix,
+			bindDNs: csnBindDNs(db.Name, db.Spec.Suffix),
 		}
 		// Read replication password from the database credentials secret.
 		secretName := db.Name + "-credentials"
@@ -1182,7 +1186,7 @@ func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv
 		}
 		log.V(1).Info("CSN query credentials",
 			"db", db.Name, "suffix", db.Spec.Suffix,
-			"bindDN", info.bindDN, "bindPWLen", len(info.bindPW),
+			"bindDNs", info.bindDNs, "bindPWLen", len(info.bindPW),
 			"secret", secretName)
 		infos = append(infos, info)
 	}
@@ -1211,7 +1215,7 @@ func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s", sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
 		for _, db := range dbInfos {
-			csns, err := queryContextCSN(host, port, tlsEnabled, db.suffix, db.bindDN, db.bindPW)
+			csns, err := queryContextCSN(host, port, tlsEnabled, db.suffix, db.bindDNs, db.bindPW)
 			if err != nil {
 				log.V(1).Info("local CSN query failed", "pod", host, "suffix", db.suffix, "err", err)
 				readings = append(readings, csnReading{Pod: podName, Suffix: db.suffix, Err: err.Error()})
@@ -1277,7 +1281,7 @@ func (r *SlapdClusterReconciler) checkPeerCSNConvergence(
 		// peer's state on behalf of the others.
 		var readings []csnReading
 		for _, db := range dbInfos {
-			csns, err := queryContextCSNFromURI(ep.URI, db.suffix, db.bindDN, db.bindPW)
+			csns, err := queryContextCSNFromURI(ep.URI, db.suffix, db.bindDNs, db.bindPW)
 			if err != nil {
 				log.V(1).Info("remote CSN query failed (URI)", "peer", ep.Name,
 					"suffix", db.suffix, "err", err)
@@ -1304,7 +1308,7 @@ func (r *SlapdClusterReconciler) checkPeerCSNConvergence(
 	var readings []csnReading
 	for _, addr := range addrs {
 		for _, db := range dbInfos {
-			csns, err := queryContextCSN(addr, port, tlsEnabled, db.suffix, db.bindDN, db.bindPW)
+			csns, err := queryContextCSN(addr, port, tlsEnabled, db.suffix, db.bindDNs, db.bindPW)
 			if err != nil {
 				log.V(1).Info("remote CSN query failed", "peer", ep.Name, "addr", addr,
 					"suffix", db.suffix, "err", err)

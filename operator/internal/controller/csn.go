@@ -28,28 +28,37 @@ import (
 )
 
 // queryContextCSN connects to an LDAP server and reads the contextCSN attribute
-// from the data suffix root entry. When bindDN and bindPW are non-empty, binds
+// from the data suffix root entry. When bindDNs and bindPW are non-empty, binds
 // first (required when ACLs deny anonymous access to the suffix). Otherwise
 // uses an anonymous connection.
 // Returns the raw CSN strings (one per serverID that has written to this replica).
-func queryContextCSN(host string, port int32, tlsEnabled bool, suffix, bindDN, bindPW string) ([]string, error) {
+func queryContextCSN(host string, port int32, tlsEnabled bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	scheme := "ldap"
 	if tlsEnabled {
 		scheme = "ldaps"
 	}
 	uri := fmt.Sprintf("%s://%s:%d", scheme, host, port)
-	return doCSNQuery(uri, tlsEnabled, suffix, bindDN, bindPW)
+	return doCSNQuery(uri, tlsEnabled, suffix, bindDNs, bindPW)
 }
 
 // queryContextCSNFromURI connects to an LDAP URI (ldap:// or ldaps://) and reads contextCSN.
 // Used for URI-mode external peers where the full URI is already available.
-func queryContextCSNFromURI(uri, suffix, bindDN, bindPW string) ([]string, error) {
+func queryContextCSNFromURI(uri, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	useTLS := strings.HasPrefix(uri, "ldaps://")
-	return doCSNQuery(uri, useTLS, suffix, bindDN, bindPW)
+	return doCSNQuery(uri, useTLS, suffix, bindDNs, bindPW)
 }
 
 // doCSNQuery is the shared implementation for contextCSN queries.
-func doCSNQuery(uri string, useTLS bool, suffix, bindDN, bindPW string) ([]string, error) {
+//
+// bindDNs are candidate identities tried in order (csnBindDNs): the node-local
+// replication identity first, the legacy cn=replication,<suffix> as a fallback.
+// The fallback is not belt-and-braces — the same query runs against CROSS-SITE
+// peers, and a peer still running a pre-ADR-027 operator has no node-local
+// entry to bind as, so without it every such peer reads Unreachable for the
+// whole migration window. A rejected bind is the only thing that advances to
+// the next candidate; a dial or search failure is returned as-is, because
+// retrying a different DN against a server that never answered proves nothing.
+func doCSNQuery(uri string, useTLS bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	dialOpts := []ldap.DialOpt{
 		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
 	}
@@ -66,9 +75,19 @@ func doCSNQuery(uri string, useTLS bool, suffix, bindDN, bindPW string) ([]strin
 	defer conn.Close()
 	conn.SetTimeout(ldapRequestTimeout)
 
-	if bindDN != "" && bindPW != "" {
-		if err := conn.Bind(bindDN, bindPW); err != nil {
-			return nil, fmt.Errorf("bind %s on %s: %w", bindDN, uri, err)
+	if bindPW != "" {
+		var bindErr error
+		for _, dn := range bindDNs {
+			if dn == "" {
+				continue
+			}
+			if bindErr = conn.Bind(dn, bindPW); bindErr == nil {
+				break
+			}
+			bindErr = fmt.Errorf("bind %s on %s: %w", dn, uri, bindErr)
+		}
+		if bindErr != nil {
+			return nil, bindErr
 		}
 	}
 

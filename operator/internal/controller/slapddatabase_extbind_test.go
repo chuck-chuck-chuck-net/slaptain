@@ -37,7 +37,7 @@ func TestExternalBindIdentity(t *testing.T) {
 	)
 
 	t.Run("no override: derives the database's replication identity", func(t *testing.T) {
-		dn, pw := externalBindIdentity("", "", "", suffix, dbName, dbPW)
+		dn, pw := externalBindIdentity("", "", "", dbName, dbPW)
 		if dn != derivedDN {
 			t.Errorf("bindDN = %q, want derived %q", dn, derivedDN)
 		}
@@ -48,7 +48,7 @@ func TestExternalBindIdentity(t *testing.T) {
 
 	t.Run("override set: wins verbatim (ADR-011 foreign source)", func(t *testing.T) {
 		dn, pw := externalBindIdentity(
-			"cn=syncuser,ou=config,o=legacy", "legacy-creds", "legacy-pw", suffix, dbName, dbPW)
+			"cn=syncuser,ou=config,o=legacy", "legacy-creds", "legacy-pw", dbName, dbPW)
 		if dn != "cn=syncuser,ou=config,o=legacy" {
 			t.Errorf("bindDN = %q, want the override verbatim", dn)
 		}
@@ -58,7 +58,7 @@ func TestExternalBindIdentity(t *testing.T) {
 	})
 
 	t.Run("fields default independently: DN derived, override password kept", func(t *testing.T) {
-		dn, pw := externalBindIdentity("", "shared-creds", "override-pw", suffix, dbName, dbPW)
+		dn, pw := externalBindIdentity("", "shared-creds", "override-pw", dbName, dbPW)
 		if dn != derivedDN {
 			t.Errorf("bindDN = %q, want derived %q", dn, derivedDN)
 		}
@@ -72,7 +72,7 @@ func TestExternalBindIdentity(t *testing.T) {
 		// keys) is "could not read it", not "not set" — silently substituting
 		// another credential would mask the user's broken override. The stanza
 		// keeps the empty credential and fails loudly at the consumer.
-		_, pw := externalBindIdentity("cn=x,o=y", "named-but-empty", "", suffix, dbName, dbPW)
+		_, pw := externalBindIdentity("cn=x,o=y", "named-but-empty", "", dbName, dbPW)
 		if pw == dbPW {
 			t.Errorf("password fell back to the per-DB credential despite a named override secret")
 		}
