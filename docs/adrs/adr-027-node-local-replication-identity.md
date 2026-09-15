@@ -148,6 +148,22 @@ auth by * none`, `to * by * none`. It exists to answer binds, nothing else.
 to it on every reconcile — replacing today's create-if-missing. This is what makes
 rotation work, and it is safe precisely because the target is node-local.
 
+**7. Ownership split: the cluster controller owns the container, the database
+controller owns its entry.** The auth database is shared by every database on a
+pod, so letting each `SlapdDatabase` reconcile create-if-missing would make it
+exactly the shared-state-with-competing-writers shape ADR-026 exists to prevent
+(and `olcDatabase={N}` renumbering, R1, would apply on every create). Therefore:
+
+- the **SlapdCluster** controller creates and converges the auth *database* on
+  every pod, alongside the per-pod infrastructure it already owns (modules, TLS,
+  global tunables) — one creator, no contention;
+- the **SlapdDatabase** controller writes and converges only *its own entry*
+  (`cn=repl-<dbname>,cn=slaptain-auth`) inside it, and defers with a retry when
+  the database is not there yet.
+
+The entries are per-database and singly-owned; the container is per-pod and
+singly-owned. No reconcile ever needs evidence about another database.
+
 ## Consequences
 
 - **ADR-008 needs amendment.** Its "create-only, never rotates" model and its
