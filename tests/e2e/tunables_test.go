@@ -161,14 +161,19 @@ var _ = Describe("scale and operations tunables", Label("tunables"), Ordered, Co
 				Skip("this cluster has no syncrepl stanzas (single replica, no external peers)")
 			}
 			for _, s := range stanzas {
+				// Assert on the raw stanza; print the redacted one. A failure
+				// message goes into CI logs and gets pasted into tickets, and a
+				// stanza carries the replication password in the clear (a real
+				// one was captured in an e2e log this way — ADR-027 follow-up).
+				red := redactCredentials(s)
 				Expect(s).To(ContainSubstring("network-timeout="),
 					"pod %s: a stanza with no network-timeout notices a dead provider "+
-						"only when TCP gives up:\n%s", pod, s)
+						"only when TCP gives up:\n%s", pod, red)
 				Expect(s).To(ContainSubstring("keepalive="),
 					"pod %s: a refreshAndPersist connection is idle by design between "+
 						"writes; without keepalive a silently dropped flow leaves a "+
 						"consumer that has stopped consuming and still reports Synced:\n%s",
-					pod, s)
+					pod, red)
 				// timeout= (LDAP_OPT_TIMEOUT) must never appear: in the refresh
 				// phase it is a BLOCKING ldap_result wait on a threadpool
 				// thread, and a cn=config write pauses the whole pool — so any
@@ -179,11 +184,11 @@ var _ = Describe("scale and operations tunables", Label("tunables"), Ordered, Co
 				Expect(s).NotTo(ContainSubstring(" timeout="),
 					"pod %s: timeout= turns every cn=config write into a "+
 						"server-wide freeze while a consumer is in refresh phase:\n%s",
-					pod, s)
+					pod, red)
 				// timelimit= is a server-side search time limit and WOULD abort
 				// the persistent search.
 				Expect(s).NotTo(ContainSubstring("timelimit="),
-					"pod %s: timelimit= would kill the persistent search:\n%s", pod, s)
+					"pod %s: timelimit= would kill the persistent search:\n%s", pod, red)
 			}
 			conn.Close()
 		}

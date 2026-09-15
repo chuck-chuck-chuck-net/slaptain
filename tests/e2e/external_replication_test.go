@@ -475,7 +475,7 @@ func dumpReplDiagnostics(addr, adminPassword, configPassword string) string {
 		fmt.Fprintf(&b, "syncrepl search error: %v\n", err)
 	} else if len(sr.Entries) > 0 {
 		for _, v := range sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl") {
-			fmt.Fprintf(&b, "olcSyncRepl: %s\n", v)
+			fmt.Fprintf(&b, "olcSyncRepl: %s\n", redactCredentials(v))
 		}
 	} else {
 		b.WriteString("no data DB entry found in cn=config\n")

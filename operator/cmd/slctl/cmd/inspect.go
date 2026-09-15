@@ -455,7 +455,7 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 							DN:       entry.DN,
 							Suffix:   suffix,
 							Dir:      entry.GetEqualFoldAttributeValue("olcDbDirectory"),
-							SyncRepl: entry.GetEqualFoldAttributeValues("olcSyncRepl"),
+							SyncRepl: redactCredentialsAll(entry.GetEqualFoldAttributeValues("olcSyncRepl")),
 						})
 						multiProvider[entry.DN] = entry.GetEqualFoldAttributeValue("olcMultiProvider")
 					}

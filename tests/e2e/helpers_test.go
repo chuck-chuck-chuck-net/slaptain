@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -546,4 +547,17 @@ func waitForCrossSiteReplication(ctx SpecContext, why string) {
 
 	GinkgoLogr.Info("cross-site replication recovered",
 		"after", why, "elapsed", time.Since(start).Round(time.Second).String(), "probe", dn)
+}
+
+// credentialsRE matches the plaintext bind password in an olcSyncRepl stanza,
+// bare or quoted.
+var credentialsRE = regexp.MustCompile(`credentials=(?:"[^"]*"|\S+)`)
+
+// redactCredentials masks the replication password when a stanza is printed
+// into a failure message. Assertions run against the raw stanza; only the
+// rendered output is masked. Spec output lands in CI logs and bug reports —
+// a real password was captured in one this way (ADR-027 follow-up). The
+// operator-side twin lives in operator/cmd/slctl/cmd/redact.go.
+func redactCredentials(s string) string {
+	return credentialsRE.ReplaceAllString(s, "credentials=<redacted>")
 }

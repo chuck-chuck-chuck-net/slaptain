@@ -29,7 +29,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] Helm Chart for standalone deployment (`charts/slapd`) — superseded by operator, kept for reference.
 - [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller. e2e: 33/33 green.
 - [x] **Operator Phase 2**: N-way multi-master delta-syncrepl; operator-orchestrated bootstrap; per-pod `volumeClaimTemplates`; replication credential management. e2e: pending.
-- [x] **Operator Phase 3**: cross-cluster replication via `ExternalPeers`, mTLS peer auth. Operator owns all syncrepl configuration (in-cluster + external). See ADR-003.
+- [x] **Operator Phase 3**: cross-cluster replication via `ExternalPeers`. Operator owns all syncrepl configuration (in-cluster + external). See ADR-003. **TLS posture, stated precisely (verified 2026-09-14):** consumers verify the provider against a distributed CA (`tls_cacert`), relaxed to `tls_reqcert=allow` for IP-addressed peers (ADR-007). It is NOT mutual: `olcTLSVerifyClient` is never set, so slapd never requests a client certificate — the `tls_cert`/`tls_key` presented on external-peer stanzas are not verified by anything. Peer *authentication* is the simple bind, not the certificate. Cert-based peer auth (SASL EXTERNAL) is considered and deferred in ADR-027.
 - [x] **S3 backup/restore** (ADR-014): `SlapdBackup` (on-demand) + `SlapdScheduledBackup` (cron + retention) → gzipped `slapcat` LDIF to S3 via co-located Jobs; `SlapdDatabase.spec.bootstrapFrom` restores into a fresh DB via a cluster-coordinated scale-to-0 → offline `slapadd` → scale-up machine. e2e green on t3e (versitygw S3 target). See `docs/BACKUP.md`.
 
 ---

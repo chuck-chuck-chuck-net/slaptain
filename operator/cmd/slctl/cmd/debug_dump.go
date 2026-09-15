@@ -364,12 +364,15 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 	}
 }
 
+// formatLDAPEntry renders an entry for the dump bundle. Values pass through
+// redactCredentials: a debug-dump is written to be handed to someone else, and
+// syncrepl stanzas carry the replication password in the clear.
 func formatLDAPEntry(entry *ldap.Entry) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "dn: %s\n", entry.DN)
 	for _, attr := range entry.Attributes {
 		for _, val := range attr.Values {
-			fmt.Fprintf(&sb, "%s: %s\n", attr.Name, val)
+			fmt.Fprintf(&sb, "%s: %s\n", attr.Name, redactCredentials(val))
 		}
 	}
 	return sb.String()
