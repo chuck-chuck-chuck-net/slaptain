@@ -390,9 +390,15 @@ never called.
 Fixed with a **5-minute resync floor** on the healthy SlapdDatabase path.
 Unhealthy keeps its 10s retry, and anything that changes a watched object still
 reconciles immediately — the floor only catches changes that produce no event.
-A Secret watch was the alternative and was rejected: it pulls every Secret in
-every watched namespace into the manager cache to observe one key per database,
-where a timer costs one LDAP sweep per database per five minutes.
+A Secret watch was the alternative, and the floor was preferred for simplicity
+rather than because a watch is unworkable. The objection as first written — that
+it caches every Secret in every watched namespace to observe one key per
+database — is true only of a *naive* watch; a label- or field-scoped cache
+avoids it, at the cost of a selector the operator must then own and keep
+correct on every Secret it cares about. Against that, the floor is four lines
+and one LDAP sweep per database per five minutes. Worth revisiting if the
+five-minute worst case ever becomes the thing standing between an operator and
+a credential rotation.
 
 Verified on the same cluster: idle reconciles at 12:46:13, 12:51:13, 12:56:13 —
 the floor on the dot — and a Secret rotated from a verifiably quiescent operator

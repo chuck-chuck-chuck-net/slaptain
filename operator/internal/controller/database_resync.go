@@ -43,6 +43,14 @@ import (
 // sweep stays negligible, short enough that rotation is an operation rather
 // than an outage. Anything that actually changes still reconciles immediately
 // on its own event; this is only the floor under the ones that produce none.
+//
+// A Secret watch would make it immediate, and is a fair alternative rather than
+// an unworkable one: the obvious objection (caching every Secret in every
+// watched namespace to observe one key per database) applies to a naive watch,
+// not to a label- or field-scoped cache. That buys a selector the operator then
+// has to own and keep correct on every Secret it cares about, against four
+// lines here. Revisit if the five-minute worst case ever becomes the thing
+// standing between an operator and a credential rotation.
 const databaseResyncInterval = 5 * time.Minute
 
 // databaseRequeueAfter is how long the SlapdDatabase reconcile asks to wait
