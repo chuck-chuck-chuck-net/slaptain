@@ -325,10 +325,19 @@ func expectEntryOnPod(ctx SpecContext, pod, dn string) {
 //
 // Best-effort: it runs in a cleanup path, so a failure is reported rather than
 // allowed to mask whatever the spec was actually asserting.
+// It MUST use the RFC 3062 Password Modify extended operation, never a plain
+// modify of userPassword. olcPasswordHash governs the extended operation only;
+// a plain modify stores whatever bytes you hand it, VERBATIM. The first version
+// of this helper did exactly that, and the consequence was not a failed bind --
+// slapd happily compares a cleartext userPassword, so every bind check still
+// passed and the damage stayed invisible -- but a cleartext credential sat in
+// the directory and travelled into every backup artifact taken afterwards. The
+// restore preflight, which expects {SSHA}, then rejected those backups with
+// "password mismatch, or unsupported hash scheme", and two restore specs failed
+// a long way from the helper that caused it.
 func repairLegacyReplicationEntry(dataSuffix, password string) {
-	req := ldap.NewModifyRequest("cn=replication,"+dataSuffix, nil)
-	req.Replace("userPassword", []string{password})
-	if err := ldapConn.Modify(req); err != nil {
+	req := ldap.NewPasswordModifyRequest("cn=replication,"+dataSuffix, "", password)
+	if _, err := ldapConn.PasswordModify(req); err != nil {
 		AddReportEntry("legacy replication entry not repaired", err.Error())
 	}
 }
