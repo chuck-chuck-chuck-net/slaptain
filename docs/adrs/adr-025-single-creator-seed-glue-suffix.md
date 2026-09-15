@@ -448,12 +448,20 @@ re-sync.
 
 **Measured, on a single-site lab with a few-dozen-entry DIT:** an RO replica
 whose data was wiped and whose syncrepl was blocked reported
-`False/DataMissingOnReadOnlyPods` within **5s** of coming up empty, stayed False
-for the whole 78s the block stood (a broken replica does not self-heal — the
-fuse genuinely fires), and recovered to `True/RootEntryVisible` **18s** after
-the block was lifted. The 600s budget is therefore ~33x the only recovery ever
-measured — and it remains **a guess for a production-sized DIT**, which the
-big-DIT lane in `docs/BACKLOG.md` is what would calibrate.
+`False/DataMissingOnReadOnlyPods` within **5s** of coming up empty and stayed
+False for the whole 78s the block stood — a broken replica does not self-heal,
+so the fuse genuinely fires. The condition was driven False→True **twice** in
+independent cycles, on both databases, so the reason itself is well
+reproduced.
+
+Recovery, however, rests on **one clean sample: 18s** from lifting the block to
+`True/RootEntryVisible`. (A second cycle recovered too, but its block-removal
+was not timestamped, so its 47s span is block-time plus recovery and cannot be
+read as a recovery figure.) The 600s budget is therefore ~33x a **single**
+fixture-sized measurement — and this repo's own discipline says never to report
+a bound from one sample, so treat it as a guess with one data point behind it,
+not a derived number. The big-DIT lane in `docs/BACKLOG.md` is what would
+calibrate it properly.
 
 **A reproduction subtlety worth keeping:** deleting an RO pod and its PVCs — what
 the ADR-014 restore specs do — does *not* produce this reason. During the
