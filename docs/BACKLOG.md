@@ -86,6 +86,30 @@ external peers or none, TLS or not), exposes it, returns a connected client, and
 registers its own cleanup. Port the three existing hand-rolled cases onto it
 first — they are the specification for what the helper must do.
 
+### 2026-09-14: the `cleanupPolicy` spec is the newest instance, and it cost a run
+
+`cleanup_policy_test.go` (ADR-005 coverage, landed today) needed three
+throwaway `SlapdDatabase`s and had nowhere to put them, so it creates them on
+the **shared** `slapd` fixture. Two concrete taxes followed, both of which a
+fixture helper would have removed:
+
+- **Cost:** every create and delete changes the StatefulSet's `DATABASE_DIRS`
+  and rolls the cluster (ADR-013's accepted wart). The container pays that four
+  times — ~8-10 minutes of a suite that otherwise runs in ~13.
+- **A wrong-tree failure that only a live run could catch:** the fixtures were
+  first written with suffixes *under* the shared fixture's own suffix
+  (`dc=cleanupdel,dc=example,dc=org` under `dc=example,dc=org`). slapd refuses a
+  database whose naming context is already served by a preceding one
+  (LDAP 80, "already served by a preceding mdb database"), so the databases
+  could never be created and `BeforeAll` timed out after 8 minutes. The spec was
+  red — for the wrong reason. A helper that owns its own cluster would have
+  given the spec its own naming-context namespace and made the collision
+  impossible rather than merely detectable.
+
+Reading for whoever picks this up: the collision is *not* a slaptain rule, it is
+slapd's — any fixture that invents a suffix on a shared cluster has to pick a
+tree no existing database serves.
+
 ## Permanent e2e coverage for in-place restore topologies
 
 **What:** `SlapdRestore` has three topologies with different meanings (ADR-014,
@@ -696,6 +720,26 @@ ADR amendment, not a bug fix.
 SlapdDatabase when it fails — cheap, no writes, catches all of the above
 loudly), and only then decide whether/where a repair write belongs.
 
+### 2026-09-14: the detector now has a pattern to copy, and a rule to obey
+
+Two things landed today that make the "detect first" half cheaper and better
+defined than when this was written:
+
+- **The pattern exists.** `internal/suffixprobe` is a shared per-pod LDAP probe
+  consumed by the operator (`DataPresent`), the backup controller
+  (`SourceSuffixHealthy`) and `slctl` — one classifier, three call sites, no
+  duplicated predicate. A replication-credential probe is the same shape: bind
+  as `cn=replication,<suffix>` per database per pod, surface a condition, write
+  nothing. Copy that structure rather than inventing a fourth.
+- **ADR-026 constrains the repair half.** R2: a destructive or corrective action
+  on state the operator does not exclusively own may not be authorised by
+  evidence it does not own. The `cn=replication` entry is *mesh-shared* state
+  whose competing writers include every other site and any human with
+  `ldapmodify`, so a repair write needs an explicit single-writer rule — which
+  site, which pod, on what authority — before it can be safe. That is precisely
+  the design pass this item defers, and R2 is now the frame for it: report and
+  stall is the cheap correct default; repairing needs ownership.
+
 ---
 
 ## ~~R4 debt: syncprovCheckpoint and accesslogPurge are silently write-once; purge has no default~~ — DONE (2026-09-13)
@@ -729,6 +773,42 @@ precedent), observability-only (ADR-012), and byte-identical behaviour at
 
 ---
 
+## ADR-005 step 4 is unimplemented for `cleanupPolicy: Retain`
+
+**What:** ADR-005's teardown sequence says the operator removes the database's
+syncrepl stanzas **in both cases** — `Delete` and `Retain`. The `Delete` path
+now does the right thing by construction: the stanzas are attributes of the data
+DB entry and die with it (verified 2026-09-14 while fixing the non-leaf delete).
+The `Retain` path does not. The CR is finalized, the operator stops managing the
+database, and the stanzas it previously wrote stay on every pod.
+
+**Why nothing dangles today:** the stanzas name *this* database, and under
+`Retain` this database stays. The retained configuration is self-consistent and
+slapd keeps replicating it — which is arguably what `Retain` should mean. The
+gap is between the ADR's wording and the code, not (yet) between the code and a
+broken cluster.
+
+**Where it could bite:** a retained database is orphaned configuration — nothing
+converges it any more. If the cluster's replica count later changes, those
+stanzas still name the old peer set, because no controller owns them; the
+database then replicates against a topology that no longer exists. Whether that
+is "as intended" for a deliberately abandoned database or a leak is a decision
+nobody has made. ADR-005's own text implies the latter.
+
+**Decide first, then implement.** Does `Retain` mean *"stop managing, leave it
+exactly as it is"* — then amend ADR-005 step 4 to say so and this closes as a
+doc fix — or *"leave the data, unwire the replication"* — then implement stanza
+removal for `Retain` and the ADR stands as written? The second is the larger
+job and needs care: removing stanzas is a `cn=config` write against a database
+the operator has just disowned, so ADR-026 R2 applies — it must be authorised by
+the operator's own record of what it wrote, never by inspecting what happens to
+be there at teardown time.
+
+**Found:** 2026-09-14, while fixing `cleanupPolicy: Delete` on replicated
+databases; deliberately not folded into that change.
+
+---
+
 ## e2e needs a liveness assertion class (found via the timeout= freeze)
 
 The suite asserts end states through Eventually with generous budgets, so a
@@ -749,3 +829,15 @@ purpose (the sizelimit class). E2E_SCALE seeds entries into a LIVE mesh (small
 deltas); this lane must instead create a FRESH consumer against a populated
 provider — pod-recreate or bootstrapFrom against a big artifact. Next e2e
 investment, before further replication-path changes.
+
+**Second consumer, 2026-09-14 — an unmeasured number is now user-visible.**
+`DataPresent` was extended to the read-only fleet (ADR-025 D5 amendment), so an
+RO pod doing a legitimate initial sync makes the condition read
+`False/DataMissingOnReadOnlyPods` until that sync completes. On fixture-sized
+data that is seconds; **on a production-sized DIT nobody has measured it**, and
+the answer decides whether the reason needs a documented "expected during RO
+bring-up" caveat, an alerting-delay recommendation, or nothing at all. This lane
+is what produces the number: stand up a populated provider, add an RO replica,
+and time the window from the condition's own transitions. The same run answers
+the older question — how long a fresh consumer's refresh phase actually is —
+against the same fixture.
