@@ -215,7 +215,7 @@ var _ = Describe("node-local replication identity", Label("auth-identity"), Orde
 		for _, pod := range rwPods[1:] {
 			expectEntryOnPod(ctx, pod, dn)
 		}
-	}, NodeTimeout(10*time.Minute))
+	}, NodeTimeout(25*time.Minute))
 })
 
 // ── Spec-local helpers ──────────────────────────────────────────────────────
@@ -250,6 +250,19 @@ func setReplPassword(ctx SpecContext, secretName, password string) {
 		"patching %s", secretName)
 }
 
+// authConvergenceBudget bounds how long the operator may take to carry a
+// changed Secret to the pods.
+//
+// Sized off the mechanism, not a guess. A Secret is not an object the
+// SlapdDatabase controller watches, so a rotation produces no event at all: it
+// is picked up by the controller's resync floor (databaseRequeueAfter, 5 min on
+// a healthy database), which is therefore the worst case. The first draft of
+// this spec used 4 minutes and failed its own cleanup on t3e — the Secret was
+// restored at 12:57:17, the spec gave up at 13:01:17, and the operator
+// converged unattended at 13:02:16, on the tick due at 13:02:14. The budget
+// must exceed the floor, with room for a slow pod.
+const authConvergenceBudget = 8 * time.Minute
+
 // expectBindEventually retries a simple bind until it succeeds — the shape a
 // convergence assertion needs, since the operator writes the projection on its
 // own schedule.
@@ -264,7 +277,7 @@ func expectBindEventually(ctx SpecContext, pod, bindDN, password string) {
 		defer c.Close()
 		c.SetTimeout(10 * time.Second)
 		return c.Bind(bindDN, password)
-	}).WithTimeout(4*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
+	}).WithTimeout(authConvergenceBudget).WithPolling(5*time.Second).Should(Succeed(),
 		"pod %s must accept a bind as %s with the Secret's current password", pod, bindDN)
 }
 
