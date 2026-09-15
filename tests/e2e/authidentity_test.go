@@ -198,6 +198,18 @@ var _ = Describe("node-local replication identity", Label("auth-identity"), Orde
 			for _, pod := range append(append([]string{}, rwPods...), roPods...) {
 				expectBindEventually(ctx, pod, identityDN, original)
 			}
+			// And repair the LEGACY entry by hand.
+			//
+			// The round trip above should leave it untouched — it is create-only,
+			// so it still holds whatever it was created with, which is `original`.
+			// This is a belt: if a rotation ever half-completes, or someone rotates
+			// the fixture out of band, the legacy entry is left holding a password
+			// nothing else knows, and accesslog_test.go — which binds as it — fails
+			// somewhere entirely unrelated. That failure mode is the real ADR-027
+			// operational hazard (the entry does NOT follow the Secret), so the
+			// suite performs exactly the manual repair the ADR documents rather
+			// than leaving a landmine for the next spec.
+			repairLegacyReplicationEntry(dataSuffix, original)
 		})
 
 		By("waiting for the operator to converge the projection on every pod")
@@ -300,4 +312,23 @@ func expectEntryOnPod(ctx SpecContext, pod, dn string) {
 		return err
 	}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
 		"%s must replicate to %s", dn, pod)
+}
+
+// repairLegacyReplicationEntry rewrites cn=replication,<suffix>'s userPassword
+// as the data rootDN.
+//
+// This is the manual repair ADR-027 documents, not something the operator does:
+// the legacy entry lives in the REPLICATED tree, and converging it there is the
+// shared-state write ADR-026 R2 forbids. That is the whole reason for "do not
+// rotate during the migration window" — and the reason the one spec that
+// rotates carries this belt.
+//
+// Best-effort: it runs in a cleanup path, so a failure is reported rather than
+// allowed to mask whatever the spec was actually asserting.
+func repairLegacyReplicationEntry(dataSuffix, password string) {
+	req := ldap.NewModifyRequest("cn=replication,"+dataSuffix, nil)
+	req.Replace("userPassword", []string{password})
+	if err := ldapConn.Modify(req); err != nil {
+		AddReportEntry("legacy replication entry not repaired", err.Error())
+	}
 }
