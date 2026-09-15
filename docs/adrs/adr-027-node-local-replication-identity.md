@@ -164,6 +164,51 @@ exactly the shared-state-with-competing-writers shape ADR-026 exists to prevent
 The entries are per-database and singly-owned; the container is per-pod and
 singly-owned. No reconcile ever needs evidence about another database.
 
+## Amendment (2026-09-14): refinements from Milestone 1 (additive implementation)
+
+Six design calls made during the first implementation milestone, all accepted
+and verified live on a single-site lab (three RW pods + one RO pod, two
+databases):
+
+1. **The `cn=slaptain-auth` suffix entry is created by the SlapdCluster
+   controller**, with the database. The ADR named the database and the
+   identities but not their parent; LDAP rejects an add whose parent is absent,
+   so without it every identity write fails forever. It belongs to the container
+   under decision 7's single-creator rule.
+2. **Identity entries are written on read-only pods too.** Decision 6 gave RO
+   pods the database for uniformity and noted only RW pods verify binds; it was
+   silent on the entries. Populating both leaves no pod half-provisioned and
+   means a later promotion needs no backfill.
+3. **The identity step is best-effort and separate from the per-pod database
+   reconcile.** An error inside `reconcilePodDatabase` marks the pod unhealthy
+   and withholds its syncrepl stanzas — far too much reach for a step nothing
+   depends on yet. **Forward-looking caveat for the cutover milestone:** once
+   stanzas bind as this identity, a missing or stale entry *does* break
+   replication, so its failure semantics must be revisited at that point — the
+   best-effort posture is correct only while the identity is unused.
+4. **`restorePending` does not gate this step** (it gates the legacy
+   `cn=replication,<suffix>` write). That guard exists because the legacy entry
+   needs the data tree's suffix entry to exist; this entry's parent is
+   operator-created infrastructure that is always present.
+5. **`olcDbMaxSize` is deliberately left unset** on the auth database. ADR-024
+   R4 makes it create-only — a live modify segfaults slapd — so a wrong value
+   could never be corrected without recreating the database, and back-mdb's
+   default is orders of magnitude more than a handful of tiny entries need.
+6. **Naming constants live in `api/v1alpha1`**, mirroring the accesslog
+   precedent that suffix derivation is observable contract rather than
+   controller-internal. No CRD change; manifest generation produces no drift.
+
+**Verified live at this milestone** (independently reproduced by the reviewer):
+a simple bind as `cn=repl-<db>,cn=slaptain-auth` with the Secret's password
+succeeds on every pod; the pre-existing `cn=replication,<suffix>` identity still
+binds (additivity); a *wrong* password is rejected with 49, so the bind is
+really verifying; the identity cannot read its own `userPassword`; and the auth
+database has no children, i.e. no syncprov, no syncrepl, no accesslog. The
+convergence path was proven by stripping the projection's `userPassword` on one
+pod and watching the operator repair it within one reconcile, then leave it
+untouched on the next — the rotation capability the previous design could not
+offer at all.
+
 ## Consequences
 
 - **ADR-008 needs amendment.** Its "create-only, never rotates" model and its

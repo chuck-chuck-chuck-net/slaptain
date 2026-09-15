@@ -282,6 +282,29 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
+	// 9b. Project this database's replication identity into the node-local auth
+	//     database on every pod (ADR-027). ADDITIVE at this milestone: the entry
+	//     appears, and nothing consumes it yet — the syncrepl stanzas below still
+	//     bind as cn=replication,<suffix>, the ACL grants still name it, and step
+	//     9 above still maintains it. The cutover is a separate release.
+	//
+	//     Gated exactly like step 9, and for the same reasons: an identity only
+	//     has a purpose where this cluster acts as a provider. restorePending is
+	//     deliberately NOT part of the gate — that guard exists because
+	//     cn=replication,<suffix> needs the data tree's suffix entry, which a
+	//     not-yet-restored database lacks; this entry's parent is operator-created
+	//     infrastructure that is always there.
+	//
+	//     Best-effort: unreachable pods and pods whose auth database the
+	//     SlapdCluster controller has not created yet only ask for another pass.
+	//     They never mark a pod unhealthy, so they cannot withhold a syncrepl
+	//     stanza — an additive change must not be able to touch replication.
+	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() {
+		if r.reconcileAuthIdentity(ctx, sc, sd, configPW) {
+			pendingWork = true
+		}
+	}
+
 	// 10. Configure replication stanzas if replication is enabled.
 	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() {
 		skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods)
