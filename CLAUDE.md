@@ -703,8 +703,9 @@ data admin password (per-database):
 The SlapdDatabase controller generates a random `replication-password` when creating
 `<dbname>-credentials`. It never rewrites it — but since ADR-027 the Secret is the single
 source of truth and **you may rotate it**: change the key and the operator converges the
-node-local identity entry and every stanza's `credentials=` on every pod (measured: all pods
-within ~1 min on a four-pod lab). See the caveat below before doing so mid-migration.
+node-local identity entry and every stanza's `credentials=` on every pod (worst case is the SlapdDatabase resync floor of 5 minutes — a Secret is not a
+watched object, so nothing reacts to it sooner; measured 21 s on a four-pod lab
+where a tick happened to be pending). See the caveat below before doing so mid-migration.
 
 **Replication bind DN: `cn=repl-<dbname>,cn=slaptain-auth`** (ADR-027) — an entry in a
 per-pod, never-replicated authentication database, written and *converged* by the

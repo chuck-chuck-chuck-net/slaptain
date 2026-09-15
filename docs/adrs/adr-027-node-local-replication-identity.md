@@ -370,3 +370,32 @@ the mesh session's.
 **Status is therefore Accepted** for what a single site can show: the placement,
 the convergence, the cutover and the rotation are all demonstrated. The
 mixed-version mesh behaviour is the one claim still resting on reasoning.
+
+### Follow-on found by running the rotation (2026-09-15)
+
+Rotation was implemented correctly and **never fired**. Changing the Secret
+produced no reconcile at all: the SlapdDatabase controller watches SlapdDatabase
+and SlapdCluster and nothing else, and its healthy path returned a bare
+`ctrl.Result{}`. Measured: last reconcile 12:34:45, Secret rewritten ~12:38, and
+at 12:40:03 the projection still held the previous password with the phase
+reading `Running`.
+
+ADR-002's 2026-08-26 amendment already named the shape ("its only periodic
+trigger is incidental… a non-replicated cluster has no periodic resync at all").
+This ADR promotes it from latent to load-bearing, because decision 6 makes the
+Secret the single source of truth and "converged on every reconcile" is worth
+nothing when no reconcile is scheduled. The convergence code was right; it was
+never called.
+
+Fixed with a **5-minute resync floor** on the healthy SlapdDatabase path.
+Unhealthy keeps its 10s retry, and anything that changes a watched object still
+reconciles immediately — the floor only catches changes that produce no event.
+A Secret watch was the alternative and was rejected: it pulls every Secret in
+every watched namespace into the manager cache to observe one key per database,
+where a timer costs one LDAP sweep per database per five minutes.
+
+Verified on the same cluster: idle reconciles at 12:46:13, 12:51:13, 12:56:13 —
+the floor on the dot — and a Secret rotated from a verifiably quiescent operator
+(no reconcile for 90 s, nothing else touched) reached all four pods 21 s later,
+on the pending tick. The floor is therefore the worst case a rotation can take,
+which is what `authConvergenceBudget` in the e2e is sized against.
