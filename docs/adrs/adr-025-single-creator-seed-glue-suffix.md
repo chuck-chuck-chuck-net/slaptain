@@ -428,6 +428,49 @@ Messages stay byte-identical on a cluster without read-only replicas, so a
 `readReplicas: 0` deployment sees no churn at all; the pod-list construction is
 a pure function (`suffixProbeTargets`) pinned by that positive control.
 
+## Amendment (2026-09-15): the RO fuse exists, and the first measurement of it
+
+The 2026-09-14 read-only amendment predicted that an alert rule would "page
+immediately on `DataMissingOnPods`/`GlueSuffix` and give
+`DataMissingOnReadOnlyPods` a fuse longer than an initial sync". The e2e
+post-suite gate (`check_data_present_every_site` in `tests/e2e.sh`) is the first
+concrete instance of that rule, and building it produced two numbers and one
+mechanism worth recording here.
+
+**The budgets are reason-aware.** Reasons that cannot be legitimately transient
+after a completed suite — `GlueSuffix`, `DataMissingOnPods`, `DataMissing`,
+`NoDataYet`, `NoReachablePod`, an absent condition, anything unrecognised — fail
+in 60s. `DataMissingOnReadOnlyPods` gets 600s. Both still end in a failure:
+never failing on the RO reason would restore precisely the blind spot evidence
+item 5 measured. Note this made the gate *stricter* where it matters — a genuine
+glue suffix previously enjoyed the same three-minute grace period as a benign
+re-sync.
+
+**Measured, on a single-site lab with a few-dozen-entry DIT:** an RO replica
+whose data was wiped and whose syncrepl was blocked reported
+`False/DataMissingOnReadOnlyPods` within **5s** of coming up empty, stayed False
+for the whole 78s the block stood (a broken replica does not self-heal — the
+fuse genuinely fires), and recovered to `True/RootEntryVisible` **18s** after
+the block was lifted. The 600s budget is therefore ~33x the only recovery ever
+measured — and it remains **a guess for a production-sized DIT**, which the
+big-DIT lane in `docs/BACKLOG.md` is what would calibrate.
+
+**A reproduction subtlety worth keeping:** deleting an RO pod and its PVCs — what
+the ADR-014 restore specs do — does *not* produce this reason. During the
+rebuild the pod is unreachable, which the probe scores as "not assessed", and by
+the time it serves, a small DIT has already synced. The reason requires a pod
+that is **up and serving but empty**.
+
+**And a consequence of ADR-002's cadence that any consumer of this condition
+must know:** `DataPresent` is phase-neutral observability, so a healthy
+`SlapdDatabase` re-evaluates it only on the 5-minute resync floor. A `False`
+that has already healed can therefore sit in status for minutes with nothing
+wrong anywhere. Any alerting rule (or gate) with a budget under five minutes is
+measuring condition staleness rather than cluster state unless it forces a fresh
+evaluation first. The e2e gate pokes each pending database with a metadata write
+to do exactly that; a production alert rule should instead set its fuse longer
+than the resync interval.
+
 ## Related
 
 - ADR-012 — seed one-shot, pod-0-pinned (the intra-site version of this
