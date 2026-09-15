@@ -1548,3 +1548,49 @@ protection for a step that is never reached. Independent convergence steps must 
 independent: run them all, report them all. A fail-fast loop over unrelated work
 quietly makes the first item a gate on every item after it, and the error it
 reports names the wrong thing.
+
+---
+
+## 2026-09-15: a plain modify of userPassword stores cleartext, and only backups notice
+
+Not a reconcile bug — a test-helper bug — but it belongs here because the
+failure mode is one the operator's own code could reproduce at any time, and
+because the verification that missed it was the obvious one.
+
+**Symptom:** two restore e2e specs failed with the preflight refusing a
+perfectly ordinary backup:
+
+```
+could not verify the replication-password against backup
+s3://…/example-db/20260915T143943Z.ldif.gz
+(password mismatch, or unsupported hash scheme)
+```
+
+The password was not wrong. Binding as `cn=replication,<suffix>` with exactly
+that Secret value succeeded, on every pod, every time it was checked.
+
+**Root cause:** a helper repaired the entry with a plain
+`ldapmodify` of `userPassword`. **`olcPasswordHash` governs the RFC 3062
+Password Modify extended operation only.** A plain modify stores the bytes it is
+given, verbatim — so the repair wrote the password in cleartext. Reading the
+attribute back showed `resync-p…` where the operator-written node-local
+projection correctly held `{SSHA}3C…`.
+
+**Why it was hard to spot:** slapd authenticates a cleartext `userPassword`
+without complaint, so the damage was invisible to every direct check. The
+verification used at the time was a successful bind, and *a bind cannot
+distinguish a correctly hashed password from a cleartext one* — it confirms the
+property you were thinking about and is silent on the one that matters. The
+consequence appeared two steps downstream and in a different component: the
+cleartext value flowed into every subsequent backup artifact, and only the
+restore preflight — the one consumer that parses the hash rather than
+authenticating with it — rejected it.
+
+**Fix:** `ldap.NewPasswordModifyRequest` / `ldappasswd`, which is what a human
+operator would use and what slapd hashes.
+
+**Lesson:** when writing a credential, verify the *stored representation*, not
+just that authentication still works. Authentication is the weaker check by
+construction: it succeeds for both the correct encoding and several incorrect
+ones. Anything that later parses the stored value — a backup, a preflight, a
+migration — sees the difference that the bind hid.
