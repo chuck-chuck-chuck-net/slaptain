@@ -147,13 +147,7 @@ var _ = Describe("in-place restore", Label("restore"), Label("restore-inplace"),
 		})).To(Succeed())
 
 		By("waiting for the bootstrap restore to complete")
-		Eventually(ctx, func() bool {
-			sd := &ldapv1alpha1.SlapdDatabase{}
-			if err := crdClient.Get(ctx, client.ObjectKey{Name: restoreDB, Namespace: namespace}, sd); err != nil {
-				return false
-			}
-			return sd.Status.RestoreApplied
-		}).WithTimeout(8 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue())
+		awaitBootstrapRestore(ctx, restoreCluster, restoreDB, sourceCount)
 		Eventually(ctx, func() bool {
 			sc := &ldapv1alpha1.SlapdCluster{}
 			if err := crdClient.Get(ctx, client.ObjectKey{Name: restoreCluster, Namespace: namespace}, sc); err != nil {
@@ -198,14 +192,7 @@ var _ = Describe("in-place restore", Label("restore"), Label("restore-inplace"),
 		})).To(Succeed())
 
 		By("waiting for the SlapdRestore to reach Completed")
-		Eventually(ctx, func() ldapv1alpha1.SlapdRestorePhase {
-			sr := &ldapv1alpha1.SlapdRestore{}
-			if err := crdClient.Get(ctx, client.ObjectKey{Name: restoreReq, Namespace: namespace}, sr); err != nil {
-				return ""
-			}
-			return sr.Status.Phase
-		}).WithTimeout(8*time.Minute).WithPolling(5*time.Second).Should(Equal(ldapv1alpha1.RestoreRequestCompleted),
-			"SlapdRestore should complete; check the cluster status.restore and restore Job logs")
+		awaitRestoreRequest(ctx, restoreCluster, restoreDB, restoreReq, sourceCount)
 
 		By("verifying the mistake is gone and the original DIT is intact")
 		// The cluster scaled down+up during the restore; reconnect.
