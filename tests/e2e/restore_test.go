@@ -164,14 +164,7 @@ var _ = Describe("restore", Label("restore"), Label("restore-bootstrap"), Ordere
 		})).To(Succeed())
 
 		By("waiting for the restore state machine to complete (scale-to-0 → slapadd → scale-up)")
-		Eventually(ctx, func() bool {
-			sd := &ldapv1alpha1.SlapdDatabase{}
-			if err := crdClient.Get(ctx, client.ObjectKey{Name: restoreDB, Namespace: namespace}, sd); err != nil {
-				return false
-			}
-			return sd.Status.RestoreApplied
-		}).WithTimeout(8*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
-			"restore-db should reach restoreApplied=true")
+		awaitBootstrapRestore(ctx, restoreCluster, restoreDB, sourceCount)
 
 		By("waiting for the cluster to return to Running with restore cleared")
 		Eventually(ctx, func() bool {

@@ -110,6 +110,17 @@ Reading for whoever picks this up: the collision is *not* a slaptain rule, it is
 slapd's — any fixture that invents a suffix on a shared cluster has to pick a
 tree no existing database serves.
 
+### 2026-09-15: and the restore specs pay it as a timing coupling
+
+The restore specs read the shared fixture's DIT (their artifact is a slapcat of
+it) and time the restore machine against it, so `E2E_SCALE=1` — which inflates
+that fixture to 1200+ entries and, more importantly, the operator's per-tick
+workload — changed how long their waits needed to be. Their fixed 8-minute
+budgets failed a restore that was still progressing. Fixed spec-side by waiting
+on progress instead (see "e2e needs a liveness assertion class"), but the
+coupling itself is this entry's: a spec that owned its own small cluster would
+not have had its budget moved by an unrelated spec's write volume.
+
 ## Permanent e2e coverage for in-place restore topologies
 
 **What:** `SlapdRestore` has three topologies with different meanings (ADR-014,
@@ -820,6 +831,38 @@ op etimes under a threshold, and/or a probe writer asserting no
 all-pods-silent gap longer than N seconds during setup/convergence. Cheap
 first cut: parse etime from slapd stats logs in the tunables spec.
 
+### 2026-09-15: the first instance landed, from the opposite direction
+
+The restore specs now wait on **progress**, not on a deadline
+(`tests/e2e/restore_wait_test.go`): any change in the restore machine's
+observable state — cluster phase, `status.restore` sub-phase and message,
+StatefulSet replicas, restore Job and Job-pod state, `restoreApplied` — resets
+the clock; 5 min with nothing changing fails, 15 min while a restore Job pod is
+*Running* (slapadd is silent, so that step is opaque) fails, and a 30 min
+ceiling is the loud backstop. Terminal negative evidence (a Job at
+`BackoffLimitExceeded`, `status.restore.phase=Failed`) fails immediately instead
+of waiting out any budget. Pure policy in `restoreBudget.verdict`, unit-tested
+red-first off the measured incident trace.
+
+Same signal as this entry wants, opposite failure mode: this entry is about a
+stall that currently passes green, that one about a slow-but-advancing machine
+that failed red (a `E2E_SCALE=1 E2E_BACKUP=1` run, 2026-09-15: the in-place
+spec's bootstrapFrom wait timed out at 480 s on a restore that completed
+afterwards). Whoever picks up the convergence half should reuse the shape —
+sample a fingerprint, treat change as liveness, keep the trail for the failure
+message — rather than invent a second mechanism.
+
+Numbers worth keeping, because they say where restore time actually goes:
+of the failing 480 s, ~347 s was spent before the first restore Job existed, in
+coarse operator ticks (107 s CR → pod, 60 s → Ready, 60 s → preflight, 120 s in
+preflight). The same specs against an idle single-site operator: 20-25 s
+end-to-end. And `slapadd -q` — the term the artifact size actually drives — is
+~19 µs/entry (1202 entries 25 ms → 250 002 entries 4.8 s, measured in the
+slapd-init image), i.e. sub-second for the 1200-entry E2E_SCALE fixture. So an
+inflated fixture lengthens restores through the *operator's* per-tick workload,
+not through the bulk load, and a per-entry timeout coefficient would have been
+fitted to the wrong variable.
+
 ## PRIORITY RAISED: the big-DIT initial-sync e2e
 
 Deferred twice; the tax keeps arriving. A >500-entry (now: multi-second
@@ -827,7 +870,10 @@ refresh-window) initial full sync exercises exactly the long refresh phases
 where the timeout= freeze had its collision window, on top of its original
 purpose (the sizelimit class). E2E_SCALE seeds entries into a LIVE mesh (small
 deltas); this lane must instead create a FRESH consumer against a populated
-provider — pod-recreate or bootstrapFrom against a big artifact. Next e2e
+provider — pod-recreate or bootstrapFrom against a big artifact. It is also the
+lane that would calibrate the restore specs' `workingStall` budget, which is
+currently ~19 µs/entry extrapolated rather than measured against a DIT big
+enough to matter (see the liveness entry above). Next e2e
 investment, before further replication-path changes.
 
 **Second consumer, 2026-09-14 — an unmeasured number is now user-visible.**

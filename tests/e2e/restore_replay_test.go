@@ -334,14 +334,7 @@ var _ = Describe("in-place restore under replication (accesslog replay)", Label(
 		})).To(Succeed())
 
 		By("waiting for the SlapdRestore to reach Completed")
-		Eventually(ctx, func() ldapv1alpha1.SlapdRestorePhase {
-			sr := &ldapv1alpha1.SlapdRestore{}
-			if err := crdClient.Get(ctx, client.ObjectKey{Name: restoreReq, Namespace: namespace}, sr); err != nil {
-				return ""
-			}
-			return sr.Status.Phase
-		}).WithTimeout(10*time.Minute).WithPolling(5*time.Second).Should(Equal(ldapv1alpha1.RestoreRequestCompleted),
-			"SlapdRestore should complete; check cluster status.restore and restore Job logs")
+		awaitRestoreRequest(ctx, "slapd", dbCRName, restoreReq, 0)
 
 		By("waiting for the restore state machine to clear and the cluster to be Running")
 		Eventually(ctx, func() bool {

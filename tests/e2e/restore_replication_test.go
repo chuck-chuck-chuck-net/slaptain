@@ -206,14 +206,7 @@ var _ = Describe("replicated restore", Label("restore"), Label("restore-replicat
 		Expect(err).NotTo(HaveOccurred(), "patch restore credentials to matching password")
 
 		By("waiting for the restore to complete (preflight passes → scale-to-0 → slapadd-all-pods → scale-up)")
-		Eventually(ctx, func() bool {
-			sd := &ldapv1alpha1.SlapdDatabase{}
-			if err := crdClient.Get(ctx, client.ObjectKey{Name: restoreDB, Namespace: namespace}, sd); err != nil {
-				return false
-			}
-			return sd.Status.RestoreApplied
-		}).WithTimeout(8*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
-			"restore should reach restoreApplied=true once the password matches")
+		awaitBootstrapRestore(ctx, restoreCluster, restoreDB, sourceCount)
 
 		By("waiting for the restore state machine to clear (cluster scaled back up)")
 		Eventually(ctx, func() bool {
