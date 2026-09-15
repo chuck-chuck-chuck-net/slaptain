@@ -104,10 +104,13 @@ func TestShouldRecordSourceCircumstances(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldRecordSourceCircumstances(tc.status, tc.jobExists)
+			// The Job column documents the scenario only: the predicate cannot
+			// see the Job, which is the fix (ADR-026 R3). Independence is
+			// structural, not merely asserted.
+			got := shouldRecordSourceCircumstances(tc.status)
 			if got != tc.want {
-				t.Errorf("shouldRecordSourceCircumstances(jobExists=%v) = %v, want %v — %s",
-					tc.jobExists, got, tc.want, tc.why)
+				t.Errorf("shouldRecordSourceCircumstances() = %v, want %v (Job exists: %v) — %s",
+					got, tc.want, tc.jobExists, tc.why)
 			}
 		})
 	}

@@ -212,10 +212,60 @@ func normalizedCSNVector(csns []string) []string {
 // stamp the source circumstances (sourcePod / sourceContextCSN /
 // SourceConverged / SourceSuffixHealthy) onto a backup's status.
 //
-// NOTE (staging commit): this is a faithful extraction of the trigger the
-// controller used until now — "record iff the backup Job does not exist yet" —
-// so the extraction itself changes no behaviour. The table test pinned against
-// it is red on the incident shape, which is the point.
-func shouldRecordSourceCircumstances(st ldapv1alpha1.SlapdBackupStatus, jobExists bool) bool {
-	return !jobExists
+// The trigger is the CONDITION THIS REPAIRS — the record is not on the object —
+// and deliberately NOT the backup Job's absence, which is what it used to be
+// (ADR-026 R3). Keying it on the Job made the state absorbing: the status write
+// that carries the record can be lost (patchStatus logs its Apply error and
+// returns), or the operator can restart between Create and that write, or the
+// Create can hit the deliberately tolerated IsAlreadyExists path — and from
+// then on the Job exists on every pass, so the record was never written again.
+// Observed 2026-09-15: a Completed SlapdBackup with a nil SourceConverged
+// condition on a live mesh.
+//
+// Cost and idempotence: recording does live LDAP work (bind, suffix probe,
+// contextCSN read), so it must not repeat. It cannot: the record is written and
+// persisted as one status apply, and patchStatus sends the whole status read at
+// the top of the reconcile, so once the apply lands both conditions are on the
+// object and this returns false for the rest of the backup's life. It fires a
+// second time only when the first record never reached the API server — which
+// is exactly the incident.
+//
+// The conditions are the discriminator rather than status.sourcePod because
+// sourcePod is a pure function of the cluster (backupSourcePod) and is stamped
+// unconditionally by the caller, so it cannot witness that the LDAP-derived
+// half of the record made it.
+func shouldRecordSourceCircumstances(st ldapv1alpha1.SlapdBackupStatus) bool {
+	for _, want := range []string{backupSourceConvergedCondition, backupSuffixHealthyCondition} {
+		if apimeta.FindStatusCondition(st.Conditions, want) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// lateRecordingCaveat is appended to the SourceConverged message when the
+// circumstances are recorded after the backup Job already exists.
+//
+// It retracts, for that one backup, the property the timely path guarantees.
+// Recorded before the Job is created, status.sourceContextCSN is a LOWER bound
+// on the artifact: everything in the vector is certainly in the dump. Recorded
+// afterwards, the source pod has kept replicating and accepting writes while
+// the dump was taken, so the vector is the source's position AT RECORDING TIME
+// and may name changes the artifact does not contain. It is still worth
+// recording — it bounds the artifact's timeline from the other side, and an
+// unset field answers nothing — but it must not be read as the lower bound.
+const lateRecordingCaveat = " NOTE: recorded after the backup Job already existed " +
+	"(a lost status write, an operator restart, or a tolerated AlreadyExists), so " +
+	"status.sourceContextCSN is the source pod's position at recording time, NOT a lower " +
+	"bound for the artifact — it may name changes the dump does not contain."
+
+// recordedSourceConvergedCondition is the SourceConverged condition as a
+// recording pass writes it: the cluster's mirrored verdict, plus the caveat when
+// the record is being written late.
+func recordedSourceConvergedCondition(sc *ldapv1alpha1.SlapdCluster, generation int64, now metav1.Time, late bool) metav1.Condition {
+	cond := sourceConvergedCondition(sc, generation, now)
+	if late {
+		cond.Message += lateRecordingCaveat
+	}
+	return cond
 }

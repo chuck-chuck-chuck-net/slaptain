@@ -165,8 +165,13 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// said about convergence and about its suffix entry. This is honesty, not
 	// policy — nothing here can refuse or delay the backup (ADR-014 amendment
 	// 2026-09-12).
-	if shouldRecordSourceCircumstances(sb.Status, jobExists) {
-		r.recordSource(ctx, sb, sd, sc)
+	//
+	// The trigger is the record's own absence, never the Job's (ADR-026 R3) —
+	// see shouldRecordSourceCircumstances. jobExists is passed on only to caveat
+	// what the recorded CSN vector means: a lower bound when recorded before the
+	// dump, the source's later position when recorded after it.
+	if shouldRecordSourceCircumstances(sb.Status) {
+		r.recordSource(ctx, sb, sd, sc, jobExists)
 	}
 
 	// Create the Job if it doesn't exist yet.
@@ -246,12 +251,24 @@ func backupObjectKey(sb *ldapv1alpha1.SlapdBackup, sc *ldapv1alpha1.SlapdCluster
 //
 // Best-effort throughout: a failed CSN read logs and leaves the field unset. A
 // backup never fails because its bookkeeping did.
-func (r *SlapdBackupReconciler) recordSource(ctx context.Context, sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase, sc *ldapv1alpha1.SlapdCluster) {
+//
+// late says the backup Job already exists, i.e. the dump may already have been
+// taken. It changes nothing about what is read — only the SourceConverged
+// message, which then retracts the lower-bound reading of sourceContextCSN
+// (lateRecordingCaveat).
+//
+// status.SourcePod is NOT written here: the caller stamps it unconditionally on
+// every pass, so it has exactly one writer (it is a pure function of the
+// cluster, needs no I/O, and must be right even on a pass that skips this).
+func (r *SlapdBackupReconciler) recordSource(ctx context.Context, sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase, sc *ldapv1alpha1.SlapdCluster, late bool) {
 	log := logf.FromContext(ctx)
 
 	sourcePod := backupSourcePod(sc)
-	sb.Status.SourcePod = sourcePod
-	setCondition(&sb.Status.Conditions, sourceConvergedCondition(sc, sb.Generation, metav1.Now()))
+	if late {
+		log.Info("recording backup source circumstances late: the record was missing while the Job already existed",
+			"backup", sb.Name, "pod", sourcePod)
+	}
+	setCondition(&sb.Status.Conditions, recordedSourceConvergedCondition(sc, sb.Generation, metav1.Now(), late))
 
 	// SourceSuffixHealthy (ADR-025 C2): is the source pod's suffix entry a real
 	// entry, or the hidden glue a multi-site seed race leaves behind — in which

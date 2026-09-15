@@ -95,11 +95,20 @@ var _ = Describe("backup", Label("backup"), Ordered, func() {
 		// contextCSN to record.
 		Expect(got.Status.SourcePod).To(Equal("slapd-0"),
 			"status.sourcePod should name the pod the artifact was read from")
+		// Both source conditions are recorded unconditionally, and the trigger is
+		// their own absence rather than the backup Job's (ADR-026 R3): keying it
+		// on the Job made one lost status write lose the record forever, observed
+		// 2026-09-15 as a Completed backup with a nil SourceConverged condition.
 		conv := findCondition(got.Status.Conditions, "SourceConverged")
 		Expect(conv).NotTo(BeNil(),
 			"a backup must always carry a SourceConverged condition, whatever it says")
 		Expect(conv.Reason).NotTo(BeEmpty())
-		fmt.Fprintf(GinkgoWriter, "backup source: pod=%s contextCSN=%v SourceConverged=%s (%s: %s)\n",
-			got.Status.SourcePod, got.Status.SourceContextCSN, conv.Status, conv.Reason, conv.Message)
+		suffixHealthy := findCondition(got.Status.Conditions, "SourceSuffixHealthy")
+		Expect(suffixHealthy).NotTo(BeNil(),
+			"a backup must always carry a SourceSuffixHealthy condition (ADR-025), whatever it says")
+		Expect(suffixHealthy.Reason).NotTo(BeEmpty())
+		fmt.Fprintf(GinkgoWriter, "backup source: pod=%s contextCSN=%v SourceConverged=%s (%s: %s) SourceSuffixHealthy=%s (%s)\n",
+			got.Status.SourcePod, got.Status.SourceContextCSN, conv.Status, conv.Reason, conv.Message,
+			suffixHealthy.Status, suffixHealthy.Reason)
 	})
 })
