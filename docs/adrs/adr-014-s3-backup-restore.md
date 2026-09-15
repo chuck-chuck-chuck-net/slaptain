@@ -915,3 +915,63 @@ produced the artifact had completed "successfully" with nothing on the
 - ADR-025 — the seed-race class that produces the glue, the full evidence
   chain, and the prevention/detection decisions this amendment is the
   backup/restore slice of.
+
+## Amendment (2026-09-15): the record's trigger is its own absence, and what a late record means
+
+**Status:** Accepted. Fixes an implementation that did not deliver decision 2 of
+the 2026-09-12 amendment ("a backup records its circumstances,
+unconditionally"). No API change; no change to what is read or to the reason
+vocabulary. "A backup always takes a backup" stands, untouched.
+
+### Context
+
+Decision 2 says the record is "written when the backup Job is created", and the
+implementation read that as its trigger: `recordSource` ran only on the pass
+that found no Job. That makes the Job — a sibling artifact — the trigger, which
+ADR-026 R3 forbids, and it made the record unreachable after a single unlucky
+pass: the status apply that carries it is best-effort by design (it must never
+fail a backup), so a lost write, an operator restart between `Create` and the
+apply, or the tolerated `AlreadyExists` left the Job in place and the record
+permanently blank. Measured 2026-09-15: a `Completed` `SlapdBackup` with a nil
+`SourceConverged` condition on a live mesh.
+
+### Decisions
+
+1. **The trigger is the record's own absence, not the Job's.** The controller
+   records when `SourceConverged` or `SourceSuffixHealthy` is missing from
+   status. Recording stays exactly as costly and as best-effort as before, and
+   still happens at most once per backup in the normal case: the record is
+   written and persisted as one status apply, so once it lands the trigger is
+   false for the rest of the backup's life. A second probe means the first
+   record never reached the API server.
+
+2. **A late record says so, because it cannot promise the same thing.** Recorded
+   before the Job exists, `status.sourceContextCSN` is a **lower bound** on the
+   artifact: everything in the vector is certainly in the dump. Recorded on the
+   repair path the source kept replicating while `slapcat` ran, so the vector is
+   the source's position *at recording time* and may name changes the artifact
+   does not contain. It is still recorded — it bounds the artifact's timeline
+   from the other side, and an unset field answers nothing — and the
+   `SourceConverged` message carries an explicit retraction of the lower-bound
+   reading. Status and reason are unchanged: they are a published contract, and
+   this is a statement about the CSN field, not about convergence.
+
+3. **A terminal backup is not re-recorded.** Once a `SlapdBackup` is `Completed`
+   or `Failed`, the source has moved on and a record written then would describe
+   a state the artifact never had; the ADR-018 Job reap on that early return
+   also stays ahead of everything else. So the self-heal window is the backup's
+   non-terminal lifetime (several passes, at the 10 s requeue). A backup that
+   was already finished when its record was lost keeps it lost — the honest
+   reading of a missing record on a terminal backup is "unknown", which is what
+   an absent condition already says.
+
+### Consequences
+
+- `docs/BACKUP.md`'s table says `status.sourceContextCSN` is "that pod's
+  `contextCSN` vector when the Job was created". That is right for every timely
+  record and wrong for a repaired one; the condition message states the
+  difference on the object itself, and the guide needs a sentence to match.
+- The decision lives in one pure predicate (`shouldRecordSourceCircumstances`),
+  table-tested, so the trigger cannot silently drift back onto an artifact.
+- Ledger: `docs/reconcile-loop-fixes.md`, 2026-09-15. Rule: ADR-026 R3, whose
+  "forward-looking" corollary this violation corrects.

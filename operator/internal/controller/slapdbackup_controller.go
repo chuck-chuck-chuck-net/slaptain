@@ -152,19 +152,30 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// status patch must not leave the record blank.
 	sb.Status.SourcePod = backupSourcePod(sc)
 
-	// Create the Job if it doesn't exist yet.
 	jobName := sb.Name + "-backup"
 	job := &batchv1.Job{}
 	err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: sb.Namespace}, job)
-	switch {
-	case apierrors.IsNotFound(err):
-		// Record the circumstances BEFORE the artifact is produced: which pod
-		// it comes from, where that pod sat in the replication timeline, and
-		// what the cluster said about convergence. This is honesty, not policy —
-		// nothing here can refuse or delay the backup (ADR-014 amendment
-		// 2026-09-12). Taken just before the Job is created, so the recorded
-		// vector is a lower bound: everything in it is certainly in the dump.
-		r.recordSource(ctx, sb, sd, sc)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	jobExists := err == nil
+
+	// Record the circumstances the artifact is taken under: which pod it comes
+	// from, where that pod sat in the replication timeline, and what the cluster
+	// said about convergence and about its suffix entry. This is honesty, not
+	// policy — nothing here can refuse or delay the backup (ADR-014 amendment
+	// 2026-09-12).
+	//
+	// The trigger is the record's own absence, never the Job's (ADR-026 R3) —
+	// see shouldRecordSourceCircumstances. jobExists is passed on only to caveat
+	// what the recorded CSN vector means: a lower bound when recorded before the
+	// dump, the source's later position when recorded after it.
+	if shouldRecordSourceCircumstances(sb.Status) {
+		r.recordSource(ctx, sb, sd, sc, jobExists)
+	}
+
+	// Create the Job if it doesn't exist yet.
+	if !jobExists {
 		job = buildBackupJob(sb, sd, sc, r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")), r.OperatorImage, objectKey)
 		if err := controllerutil.SetControllerReference(sb, job, r.Scheme); err != nil {
 			return ctrl.Result{}, err
@@ -177,8 +188,6 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		sb.Status.StartedAt = &now
 		r.setRunning(ctx, sb, jobName, objectKey, "BackupStarted", "backup Job created")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	case err != nil:
-		return ctrl.Result{}, err
 	}
 
 	// Observe the existing Job.
@@ -242,12 +251,24 @@ func backupObjectKey(sb *ldapv1alpha1.SlapdBackup, sc *ldapv1alpha1.SlapdCluster
 //
 // Best-effort throughout: a failed CSN read logs and leaves the field unset. A
 // backup never fails because its bookkeeping did.
-func (r *SlapdBackupReconciler) recordSource(ctx context.Context, sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase, sc *ldapv1alpha1.SlapdCluster) {
+//
+// late says the backup Job already exists, i.e. the dump may already have been
+// taken. It changes nothing about what is read — only the SourceConverged
+// message, which then retracts the lower-bound reading of sourceContextCSN
+// (lateRecordingCaveat).
+//
+// status.SourcePod is NOT written here: the caller stamps it unconditionally on
+// every pass, so it has exactly one writer (it is a pure function of the
+// cluster, needs no I/O, and must be right even on a pass that skips this).
+func (r *SlapdBackupReconciler) recordSource(ctx context.Context, sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase, sc *ldapv1alpha1.SlapdCluster, late bool) {
 	log := logf.FromContext(ctx)
 
 	sourcePod := backupSourcePod(sc)
-	sb.Status.SourcePod = sourcePod
-	setCondition(&sb.Status.Conditions, sourceConvergedCondition(sc, sb.Generation, metav1.Now()))
+	if late {
+		log.Info("recording backup source circumstances late: the record was missing while the Job already existed",
+			"backup", sb.Name, "pod", sourcePod)
+	}
+	setCondition(&sb.Status.Conditions, recordedSourceConvergedCondition(sc, sb.Generation, metav1.Now(), late))
 
 	// SourceSuffixHealthy (ADR-025 C2): is the source pod's suffix entry a real
 	// entry, or the hidden glue a multi-site seed race leaves behind — in which
