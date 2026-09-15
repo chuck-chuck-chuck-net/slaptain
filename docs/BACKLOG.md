@@ -121,6 +121,27 @@ on progress instead (see "e2e needs a liveness assertion class"), but the
 coupling itself is this entry's: a spec that owned its own small cluster would
 not have had its budget moved by an unrelated spec's write volume.
 
+### 2026-09-15: and teardown could not see what the specs had created
+
+A three-site run deadlocked in `./tests/e2e.sh teardown`. An earlier suite's
+in-place restore spec had failed and kept its evidence by design
+(`E2E_KEEP_ON_FAILURE`), leaving a spec-created `SlapdCluster` + `SlapdDatabase`
+standing — and therefore a running pod. Teardown deleted the resources *it* had
+created, then ran `kubectl delete pvc --all`; a pod object naming a PVC is a
+deletion lease on it (ADR-018), so those PVCs went `Terminating` and stayed
+there, the namespace never drained, and — the context loop being serial — the
+other two sites were never torn down at all.
+
+The ordering fix landed in `tests/e2e.sh` (owners before storage, by `--all`
+rather than by fixture name; bounded waits; a loud line naming any leftover it
+destroys). But the *cause* is this entry's: teardown has no inventory of what
+the specs provisioned, because provisioning is hand-rolled per spec. A fixture
+helper that registered its own cleanup would have removed both the debris and
+teardown's need to guess at it — the `--all` sweep is a safety net over an
+unknown set, not knowledge of it. Note the second-order cost too: the sweep now
+deletes kept-on-failure evidence that somebody may have wanted, which is the
+right default for a teardown but a worse trade than never needing the sweep.
+
 ## Permanent e2e coverage for in-place restore topologies
 
 **What:** `SlapdRestore` has three topologies with different meanings (ADR-014,
