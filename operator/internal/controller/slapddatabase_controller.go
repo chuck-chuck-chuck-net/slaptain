@@ -364,10 +364,11 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	r.setStatus(ctx, sd, phase, appliedPods, failedPods, reason, msg)
 
-	if phase != ldapv1alpha1.DatabasePhaseRunning {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-	return ctrl.Result{}, nil
+	// Unhealthy → the tight retry; healthy → a slow resync floor, so that state
+	// no watch can see — notably a rotated <dbname>-credentials Secret, which is
+	// ADR-027's declared source of truth — is still picked up. See
+	// databaseRequeueAfter for the measurement that prompted it.
+	return ctrl.Result{RequeueAfter: databaseRequeueAfter(phase)}, nil
 }
 
 // ── Credentials ──────────────────────────────────────────────────────────────
