@@ -908,3 +908,32 @@ is what produces the number: stand up a populated provider, add an RO replica,
 and time the window from the condition's own transitions. The same run answers
 the older question — how long a fresh consumer's refresh phase actually is —
 against the same fixture.
+
+**Third consumer, 2026-09-15 — the number is now a budget in `tests/e2e.sh`.**
+The post-suite `check_data_present_every_site` gate got reason-aware budgets:
+60 s for every reason that is never legitimately transient after a completed
+suite (`GlueSuffix`, `DataMissingOnPods`, `DataMissing`, `NoDataYet`,
+`NoReachablePod`, an absent or unrecognised one), 600 s for
+`DataMissingOnReadOnlyPods`, overridable as `E2E_DATAPRESENT_TIMEOUT` /
+`E2E_DATAPRESENT_RO_TIMEOUT`. **The 600 s is a guess and is labelled as one in
+the script**, for exactly the reason this entry exists: fixture-sized numbers
+are all anybody has. Measured on a single-site lab on 2026-09-15, forcing the
+shape by wiping the RO pod's data PVC behind an egress NetworkPolicy that
+denied its syncrepl: the condition read `False/DataMissingOnReadOnlyPods`
+within 5 s of the pod coming up empty, stayed False for as long as the block
+stood (78 s, bounded only by when it was lifted — a broken replica does not
+self-heal, so the fuse does end in a failure), and returned to
+`True/RootEntryVisible` **18 s** after the block was removed. 600 s is ~33x
+that, on a DIT of a few dozen entries. This lane replaces the guess with a
+number; until then, raise the env var rather than trusting the default on a
+fixture that has grown.
+
+A second finding from the same session, worth more than the budget: the gate
+now **pokes** each pending `SlapdDatabase` with an annotation every 30 s,
+because `DataPresent` is phase-neutral observability and a healthy database
+reconciles on the 5-minute `databaseResyncInterval` floor. Without that, a
+`False` that had already healed could sit in status for up to five minutes with
+nothing wrong anywhere — so any budget shorter than five minutes would have
+been measuring condition staleness, not cluster state. Anything else that
+gates on a `SlapdDatabase` condition from outside the operator inherits the
+same problem.
