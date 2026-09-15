@@ -1491,3 +1491,60 @@ reconcile that fixes the state, masking the root cause.
 Watch on every CR kind it reads from — not just the one it lists under `For(...)`.
 A cross-CR dependency without a cross-CR Watch is a silent liveness bug: it looks
 like it works because every manual poke causes a reconcile.
+
+---
+
+## 2026-09-15: a refused tunable skipped the auth database, and ADR-027 made it fatal
+
+**Symptom:** After the ADR-027 cutover, two multi-site e2e specs failed while the
+cutover itself was green everywhere (all stanzas on the node-local identity, all
+six peer links Synced, all three sites `CSNsMatch`). The scale-up spec timed out
+after 300 s waiting for a pre-scale-up entry to reach pod-1; the replicated-restore
+spec failed the same way. The operator logged
+`syncrepl configuration withheld: the node-local replication identity is not yet on
+every read-write pod (ADR-027); will retry` 242 times.
+
+**The hypothesis that was wrong, and why it mattered:** that a withheld database
+stays phase `Running` and therefore inherits the new 5-minute resync floor instead
+of the fast retry. Disproved in code and in the logs — the withhold sets
+`pendingWork`, `pendingWork` forces `Degraded`, and `Degraded` requeues at 10 s. The
+38 withheld messages for one database over ~380 s *are* that fast retry. The gate
+was retrying correctly the whole time; it had nothing to open on. Counting the
+retries is what ruled the latency theory out.
+
+**Root cause:** `reconcilePodInfrastructure` ran `ensureGlobalTunables` and returned
+on its error, so `ensureAuthDB` — listed after it — never ran at all on any cluster
+whose global tunables slapd refused. The affected clusters are the ones built with
+`spec.ldap.tls.enabled=false`: slapd then rejects `olcTLSProtocolMin` outright with
+`LDAP Result Code 53 "Unwilling To Perform"`, on every reconcile, forever. So the
+node-local auth database was never created, the identity deferred
+(`auth identity deferred: auth database not created yet`, ×34 per pod), and the
+ADR-027 gate correctly withheld syncrepl for the life of the cluster.
+
+Both short-circuits — that one and the attribute loop inside `ensureGlobalTunables`
+— predate the milestone. They were harmless while the auth database was unused
+(ADR-027 milestone 1 was deliberately additive). The cutover made one fatal by
+turning that database into a hard precondition for replication.
+
+**Fix:** `runConvergenceSteps` (`operator/internal/controller/podinfra.go`) runs
+every per-pod step even when an earlier one fails and joins the errors; applied at
+both levels that had the trap. Plus `tlsTunablesWritable`: TLS attributes are
+omitted from the desired list entirely on a TLS-less cluster rather than given
+`write=false`, because that branch *deletes* the attribute and the same server
+refuses the delete for the same reason.
+
+**Why it was hard to spot:** the failing clusters were throwaway fixtures with an
+unusual property (TLS off) that nothing else in the suite depends on, and the
+symptom surfaced two steps downstream, in a component — replication — that had
+nothing to do with the attribute that failed. The log line that named the real
+cause (`per-pod infrastructure convergence skipped for pod`) reported only the TLS
+error, so it read as a TLS problem; the consequence that actually mattered, a
+database that was never created, appeared nowhere. Both the visible error and the
+visible symptom pointed away from the mechanism.
+
+**Lesson:** the moment something becomes a precondition, every path that can
+silently skip it becomes a potential deadlock — and "best-effort, will retry" is no
+protection for a step that is never reached. Independent convergence steps must be
+independent: run them all, report them all. A fail-fast loop over unrelated work
+quietly makes the first item a gate on every item after it, and the error it
+reports names the wrong thing.

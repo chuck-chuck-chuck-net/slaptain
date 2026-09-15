@@ -399,3 +399,35 @@ the floor on the dot — and a Secret rotated from a verifiably quiescent operat
 (no reconcile for 90 s, nothing else touched) reached all four pods 21 s later,
 on the pending tick. The floor is therefore the worst case a rotation can take,
 which is what `authConvergenceBudget` in the e2e is sized against.
+
+### The gate's first real cost, and what it exposed (2026-09-15, mesh validation)
+
+The first mesh run of the cutover was 86 passed / 2 failed, with the cutover
+itself green throughout: every stanza on the node-local identity across three
+sites, all six peer links `Synced`, all three sites `CSNsMatch`, additivity
+confirmed on the wire. Both failures were the ordering gate firing on clusters
+that could never satisfy it.
+
+Not a flaw in the gate. `reconcilePodInfrastructure` short-circuited on the
+first failing step, so on a cluster with `spec.ldap.tls.enabled=false` — where
+slapd rejects `olcTLSProtocolMin` with err=53 forever — `ensureAuthDB` never ran
+at all, and the auth database this ADR depends on simply did not exist. The gate
+then did exactly what it is for: it refused to point stanzas at an identity no
+provider carried, and it refused for the life of the cluster.
+
+That short-circuit predates this ADR and was harmless throughout milestone 1,
+which is the point worth recording: **milestone 1's additive posture hid it.**
+While the auth database was unused, a path that silently skipped creating it cost
+nothing and produced no signal. The cutover converted a dormant gap into a
+permanent replication outage, on exactly the clusters (TLS-less throwaway
+fixtures) that nothing else in the suite exercises.
+
+The generalisable rule, now implemented as `runConvergenceSteps`: once anything
+becomes a precondition, every path that can silently skip it is a deadlock, and
+"best-effort, will retry" does not save a step that is never *reached*.
+Independent convergence steps run independently and report independently. Full
+mechanism and the wrong-hypothesis-first debugging path in
+`docs/reconcile-loop-fixes.md` (2026-09-15).
+
+Verified: the scale-up spec, which timed out at 300 s before the fix, passes in
+34 s after it.
