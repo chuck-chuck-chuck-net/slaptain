@@ -243,6 +243,19 @@ Reproducibility and triage:
                          overruns is reported with the manual commands to finish
                          it, the remaining contexts are still torn down, and the
                          script exits non-zero.
+  E2E_DATAPRESENT_TIMEOUT
+                       = Seconds the post-suite DataPresent gate waits on a reason
+                         that is never legitimately transient (default 60):
+                         GlueSuffix, DataMissingOnPods, DataMissing, NoDataYet,
+                         NoReachablePod, an absent condition, anything unknown.
+  E2E_DATAPRESENT_RO_TIMEOUT
+                       = Seconds the same gate waits on
+                         False/DataMissingOnReadOnlyPods (default 600), which
+                         ADR-025 calls legitimately transient during a read-only
+                         initial sync. The default is a GUESS — RO initial-sync
+                         duration is unmeasured on a large DIT (docs/BACKLOG.md,
+                         "the big-DIT initial-sync e2e"). It still ends in a
+                         failure; it is a longer fuse, not an exemption.
 
 Cross-site replication transport (multi-site only):
   (default)            = NodePort URIs, one per remote site.
@@ -1047,35 +1060,132 @@ run_tests() {
 # (decision 5) therefore never running. Measured on a healthy three-site mesh on
 # 2026-09-14: 4 of 6 databases had the detector disabled that way.
 #
-# A short retry window absorbs the settling after the destructive specs (the
-# case-2 PVC delete rebuilds a pod, and a pod that is still initial-syncing
-# legitimately reads False/DataMissingOnPods until it converges).
-check_data_present_every_site() {
-    local deadline=$((SECONDS + 180))
-    local ctx db status reason pending
+# Budgets are per REASON, not one deadline for all of them — see
+# datapresent_budget below for why, and E2E_DATAPRESENT_TIMEOUT /
+# E2E_DATAPRESENT_RO_TIMEOUT to override either.
 
-    log "Verifying DataPresent on every site's databases (ADR-025 D5)..."
+# Seconds a DataPresent reason that is NEVER legitimately transient after a
+# completed suite gets before this gate fails: GlueSuffix, DataMissingOnPods,
+# DataMissing, NoDataYet, NoReachablePod, an absent condition, and anything
+# unrecognised.
+#
+# The gate only ever runs after a green suite (set -e aborts otherwise), so
+# every spec has already asserted its own convergence; what is left to wait for
+# is one fresh evaluation of the condition, not a cluster settling. The loop
+# forces that evaluation (see the poke below), which lands in seconds, so 60s is
+# an order of magnitude of headroom over the mechanism it waits on and still
+# three times faster than the 180s a genuine GlueSuffix — the silent-corruption
+# class this whole gate exists for — used to be granted before being reported.
+DATAPRESENT_TIMEOUT="${E2E_DATAPRESENT_TIMEOUT:-60}"
+
+# Seconds False/DataMissingOnReadOnlyPods gets — deliberately generous, and
+# **a guess**, said plainly.
+#
+# How long a legitimate read-only initial sync takes is UNMEASURED on anything
+# larger than the fixture: on fixture-sized data it is seconds, on a
+# production-sized DIT nobody has timed it (docs/BACKLOG.md, "PRIORITY RAISED:
+# the big-DIT initial-sync e2e" — that lane is what would calibrate this
+# number, and until it runs, any arithmetic here would be arithmetic about
+# nothing). 600s is picked to be comfortably larger than every RO re-sync
+# observed on a lab fixture and small enough that a broken replica still ends
+# the run rather than hanging it. Raise it via E2E_DATAPRESENT_RO_TIMEOUT if a
+# fixture ever grows a DIT worth the name; replace it with a measurement when
+# the big-DIT lane lands.
+DATAPRESENT_RO_TIMEOUT="${E2E_DATAPRESENT_RO_TIMEOUT:-600}"
+
+# How often the loop pokes a pending database into re-evaluating (seconds).
+# A healthy SlapdDatabase reconciles on a 5-minute floor (databaseResyncInterval)
+# and DataPresent is phase-neutral observability, so a False that has already
+# healed can sit in status for up to five minutes with nothing wrong anywhere.
+# Without the poke every budget below would be measuring condition staleness
+# instead of cluster state — and the strict one could not be short at all.
+DATAPRESENT_POKE_INTERVAL=30
+
+# datapresent_budget maps a DataPresent reason to the seconds it gets.
+#
+# The reason strings are the operator's, verbatim (aggregateDataPresent in
+# operator/internal/controller/data_present.go). Anything not named there falls
+# to the strict budget on purpose: an unrecognised reason is not a licence to
+# wait.
+#
+# Two budgets, because ADR-025's read-only amendment split the reasons for
+# exactly this: "an alert rule can page immediately on DataMissingOnPods /
+# GlueSuffix and give DataMissingOnReadOnlyPods a fuse longer than an initial
+# sync". This gate is that alert rule. Both fuses still END in a failure — an
+# RO pod carrying the same glue with the same entryUUID as its glued provider
+# is ADR-025 evidence item 5, so "never fail on the RO reason" would restore
+# the blind spot the all-pods rule was written to close.
+datapresent_budget() { # reason → seconds
+    case "$1" in
+        DataMissingOnReadOnlyPods) echo "$DATAPRESENT_RO_TIMEOUT" ;;
+        *)                         echo "$DATAPRESENT_TIMEOUT" ;;
+    esac
+}
+
+check_data_present_every_site() {
+    local start=$SECONDS last_poke=-1
+    local ctx db status reason pending overdue budget elapsed poke
+
+    log "Verifying DataPresent on every site's databases (ADR-025 D5) — \
+${DATAPRESENT_TIMEOUT}s budget, ${DATAPRESENT_RO_TIMEOUT}s for DataMissingOnReadOnlyPods..."
     while true; do
         pending=""
+        overdue=""
+        elapsed=$((SECONDS - start))
+        poke=0
+        if (( last_poke < 0 || elapsed - last_poke >= DATAPRESENT_POKE_INTERVAL )); then
+            poke=1
+            last_poke=$elapsed
+        fi
+
         for ctx in "${CONTEXTS[@]}"; do
             for db in $(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net \
                 -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
                 status=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net "$db" \
                     -o jsonpath='{.status.conditions[?(@.type=="DataPresent")].status}' 2>/dev/null || true)
-                if [[ "$status" != "True" ]]; then
-                    reason=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net "$db" \
-                        -o jsonpath='{.status.conditions[?(@.type=="DataPresent")].reason}' 2>/dev/null || true)
-                    pending+="  [$ctx] $db: ${status:-<absent>}/${reason:-<none>}"$'\n'
+                if [[ "$status" == "True" ]]; then continue; fi
+
+                reason=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapddatabases.ldap.chuck-chuck-chuck.net "$db" \
+                    -o jsonpath='{.status.conditions[?(@.type=="DataPresent")].reason}' 2>/dev/null || true)
+                budget=$(datapresent_budget "${reason:-<none>}")
+                pending+="  [$ctx] $db: ${status:-<absent>}/${reason:-<none>} (budget ${budget}s, waited ${elapsed}s)"$'\n'
+
+                # Per-database budgets, judged per database: the strictest
+                # applicable one governs, because the first database to outlive
+                # its OWN budget ends the run. One RO-pending database can
+                # therefore never extend the leash of a GlueSuffix one.
+                if (( elapsed >= budget )); then
+                    overdue+="  [$ctx] $db: ${status:-<absent>}/${reason:-<none>} — exceeded its ${budget}s budget"$'\n'
+                fi
+
+                # Force a fresh evaluation rather than waiting out the 5-minute
+                # resync floor. The SlapdDatabase watch carries no predicate, so
+                # a metadata-only write enqueues a reconcile immediately;
+                # reconciles are idempotent (ADR-001) and DataPresent drives no
+                # action (ADR-012), so the only effect is a current reading.
+                # Best-effort: if the write fails we simply measure staleness.
+                if (( poke )); then
+                    kctl "$ctx" -n "$NAMESPACE_TESTING" annotate --overwrite \
+                        slapddatabases.ldap.chuck-chuck-chuck.net "$db" \
+                        "e2e.ldap.chuck-chuck-chuck.net/datapresent-poke=$(date +%s)" >/dev/null 2>&1 || true
                 fi
             done
         done
+
         [[ -z "$pending" ]] && break
-        if (( SECONDS >= deadline )); then
+
+        if [[ -n "$overdue" ]]; then
             printf '%s' "$pending" >&2
+            printf 'Over budget:\n%s' "$overdue" >&2
             die "DataPresent is not True on every site's databases (see above). \
-A never-seeded peer site reporting Unknown/NotSeeded means the ADR-025 detector is disabled there; \
-False/GlueSuffix or False/DataMissingOnPods means a pod is hiding the suffix entry \
-(check with: slctl inspect -n $NAMESPACE_TESTING slapd)."
+GlueSuffix, DataMissingOnPods, DataMissing, NoDataYet, NoReachablePod and an absent condition \
+share the ${DATAPRESENT_TIMEOUT}s budget: none of them is legitimately transient once the suite has \
+finished, so the only thing being waited for is one reconcile, and a glue suffix is silent \
+corruption that should be reported fast (ADR-025). DataMissingOnReadOnlyPods gets \
+${DATAPRESENT_RO_TIMEOUT}s instead because ADR-025's read-only amendment calls it legitimately \
+transient during an RO initial sync — that budget is a guess, not a measurement, and \
+E2E_DATAPRESENT_RO_TIMEOUT raises it. Exceeding even that means the replica is broken or its \
+syncrepl stanzas are not converging (check with: slctl inspect -n $NAMESPACE_TESTING slapd)."
         fi
         sleep 5
     done
