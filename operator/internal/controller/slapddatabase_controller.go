@@ -1542,14 +1542,14 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		// provisions /accesslog/<db> from DATABASE_DIRS (ADR-019 R3).
 		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AccesslogDir(sd.Name)})
 		addReq.Attribute("olcDbIndex", planAccesslogIndices(nil))
-		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Spec.Suffix)})
+		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Name, sd.Spec.Suffix)})
 		// A journal with no map size gets back-mdb's ~10 MB, and a full journal
 		// is worse than a full data DB: it fails on write RATE, not data
 		// volume, and delta-syncrepl stops advancing (ADR-024 R1).
 		addReq.Attribute("olcDbMaxSize", []string{strconv.FormatInt(defaultAccesslogMaxSizeBytes, 10)})
 		// And the replication identity must be able to read all of it — the
 		// ACL says who, this says how much (ADR-020 amendment).
-		addReq.Attribute("olcLimits", []string{replicationLimits(sd.Spec.Suffix)})
+		addReq.Attribute("olcLimits", replicationLimits(sd.Name, sd.Spec.Suffix))
 		// The journal inherits the cluster's durability posture — it is written
 		// on the same hot path as the data it journals, so an fsync per record
 		// on one and not the other buys nothing — on its own, longer checkpoint
@@ -1577,7 +1577,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 
 	// Converge the ACL on every reconcile (ADR-020 R5). Covers a log created
 	// by an operator predating ADR-020, and any hand-edit.
-	if err := r.ensureAccesslogACL(ctx, conn, host, dbDN, sd.Spec.Suffix); err != nil {
+	if err := r.ensureAccesslogACL(ctx, conn, host, dbDN, sd.Name, sd.Spec.Suffix); err != nil {
 		return err
 	}
 
@@ -1599,7 +1599,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		return err
 	}
 	if err := r.ensureLimits(ctx, conn, host, dbDN,
-		[]string{replicationLimits(sd.Spec.Suffix)}); err != nil {
+		replicationLimits(sd.Name, sd.Spec.Suffix)); err != nil {
 		return fmt.Errorf("ensure accesslog limits at %s: %w", host, err)
 	}
 
@@ -1739,7 +1739,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogIndices(
 //
 // Offline paths are unaffected (ADR-020 R4): slapcat/slapadd in backup and
 // restore Jobs read the LMDB files directly and never evaluate ACLs.
-func accesslogACL(dataSuffix string) string {
+func accesslogACL(dbName, dataSuffix string) string {
 	return fmt.Sprintf(`to * by dn.exact="cn=replication,%s" read by * none`, dataSuffix)
 }
 
@@ -1748,11 +1748,11 @@ func accesslogACL(dataSuffix string) string {
 func (r *SlapdDatabaseReconciler) ensureAccesslogACL(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host, dbDN, dataSuffix string,
+	host, dbDN, dbName, dataSuffix string,
 ) error {
 	log := logf.FromContext(ctx)
 
-	desired := []string{accesslogACL(dataSuffix)}
+	desired := []string{accesslogACL(dbName, dataSuffix)}
 
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dbDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
@@ -2406,7 +2406,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 
 		// Per-database bind identity: derived unless the peer overrides it.
 		bindDN, bindPassword := externalBindIdentity(
-			ep.BindDN, ep.BindPasswordSecretName, password, sd.Spec.Suffix, replPassword)
+			ep.BindDN, ep.BindPasswordSecretName, password, sd.Spec.Suffix, sd.Name, replPassword)
 
 		if len(podAddrs) > 0 {
 			port := ep.Port
@@ -2570,7 +2570,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 // (missing keys) keeps the empty credential rather than borrowing the per-DB
 // one — "could not read it" is not "not set", and a silent substitution would
 // mask the broken override; the stanza fails loudly at the consumer instead.
-func externalBindIdentity(overrideBindDN, overrideSecretName, overridePassword, suffix, dbReplPassword string) (string, string) {
+func externalBindIdentity(overrideBindDN, overrideSecretName, overridePassword, suffix, dbName, dbReplPassword string) (string, string) {
 	bindDN := overrideBindDN
 	if bindDN == "" {
 		bindDN = "cn=replication," + suffix

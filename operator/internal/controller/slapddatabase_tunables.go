@@ -41,10 +41,10 @@ import (
 // the four-attribute form is what appears in cn=config after slapd normalises
 // it either way, so writing it lets the convergence comparison be a string
 // compare rather than a limits parser.
-func replicationLimits(dataSuffix string) string {
-	return fmt.Sprintf(
+func replicationLimits(dbName, dataSuffix string) []string {
+	return []string{fmt.Sprintf(
 		`dn.exact="cn=replication,%s" time.soft=unlimited time.hard=unlimited `+
-			`size.soft=unlimited size.hard=unlimited`, dataSuffix)
+			`size.soft=unlimited size.hard=unlimited`, dataSuffix)}
 }
 
 // desiredLimits is the full olcLimits list a data database must carry: the
@@ -60,7 +60,7 @@ func replicationLimits(dataSuffix string) string {
 func desiredLimits(sd *ldapv1alpha1.SlapdDatabase, replicating bool) []string {
 	var out []string
 	if replicating {
-		out = append(out, replicationLimits(sd.Spec.Suffix))
+		out = append(out, replicationLimits(sd.Name, sd.Spec.Suffix)...)
 	}
 	out = append(out, sd.Spec.Limits...)
 	return out
