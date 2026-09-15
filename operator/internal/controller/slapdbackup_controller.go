@@ -152,19 +152,25 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// status patch must not leave the record blank.
 	sb.Status.SourcePod = backupSourcePod(sc)
 
-	// Create the Job if it doesn't exist yet.
 	jobName := sb.Name + "-backup"
 	job := &batchv1.Job{}
 	err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: sb.Namespace}, job)
-	switch {
-	case apierrors.IsNotFound(err):
-		// Record the circumstances BEFORE the artifact is produced: which pod
-		// it comes from, where that pod sat in the replication timeline, and
-		// what the cluster said about convergence. This is honesty, not policy —
-		// nothing here can refuse or delay the backup (ADR-014 amendment
-		// 2026-09-12). Taken just before the Job is created, so the recorded
-		// vector is a lower bound: everything in it is certainly in the dump.
+	if err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	jobExists := err == nil
+
+	// Record the circumstances the artifact is taken under: which pod it comes
+	// from, where that pod sat in the replication timeline, and what the cluster
+	// said about convergence and about its suffix entry. This is honesty, not
+	// policy — nothing here can refuse or delay the backup (ADR-014 amendment
+	// 2026-09-12).
+	if shouldRecordSourceCircumstances(sb.Status, jobExists) {
 		r.recordSource(ctx, sb, sd, sc)
+	}
+
+	// Create the Job if it doesn't exist yet.
+	if !jobExists {
 		job = buildBackupJob(sb, sd, sc, r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")), r.OperatorImage, objectKey)
 		if err := controllerutil.SetControllerReference(sb, job, r.Scheme); err != nil {
 			return ctrl.Result{}, err
@@ -177,8 +183,6 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		sb.Status.StartedAt = &now
 		r.setRunning(ctx, sb, jobName, objectKey, "BackupStarted", "backup Job created")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	case err != nil:
-		return ctrl.Result{}, err
 	}
 
 	// Observe the existing Job.

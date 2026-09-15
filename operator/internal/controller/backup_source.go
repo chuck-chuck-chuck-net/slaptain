@@ -207,3 +207,15 @@ func normalizedCSNVector(csns []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// shouldRecordSourceCircumstances decides whether this reconcile pass must
+// stamp the source circumstances (sourcePod / sourceContextCSN /
+// SourceConverged / SourceSuffixHealthy) onto a backup's status.
+//
+// NOTE (staging commit): this is a faithful extraction of the trigger the
+// controller used until now — "record iff the backup Job does not exist yet" —
+// so the extraction itself changes no behaviour. The table test pinned against
+// it is red on the incident shape, which is the point.
+func shouldRecordSourceCircumstances(st ldapv1alpha1.SlapdBackupStatus, jobExists bool) bool {
+	return !jobExists
+}
