@@ -140,7 +140,7 @@ kubectl get slapdbackup nightly-2026-06-08 -o yaml | grep -A5 SourceConverged
 | Field | What it tells you |
 |---|---|
 | `status.sourcePod` | Which pod the bytes came from. |
-| `status.sourceContextCSN` | That pod's `contextCSN` vector when the Job was created — the artifact's place in the replication timeline. The LDIF embeds the same vector; this is the copy you can query without downloading the object. |
+| `status.sourceContextCSN` | That pod's `contextCSN` vector, normally recorded just before the Job is created — so everything in it is certainly in the dump (a lower bound on the artifact's place in the replication timeline). If the record was lost to a failed status write and repaired on a later pass, it is instead the source's position *at recording time* and may name changes the artifact does not contain; the `SourceConverged` message says so explicitly when that happened (ADR-014 amendment 2026-09-15). The LDIF embeds the vector from the dump itself; this is the copy you can query without downloading the object. |
 | condition `SourceConverged` | What the `SlapdCluster` said about replica convergence at the time (it mirrors the cluster's own `ReplicationConverged` condition, with its message and timestamp). `NotReplicated` means there was nothing to be current with. |
 
 `SourceConverged=False` does not mean the artifact is bad — it means the source
