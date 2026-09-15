@@ -270,7 +270,7 @@ func (r *SlapdBackupReconciler) recordSource(ctx context.Context, sb *ldapv1alph
 }
 
 // probeSourceSuffix classifies the backup source pod's suffix entry, binding as
-// cn=replication (the ADR-008 identity). The classification itself is the
+// the replication identity (ADR-008, ADR-027). The classification itself is the
 // shared suffixprobe.Probe — ordinary base search, then ManageDsaIT to tell a
 // hidden glue from a genuinely absent entry (ADR-025). What lives here is only
 // how to reach that pod. Best-effort: any transport failure reports
@@ -285,7 +285,7 @@ func (r *SlapdBackupReconciler) probeSourceSuffix(ctx context.Context, ns string
 	if tlsEnabled {
 		port = ldapsContainerPort
 	}
-	bindDN := "cn=replication," + sd.Spec.Suffix
+	bindDNs := csnBindDNs(sd.Name, sd.Spec.Suffix)
 	bindPW, err := r.replicationPassword(ctx, ns, sd)
 	if err != nil {
 		return suffixProbeError, err.Error()
@@ -305,8 +305,17 @@ func (r *SlapdBackupReconciler) probeSourceSuffix(ctx context.Context, ns string
 	}
 	defer conn.Close()
 	conn.SetTimeout(ldapRequestTimeout)
-	if err := conn.Bind(bindDN, bindPW); err != nil {
-		return suffixProbeError, err.Error()
+	// Same candidate order as the CSN queries (csnBindDNs): the node-local
+	// identity first, the legacy one as the fallback that keeps this working
+	// against a pod the cutover has not reached yet.
+	var bindErr error
+	for _, dn := range bindDNs {
+		if bindErr = conn.Bind(dn, bindPW); bindErr == nil {
+			break
+		}
+	}
+	if bindErr != nil {
+		return suffixProbeError, bindErr.Error()
 	}
 
 	obs := suffixprobe.Probe(conn, sd.Spec.Suffix)
@@ -327,12 +336,12 @@ func (r *SlapdBackupReconciler) readSourceContextCSN(ctx context.Context, ns str
 	if tlsEnabled {
 		port = ldapsContainerPort
 	}
-	bindDN := "cn=replication," + sd.Spec.Suffix
 	bindPW, err := r.replicationPassword(ctx, ns, sd)
 	if err != nil {
 		return nil, err
 	}
-	return queryContextCSN(host, port, tlsEnabled, sd.Spec.Suffix, bindDN, bindPW)
+	return queryContextCSN(host, port, tlsEnabled, sd.Spec.Suffix,
+		csnBindDNs(sd.Name, sd.Spec.Suffix), bindPW)
 }
 
 // replicationPassword reads a database's replication bind password from its

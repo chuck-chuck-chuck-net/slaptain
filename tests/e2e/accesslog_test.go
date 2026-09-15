@@ -397,9 +397,16 @@ func assertPerDatabaseAccesslogLayout(
 		Expect(logDBHasSyncprov(conn, logDB.dn)).To(BeTrue(),
 			"pod %s: accesslog DB %q has no syncprov overlay — consumers cannot pull it",
 			pod, wantLog)
+		// Both replication identities since ADR-027's cutover: the node-local
+		// one every stanza now binds as, and the legacy one kept granted so a
+		// not-yet-upgraded consumer keeps replicating through the migration
+		// window. Still exactly ONE rule, still ending `by * none`.
 		Expect(logDBAccess(conn, logDB.dn)).To(ConsistOf(
-			MatchRegexp(`^(\{\d+\})?to \* by dn\.exact="cn=replication,`+regexp.QuoteMeta(dataSuffix)+`" read by \* none$`)),
-			"pod %s: accesslog DB %q must carry exactly the ADR-020 R1 rule for %q",
+			MatchRegexp(`^(\{\d+\})?to \* by dn\.exact="`+
+				regexp.QuoteMeta(ldapv1alpha1.AuthIdentityDN(dbName))+`" read`+
+				` by dn\.exact="cn=replication,`+regexp.QuoteMeta(dataSuffix)+`" read by \* none$`)),
+			"pod %s: accesslog DB %q must carry exactly the ADR-020 R1 rule for %q, "+
+				"naming both replication identities (ADR-027)",
 			pod, wantLog, dataSuffix)
 
 		// (a3) with the full upstream index set. reqDN above all: multi-provider

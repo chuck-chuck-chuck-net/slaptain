@@ -519,7 +519,7 @@ the original decision — the history of reasoning matters.
 - ADR-005: SlapdDatabase cleanup policy (Retain default, Delete opt-in) — *amended 2026-09-14: the decision was never implemented for the databases it exists for — a replicated data DB is not a leaf and slapd does not cascade, so `Delete` always failed and the finalizer was released anyway. Teardown is now subtree-deepest-first, reaps the database's own `cn=accesslog-<db>` (data DB first, so no dangling `olcAccessLogDB` — ADR-026), covers RO pods, and a failed teardown keeps the finalizer and retries as the ADR always said it would*
 - ADR-006: Schema lifecycle (additive-only, desired-minimum model)
 - ADR-007: Multus-based dedicated replication network for cross-site traffic (amended: dynamic peer discovery via remote kubeconfig)
-- ADR-008: CSN monitoring uses replication bind credentials (uniform-password assumption) — *amended 2026-08-26: what CSN comparison can and cannot observe — peer status is consumer-side and one-directional, and lag is only observable while writes flow, so an idle database reads `Synced` across a broken link; amended again 2026-09-11: the "heartbeats only help during idle periods, when nothing is at stake" premise was refuted by ITS#9580 dormancy (idleness lets a SID's minCSN go stale; the next reconnect pays with a stale-cookie full-refresh storm) — heartbeats stay deferred regardless, superseded by ADR-021 (OpenLDAP 2.7) and ADR-022 (syncprov sessionlog)*
+- ADR-008: CSN monitoring uses replication bind credentials (uniform-password assumption) — *amended 2026-08-26: what CSN comparison can and cannot observe — peer status is consumer-side and one-directional, and lag is only observable while writes flow, so an idle database reads `Synced` across a broken link; amended again 2026-09-11: the "heartbeats only help during idle periods, when nothing is at stake" premise was refuted by ITS#9580 dormancy (idleness lets a SID's minCSN go stale; the next reconnect pays with a stale-cookie full-refresh storm) — heartbeats stay deferred regardless, superseded by ADR-021 (OpenLDAP 2.7) and ADR-022 (syncprov sessionlog); amended 2026-09-15: the monitoring bind now tries `cn=repl-<db>,cn=slaptain-auth` first and the legacy DN second (the fallback exists for cross-site peers on a pre-ADR-027 operator, which would otherwise read Unreachable for the whole migration window), and "create-only, never rotates" is retired — the Secret is the source of truth and rotation is supported, except during the ADR-027 migration window*
 - ADR-009: SlapdUser lifecycle (service users only, single-pod write, retain default) — *Proposed*
 - ADR-010: SlapdCluster replication modes (peer / consumer-only, in-place promotion) — *Accepted (impl + e2e green 2026-05-13)*
 - ADR-011: Hot migration topology contract (RID/ServerID coexistence, plain-syncrepl interop, stage transitions) — *Accepted (impl + e2e green 2026-05-13)*
@@ -537,8 +537,8 @@ the original decision — the history of reasoning matters.
 - ADR-024: Where an OpenLDAP tunable lives — three placement classes (converged-per-pod as the default, bootstrap-time, create-only-by-nature), a spec field that cannot be honoured is rejected or converged but never ignored, and unset means slaptain's default rather than slapd's — *Accepted 2026-09-12; amended twice from live evidence: olcDbMaxSize and olcDbEnvFlags segfault slapd on a live modify, olcIdleTimeout/olcWriteTimeout and the monitor ACL MOD hang it — R1 membership is proven on a running pod. User-facing guide: docs/TUNING.md*
 - ADR-025: Seed is single-creator MESH-wide (founder-only: exactly one site carries `spec.seed`; peers sync). A multi-site seed race demotes one pod's suffix entry to a permanent hidden GLUE — invisible to ordinary searches (ManageDSAIT reveals it), frozen at the winner's entryCSN so all CSN health reads clean, silently breaking that pod and making every backup from it unrestorable. Fix set: e2e founder-only seeding; operator withhold belt (foreign-sid suffix creator → seed withheld — the OPPOSITE direction of the reverted verifySeedExists); restore preflight rejects a glue/RDN-less suffix entry (destroy-last); `SourceSuffixHealthy` on SlapdBackup; `DataPresent` all-pods; `slctl inspect` suffix-visibility + suffix-uuid-agreement; NO auto-heal (manual runbook in the ADR) — *Accepted 2026-09-13; amended 2026-09-14: following Decision 1 switched OFF Decision 5 — a never-seeded database (every non-founder site, migration, consumer-only, bootstrapFrom) never latched `SeedApplied`, so the per-pod suffix probe never ran; measured 4 of 6 databases on a healthy mesh. The probe is now ungated and the seed latch informs only what an all-empty reading means (`Unknown/NoDataYet` vs `False/DataMissing`, via the new one-way `status.dataObserved`); a ManageDsaIT-confirmed glue reports `False/GlueSuffix` on its own. One shared probe in `internal/suffixprobe` for operator, backup and slctl; amended again 2026-09-14: the all-pods rule now includes the **read-only fleet** — an RO-only divergence reports `False/DataMissingOnReadOnlyPods` (its own reason, because an RO initial sync makes it legitimately transient), phase-neutral, byte-identical at `readReplicas: 0`*
 - ADR-026: What a `SlapdDatabase` reconcile may do to `cn=config` state it does not exclusively own — R1 `olcDatabase={N}` is a positional namespace, so re-resolve after any delete (implemented, correct); R2 never destroy shared state on evidence the operator does not own (another database's overlays, a hand edit — ADR-002 sanctions both; report and stall instead, because the bad state here is silent until a restart); R3 trigger a repair on the condition it repairs, never on a sibling artifact the same pass may delete. Origin: the withdrawn ADR-019 R8 migration stranded an `olcAccessLogDB` and made a pod permanently unbootable. R2/R3 are forward-looking guards — after R8's removal no live path violates them — *Accepted 2026-09-14*
-- ADR-027: The replication identity is node-local, not an entry in the replicated tree — `cn=repl-<db>,cn=slaptain-auth` in a per-pod, never-replicated auth database on the data PVC, converged from the Secret (so rotation finally works). Kills the two-store class at its cause: the duplication is inherent to simple bind, but putting the verifier copy in the *replicated customer tree* is what made it shared multi-writer state (ADR-026 R2) and produced both the 19-day dead db2 link and a password-stripped copy. Fixed infrastructure: outside `DATABASE_DIRS`, so no new ADR-013 roll. SASL EXTERNAL/mTLS considered and deferred with its real marginal value recorded — *Proposed 2026-09-14*
-- ADR-020: An accesslog DB is at least as restrictive as the database it journals — *amended 2026-09-12: the replication identity also gets unlimited olcLimits on the data DB and the journal (slapd's default sizelimit of 500 capped every syncrepl search — found when a journal outgrew it live); never modify olcDbMaxSize on a live database (slapd segfaults — ADR-024 amendment)* — `to * by dn.exact="cn=replication,<suffix>" read by * none`; without it a data DB's ACLs are bypassable through its own change journal — *Accepted (impl + e2e green 2026-08-25; the bypass was captured live before the fix — an anonymous read of the shared journal returned `reqMod: userPassword:+ {SSHA}…` for a user whose `userPassword` the data DB denies)*
+- ADR-027: The replication identity is node-local, not an entry in the replicated tree — `cn=repl-<db>,cn=slaptain-auth` in a per-pod, never-replicated auth database on the data PVC, converged from the Secret (so rotation finally works). Kills the two-store class at its cause: the duplication is inherent to simple bind, but putting the verifier copy in the *replicated customer tree* is what made it shared multi-writer state (ADR-026 R2) and produced both the 19-day dead db2 link and a password-stripped copy. Fixed infrastructure: outside `DATABASE_DIRS`, so no new ADR-013 roll. SASL EXTERNAL/mTLS considered and deferred with its real marginal value recorded — *Accepted 2026-09-15 for what a single site can show; amended twice: 2026-09-14 (M1, the database + entries, additive) and 2026-09-15 (M2, the cutover — stanzas, ACLs and olcLimits and the operator's CSN bind all name the node-local DN, with the legacy grants RETAINED; identity convergence is now an ordering GATE that withholds syncrepl until every RW pod carries the entry; rotation measured at 52 s across four pods). Two live findings: the migration window is one-directional (a stanza carries one binddn, so a NEW consumer against an OLD provider fails — pin `externalPeers[].bindDN` meanwhile), and rotating the Secret mid-window strands the create-only legacy entry. Mesh-validated 2026-09-15 (86/2; the two failures were the gate firing on TLS-less fixture clusters whose auth database a pre-existing short-circuit never created — `runConvergenceSteps`, see docs/reconcile-loop-fixes.md). Mixed-VERSION mesh behaviour remains reasoned, not measured*
+- ADR-020: An accesslog DB is at least as restrictive as the database it journals — *amended 2026-09-12: the replication identity also gets unlimited olcLimits on the data DB and the journal (slapd's default sizelimit of 500 capped every syncrepl search — found when a journal outgrew it live); never modify olcDbMaxSize on a live database (slapd segfaults — ADR-024 amendment)* — `to * by dn.exact="cn=repl-<db>,cn=slaptain-auth" read by dn.exact="cn=replication,<suffix>" read by * none` (two `by` clauses since the ADR-027 cutover, 2026-09-15 amendment — one rule, still ending `by * none`; the `olcLimits` exemption doubles with it, because a limits value carries exactly one selector); without it a data DB's ACLs are bypassable through its own change journal — *Accepted (impl + e2e green 2026-08-25; the bypass was captured live before the fix — an anonymous read of the shared journal returned `reqMod: userPassword:+ {SSHA}…` for a user whose `userPassword` the data DB denies)*
 
 ---
 
@@ -701,10 +701,37 @@ data admin password (per-database):
 | `<dbname>-credentials` | `replication-password` | Init container: syncrepl bind password; SlapdDatabase controller: adds `cn=replication` LDAP entry |
 
 The SlapdDatabase controller generates a random `replication-password` when creating
-`<dbname>-credentials`. Never updated after creation.
+`<dbname>-credentials`. It never rewrites it — but since ADR-027 the Secret is the single
+source of truth and **you may rotate it**: change the key and the operator converges the
+node-local identity entry and every stanza's `credentials=` on every pod (worst case is the SlapdDatabase resync floor of 5 minutes — a Secret is not a
+watched object, so nothing reacts to it sooner; measured 21 s on a four-pod lab
+where a tick happened to be pending). See the caveat below before doing so mid-migration.
 
-Replication bind DN: `cn=replication,<suffix>`. The controller adds this entry via live LDAP
-during bootstrap and the init container grants it read access to the accesslog and data databases.
+**Replication bind DN: `cn=repl-<dbname>,cn=slaptain-auth`** (ADR-027) — an entry in a
+per-pod, never-replicated authentication database, written and *converged* by the
+SlapdDatabase controller from the Secret. Every syncrepl stanza (in-cluster, external and
+read-only), the operator's CSN monitoring, the backup controller's source-CSN read and the
+ADR-025 suffix probe bind as it.
+
+The pre-ADR-027 identity `cn=replication,<suffix>` — an entry in the *replicated data tree* —
+is still created and still granted read (`olcAccess`) and unlimited `olcLimits` on the data
+database and its journal. That is deliberate and temporary: it is what keeps a not-yet-upgraded
+peer replicating through a staged mesh upgrade (ADR-027 migration steps 2+3). Removing the
+grants is step 4, a separate release; the entry itself is then inert and is a documented
+manual cleanup, because deleting it is a write into replicated state the operator does not own
+(ADR-026 R2).
+
+Two consequences of that split worth knowing before you touch it:
+
+- **The migration window is one-directional.** An old consumer binding to a new provider works
+  (the grants are additive). A *new* consumer binding to an *old* provider does not — a stanza
+  carries one `binddn` and the node-local entry does not exist there. In-cluster this window
+  does not exist; cross-site, pin `externalPeers[].bindDN` to
+  `cn=replication,<remote suffix>` until the peer upgrades.
+- **Do not rotate the Secret during that window.** `cn=replication,<suffix>` is create-only,
+  so a rotation moves the node-local identity and leaves the legacy entry stale — verified
+  live, `err=49`. Every upgraded consumer is fine; a not-yet-upgraded one is locked out until
+  the legacy entry is repaired by hand.
 
 #### Operator Changes for Phase 2
 
@@ -734,9 +761,15 @@ SlapdDatabase controller, per data database, when `spec.replication.deltaSync=tr
 - Add `overlay accesslog` and `overlay syncprov` to the data DB (`ensureReplicationOverlays`).
 - Set `olcMultiProvider: TRUE` on the data DB (the OL 2.5+ rename of `olcMirrorMode`).
 - Write N-1 in-cluster `olcSyncRepl` stanzas plus external peer stanzas (see ADR-003).
-- Add `cn=replication,<suffix>` bind entry to the data tree (`ensureReplicationUser`).
-- Prepend an ACL granting `cn=replication,<suffix>` read-all (see reconcile-loop-fixes.md:
-  "User ACLs block userPassword replication").
+- Converge `cn=repl-<dbname>,cn=slaptain-auth` in the node-local auth database on every pod
+  (`reconcileAuthIdentity`, ADR-027) — and **withhold the stanzas above** until every RW pod
+  has it, since a provider lacking the entry rejects every consumer that binds as it.
+- Still add the legacy `cn=replication,<suffix>` entry to the data tree
+  (`ensureReplicationUser`) for the additive migration window.
+- Prepend one ACL granting BOTH identities read-all (see reconcile-loop-fixes.md:
+  "User ACLs block userPassword replication"), plus the matching `olcLimits` exemption for
+  each — a granted identity without its own limits value caps at slapd's default 500 entries
+  (ADR-020 amendment).
 
 Peer URL template: `ldaps://<name>-<ordinal>.<headless-svc>.<ns>.svc.cluster.local:1025`
 

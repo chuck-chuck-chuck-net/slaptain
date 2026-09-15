@@ -1,6 +1,6 @@
 # ADR-027: The replication identity is node-local, not an entry in the replicated tree
 
-**Status:** Proposed
+**Status:** Accepted (single-site; mixed-version mesh behaviour unvalidated — see the 2026-09-15 amendment)
 **Date:** 2026-09-14
 
 ## Context
@@ -270,3 +270,170 @@ offer at all.
 - **Correct the "mTLS peer auth" claim in CLAUDE.md** — client certificates are
   presented but never verified (`olcTLSVerifyClient` unset), so nobody builds a
   security argument on a property we do not have.
+
+## Amendment (2026-09-15): the cutover (milestone 2), and what it taught
+
+Migration steps 2 and 3 implemented and verified live on a single-site lab
+(three RW pods + one RO pod, two databases). Stanzas, ACLs, `olcLimits` and the
+operator's own monitoring now name `cn=repl-<db>,cn=slaptain-auth`. Four design
+calls beyond what the ADR had settled:
+
+**1. The granted identity is doubled inside one rule, not added as a second
+rule.** Both the data database's grant and the journal's (ADR-020 R1) carry two
+`by dn.exact=… read` clauses, node-local first. The clauses select disjoint DNs
+so their order is cosmetic, but a single rule keeps the trailing `by * break` /
+`by * none` — the part that is load-bearing and easy to get wrong — in one place
+instead of two chained ones. Removing the legacy clause at step 4 is a deletion,
+not a restructure.
+
+**2. `olcLimits` doubles with it.** This was nearly missed, and it is the
+expensive kind of miss: an `olcLimits` value carries exactly one selector, so an
+identity that is granted read without its own exemption caps at slapd's default
+`sizelimit` of 500 — the ADR-020 2026-09-12 defect, invisible in any
+fixture-sized directory. The DN, the ACL and the limits are one contract, and
+all three now derive from one file (`internal/controller/replidentity.go`), so
+step 4 is a deletion in one place rather than a hunt.
+
+**3. Deviation 3 of the previous amendment came due, and the answer is an
+ordering gate rather than a stronger error.** While nothing bound as the
+identity, a failed write was harmless and the step was deliberately best-effort.
+Now a provider without the entry rejects every consumer binding as it, so the
+write must be *ordered* before the stanza. In an in-cluster mesh every RW pod is
+provider and consumer at once, which collapses the ordering requirement to one
+fleet-wide predicate: **write no syncrepl stanzas at all until every RW pod
+carries the entry** (`authIdentityReadyForStanzas`). Withholding is safe in both
+directions — an upgrading cluster keeps the stanzas it already has, which name
+the still-granted legacy identity and still work; a fresh cluster has none yet
+and pays only a requeue.
+
+The **read-only fleet is excluded from the gate on purpose**. Nothing ever binds
+*to* an RO pod, so its entry is provisioning uniformity (amendment 2 above), not
+anyone's precondition; including it would let one unreachable read replica
+withhold the whole mesh's replication configuration. Its failures still request
+a requeue, they just cannot gate.
+
+What the gate does **not** cover, and cannot: an external peer. The operator has
+no authority over a remote site's auth database and no way to observe it, so a
+cross-site stanza is retry-only.
+
+**4. The migration window is asymmetric, and only one direction was ever
+protected.** The ADR's Consequences said steps 1-3 "leave the old identity
+working, so a partially upgraded mesh keeps replicating". That is true for an
+**old consumer against a new provider** — the grants are additive, so it holds.
+It is *not* true in reverse: a stanza carries exactly one `binddn`, so a **new
+consumer against an old provider** binds as an identity that does not exist
+there and gets `err=49` until that site upgrades. This cannot be fixed in code;
+the handle is `externalPeers[].bindDN`, which still wins verbatim, so an
+operator mid-migration pins the cross-site stanza to
+`cn=replication,<remote suffix>` and unpins it when the peer upgrades. The
+in-cluster case has no such window: one operator writes both ends and decision 3
+above orders them.
+
+**5. Do not rotate the Secret during the migration window.** Found by running
+the rotation, not by reasoning about it. `cn=replication,<suffix>` is still
+written create-only — deliberately, because converging it is exactly the
+shared-state write ADR-026 R2 forbids — so a rotation updates the node-local
+projection and leaves the legacy entry holding the **old** password. Measured:
+after rotating, the legacy bind failed with `err=49` while the node-local bind
+succeeded and the mesh replicated normally. Already-upgraded consumers are
+unaffected; a not-yet-upgraded one is locked out until the legacy entry is
+repaired by hand. So rotation belongs to a mesh that has finished step 3
+everywhere — which is also when the capability is actually wanted. Recorded on
+ADR-008 as well, since that is where the credential model lives.
+
+### Verified live, 2026-09-15 (single-site: 3 RW + 1 RO, two databases)
+
+- **All 18 syncrepl stanzas** — 12 on the RW pods, 6 on the RO pod, across both
+  databases — name `cn=repl-<db>,cn=slaptain-auth`; none names the
+  replicated-tree identity.
+- **Grants and limits doubled on every pod**, on the data database and on the
+  journal, with the node-local identity first and the legacy one retained.
+- **Replication works**: a write on pod-0 appeared on both peers and on the
+  read-only consumer, i.e. the new `binddn` really authenticates a syncrepl
+  session, not merely a hand-run `ldapwhoami`.
+- **`ReplicationConverged=True` / `CSNsMatch`** with the operator's monitoring
+  binding as the node-local identity; `slctl inspect` 11 passed, 0 failed.
+- **Rotation**: patching the Secret converged the projection on all four pods in
+  **52 s**; the old password was then rejected with `err=49`; a write through
+  the rotated mesh reached every pod. The legacy entry did *not* follow — see
+  decision 5 above.
+- **The gate fires**: with one RW pod deleted, the operator logged
+  `syncrepl configuration withheld: the node-local replication identity is not
+  yet on every read-write pod (ADR-027); will retry` on every pass, and the
+  cluster returned to 11/11 green once the pod came back.
+
+**Not validated here:** a multi-site mesh. Everything about the asymmetric
+window in decision 4 is reasoned from the protocol, not measured — a stanza
+takes one `binddn`, and a pre-ADR-027 provider has no such entry. That run is
+the mesh session's.
+
+**Status is therefore Accepted** for what a single site can show: the placement,
+the convergence, the cutover and the rotation are all demonstrated. The
+mixed-version mesh behaviour is the one claim still resting on reasoning.
+
+### Follow-on found by running the rotation (2026-09-15)
+
+Rotation was implemented correctly and **never fired**. Changing the Secret
+produced no reconcile at all: the SlapdDatabase controller watches SlapdDatabase
+and SlapdCluster and nothing else, and its healthy path returned a bare
+`ctrl.Result{}`. Measured: last reconcile 12:34:45, Secret rewritten ~12:38, and
+at 12:40:03 the projection still held the previous password with the phase
+reading `Running`.
+
+ADR-002's 2026-08-26 amendment already named the shape ("its only periodic
+trigger is incidental… a non-replicated cluster has no periodic resync at all").
+This ADR promotes it from latent to load-bearing, because decision 6 makes the
+Secret the single source of truth and "converged on every reconcile" is worth
+nothing when no reconcile is scheduled. The convergence code was right; it was
+never called.
+
+Fixed with a **5-minute resync floor** on the healthy SlapdDatabase path.
+Unhealthy keeps its 10s retry, and anything that changes a watched object still
+reconciles immediately — the floor only catches changes that produce no event.
+A Secret watch was the alternative, and the floor was preferred for simplicity
+rather than because a watch is unworkable. The objection as first written — that
+it caches every Secret in every watched namespace to observe one key per
+database — is true only of a *naive* watch; a label- or field-scoped cache
+avoids it, at the cost of a selector the operator must then own and keep
+correct on every Secret it cares about. Against that, the floor is four lines
+and one LDAP sweep per database per five minutes. Worth revisiting if the
+five-minute worst case ever becomes the thing standing between an operator and
+a credential rotation.
+
+Verified on the same cluster: idle reconciles at 12:46:13, 12:51:13, 12:56:13 —
+the floor on the dot — and a Secret rotated from a verifiably quiescent operator
+(no reconcile for 90 s, nothing else touched) reached all four pods 21 s later,
+on the pending tick. The floor is therefore the worst case a rotation can take,
+which is what `authConvergenceBudget` in the e2e is sized against.
+
+### The gate's first real cost, and what it exposed (2026-09-15, mesh validation)
+
+The first mesh run of the cutover was 86 passed / 2 failed, with the cutover
+itself green throughout: every stanza on the node-local identity across three
+sites, all six peer links `Synced`, all three sites `CSNsMatch`, additivity
+confirmed on the wire. Both failures were the ordering gate firing on clusters
+that could never satisfy it.
+
+Not a flaw in the gate. `reconcilePodInfrastructure` short-circuited on the
+first failing step, so on a cluster with `spec.ldap.tls.enabled=false` — where
+slapd rejects `olcTLSProtocolMin` with err=53 forever — `ensureAuthDB` never ran
+at all, and the auth database this ADR depends on simply did not exist. The gate
+then did exactly what it is for: it refused to point stanzas at an identity no
+provider carried, and it refused for the life of the cluster.
+
+That short-circuit predates this ADR and was harmless throughout milestone 1,
+which is the point worth recording: **milestone 1's additive posture hid it.**
+While the auth database was unused, a path that silently skipped creating it cost
+nothing and produced no signal. The cutover converted a dormant gap into a
+permanent replication outage, on exactly the clusters (TLS-less throwaway
+fixtures) that nothing else in the suite exercises.
+
+The generalisable rule, now implemented as `runConvergenceSteps`: once anything
+becomes a precondition, every path that can silently skip it is a deadlock, and
+"best-effort, will retry" does not save a step that is never *reached*.
+Independent convergence steps run independently and report independently. Full
+mechanism and the wrong-hypothesis-first debugging path in
+`docs/reconcile-loop-fixes.md` (2026-09-15).
+
+Verified: the scale-up spec, which timed out at 300 s before the fix, passes in
+34 s after it.

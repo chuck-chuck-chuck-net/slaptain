@@ -18,6 +18,7 @@ package controller
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -28,28 +29,37 @@ import (
 )
 
 // queryContextCSN connects to an LDAP server and reads the contextCSN attribute
-// from the data suffix root entry. When bindDN and bindPW are non-empty, binds
+// from the data suffix root entry. When bindDNs and bindPW are non-empty, binds
 // first (required when ACLs deny anonymous access to the suffix). Otherwise
 // uses an anonymous connection.
 // Returns the raw CSN strings (one per serverID that has written to this replica).
-func queryContextCSN(host string, port int32, tlsEnabled bool, suffix, bindDN, bindPW string) ([]string, error) {
+func queryContextCSN(host string, port int32, tlsEnabled bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	scheme := "ldap"
 	if tlsEnabled {
 		scheme = "ldaps"
 	}
 	uri := fmt.Sprintf("%s://%s:%d", scheme, host, port)
-	return doCSNQuery(uri, tlsEnabled, suffix, bindDN, bindPW)
+	return doCSNQuery(uri, tlsEnabled, suffix, bindDNs, bindPW)
 }
 
 // queryContextCSNFromURI connects to an LDAP URI (ldap:// or ldaps://) and reads contextCSN.
 // Used for URI-mode external peers where the full URI is already available.
-func queryContextCSNFromURI(uri, suffix, bindDN, bindPW string) ([]string, error) {
+func queryContextCSNFromURI(uri, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	useTLS := strings.HasPrefix(uri, "ldaps://")
-	return doCSNQuery(uri, useTLS, suffix, bindDN, bindPW)
+	return doCSNQuery(uri, useTLS, suffix, bindDNs, bindPW)
 }
 
 // doCSNQuery is the shared implementation for contextCSN queries.
-func doCSNQuery(uri string, useTLS bool, suffix, bindDN, bindPW string) ([]string, error) {
+//
+// bindDNs are candidate identities tried in order (csnBindDNs): the node-local
+// replication identity first, the legacy cn=replication,<suffix> as a fallback.
+// The fallback is not belt-and-braces — the same query runs against CROSS-SITE
+// peers, and a peer still running a pre-ADR-027 operator has no node-local
+// entry to bind as, so without it every such peer reads Unreachable for the
+// whole migration window. A rejected bind is the only thing that advances to
+// the next candidate; a dial or search failure is returned as-is, because
+// retrying a different DN against a server that never answered proves nothing.
+func doCSNQuery(uri string, useTLS bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	dialOpts := []ldap.DialOpt{
 		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
 	}
@@ -66,9 +76,33 @@ func doCSNQuery(uri string, useTLS bool, suffix, bindDN, bindPW string) ([]strin
 	defer conn.Close()
 	conn.SetTimeout(ldapRequestTimeout)
 
-	if bindDN != "" && bindPW != "" {
-		if err := conn.Bind(bindDN, bindPW); err != nil {
-			return nil, fmt.Errorf("bind %s on %s: %w", bindDN, uri, err)
+	if bindPW != "" {
+		// Report EVERY candidate that was tried, not just the last one to fail.
+		//
+		// A message naming only the final candidate points a reader at the wrong
+		// credential during exactly the window when someone is most likely to be
+		// reading it: the migration window, where "bind cn=replication,… err=49"
+		// looks like a legacy-credential problem when the real cause is that the
+		// remote pod's node-local identity has not been written yet. That cost
+		// real debugging time during the mesh validation, and it is the same
+		// misleading-evidence class the csn-convergence verdicts were fixed for.
+		var bindErrs []error
+		bound := false
+		for _, dn := range bindDNs {
+			if dn == "" {
+				continue
+			}
+			err := conn.Bind(dn, bindPW)
+			if err == nil {
+				bound = true
+				break
+			}
+			bindErrs = append(bindErrs, fmt.Errorf("as %s: %w", dn, err))
+		}
+		if !bound && len(bindErrs) > 0 {
+			return nil, fmt.Errorf("bind on %s failed for all %d candidate identities "+
+				"(node-local first, legacy second — ADR-027): %w",
+				uri, len(bindErrs), errors.Join(bindErrs...))
 		}
 	}
 

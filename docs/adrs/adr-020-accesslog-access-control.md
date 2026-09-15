@@ -214,3 +214,39 @@ it (ADR-024 Consequences).
   - `servers/slapd/backend.c` — per-backend inheritance of the default (`:616`)
   - `servers/slapd/acl.c` — `be_dfltaccess` consulted when no ACL matches
     (`:206-211`)
+
+---
+
+## Amendment (2026-09-15): the granted identity is now two, additively
+
+ADR-027 moves the replication bind identity to `cn=repl-<database>,cn=slaptain-auth`.
+**The rule is unchanged; the DN it names is not** — and during the additive
+migration window the rule names *both*:
+
+```
+to * by dn.exact="cn=repl-<database>,cn=slaptain-auth" read
+     by dn.exact="cn=replication,<data suffix>" read
+     by * none
+```
+
+Still exactly one `olcAccess` value, still ending `by * none` — only the `by`
+clauses doubled. One rule with two clauses rather than two chained rules on
+purpose: the clauses select disjoint DNs so their order is cosmetic, but keeping
+them together means the trailing `by * none` (R1's whole point — a log with no
+matching rule inherits the frontend default of *read*) has one spelling that can
+go wrong instead of two.
+
+The same doubling applies to the **`olcLimits` exemption** this ADR's 2026-09-12
+amendment added, on the data database and on the journal. An `olcLimits` value
+carries exactly one selector, so the exemption becomes a two-element list rather
+than an edited string. This is not bookkeeping: an identity granted read without
+a matching exemption caps at slapd's default `sizelimit` of 500, which is the
+defect that amendment was written from and which no fixture-sized directory can
+reveal. Granting a DN and exempting a DN are one action in two attributes; both
+now derive from a single place in `internal/controller/replidentity.go`.
+
+The legacy clause and the legacy limits value are kept **only** for the
+migration window, so a provider that has cut over still accepts a consumer that
+has not. Removing them is ADR-027 migration step 4, a separate release; the unit
+tests and `tests/e2e/authidentity_test.go` assert their presence so an early
+removal fails loudly rather than silently killing a not-yet-upgraded peer.

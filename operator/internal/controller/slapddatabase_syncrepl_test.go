@@ -358,10 +358,14 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 
 func TestAccesslogACL(t *testing.T) {
 	// ADR-020 R1: exactly one rule, granting read to the journalled database's
-	// replication bind DN and nothing to anyone else. The DN is derived from
-	// the *data* DB's suffix, in the same dn.exact form applyACLs uses.
-	got := accesslogACL("dc=ex,dc=com")
-	want := `to * by dn.exact="cn=replication,dc=ex,dc=com" read by * none`
+	// replication bind identities and nothing to anyone else, in the same
+	// dn.exact form applyACLs uses. Since ADR-027's cutover that is TWO
+	// identities: the node-local cn=repl-<db>,cn=slaptain-auth that stanzas now
+	// bind as, and the legacy cn=replication,<data suffix> kept so a
+	// not-yet-upgraded peer keeps replicating through the migration window.
+	got := accesslogACL("exdb", "dc=ex,dc=com")
+	want := `to * by dn.exact="cn=repl-exdb,cn=slaptain-auth" read ` +
+		`by dn.exact="cn=replication,dc=ex,dc=com" read by * none`
 	if got != want {
 		t.Fatalf("accesslogACL = %q, want %q", got, want)
 	}

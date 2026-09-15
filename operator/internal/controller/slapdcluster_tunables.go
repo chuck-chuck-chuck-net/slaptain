@@ -88,14 +88,24 @@ func (r *SlapdClusterReconciler) reconcilePodInfrastructure(
 	host string,
 	sc *ldapv1alpha1.SlapdCluster,
 ) error {
-	if err := r.ensureGlobalTunables(ctx, conn, host, sc); err != nil {
-		return err
-	}
-	// The node-local authentication database (ADR-027 decision 7): this
-	// controller is its single creator, on every pod, read-write and read-only
-	// alike. Its per-database identity ENTRIES belong to the SlapdDatabase
-	// controller and are written separately.
-	return r.ensureAuthDB(ctx, conn, host)
+	// Every step runs even if an earlier one fails, and all failures are
+	// reported together (runConvergenceSteps). This used to short-circuit, and
+	// the auth database — listed second, and a hard precondition for
+	// replication since ADR-027's cutover — was consequently never created on
+	// any cluster whose global tunables slapd refused. See podinfra.go for the
+	// measurement that found it.
+	return runConvergenceSteps(
+		convergenceStep{"global tunables", func() error {
+			return r.ensureGlobalTunables(ctx, conn, host, sc)
+		}},
+		// The node-local authentication database (ADR-027 decision 7): this
+		// controller is its single creator, on every pod, read-write and
+		// read-only alike. Its per-database identity ENTRIES belong to the
+		// SlapdDatabase controller and are written separately.
+		convergenceStep{"auth database", func() error {
+			return r.ensureAuthDB(ctx, conn, host)
+		}},
+	)
 }
 
 // reconcilePodTunables dials one pod, binds as cn=admin,cn=config, and runs the
@@ -170,44 +180,58 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 	// recorded in docs/BACKLOG.md with this evidence rather than shipped as an
 	// API field that does nothing (ADR-024 R4 — a field that cannot be honoured
 	// is not offered).
-	wants := []struct {
-		attr  string
-		value string
-		write bool
-	}{
+	wants := []globalTunable{
 		{"olcToolThreads", strconv.FormatInt(int64(desiredToolThreads(sc)), 10), true},
-		{"olcTLSProtocolMin", desiredTLSProtocolMin(sc), true},
 		{"olcPasswordHash", desiredPasswordHash(sc), true},
-		{"olcTLSCipherSuite", cipher, writeCipher},
+	}
+	// TLS attributes are appended only where slapd will accept them. With TLS
+	// disabled it answers err=53 to every one of these on every reconcile,
+	// forever. They are LEFT ALONE rather than given write=false: that branch
+	// DELETES the attribute, which the same server refuses for the same reason,
+	// so it would swap one impossible modify for another.
+	if tlsTunablesWritable(sc) {
+		wants = append(wants,
+			globalTunable{"olcTLSProtocolMin", desiredTLSProtocolMin(sc), true},
+			globalTunable{"olcTLSCipherSuite", cipher, writeCipher},
+		)
 	}
 
+	// One attribute per step, so an attribute slapd refuses cannot stop the
+	// others from converging. Same rule as reconcilePodInfrastructure, one level
+	// down, and for the same reason: these attributes are independent of each
+	// other, and the short-circuit that used to be here is what let a single
+	// rejected TLS setting silently abandon the rest of the list.
+	steps := make([]convergenceStep, 0, len(wants))
 	for _, w := range wants {
-		current, err := readConfigAttr(conn, "cn=config", w.attr)
-		if err != nil {
-			return err
-		}
-		if !w.write {
-			if len(current) == 0 {
-				continue
+		steps = append(steps, convergenceStep{w.attr, func() error {
+			current, err := readConfigAttr(conn, "cn=config", w.attr)
+			if err != nil {
+				return err
 			}
-			log.Info("removing global tunable", "host", host, "attr", w.attr)
+			if !w.write {
+				if len(current) == 0 {
+					return nil
+				}
+				log.Info("removing global tunable", "host", host, "attr", w.attr)
+				modReq := ldap.NewModifyRequest("cn=config", nil)
+				modReq.Delete(w.attr, nil)
+				if err := conn.Modify(modReq); err != nil {
+					return fmt.Errorf("delete %s on cn=config at %s: %w", w.attr, host, err)
+				}
+				return nil
+			}
+			if len(current) == 1 && strings.EqualFold(strings.TrimSpace(current[0]), w.value) {
+				return nil
+			}
+			log.Info("aligning global tunable", "host", host, "attr", w.attr,
+				"from", current, "to", w.value)
 			modReq := ldap.NewModifyRequest("cn=config", nil)
-			modReq.Delete(w.attr, nil)
+			modReq.Replace(w.attr, []string{w.value})
 			if err := conn.Modify(modReq); err != nil {
-				return fmt.Errorf("delete %s on cn=config at %s: %w", w.attr, host, err)
+				return fmt.Errorf("set %s on cn=config at %s: %w", w.attr, host, err)
 			}
-			continue
-		}
-		if len(current) == 1 && strings.EqualFold(strings.TrimSpace(current[0]), w.value) {
-			continue
-		}
-		log.Info("aligning global tunable", "host", host, "attr", w.attr,
-			"from", current, "to", w.value)
-		modReq := ldap.NewModifyRequest("cn=config", nil)
-		modReq.Replace(w.attr, []string{w.value})
-		if err := conn.Modify(modReq); err != nil {
-			return fmt.Errorf("set %s on cn=config at %s: %w", w.attr, host, err)
-		}
+			return nil
+		}})
 	}
-	return nil
+	return runConvergenceSteps(steps...)
 }

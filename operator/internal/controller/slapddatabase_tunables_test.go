@@ -20,6 +20,7 @@ func ptrStr(s string) *string { return &s }
 
 func dbWith(f func(*ldapv1alpha1.SlapdDatabaseSpec)) *ldapv1alpha1.SlapdDatabase {
 	sd := &ldapv1alpha1.SlapdDatabase{}
+	sd.Name = "exdb"
 	sd.Spec.Suffix = "dc=example,dc=org"
 	f(&sd.Spec)
 	return sd
@@ -28,11 +29,20 @@ func dbWith(f func(*ldapv1alpha1.SlapdDatabaseSpec)) *ldapv1alpha1.SlapdDatabase
 // ── 1. Replication identity limits (ADR-024 R7, ADR-020 amendment) ──────────
 
 func TestReplicationLimits(t *testing.T) {
-	got := replicationLimits("dc=example,dc=org")
-	want := `dn.exact="cn=replication,dc=example,dc=org" ` +
-		`time.soft=unlimited time.hard=unlimited size.soft=unlimited size.hard=unlimited`
-	if got != want {
+	got := replicationLimits("exdb", "dc=example,dc=org")
+	want := []string{
+		`dn.exact="cn=repl-exdb,cn=slaptain-auth" ` +
+			`time.soft=unlimited time.hard=unlimited size.soft=unlimited size.hard=unlimited`,
+		`dn.exact="cn=replication,dc=example,dc=org" ` +
+			`time.soft=unlimited time.hard=unlimited size.soft=unlimited size.hard=unlimited`,
+	}
+	if len(got) != len(want) {
 		t.Fatalf("replicationLimits =\n  %q\nwant\n  %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("replicationLimits[%d] =\n  %q\nwant\n  %q", i, got[i], want[i])
+		}
 	}
 }
 
@@ -41,20 +51,37 @@ func TestReplicationLimits(t *testing.T) {
 // whose searches are capped at 500 is a replication cap nobody can see in the
 // ACL.
 func TestReplicationLimitsMatchesACLIdentity(t *testing.T) {
-	const suffix = "o=drift,dc=example,dc=net"
-	acl := accesslogACL(suffix)
-	lim := replicationLimits(suffix)
-	const dn = `dn.exact="cn=replication,` + suffix + `"`
-	if !strings.Contains(acl, dn) {
-		t.Fatalf("accesslogACL(%q) = %q does not name %s", suffix, acl, dn)
-	}
-	if !strings.HasPrefix(lim, dn+" ") {
-		t.Fatalf("replicationLimits(%q) = %q does not select %s", suffix, lim, dn)
+	const (
+		dbName = "driftdb"
+		suffix = "o=drift,dc=example,dc=net"
+	)
+	acl := accesslogACL(dbName, suffix)
+	lims := replicationLimits(dbName, suffix)
+	// Every identity the ACL grants read must also carry a limits exemption,
+	// and vice versa. Since ADR-027 that is both DNs.
+	for _, dn := range []string{
+		`dn.exact="cn=repl-` + dbName + `,cn=slaptain-auth"`,
+		`dn.exact="cn=replication,` + suffix + `"`,
+	} {
+		if !strings.Contains(acl, dn) {
+			t.Errorf("accesslogACL(%q,%q) = %q does not name %s", dbName, suffix, acl, dn)
+		}
+		found := false
+		for _, l := range lims {
+			if strings.HasPrefix(l, dn+" ") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("replicationLimits(%q,%q) = %q does not select %s", dbName, suffix, lims, dn)
+		}
 	}
 }
 
 func TestDesiredLimits(t *testing.T) {
-	repl := replicationLimits("dc=example,dc=org")
+	// Both replication identities, in the order desiredLimits emits them
+	// (ADR-027: node-local first, legacy second — see replicationLimits).
+	repl := replicationLimits("exdb", "dc=example,dc=org")
 	user := `dn.exact="cn=bulk,dc=example,dc=org" size=unlimited`
 
 	cases := []struct {
@@ -64,8 +91,8 @@ func TestDesiredLimits(t *testing.T) {
 		want        []string
 	}{
 		{"no replication, no user limits", nil, false, nil},
-		{"replicating, no user limits", nil, true, []string{repl}},
-		{"replicating, user limits follow ours", []string{user}, true, []string{repl, user}},
+		{"replicating, no user limits", nil, true, repl},
+		{"replicating, user limits follow ours", []string{user}, true, append(append([]string{}, repl...), user)},
 		{"not replicating, user limits stand alone", []string{user}, false, []string{user}},
 	}
 	for _, tc := range cases {
@@ -96,7 +123,7 @@ func TestDesiredLimitsDoesNotMutateSpec(t *testing.T) {
 }
 
 func TestLimitsMatch(t *testing.T) {
-	repl := replicationLimits("dc=example,dc=org")
+	repl := replicationLimits("exdb", "dc=example,dc=org")[0]
 	cases := []struct {
 		name    string
 		current []string

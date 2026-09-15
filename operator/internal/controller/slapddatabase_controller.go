@@ -283,10 +283,10 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// 9b. Project this database's replication identity into the node-local auth
-	//     database on every pod (ADR-027). ADDITIVE at this milestone: the entry
-	//     appears, and nothing consumes it yet — the syncrepl stanzas below still
-	//     bind as cn=replication,<suffix>, the ACL grants still name it, and step
-	//     9 above still maintains it. The cutover is a separate release.
+	//     database on every pod (ADR-027), and learn whether every pod now has
+	//     it. Since the cutover (ADR-027 migration step 3) the syncrepl stanzas
+	//     in step 10 bind as this identity, so this step is no longer additive
+	//     decoration — it is step 10's precondition.
 	//
 	//     Gated exactly like step 9, and for the same reasons: an identity only
 	//     has a purpose where this cluster acts as a provider. restorePending is
@@ -295,24 +295,40 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//     not-yet-restored database lacks; this entry's parent is operator-created
 	//     infrastructure that is always there.
 	//
-	//     Best-effort: unreachable pods and pods whose auth database the
-	//     SlapdCluster controller has not created yet only ask for another pass.
-	//     They never mark a pod unhealthy, so they cannot withhold a syncrepl
-	//     stanza — an additive change must not be able to touch replication.
+	//     A cluster that does not reach this branch (replication disabled, or
+	//     consumer-only) writes no in-cluster stanza that binds as the identity,
+	//     so the zero value must not gate step 10 — it is set converged.
+	authIdentity := authIdentityState{AllRWPodsConverged: true, AllROPodsConverged: true}
 	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() {
-		if r.reconcileAuthIdentity(ctx, sc, sd, configPW) {
+		authIdentity = r.reconcileAuthIdentity(ctx, sc, sd, configPW)
+		if !authIdentity.AllRWPodsConverged || !authIdentity.AllROPodsConverged {
 			pendingWork = true
 		}
 	}
 
 	// 10. Configure replication stanzas if replication is enabled.
+	//
+	//     Withheld entirely while any RW pod is missing its identity entry
+	//     (ADR-027, authIdentityReadyForStanzas): a stanza naming an identity
+	//     its provider does not carry is a dead link, so ordering the two writes
+	//     is the whole of the cutover's safety. Withholding is safe in both
+	//     directions — an upgrading cluster keeps the stanzas it already has,
+	//     which name the still-granted legacy identity and still work; a fresh
+	//     cluster has none yet and only pays a requeue.
 	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() {
-		skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
-		}
-		if skipped {
+		if !authIdentityReadyForStanzas(authIdentity) {
+			log.Info("syncrepl configuration withheld: the node-local replication "+
+				"identity is not yet on every read-write pod (ADR-027); will retry",
+				"database", sd.Name)
 			pendingWork = true
+		} else {
+			skipped, err := r.reconcileReplication(ctx, sc, sd, configPW, healthyPods)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("reconcileReplication: %w", err)
+			}
+			if skipped {
+				pendingWork = true
+			}
 		}
 	}
 
@@ -348,10 +364,11 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	r.setStatus(ctx, sd, phase, appliedPods, failedPods, reason, msg)
 
-	if phase != ldapv1alpha1.DatabasePhaseRunning {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-	return ctrl.Result{}, nil
+	// Unhealthy → the tight retry; healthy → a slow resync floor, so that state
+	// no watch can see — notably a rotated <dbname>-credentials Secret, which is
+	// ADR-027's declared source of truth — is still picked up. See
+	// databaseRequeueAfter for the measurement that prompted it.
+	return ctrl.Result{RequeueAfter: databaseRequeueAfter(phase)}, nil
 }
 
 // ── Credentials ──────────────────────────────────────────────────────────────
@@ -878,13 +895,13 @@ func (r *SlapdDatabaseReconciler) applyACLs(
 	log := logf.FromContext(ctx)
 
 	// Build effective ACL list. When replication is active, prepend a rule
-	// granting the replication bind DN read access to all attributes.
+	// granting the replication bind identities read access to all attributes.
+	// Since ADR-027's cutover that is two DNs in one rule — the node-local
+	// identity the stanzas now bind as, and the legacy one kept granted so a
+	// not-yet-upgraded consumer keeps replicating (replidentity.go).
 	acls := sd.Spec.ACLs
 	if sc.NeedsAccesslog() {
-		replACL := fmt.Sprintf(
-			`to * by dn.exact="cn=replication,%s" read by * break`,
-			sd.Spec.Suffix)
-		acls = append([]string{replACL}, acls...)
+		acls = append([]string{replicationACL(sd.Name, sd.Spec.Suffix)}, acls...)
 	}
 
 	// Read current olcAccess.
@@ -1542,14 +1559,14 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		// provisions /accesslog/<db> from DATABASE_DIRS (ADR-019 R3).
 		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AccesslogDir(sd.Name)})
 		addReq.Attribute("olcDbIndex", planAccesslogIndices(nil))
-		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Spec.Suffix)})
+		addReq.Attribute("olcAccess", []string{accesslogACL(sd.Name, sd.Spec.Suffix)})
 		// A journal with no map size gets back-mdb's ~10 MB, and a full journal
 		// is worse than a full data DB: it fails on write RATE, not data
 		// volume, and delta-syncrepl stops advancing (ADR-024 R1).
 		addReq.Attribute("olcDbMaxSize", []string{strconv.FormatInt(defaultAccesslogMaxSizeBytes, 10)})
 		// And the replication identity must be able to read all of it — the
 		// ACL says who, this says how much (ADR-020 amendment).
-		addReq.Attribute("olcLimits", []string{replicationLimits(sd.Spec.Suffix)})
+		addReq.Attribute("olcLimits", replicationLimits(sd.Name, sd.Spec.Suffix))
 		// The journal inherits the cluster's durability posture — it is written
 		// on the same hot path as the data it journals, so an fsync per record
 		// on one and not the other buys nothing — on its own, longer checkpoint
@@ -1577,7 +1594,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 
 	// Converge the ACL on every reconcile (ADR-020 R5). Covers a log created
 	// by an operator predating ADR-020, and any hand-edit.
-	if err := r.ensureAccesslogACL(ctx, conn, host, dbDN, sd.Spec.Suffix); err != nil {
+	if err := r.ensureAccesslogACL(ctx, conn, host, dbDN, sd.Name, sd.Spec.Suffix); err != nil {
 		return err
 	}
 
@@ -1599,7 +1616,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		return err
 	}
 	if err := r.ensureLimits(ctx, conn, host, dbDN,
-		[]string{replicationLimits(sd.Spec.Suffix)}); err != nil {
+		replicationLimits(sd.Name, sd.Spec.Suffix)); err != nil {
 		return fmt.Errorf("ensure accesslog limits at %s: %w", host, err)
 	}
 
@@ -1726,33 +1743,19 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogIndices(
 	return conn.Modify(modReq)
 }
 
-// accesslogACL returns the single olcAccess rule an accesslog database carries
-// (ADR-020 R1): read for the replication bind DN of the database it journals,
-// nothing for anyone else. dataSuffix is the *data* DB's suffix — the same
-// identity and the same dn.exact form applyACLs grants on the data DB, so the
-// two stay in step by construction.
-//
-// No explicit rootDN grant (ADR-020 R3): the log's olcRootDN is
-// cn=admin,cn=config and a rootDN bypasses ACLs, so the operator's own
-// cn=config work is unaffected. An ACL line restating a bypass is noise later
-// readers mistake for a requirement.
-//
-// Offline paths are unaffected (ADR-020 R4): slapcat/slapadd in backup and
-// restore Jobs read the LMDB files directly and never evaluate ACLs.
-func accesslogACL(dataSuffix string) string {
-	return fmt.Sprintf(`to * by dn.exact="cn=replication,%s" read by * none`, dataSuffix)
-}
+// accesslogACL, and every other spelling of a replication identity, lives in
+// replidentity.go (ADR-027 milestone 2).
 
 // ensureAccesslogACL aligns the accesslog DB's olcAccess to accesslogACL,
 // modifying only when it differs. Same shape as applyACLs on the data DB.
 func (r *SlapdDatabaseReconciler) ensureAccesslogACL(
 	ctx context.Context,
 	conn *ldap.Conn,
-	host, dbDN, dataSuffix string,
+	host, dbDN, dbName, dataSuffix string,
 ) error {
 	log := logf.FromContext(ctx)
 
-	desired := []string{accesslogACL(dataSuffix)}
+	desired := []string{accesslogACL(dbName, dataSuffix)}
 
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dbDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
@@ -2406,7 +2409,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 
 		// Per-database bind identity: derived unless the peer overrides it.
 		bindDN, bindPassword := externalBindIdentity(
-			ep.BindDN, ep.BindPasswordSecretName, password, sd.Spec.Suffix, replPassword)
+			ep.BindDN, ep.BindPasswordSecretName, password, sd.Name, replPassword)
 
 		if len(podAddrs) > 0 {
 			port := ep.Port
@@ -2570,10 +2573,10 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 // (missing keys) keeps the empty credential rather than borrowing the per-DB
 // one — "could not read it" is not "not set", and a silent substitution would
 // mask the broken override; the stanza fails loudly at the consumer instead.
-func externalBindIdentity(overrideBindDN, overrideSecretName, overridePassword, suffix, dbReplPassword string) (string, string) {
+func externalBindIdentity(overrideBindDN, overrideSecretName, overridePassword, dbName, dbReplPassword string) (string, string) {
 	bindDN := overrideBindDN
 	if bindDN == "" {
-		bindDN = "cn=replication," + suffix
+		bindDN = replicationBindDN(dbName)
 	}
 	password := overridePassword
 	if overrideSecretName == "" {
@@ -2692,11 +2695,11 @@ func buildDatabaseSyncRepl(
 			" scope=sub"+
 			" schemachecking=off"+
 			" bindmethod=simple"+
-			" binddn=\"cn=replication,%s\""+
+			" binddn=\"%s\""+
 			" credentials=%s"+
 			"%s%s%s%s"+
 			" retry=\"%s\"",
-			rid, providerURI, suffix, suffix, replPassword,
+			rid, providerURI, suffix, replicationBindDN(dbName), replPassword,
 			deltaSyncOpts, peerTLSOpt, keepaliveOpt, syncreplTimeoutOpts, retryInterval)
 		stanzas = append(stanzas, stanza)
 	}
@@ -2821,11 +2824,11 @@ func buildDatabaseSyncReplRO(
 			" scope=sub"+
 			" schemachecking=off"+
 			" bindmethod=simple"+
-			" binddn=\"cn=replication,%s\""+
+			" binddn=\"%s\""+
 			" credentials=%s"+
 			"%s%s%s%s"+
 			" retry=\"%s\"",
-			rid, providerURI, suffix, suffix, replPassword,
+			rid, providerURI, suffix, replicationBindDN(dbName), replPassword,
 			deltaSyncOpts, peerTLSOpt, keepaliveOpt, syncreplTimeoutOpts, retryInterval)
 		stanzas = append(stanzas, stanza)
 	}

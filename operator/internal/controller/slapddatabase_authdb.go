@@ -57,36 +57,48 @@ var errAuthDBAbsent = errors.New("auth database not present on this pod yet")
 // reconcileAuthIdentity converges this database's replication identity inside
 // the auth database on every pod of the cluster.
 //
-// Best-effort per pod, in the shape of reconcileTunables rather than of
-// reconcilePodDatabase: a pod that cannot be reached, or has no auth database
-// yet, is logged and retried. Deliberately NOT folded into reconcilePodDatabase,
-// where a returned error marks the pod unhealthy and withholds its syncrepl
-// stanzas — at this milestone nothing consumes these entries, so a failure to
-// write one must not be able to touch replication. Returns true when any pod was
-// left incomplete, which the caller folds into its existing pendingWork requeue.
+// Still per-pod best-effort in the shape of reconcileTunables rather than of
+// reconcilePodDatabase — a returned error there marks the pod unhealthy for
+// every other purpose too, which is far more reach than this step needs. What
+// changed at the cutover is what the RESULT is used for.
+//
+// Milestone 1's posture was "a failure here must not be able to touch
+// replication", correct only while nothing bound as the identity (ADR-027
+// amendment, deviation 3). Now that every stanza names it, a pod without the
+// entry rejects every consumer that binds as it, so the result is returned as
+// an authIdentityState and the caller gates stanza writes on it
+// (authIdentityReadyForStanzas in replidentity.go). The failure semantics are
+// therefore inverted deliberately: an incomplete pass no longer merely asks for
+// a requeue, it withholds the configuration that would point at the missing
+// entry.
 //
 // Visits read-only pods too. ADR-027 gives RO pods the database for uniformity
 // and notes only RW pods verify incoming binds; populating both means a pod is
 // never half-provisioned, and an RO fleet that is later promoted needs no
-// backfill. The write is node-local and tiny.
+// backfill. The write is node-local and tiny. Their outcome is reported
+// separately from the RW fleet's because only the RW fleet is a provider — see
+// authIdentityReadyForStanzas for why an RO pod must not be able to gate.
 func (r *SlapdDatabaseReconciler) reconcileAuthIdentity(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	configPW string,
-) bool {
+) authIdentityState {
 	log := logf.FromContext(ctx)
 
 	replPassword, err := r.getDatabaseReplPassword(ctx, sd)
 	if err != nil {
 		log.Info("auth identity convergence skipped: cannot read the replication password",
 			"database", sd.Name, "err", err)
-		return true
+		return authIdentityState{}
 	}
 	if replPassword == "" {
 		// No replication password in the Secret — the same condition under which
-		// ensureReplicationUser declines to create its entry. Nothing to project.
-		return false
+		// ensureReplicationUser declines to create its entry. Nothing to
+		// project, and nothing a stanza could bind as either: report converged
+		// so this cannot wedge a database that simply has no replication
+		// credential (the stanza builder is not reached in that state anyway).
+		return authIdentityState{AllRWPodsConverged: true, AllROPodsConverged: true}
 	}
 
 	replicas := sc.Spec.Replicas
@@ -94,7 +106,10 @@ func (r *SlapdDatabaseReconciler) reconcileAuthIdentity(
 		replicas = 1
 	}
 
-	type target struct{ name, headless string }
+	type target struct {
+		name, headless string
+		readOnly       bool
+	}
 	var targets []target
 	for i := int32(0); i < replicas; i++ {
 		targets = append(targets, target{
@@ -106,10 +121,11 @@ func (r *SlapdDatabaseReconciler) reconcileAuthIdentity(
 		targets = append(targets, target{
 			name:     fmt.Sprintf("%s-readonly-%d", sc.Name, i),
 			headless: sc.Name + "-readonly-headless",
+			readOnly: true,
 		})
 	}
 
-	pending := false
+	state := authIdentityState{AllRWPodsConverged: true, AllROPodsConverged: true}
 	for _, t := range targets {
 		host := fmt.Sprintf("%s.%s.%s.svc.%s", t.name, t.headless, sc.Namespace, r.ClusterDomain)
 		err := r.reconcilePodAuthIdentity(ctx, host, configPW, replPassword, sd)
@@ -119,14 +135,19 @@ func (r *SlapdDatabaseReconciler) reconcileAuthIdentity(
 			// failure — just not this pass (ADR-027 decision 7).
 			log.V(1).Info("auth identity deferred: auth database not created yet",
 				"pod", t.name, "database", sd.Name)
-			pending = true
 		case err != nil:
 			log.Info("auth identity convergence skipped for pod (will retry)",
 				"pod", t.name, "database", sd.Name, "err", err)
-			pending = true
+		default:
+			continue
+		}
+		if t.readOnly {
+			state.AllROPodsConverged = false
+		} else {
+			state.AllRWPodsConverged = false
 		}
 	}
-	return pending
+	return state
 }
 
 // reconcilePodAuthIdentity converges the identity entry on one pod.
