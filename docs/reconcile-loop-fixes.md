@@ -1668,6 +1668,21 @@ shape and does not have it: its create is triggered by `status.lastScheduleTime`
 (its own state, not an artifact), and a lost write there makes it re-fire, which
 the name-idempotent `Create` absorbs — the opposite of absorbing.
 
+**Measured on t3e 2026-09-15** (single-site, backup gate on; this is status
+bookkeeping, not the replication path, so no mesh cycle): full suite 74/74 green
+with the e2e assertion now covering both conditions, and the repair path itself
+exercised live — the record was deleted from a `SlapdBackup` whose Job existed,
+and the operator re-recorded it within a second, logging `recording backup
+source circumstances late` and stamping the caveat into the condition message.
+
+One benign side effect seen in the same run: a stale-cache double reconcile (the
+second pass reads a `SlapdBackup` older than the first pass's status apply, ADR-001)
+can make the operator record once more and mark the record late even though
+nothing was lost. It costs one extra LDAP probe, and the caveat it writes is
+*true* — the Job does exist by then, so the vector is no longer a strict lower
+bound. Deciding from a live (uncached) read would avoid the extra probe; not done,
+because the cost is one probe and the recorded statement is honest either way.
+
 **Lesson:** "record this unconditionally" is a convergence requirement, and a
 convergence step must be keyed on its own absence. The moment a record's only
 writer sits behind a one-shot branch, best-effort error handling on the write turns
