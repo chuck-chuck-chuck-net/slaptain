@@ -1594,3 +1594,83 @@ just that authentication still works. Authentication is the weaker check by
 construction: it succeeds for both the correct encoding and several incorrect
 ones. Anything that later parses the stored value — a backup, a preflight, a
 migration — sees the difference that the bind hid.
+
+---
+
+## 2026-09-15: a backup's source record was triggered by the Job, so one lost status write lost it forever
+
+**Symptom:** On a multi-site run, `tests/e2e/backup_test.go` failed its weakest
+assertion — "a backup must always carry a SourceConverged condition, whatever it
+says" — on a `SlapdBackup` in phase `Completed`. The condition was nil. A sibling
+backup in the same namespace carried it, with a sensible reason and message.
+
+**Root cause:** `recordSource` (`operator/internal/controller/slapdbackup_controller.go`)
+writes the whole source record that ADR-014's 2026-09-12 amendment says is written
+*unconditionally*: `status.sourcePod`, `status.sourceContextCSN`, and the
+`SourceConverged` (ADR-014) and `SourceSuffixHealthy` (ADR-025) conditions. It was
+called from exactly one place: inside `case apierrors.IsNotFound(err):` on the
+**backup Job's** `Get` — the branch taken only before the Job exists.
+
+That is ADR-026 R3 verbatim: the trigger was a sibling artifact, not the condition
+being repaired, and it made the state absorbing. Three live ways to lose the record
+and never get it back, all needing nothing more than one unlucky pass:
+
+1. `patchStatus` **logs** its `Apply` error and returns — a conflict or a transient
+   API failure on the one apply that carries the record loses it silently, and the
+   Job it just created is there forever after;
+2. an operator restart between `Create(job)` and that apply;
+3. the deliberately tolerated `IsAlreadyExists` on `Create`, which continues past
+   a Job that already existed.
+
+The condition builders were not at fault, and that is what made the sibling backup
+look like a contradiction rather than a clue: `sourceConvergedCondition` sets a
+`Type` on every path including a `NoConvergenceSignal` fallback, so the difference
+between the two backups was never in the shape of the data — it was in whether the
+one pass that could write it succeeded.
+
+**Fix:** `shouldRecordSourceCircumstances(status)` — record iff the record is
+absent (either condition missing). The recording is deliberately *not* free
+(bind, ADR-025 suffix probe, `contextCSN` read), and it does not repeat: the
+record is written and persisted as one status apply, `patchStatus` sends the whole
+status read at the top of the reconcile, so once the apply lands the predicate is
+false for the rest of the backup's life. It fires a second time only when the
+first record never reached the API server.
+
+`status.sourcePod` keeps its own unconditional write in `Reconcile` (it is a pure
+function of the cluster and needs no I/O) and is no longer written twice.
+
+**The guarantee that changes, stated rather than weakened:** recorded before the
+Job is created, `status.sourceContextCSN` is a **lower bound** — everything in the
+vector is certainly in the dump. Recorded on the repair path, the source kept
+replicating while `slapcat` ran, so the vector is the source's position *at
+recording time* and may name changes the artifact does not contain. The
+`SourceConverged` message says exactly that when the record is late
+(`lateRecordingCaveat`); the status and reason vocabulary is unchanged, because it
+is a published contract.
+
+**Why it was hard to spot:** the failure is state-dependent, not input-dependent.
+Two backups of the same database, same operator, same cluster, one green and one
+red — so the instinct is to look for the input that differed, and there is none.
+Nothing errors on the path that loses the record: `patchStatus` is best-effort by
+design (a backup must never fail because its bookkeeping did), which is correct,
+and is also what makes the loss silent. And the trigger read as a *correctness*
+measure — "record it before the artifact is produced, so the CSN is a lower bound"
+— which is a true and useful property; it just is not a reason to make it the only
+opportunity.
+
+**Regresses / not covered:** a backup that has *already* reached `Completed` or
+`Failed` with the record lost keeps it lost. The terminal early return (ADR-018
+Job reap) precedes the recording, deliberately: the source pod has moved on, so a
+record written then would describe a state the artifact never had. The self-heal
+window is the backup's non-terminal lifetime, and the 10 s requeue while the Job
+runs gives it several passes. `SlapdScheduledBackup` was audited for the same
+shape and does not have it: its create is triggered by `status.lastScheduleTime`
+(its own state, not an artifact), and a lost write there makes it re-fire, which
+the name-idempotent `Create` absorbs — the opposite of absorbing.
+
+**Lesson:** "record this unconditionally" is a convergence requirement, and a
+convergence step must be keyed on its own absence. The moment a record's only
+writer sits behind a one-shot branch, best-effort error handling on the write turns
+into permanent data loss — and the branch that looked like it was protecting a
+property (the CSN lower bound) was the thing that made the record unreachable. When
+a step may only run once, say what happens if that once fails.

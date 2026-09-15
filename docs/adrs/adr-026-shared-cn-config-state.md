@@ -80,7 +80,11 @@ the same pass may delete. A trigger keyed on an artifact another path can remove
 turns a retryable partial state into an absorbing one: the moment the trigger is
 gone, the remainder is unreachable and no amount of reconciling fixes it.
 
-**Corollary — R2 and R3 are forward-looking.** With the ADR-019 R8 migration
+**Corollary — R2 and R3 are forward-looking.**
+*⚠ Corrected by the 2026-09-15 amendment at the bottom: the R3 half of this claim
+was false when it was written — the SlapdBackup controller was violating R3 in
+production. The R1/R2 audit below stands.*
+With the ADR-019 R8 migration
 removed there is **no remaining path** on which a `SlapdDatabase` reconcile
 destroys shared state on foreign evidence. They are guards on future code, not a
 description of a live hazard. The audit that establishes that:
@@ -142,3 +146,49 @@ operator ships (ADR-021).
 - `servers/slapd/slap-config.h` — `#define CONFIG_ONLINE_ADD(ca) (!((ca)->lineno))`
 - `slapd-config(5)` — `olcDatabase={N}` ordering semantics:
   <https://www.openldap.org/software/man.cgi?query=slapd-config>
+
+## Amendment (2026-09-15): the corollary was wrong — R3 had a live violation, in the backup controller
+
+**Status:** Accepted. Corrects the Corollary above; changes no rule. R1 and R2
+are untouched.
+
+The Corollary claims R2 and R3 are "forward-looking" guards with "no remaining
+path" violating them. That was an audit of `SlapdDatabase` reconciles writing
+`cn=config`, which is the scope this ADR was written from — and it is the wrong
+scope for R3. **R2 is about shared `cn=config` state; R3 is about triggers, and
+a trigger keyed on a sibling artifact is a defect wherever a convergence step
+lives.** One shipped controller was doing exactly that when this ADR was
+accepted.
+
+`SlapdBackupReconciler` recorded a backup's source circumstances — `sourcePod`,
+`sourceContextCSN`, and the `SourceConverged`/`SourceSuffixHealthy` conditions
+that ADR-014's 2026-09-12 amendment says are recorded *unconditionally* — inside
+the branch taken only when the backup **Job does not exist yet**. The Job is the
+sibling artifact. Any pass that created the Job but lost the status write
+carrying the record (`patchStatus` logs its `Apply` error and returns; an
+operator restart between `Create` and the write; the deliberately tolerated
+`IsAlreadyExists`) left the trigger permanently gone and the record permanently
+unreachable — R3's "absorbing state" in full. Measured on a live mesh
+2026-09-15: a `Completed` `SlapdBackup` with a nil `SourceConverged` condition,
+red against the e2e assertion that a backup always carries one, while a sibling
+backup in the same namespace carried it fine.
+
+The fix is R3 applied verbatim: the trigger is now the record's own absence
+(`shouldRecordSourceCircumstances`), which is also what bounds the cost — the
+recording does live LDAP work, and the record is written and persisted as one
+status apply, so it fires at most once per backup and a second time only when
+the first record never reached the API server. Full mechanism in
+`docs/reconcile-loop-fixes.md` (2026-09-15).
+
+Two things this corrects for the next reader:
+
+- **R3's scope is every convergence step in the operator, not just
+  `cn=config`.** "Convergence step" includes recording a fact that a contract
+  says is recorded unconditionally: if the record can go missing, writing it is
+  a repair, and repairs are triggered by what they repair.
+- **An audit's conclusion is only as wide as the code it read.** The table above
+  is a correct audit of `SlapdDatabase` → `cn=config` writes. Stating "no
+  remaining path" from it over-claimed, in the one direction that let a live
+  violation sit under an accepted rule for a day. The R1/R2 audit stands; the
+  R3 claim is withdrawn, and R3 is a description of a hazard that has been live
+  at least once.
