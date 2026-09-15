@@ -277,3 +277,46 @@ Decisions:
 equality on an idle database still means "everything replicable has replicated",
 not "the link works", and the check remains consumer-side and one-directional —
 mesh health is still only readable by reading every site's CR.
+
+---
+
+## Amendment (2026-09-15): the bind identity moves, and rotation becomes real
+
+ADR-027 relocates the replication bind identity out of the replicated data tree
+and into a per-pod authentication database. Two things this ADR asserts about
+credentials change with it.
+
+**1. The monitoring bind names a different DN — and tries two.** CSN queries
+(and the backup controller's source-CSN read and ADR-025 suffix probe, which
+reuse the same identity) now bind as `cn=repl-<database>,cn=slaptain-auth`,
+falling back to `cn=replication,<suffix>` when that bind is rejected. The
+fallback is not caution for its own sake: the very same query runs against
+**cross-site peers**, and a peer still running a pre-ADR-027 operator has no
+node-local entry to bind as. Without it every such peer would read `Unreachable`
+for the whole length of the migration window — a monitoring blackout precisely
+when the mesh is mid-change and being watched. It costs one extra dial, only on
+a peer whose first bind already failed, and it disappears with migration step 4.
+
+**2. "Create-only, never rotates" is no longer true, and "copy the Secret
+between clusters" needs a sharper reading.** The Secret must still be uniform
+mesh-wide — every consumer presents it to every provider, and that is inherent
+to a shared simple-bind identity. What changed is the verifier copy: it is now a
+node-local projection with exactly one writer, converged from the Secret on
+every reconcile, so changing the Secret changes what the mesh accepts.
+
+Measured on a three-RW + one-RO single-site lab, 2026-09-15: patching
+`replication-password` in `example-db-credentials` converged the projection on
+**all four pods within 52 s**, the old password was then rejected with `err=49`,
+and a write on pod-0 reached both peers and the read-only consumer immediately
+after. That capability did not exist before ADR-027 at any price.
+
+**The constraint this uncovers — do not rotate during the migration window.**
+`cn=replication,<suffix>` is still written create-only (deliberately: converging
+it is the shared-state write ADR-026 R2 forbids). So a rotation updates the
+node-local projection and leaves the legacy entry holding the *old* password —
+reproduced live in the same session, the legacy bind failing with `err=49` while
+the node-local one succeeded. Every already-upgraded consumer is unaffected,
+because it binds as the node-local identity; a **not-yet-upgraded** consumer is
+locked out until the legacy entry is repaired by hand. Rotation is therefore an
+operation for a mesh where every site has completed ADR-027 migration step 3 —
+or one that repairs `cn=replication,<suffix>` in the same window.
