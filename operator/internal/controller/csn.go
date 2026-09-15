@@ -18,6 +18,7 @@ package controller
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -76,18 +77,32 @@ func doCSNQuery(uri string, useTLS bool, suffix string, bindDNs []string, bindPW
 	conn.SetTimeout(ldapRequestTimeout)
 
 	if bindPW != "" {
-		var bindErr error
+		// Report EVERY candidate that was tried, not just the last one to fail.
+		//
+		// A message naming only the final candidate points a reader at the wrong
+		// credential during exactly the window when someone is most likely to be
+		// reading it: the migration window, where "bind cn=replication,… err=49"
+		// looks like a legacy-credential problem when the real cause is that the
+		// remote pod's node-local identity has not been written yet. That cost
+		// real debugging time during the mesh validation, and it is the same
+		// misleading-evidence class the csn-convergence verdicts were fixed for.
+		var bindErrs []error
+		bound := false
 		for _, dn := range bindDNs {
 			if dn == "" {
 				continue
 			}
-			if bindErr = conn.Bind(dn, bindPW); bindErr == nil {
+			err := conn.Bind(dn, bindPW)
+			if err == nil {
+				bound = true
 				break
 			}
-			bindErr = fmt.Errorf("bind %s on %s: %w", dn, uri, bindErr)
+			bindErrs = append(bindErrs, fmt.Errorf("as %s: %w", dn, err))
 		}
-		if bindErr != nil {
-			return nil, bindErr
+		if !bound && len(bindErrs) > 0 {
+			return nil, fmt.Errorf("bind on %s failed for all %d candidate identities "+
+				"(node-local first, legacy second — ADR-027): %w",
+				uri, len(bindErrs), errors.Join(bindErrs...))
 		}
 	}
 
