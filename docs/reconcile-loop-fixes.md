@@ -1689,3 +1689,150 @@ writer sits behind a one-shot branch, best-effort error handling on the write tu
 into permanent data loss — and the branch that looked like it was protecting a
 property (the CSN lower bound) was the thing that made the record unreachable. When
 a step may only run once, say what happens if that once fails.
+
+---
+
+## 2026-09-16: one operator `cn=config` write froze a whole slapd for 874 s — mechanism confirmed, trigger NOT reproduced
+
+**Status: recorded, not fixed.** The freeze is measured and its mechanism is
+source-confirmed, but four targeted attempts failed to reproduce it. Read the
+"What does NOT arm it" section before theorising — it is the most reusable part
+of this entry.
+
+**Symptom:** a three-site e2e run went red in
+`resilience [It] data persists after simultaneous restart of all pods`, which
+deletes every RW pod at the local site and then waits up to 480 s for a peer
+site to repoint its syncrepl stanzas at the new pod IPs (ADR-016 names pod IPs,
+so a replacement invalidates every peer's stanzas). The probe entry never
+arrived. What made it confusing: the site that failed to repoint was **not** the
+site whose pods were replaced, and nothing there looked wrong — its
+`SlapdCluster` read `phase=Running`, `3/3` ready, throughout.
+
+**What was actually happening.** One pod at each of the two *observing* sites
+had stopped serving LDAP entirely:
+
+| pod | frozen for | while |
+|---|---|---|
+| site B, ordinal 0 | **874.016345 s** | `Ready`, 0 restarts, pod IP unchanged |
+| site C, ordinal 0 | **864.310254 s** | idem |
+
+It is one operation. On waking, the pod's first log line is the completion of
+the operator's own stanza rewrite, with the duration sitting in plain sight:
+
+    conn=NNNN op=3 MOD dn="olcDatabase={N}mdb,cn=config"  attr=olcSyncRepl
+    conn=NNNN op=3 RESULT tag=103 err=0 qtime=0.000019 etime=874.016345
+
+For the 14 minutes in between, the container emitted **zero** log lines — then
+3823 lines stamped inside a single second when it resumed. slapd's own
+timestamps on those lines are the resume instant, not the stall, so they were
+never buffered: the server was simply not running anything.
+
+**Root cause (the mechanism, source-confirmed at 2.7.1).** A write to
+`cn=config` pauses the entire server until every other threadpool task is idle:
+
+- `config_back_modify` → `slap_pause_server()` (`servers/slapd/daemon.c:3503`)
+- → `ldap_pvt_thread_pool_pause()`, whose own contract is the point
+  (`libraries/libldap/tpool.c:1304-1307`):
+  *"Pause the pool. The calling task must be active, not idle. Return when all
+  other tasks are paused or idle."*
+
+So any `cn=config` write inherits the worst-case blocking time of whatever
+threadpool task happens to be stuck, as a **whole-server freeze**. This is the
+same mechanism as the `timeout=300` entry of 2026-09-13; that entry fixed the
+thing that made *every* config write block, and this one is what remains when a
+task blocks for its own reasons.
+
+The pairing is not bad luck. Under ADR-016 the stanzas name pod IPs, so the
+operator writes `cn=config` **precisely when a peer has just become
+unreachable** — the write and the blocked-peer condition are correlated by
+construction, not independent events that occasionally coincide.
+
+**Why nothing noticed.** The slapd container has no `readinessProbe` and no
+`livenessProbe`, so "Ready" means only that the process exists. A frozen pod
+stays in the Service endpoints, keeps `readyReplicas` at full, and leaves
+`status.phase=Running`. The only party that saw it was the site's own operator,
+which logged 106 consecutive bind timeouts against that pod — and those went
+nowhere, because a skipped per-pod convergence is an INFO line.
+
+**Blast radius — why one wedged pod cost the whole site its replication.** The
+ADR-027 ordering gate (`slapddatabase_controller.go:302-320`) withholds syncrepl
+configuration while *any* RW pod is missing its node-local identity entry. A
+frozen pod cannot answer the identity probe, so the gate withheld **every
+stanza for every database on every pod at that site** for as long as the freeze
+lasted. That is why the peer never repointed and the spec failed: not the freeze
+itself, but the gate's all-or-nothing scope multiplying it.
+
+**What does NOT arm it — four negative reproductions (2026-09-16, three-site lab).**
+All four left the config write completing in milliseconds:
+
+| trigger | result |
+|---|---|
+| delete all RW pods of a peer site, let them be recreated | stanza rewrite, `etime=0.007` |
+| remove a peer pod permanently (`spec.replicas` 3 → 2) | no freeze, 6 min observation |
+| blackhole cross-site ingress (NetworkPolicy, no RST), then force a config write | `etime=0.610943` and `etime=0.000970` |
+| same, but cut *during* a 6000-entry refresh so a transfer was in flight | no freeze; longest silence 50 s, which is the retry cycle |
+
+The common factor in all four is that the consumers were **idle**, and an idle
+consumer in persist phase polls with `tout={0,0}` and yields — it holds no
+threadpool task, so `pool_pause` has nothing to wait for. Ordinary peer loss,
+including the routine pod replacement of ADR-016, therefore does **not** arm
+this. The state that does arm it is a consumer blocked *mid-operation* when its
+peer goes silent — mid-refresh with a response in flight, or the documented
+residual of the `timeout=` entry (`ldap_sasl_bind_s` past a completed
+handshake). Naming that state is as far as the evidence goes; producing it
+deliberately is unsolved.
+
+**Two measurements taken along the way, both worth keeping:**
+
+- *We are not causing this by writing `cn=config` too often.* A steady site
+  logged **4** config MODs in 47 minutes (32 239 log lines), every one of them
+  attributable to a deliberate spec change made during the investigation.
+  Convergence is compare-then-write (`syncreplMatch`, then `Replace` only on
+  divergence), so a quiet cluster issues none at all.
+- *The bound that matters is the keepalive triple, and the fixture disagrees
+  with the product.* `idle:probes:interval` maps to `TCP_KEEPIDLE`/`KEEPCNT`/
+  `KEEPINTVL`, so the worst case a consumer can stay stuck on a silent
+  established flow is `idle + probes × interval`: the operator default
+  `240:3:30` gives **330 s**, while `tests/values.slapd-persistent.yaml` has
+  overridden it to `300:10:60` = **900 s** since the file was created. The
+  observed 874 s and 864 s sit just under the fixture's bound and well over the
+  product's. Suggestive, and the reason the fixture is being aligned — but with
+  the trigger unreproduced this remains arithmetic, not a demonstrated
+  relationship.
+
+**Fix — what is being changed, and what is deliberately not:**
+
+1. `tests/values.slapd-persistent.yaml`: drop the `300:10:60` override. Justified
+   on its own terms — it contradicts `docs/TUNING.md`, which keeps the idle time
+   under the five-minute mark that firewalls and load balancers cut at.
+2. A `readinessProbe` on the slapd container (a real rootDSE query, generous
+   `failureThreshold` so a normal sub-second pause never flaps endpoints, and
+   **no** liveness probe — restarting a pod mid-freeze would invalidate every
+   peer's addresses again under ADR-016).
+3. Narrow the ADR-027 gate to withhold only the stanzas *naming* an unconverged
+   pod, rather than every stanza at the site. Needs an ADR-027 amendment.
+4. The liveness assertion class `docs/BACKLOG.md` already asks for: parse `etime`
+   and all-pods-silence during convergence, so the next occurrence is captured
+   with the evidence this investigation lacked.
+
+**Deliberately NOT changed: the shipped `keepalive` default.** Shortening it to
+e.g. `60:3:10` (90 s) was proposed and withdrawn. Its entire justification was
+the 900 s ↔ 874 s arithmetic above, and four attempts failed to demonstrate that
+relationship. Changing a shipped replication default on unreproduced arithmetic
+is the "plausible-sounding theory" this project's Fix Discipline exists to
+refuse. Revisit when the trigger is reproducible.
+
+**Not covered:** the triggering state is named but not reproducible, so there is
+no regression test for the freeze itself. Items 2 and 3 above are testable on
+their own terms and do not depend on it.
+
+**Lesson.** The measurement was `etime`, and it was sitting in the logs the whole
+time — exactly as it was for the `timeout=300` freeze three days earlier, where a
+human noticing silence found what generous `Eventually` budgets could not. A
+suite that only asserts end states cannot see a self-resolving freeze; it sees a
+slow success. Second lesson, from the investigation rather than the defect: three
+of the four reproductions failed because the *instrument* was wrong, not the
+theory — `kubectl logs --since` silently reads only the current file on a pod
+that rotates every 90 s, and an `ipBlock`-only NetworkPolicy denies in-cluster
+pod traffic, because Cilium matches pod sources by identity and not by CIDR. Both
+produced confident, wrong readings before being caught.

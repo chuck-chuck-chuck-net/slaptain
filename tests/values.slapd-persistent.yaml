@@ -13,4 +13,9 @@ replicas: 3
 readReplicas: 1
 replication:
   enabled: true
-  keepalive: "300:10:60"
+  # keepalive is deliberately UNSET: the fixture exercises the operator default
+  # (240:3:30 = 330 s worst-case detection on a silently dropped flow). The
+  # previous "300:10:60" override contradicted docs/TUNING.md — it put the idle
+  # time AT the five-minute mark firewalls and load balancers cut at, and
+  # stretched the bound to 900 s, three times what the stanza hardening of
+  # 2026-09-13 assumed. See the 2026-09-16 reconcile-loop-fixes entry.
