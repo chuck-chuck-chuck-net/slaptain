@@ -482,6 +482,94 @@ whether the operator should set an explicit strategy or the docs should simply
 never use `rollout status` as a readiness gate (the demo now waits on
 `status.readyReplicas`, which cannot lie).
 
+### 2026-09-16: `readyReplicas` *can* lie, and did — the slapd container has no probes
+
+The parenthesis above is wrong, and the correction is the actionable part of
+this entry. The slapd container defines **no `readinessProbe` and no
+`livenessProbe`**, so "Ready" means only that the process exists. A slapd frozen
+for 874 s — accepting TCP, answering nothing, logging nothing — held
+`readyReplicas: 3`, `phase=Running` and its place in the Service endpoints for
+the entire freeze (see the 2026-09-16 ledger entry). Every wait built on
+`readyReplicas`, in the demo and in e2e, inherits that blindness.
+
+**Wanted:** a `readinessProbe` doing a real rootDSE query, with a
+`failureThreshold` sized well above a normal sub-second `cn=config` pause so
+legitimate config writes never flap pods out of the Service, and **no**
+liveness probe — restarting a pod mid-freeze would invalidate every peer's
+syncrepl addresses again under ADR-016, turning a recoverable stall into a
+topology event. Sizing that threshold is the whole design question and wants
+measured pause durations, not a guess.
+
+---
+
+## The `cn=config` pause freeze: mechanism known, trigger unreproduced
+
+**What:** any write to `cn=config` pauses the whole server until every other
+threadpool task is idle (`slap_pause_server` → `ldap_pvt_thread_pool_pause`,
+`libraries/libldap/tpool.c:1304-1307`). A task blocked on a silent peer
+therefore freezes the entire slapd for its own duration, and the operator
+issues those writes *precisely* when a peer has become unreachable, because
+ADR-016 stanzas name pod IPs. Measured once, on two sites in the same window:
+**874.016 s** and **864.310 s**, each ending with the completion of the
+operator's own `MOD olcSyncRepl`.
+
+**What is NOT known:** what held a task that long. Four targeted reproductions
+on a three-site lab all completed their config write in milliseconds — graceful
+mass pod delete, permanent peer removal, a no-RST cross-site blackhole, and the
+same blackhole applied mid-refresh with a 6000-entry transfer in flight. They
+share one property: the consumers were idle, and an idle persist-phase consumer
+polls with `tout={0,0}` and yields, holding no task. So routine pod churn does
+not arm this. The state that does is a consumer blocked *mid-operation* when its
+peer goes silent; producing that deliberately is the open problem.
+
+**Why it matters anyway:** while it lasts, the pod serves nothing, Kubernetes
+cannot see it (no probes), and the ADR-027 gate turns it into a site-wide
+replication stall (next entry).
+
+**How to pick it up — instrument before theorising.** Land the liveness
+assertion class first ("e2e needs a liveness assertion class" above): parse
+`etime` from slapd stats logs and assert no all-pods-silent gap during
+convergence. The next occurrence then arrives with evidence instead of
+inference. Two instrument traps cost three wrong readings during the original
+investigation and will cost them again: `kubectl logs --since` reads **only the
+current file**, and these pods rotate every ~90 s under `logLevel: 16640`
+(use the node's `/var/log/pods/.../0.log*`); and an `ipBlock`-only NetworkPolicy
+denies **in-cluster** pod traffic too, because Cilium matches pod sources by
+identity rather than CIDR (add a `namespaceSelector: {}` allow rule).
+
+**Explicitly rejected until it is reproducible:** shortening the shipped
+`keepalive` default from `240:3:30`. The 874 s observation sits just under the
+e2e fixture's non-default `300:10:60` bound (900 s), which is suggestive
+arithmetic and nothing more. Full reasoning in the ledger entry.
+
+---
+
+## ADR-027's identity gate is all-or-nothing per site
+
+**What:** `slapddatabase_controller.go:302-320` withholds syncrepl configuration
+while *any* RW pod is missing its node-local identity entry. The invariant is
+sound — point a consumer at a provider lacking the entry and the bind DN does
+not resolve there, so it fails with `err=49` forever — but the scope is wider
+than the invariant needs.
+
+**What it cost, measured:** one wedged pod (unable to answer the identity probe)
+withheld **every stanza for every database on every pod at that site**, for the
+whole 874 s freeze. The site therefore never repointed its external stanzas at a
+peer's new pod IPs, and the e2e cross-site recovery spec failed at its 480 s
+budget. The freeze was the cause; the gate's scope is what turned one sick pod
+into a site-wide replication stall.
+
+**Wanted:** withhold only the stanzas that *name* an unconverged pod. A stanza
+pointing at a healthy provider is not made unsafe by a third pod's missing
+entry. That preserves the ordering guarantee the cutover rests on while
+removing the amplification.
+
+**Note it is a guard narrowing, not a bug fix:** the gate does what ADR-027 says
+it should. Changing it needs an ADR-027 amendment recording why the narrower
+scope still satisfies the cutover's ordering property, and what an operator
+should see instead (today the withholding is an INFO line and nothing surfaces
+on the CR — arguably the worse half of this entry).
+
 ---
 
 ## Designed, deferred: opt-in `SlapdBackup.spec.requireConverged` with a bounded wait
