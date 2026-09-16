@@ -721,7 +721,7 @@ shape.
 
 ---
 
-## The replication credential lives in two stores with no reconciliation between them
+## ~~The replication credential lives in two stores with no reconciliation between them~~ — DONE (2026-09-15, ADR-027)
 
 **What:** `cn=replication,<suffix>`'s password exists as (a) a per-site k8s
 Secret (`<dbname>-credentials`, create-only, ADR-008) and (b) a `userPassword`
@@ -771,6 +771,35 @@ defined than when this was written:
   site, which pod, on what authority — before it can be safe. That is precisely
   the design pass this item defers, and R2 is now the frame for it: report and
   stall is the cheap correct default; repairing needs ownership.
+
+---
+
+### 2026-09-15: closed by removing the store, not by reconciling the two
+
+ADR-027 moved the replication identity to `cn=repl-<db>,cn=slaptain-auth` in a
+per-pod, never-replicated auth database on the data PVC, converged from the
+Secret on every reconcile. That kills this item at its cause rather than
+answering it: the duplication is inherent to simple bind, but the verifier copy
+is no longer in the *replicated customer tree*, so it is no longer shared
+multi-writer state — no single-writer rule is needed, no drift detector, and
+rotation is supported (measured 52 s across four pods; worst case is the
+SlapdDatabase resync floor of 5 minutes).
+
+The "detect first" plan was therefore overtaken, not executed. The two live
+findings that motivated this entry — the 19-day dead db2 link and the
+password-stripped copy — are both impossible in the new store: it is node-local,
+so nothing replicates a foreign or ACL-mangled copy into it, and the entry is
+converged rather than create-if-missing.
+
+**What remains, and it is not this item:** the legacy `cn=replication,<suffix>`
+entry and its grants are deliberately retained for the staged-upgrade window
+(ADR-027 migration steps 2+3). Dropping the grants is step 4, a separate
+release; deleting the entry itself is a documented manual cleanup, because it is
+a write into replicated state the operator does not own (ADR-026 R2). Two
+window caveats are recorded in CLAUDE.md and ADR-027: the migration window is
+one-directional (a NEW consumer against an OLD provider fails — pin
+`externalPeers[].bindDN` meanwhile), and rotating the Secret mid-window strands
+the create-only legacy entry.
 
 ---
 
