@@ -133,9 +133,20 @@ multi-site deployment, exactly **one** site's `SlapdDatabase` carries
 `spec.seed`; every other site deploys the same CR *without* `seed` and
 receives the DIT via syncrepl — the same cold-start delivery ADR-014 relies on
 for a fresh peer, and the mesh-wide form of ADR-012's "replication propagates
-the seed from pod-0 to peers". `tests/e2e.sh` applies fixtures seed-stripped
-to every context after the first (`strip_seed_block`); the founder rule is
-documented in `docs/BOOTSTRAP.md`.
+the seed from pod-0 to peers". The founder rule is documented in
+`docs/BOOTSTRAP.md`.
+
+*Amended 2026-09-17 (ADR-028 §3, MESH-PLAN Phase 2):* the decision stands
+unchanged — exactly one site applies the seed — but **how it is expressed
+changed**. Originally every non-founder deployed the CR *without* `spec.seed`,
+and `tests/e2e.sh` produced that by stripping the block per context
+(`strip_seed_block`). That made a resource which must be byte-identical across
+sites differ per site, and it left a hard correctness rule living in a
+deployment procedure. Now every site deploys the same CR and `spec.seed.site`
+names the founder; each operator compares it against its own `SITE_NAME`
+identity. The belt below is unchanged and still fires: the site gate acts on
+what the spec *declares*, the belt on what the directory shows already
+*happened*.
 
 **2. Operator belt: withhold-create on positive evidence of a foreign
 creator.** Before applying seed, the SlapdDatabase controller reads the suffix

@@ -412,6 +412,30 @@ configure_multus_external_peers() {
     configure_multus_external_peers_static
 }
 
+# ── Site identity (ADR-028) ──────────────────────────────────────────────────
+
+# Every operator needs to know which site of the mesh it runs at: it is the one
+# per-site fact in the system (ADR-028 §4), and `spec.seed.site` is decided by
+# comparing the declared founder against it.
+#
+# The names are LOGICAL and POSITIONAL — the Nth context is `site-N` — not the
+# kube context names. Two reasons:
+#   * the fixtures in tests/resources/ are committed to a public repository and
+#     must name the founder, so the name has to be neutral (CLAUDE.md
+#     "References"); a lab's context names are not.
+#   * it keeps the fixture independent of which lab it runs against: any set of
+#     contexts, in any naming scheme, yields site-1..site-N.
+# Consequence worth stating: the founder is whichever context is listed FIRST,
+# exactly as it was when the seed was stripped from every context after the
+# first — the rule moved from the procedure into the spec, it did not change.
+assign_site_names() {
+    local idx=1 ctx
+    for ctx in "${CONTEXTS[@]}"; do
+        SITE_NAMES[$ctx]="site-${idx}"
+        ((idx++)) || true
+    done
+}
+
 # ── Discovery ────────────────────────────────────────────────────────────────
 
 discover_node_ips() {
@@ -574,7 +598,7 @@ setup_foundation() {
                 slapd-tls
         )
 
-        log "[$ctx] Installing operator (tag: $GIT_TAG)..."
+        log "[$ctx] Installing operator (tag: $GIT_TAG, site: ${SITE_NAMES[$ctx]})..."
         local operator_multus_sets=()
         if [[ -n "$MULTUS_NETWORK" && -z "$STATIC_PODADDRESSES" ]]; then
             operator_multus_sets=(--set "multus.network=$MULTUS_NETWORK")
@@ -583,6 +607,7 @@ setup_foundation() {
             --namespace "$NAMESPACE" --create-namespace \
             --set "image.repository=$REGISTRY/$PROJECT/operator" \
             --set "image.tag=$GIT_TAG" \
+            --set "siteName=${SITE_NAMES[$ctx]}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${operator_multus_sets[@]}"
     done
@@ -793,25 +818,6 @@ wait_for_clusters_ready() {
     done
 }
 
-# strip_seed_block removes the 2-space-indented `seed:` mapping (and everything
-# nested under it) from a SlapdDatabase manifest on stdin. Founder-only seeding
-# (ADR-025): in a multi-site mesh exactly ONE site may carry spec.seed — every
-# site seeding the same suffix independently creates same-DN entries with fresh
-# entryUUIDs, and slapd's conflict resolution can demote a loser pod's suffix
-# entry to a permanent hidden glue. Peer sites receive the DIT via replication.
-strip_seed_block() {
-    awk '
-        {
-            if (skip) {
-                if ($0 ~ /^[^ ]/ || $0 ~ /^  [^ ]/) skip = 0
-                else next
-            }
-            if ($0 ~ /^  seed:[ \t]*$/) { skip = 1; next }
-            print
-        }
-    '
-}
-
 apply_test_resources() {
     # Apply SlapdDatabase + SlapdSchema BEFORE the SlapdCluster helm install
     # (see do_setup ordering). That way the SlapdCluster controller's first
@@ -823,25 +829,22 @@ apply_test_resources() {
     # restart ADR-013 accepts. Documented in
     # docs/BUG-ANALYSIS-database-dirs-rolling-restart.md (option A).
     #
-    # Founder-only seeding (ADR-025): only the FIRST context applies the
-    # fixtures verbatim (seed included); every other site gets spec.seed
-    # stripped and receives the DIT via cross-site replication instead. The
-    # operator additionally withholds a seed whose suffix already has a foreign
-    # creator, but the fixture must not rely on winning that race.
+    # The SAME files go to EVERY site, byte for byte (ADR-028 §3). Founder-only
+    # seeding (ADR-025) is still in force, but it is now a property of the spec
+    # rather than of this script: each fixture's `spec.seed.site` names the
+    # founder, every operator compares that name against its own site identity
+    # (--set siteName=… in setup_foundation), and the sites that do not match
+    # withhold the seed and receive the DIT by replication.
+    #
+    # This replaces `strip_seed_block`, which deleted the seed mapping from
+    # every context after the first — a per-site EDIT of an object that must be
+    # identical everywhere, and precisely the deployment procedure ADR-025 says
+    # must not be relied upon. The operator's evidence belt (a suffix with a
+    # foreign creator withholds the seed) is unchanged and still the belt.
     local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
-    local founder=1
     for ctx in "${CONTEXTS[@]}"; do
-        if [[ $founder == 1 ]]; then
-            log "[$ctx] Applying test resources from $resource_dir (founder site — seed included)..."
-            kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$resource_dir/"
-            founder=0
-        else
-            log "[$ctx] Applying test resources from $resource_dir (peer site — seed stripped, ADR-025)..."
-            local f
-            for f in "$resource_dir"/*.yaml; do
-                strip_seed_block < "$f" | kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f -
-            done
-        fi
+        log "[$ctx] Applying test resources from $resource_dir (site ${SITE_NAMES[$ctx]})..."
+        kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$resource_dir/"
     done
 }
 
@@ -1428,6 +1431,9 @@ fi
 
 declare -A NODE_IPS          # node k8s InternalIP — used for cross-site peer URIs
 declare -A NODE_ACCESS_IPS   # address used to reach node NodePorts + cert SAN (override: E2E_NODE_ACCESS_IP[S])
+declare -A SITE_NAMES        # logical per-site identity handed to the operator (ADR-028 §4)
+
+assign_site_names
 
 # Fail fast when the images this run would deploy were never pushed — an
 # ImagePullBackOff twenty minutes into setup is the worst way to learn that.
@@ -1472,6 +1478,9 @@ do_setup() {
 if [[ "$subcommand" == "config" ]]; then
     echo "lab config file:      ${E2E_CONFIG:-<none>}"
     echo "contexts:             ${CONTEXTS[*]} (multisite=$MULTISITE)"
+    site_map=""
+    for ctx in "${CONTEXTS[@]}"; do site_map+="${ctx}=${SITE_NAMES[$ctx]} "; done
+    echo "site identities:      ${site_map% } (founder: site-1, per spec.seed.site)"
     echo "registry/project:     $REGISTRY / $PROJECT"
     echo "image tag:            $GIT_TAG${SLAPD_TAG_SUFFIX:+ (slapd pair: $GIT_TAG$SLAPD_TAG_SUFFIX)}"
     echo "operator namespace:   $NAMESPACE"

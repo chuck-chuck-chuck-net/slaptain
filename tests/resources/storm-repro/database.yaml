@@ -44,6 +44,10 @@ spec:
     - "entryUUID eq"
 
   seed:
+    # Founder site for this database (ADR-028 §3, ADR-025): exactly one site
+    # seeds, every other site withholds and syncs. tests/e2e.sh names the first
+    # context `site-1`, so this file is applied unmodified to every site.
+    site: site-1
     entries:
       # Root entry.
       - |
