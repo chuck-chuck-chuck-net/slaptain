@@ -268,7 +268,47 @@ exists to prevent, so the red was load-bearing, not ceremony.
 - What it does **not** touch yet: trust bootstrap and shared credentials stay as
   they are. cert-manager and ESO adoption is out of scope here.
 - Done when: a full-gate three-site run is green on `E2E_MESH=1` and produces the
-  same 92/93 the current path does.
+  same result the current path does.
+
+*Landed 2026-09-18.* **Multi-site `meshRef` is proven end-to-end** — the claim
+every phase since 3 deferred. `MeshResolved=True` at all three sites, the
+`SlapdCluster` byte-identical everywhere with nothing per-site in it, decades
+reproducing the hand-wired scheme exactly (`olcServerID` 1 / 101 / 201), stanzas
+naming logical site names, and `slctl inspect --short` 17/17 at every site.
+
+    mesh path     87 of 93, 0 failed
+    default path  88 of 93, 0 failed
+
+The one-spec difference is the single deliberate skip below. **Baseline
+correction:** with this gate set the comparable number is 88/93, not the 92/93
+this plan originally quoted — 92 required `E2E_SCALE=1` as well.
+
+The port exposed a defect of exactly the Phase 6a class, one layer further out:
+four places in `tests/e2e/*.go` read `spec.replication.externalPeers` directly.
+Two failed, one silently skipped, and one **passed vacuously** — with an empty
+list every assertion block was skipped. The vacuous pass is the worst of the
+four and the best argument for the exercise: a suite that passes by asserting
+nothing is worse than one that fails. All four now go through one shared reader
+that returns the *derived* set and, crucially, **fails the spec rather than
+returning empty when the mesh has not resolved** — treating unknown as empty was
+the original bug and would have been reintroduced one layer up.
+
+One deliberate coverage difference, documented in code and in `tests/README.md`:
+the peer-*removal* spec is skipped on the mesh path. Its premise — patch peers
+out of the spec — is inexpressible on a mesh cluster, where peers are derived and
+writing them is refused by design.
+
+### Follow-ups this phase opened
+
+- **Re-express peer removal against the mesh**: drop a site from the `SlapdMesh`
+  and assert the stanza disappears. Better than the spec it replaces, because it
+  also exercises the operator's watch on the mesh object. Until then the
+  hand-wired path is the only coverage of peer removal.
+- **`E2E_ACCESSLOG_MIGRATION=1` is a no-op** — no such gate exists anywhere in
+  the suite (presumably retired with ADR-019 R8), yet it has been carried in the
+  documented invocation line. Drop it, or implement what it promises.
+- Untested on the mesh path: the `multus` branch of `build_mesh_values`,
+  `imagePullSecrets` in the generated values, and `TEST_RESOURCES=lab`.
 
 ## Phase 7 — Flip the default; docs
 

@@ -202,6 +202,7 @@ separates measured isolated staleness (3) from the measured storm (thousands).
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
 | `E2E_CONFIG` | `<repo-root>/lab.yaml` if present | Lab config file (site inventory, registry, network mode). Env vars win over file values. Schema: `lab.yaml.sample` |
+| `E2E_MESH` | *(unset — hand-wired path)* | Set to `1` to deploy the mesh path (ADR-028): `charts/slapd-mesh` installed with **one values file, unchanged, at every site**, with the operator deriving `serverIDBase`, `externalPeers`, the network mode and the trust wiring from the `SlapdMesh` plus its own `siteName`. See [Mesh path](#mesh-path-e2e_mesh1) below. |
 | `SLAPD_TAG_SUFFIX` | *(empty — OpenLDAP 2.7.1)* | Appended to the slapd/slapd-init image tags only (operator/toolkit untouched). `-ol26` deploys the legacy OpenLDAP 2.6 pair (ADR-011 interop / ADR-021). |
 | `E2E_LABEL_FILTER` | *(unset — full suite)* | Ginkgo label filter to run a subset, e.g. `accesslog`, `sessionlog`, `resilience` (the dataloss container), `external-replication`. |
 | `E2E_NODE_ACCESS_IP` | *(node `InternalIP`)* | Single-site override for the address the runner uses to reach NodePorts (+ cert SAN). Set when the `InternalIP` isn't reachable from the runner. |
@@ -301,6 +302,70 @@ POD_ROUTED=1 \
 # Multus:   MULTUS_NETWORK=infra/replication-net ./tests/e2e.sh all <ctx1> <ctx2>
 # NodePort: (default, neither set)               ./tests/e2e.sh all <ctx1> <ctx2>
 ```
+
+### Mesh path (`E2E_MESH=1`)
+
+Everything above describes the **hand-wired** path, which is still the default:
+`e2e.sh` computes each site's `serverIDBase`, builds its N−1 `externalPeers` by
+hand and feeds them to `charts/slapd-cluster`, then applies the
+`SlapdDatabase`/`SlapdSchema` fixtures with `kubectl`.
+
+`E2E_MESH=1` runs the same suite over the ADR-028 mesh layer instead:
+
+```bash
+E2E_MESH=1 POD_ROUTED=1 ./tests/e2e.sh all <ctx1> <ctx2> <ctx3>
+```
+
+What changes:
+
+- **One chart, one values file.** `charts/slapd-mesh` renders the `SlapdMesh`,
+  the `SlapdCluster`, the `SlapdDatabase`s and the `SlapdSchema`s, and the same
+  generated values file is applied **unchanged** at every site. The file is
+  built once per run and its path is logged, so `sha256sum` settles any doubt
+  about whether the sites really got the same bytes.
+- **Nothing per-site in it.** No `serverIDBase`, no `externalPeers`, no network
+  block on the cluster. The operator derives all four from the mesh plus its own
+  `siteName` (which `setup_foundation` already passes to `charts/operator`), and
+  a cluster that sets one of them alongside `meshRef` is refused outright with
+  `MeshResolved=False`.
+- **The fixtures are the same files.** `tests/resources/<set>/*.yaml` stays the
+  single source of truth: the mesh path transforms those same CRs into chart
+  values (`{name, spec}`, minus `clusterRef`, which the chart pins) rather than
+  keeping a second copy. Non-CR manifests — the readpw Secret — are still
+  applied with `kubectl`.
+- **Peers are named after mesh sites, not kube contexts.** The hand-wired path
+  calls a peer `site-<context>` and reads its CA from `site-<context>-ca`; the
+  mesh derives `site-N` and `site-N-ca` / `site-N-kubeconfig`, because a peer's
+  name is the directory component of its CA mount path and therefore ends up in
+  every external stanza's `tls_cacert`. `./tests/e2e.sh config` prints the
+  resolved names for whichever path is selected.
+- **`serverIDIndex` is the context's position minus one**, so site-1/2/3 get
+  decades 0/100/200 — exactly what the hand-wired `site_idx * 100` produced. That
+  is a hard requirement, not a nicety: `olcServerID` is baked into every CSN a
+  pod has written (MESH-PLAN hazard 2).
+
+Multi-site needs a **discovery** transport (`POD_ROUTED=1` or
+`MULTUS_NETWORK=…`): a mesh describes sites and reaches them through their API
+servers, so it never derives a static NodePort `uri`. The script refuses the
+combination up front rather than producing a cluster with no peers.
+
+One spec differs in coverage, deliberately. `external replication > removing an
+external peer from the spec removes its syncrepl stanza` **skips on the mesh
+path**: its premise is to patch `spec.replication.externalPeers` empty, and on a
+mesh-driven cluster that field is derived and setting it is refused outright with
+`MeshResolved=False` (ADR-028 §4). Removing a peer there means editing the
+`SlapdMesh`. The mesh equivalent — drop a site, assert the stanza disappears — is
+the better test, because it also exercises the operator's watch on the mesh
+object; it is a tracked follow-up, not a silent gap.
+
+Every other spec runs on both paths. Anything that needs to know whether the
+cluster has external peers must go through `clusterExternalPeerNames`
+(`helpers_test.go`) rather than read `spec.replication.externalPeers`: on a
+mesh-driven cluster that field is empty by design, so reading it directly makes a
+guard skip a spec that should run, or makes a spec pass while asserting nothing.
+Three guards and one vacuous pass were found that way on the first mesh run.
+
+Both paths live side by side until MESH-PLAN Phase 7 flips the default.
 
 ### Prerequisites
 

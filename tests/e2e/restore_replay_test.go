@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
@@ -168,11 +169,18 @@ var _ = Describe("in-place restore under replication (accesslog replay)", Label(
 		// peers. That is blocked on the e2e framework refactor — see
 		// docs/BACKLOG.md, "Permanent e2e coverage for in-place restore
 		// topologies". Verified manually in the meantime.
-		if len(sc.Spec.Replication.ExternalPeers) > 0 {
-			Skip(fmt.Sprintf("primary cluster has %d external peer(s): in-place restore is a local "+
+		//
+		// The peer set comes from the operator, not from
+		// spec.replication.externalPeers: a mesh-driven cluster derives its
+		// peers and leaves that field empty (ADR-028 §4), so reading it here
+		// let this spec RUN on a three-site mesh and then fail exactly as the
+		// paragraph above predicts — the peers replayed their newer state over
+		// the restore. See clusterExternalPeerNames.
+		if peers := clusterExternalPeerNames(ctx, "slapd"); len(peers) > 0 {
+			Skip(fmt.Sprintf("primary cluster has %d external peer(s) (%s): in-place restore is a local "+
 				"re-seed there, not a rollback (ADR-014 amendment) — this spec needs a cluster "+
 				"with no external peers; see docs/BACKLOG.md",
-				len(sc.Spec.Replication.ExternalPeers)))
+				len(peers), strings.Join(peers, ", ")))
 		}
 		rwPods = nil
 		for i := int32(0); i < sc.Spec.Replicas; i++ {

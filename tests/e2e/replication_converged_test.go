@@ -60,11 +60,18 @@ var _ = Describe("replication convergence condition", Label("replication-converg
 	})
 
 	It("never reports an external peer Synced off a subset of the databases", func(ctx SpecContext) {
-		sc := &ldapv1alpha1.SlapdCluster{}
-		Expect(crdClient.Get(ctx, client.ObjectKey{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
-		if len(sc.Spec.Replication.ExternalPeers) == 0 {
+		// Ask the operator for the peer set, not the raw spec: on a
+		// mesh-driven cluster spec.replication.externalPeers is empty by design
+		// and this guard would skip a spec that should run (ADR-028 §4, see
+		// clusterExternalPeerNames).
+		if len(clusterExternalPeerNames(ctx, "slapd")) == 0 {
 			Skip("no external peers configured")
 		}
+		sc := &ldapv1alpha1.SlapdCluster{}
+		Expect(crdClient.Get(ctx, client.ObjectKey{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
+		Expect(sc.Status.ExternalPeerStatuses).NotTo(BeEmpty(),
+			"the cluster has external peers, so status.externalPeerStatuses must report them; "+
+				"an empty list here would make every assertion below vacuous")
 
 		// The db2 breakage of 2026-09-13 read Synced off db1 while db2's remote
 		// binds failed err=49 on the same hosts. A peer whose evidence is
