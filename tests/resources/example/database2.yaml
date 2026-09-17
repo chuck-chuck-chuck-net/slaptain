@@ -48,6 +48,8 @@ spec:
     - "entryUUID eq"
 
   seed:
+    # Founder site for this database (ADR-028 §3, ADR-025) — see database.yaml.
+    site: site-1
     entries:
       - |
         dn: dc=second,dc=example,dc=net

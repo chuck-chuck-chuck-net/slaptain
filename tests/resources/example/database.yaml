@@ -44,6 +44,13 @@ spec:
     - "entryUUID eq"
 
   seed:
+    # Which site of the mesh may create these entries (ADR-028 §3, ADR-025).
+    # Exactly one site seeds; every other site reads this same value, finds it
+    # is not its own identity, withholds the seed and receives the DIT by
+    # replication. tests/e2e.sh names the first context `site-1`, so this file
+    # is applied unmodified to every site — a mesh-scoped object carries no
+    # per-site edits. A single-site run is unaffected: its sole site IS site-1.
+    site: site-1
     entries:
       # Root entry.
       - |

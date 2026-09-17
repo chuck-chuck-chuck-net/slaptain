@@ -80,9 +80,32 @@ is enabled. See [Why Not slapadd with Replication](#why-not-slapadd-with-replica
 
 ### Multi-site: exactly one site seeds (founder-only — ADR-025)
 
-In a cross-cluster mesh, **only one site's `SlapdDatabase` may carry
-`spec.seed`**. Every other site deploys the same CR *without* `seed` and
-receives the whole DIT via syncrepl, exactly like a fresh peer pod does.
+In a cross-cluster mesh, **exactly one site may apply the seed**. Every site
+deploys the *same* `SlapdDatabase` — seed included — and the seed itself names
+the site allowed to apply it:
+
+```yaml
+spec:
+  seed:
+    site: site-a          # only the operator whose SITE_NAME is site-a seeds
+    entries: [...]
+```
+
+Each operator compares that name against its own identity, which comes from its
+installation config (`SITE_NAME`, set from the operator chart's `siteName`) and
+never from a CR. The named site seeds; every other site withholds and receives
+the whole DIT via syncrepl, exactly like a fresh peer pod does. A site whose
+operator has **no** identity configured withholds too and stays `Degraded` until
+`siteName` is set — an unreadable identity never counts as a match.
+
+Leaving `seed.site` unset means "no site restriction", which is what a
+single-site deployment wants and is the behaviour every pre-existing CR keeps.
+
+Until 2026-09-17 this was a per-site *edit* instead — the founder carried
+`spec.seed` and every other site deployed the CR with the block removed. That
+made a resource which must be byte-identical across sites differ per site, and
+it put a hard correctness rule in a deployment procedure rather than in the
+spec. ADR-028 §3 replaced it with the declaration above.
 
 Why this is a hard rule and not a style preference: `entryUUID` is
 server-generated, so two sites seeding the same DNs create two different
