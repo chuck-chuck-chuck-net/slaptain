@@ -112,6 +112,24 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// 3b. Resolve the cluster's spec.meshRef, in memory (ADR-028 §4,
+	// MESH-PLAN Phase 4). Everything this controller derives from the cluster's
+	// cross-site wiring — the per-pod olcServerID (serverIDBase + ordinal + 1),
+	// the external syncrepl stanzas, and ADR-025's foreign-sid withhold belt —
+	// reads sc.Spec.Replication, so the derivation has to land on the copy
+	// fetched here as well as on the SlapdCluster controller's own.
+	//
+	// No-op when meshRef is unset. On failure the database stalls rather than
+	// writing stanzas from a half-derived spec: an unreadable mesh yielding an
+	// empty peer set would tear every cross-site stanza off every pod.
+	if err := resolveMeshWiring(ctx, r.Client, sc, r.SiteName); err != nil {
+		log.Info("mesh resolution failed; not touching this database's replication config",
+			"meshRef", sc.Spec.MeshRef, "err", err)
+		r.setStatus(ctx, sd, ldapv1alpha1.DatabasePhasePending, nil, nil,
+			"MeshUnresolved", err.Error())
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	// 3a. Honor spec.suspend on either CR. Parent SlapdCluster being suspended
 	// implies its databases should also pause — manual interventions that
 	// suspend the cluster will typically span cn=config edits this controller
@@ -3288,6 +3306,45 @@ func (r *SlapdDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 							},
 						})
 					}
+				}
+				return reqs
+			},
+		)).
+		// A SlapdMesh edit changes the derived externalPeers and serverIDBase
+		// without touching the SlapdCluster object, so the watch above never
+		// fires for it. Without this one a mesh edit would not reach the
+		// syncrepl stanzas until the 5-minute resync floor.
+		Watches(&ldapv1alpha1.SlapdMesh{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrl.Request {
+				mesh, ok := obj.(*ldapv1alpha1.SlapdMesh)
+				if !ok {
+					return nil
+				}
+				var scList ldapv1alpha1.SlapdClusterList
+				if err := r.List(ctx, &scList, client.InNamespace(mesh.Namespace)); err != nil {
+					return nil
+				}
+				clusters := map[string]struct{}{}
+				for i := range scList.Items {
+					if scList.Items[i].Spec.MeshRef == mesh.Name {
+						clusters[scList.Items[i].Name] = struct{}{}
+					}
+				}
+				if len(clusters) == 0 {
+					return nil
+				}
+				var dbList ldapv1alpha1.SlapdDatabaseList
+				if err := r.List(ctx, &dbList, client.InNamespace(mesh.Namespace)); err != nil {
+					return nil
+				}
+				var reqs []ctrl.Request
+				for _, db := range dbList.Items {
+					if _, ok := clusters[db.Spec.ClusterRef]; !ok {
+						continue
+					}
+					reqs = append(reqs, ctrl.Request{
+						NamespacedName: client.ObjectKey{Name: db.Name, Namespace: db.Namespace},
+					})
 				}
 				return reqs
 			},
