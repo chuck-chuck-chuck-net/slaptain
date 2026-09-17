@@ -14,8 +14,8 @@ after the cheap ones have proven the model.
 2. Read ADR-025 (single-creator seed), ADR-017 (bare-integer `olcServerID`) and
    ADR-013 (a template change rolls the cluster) — Phases 1, 3 and 4 each turn
    on one of them.
-3. Phases are sequential by dependency, except Phase 1 which is independent and
-   can land alone.
+3. Phases are sequential by dependency. Phases 1 and 2 need no new CRD and can
+   land alone, ahead of the mesh type.
 
 ## Two hazards to read before writing any code
 
@@ -25,7 +25,9 @@ which carries `spec.seed` — identically to N sites and every site seeds, which
 the ADR-025 multi-site seed race: one pod ends up with a permanent hidden glue
 suffix, invisible to ordinary searches and clean on every CSN health read. The
 operator's withhold belt is a belt, and ADR-025 says explicitly that the fixture
-must not rely on winning that race. So Phase 1 is not optional and not reorderable.
+must not rely on winning that race. So `seed.site` (Phase 2) is not optional, and
+it sits behind operator self-identity (Phase 1) because it decides by comparing
+against it.
 
 **2. `olcServerID` is baked into every CSN ever written.** A CSN is
 `timestamp#count#sid#mod`. If the mesh derivation gives a running pod a different
@@ -49,30 +51,50 @@ actual values (`scm-s1`→0, `scm-s2`→100, `scm-s3`→200).
 - Both paths work simultaneously from Phase 4 until Phase 7. Nothing is removed
   until the e2e runs green on the new path.
 
-## Phase 0 — Scaffolding
+## Phase 1 — Operator self-identity
 
-- `kubebuilder create api` for `SlapdMesh` (namespaced, group `ldap.chuck-chuck-chuck.net`, v1alpha1).
-- RBAC for the new kind; regenerate `config/rbac/role.yaml`.
-- Done when: `make build` and `make operator-manifests` are green and the CRD
-  appears in `charts/operator/crds/`.
+Ordering correction, 2026-09-17: this was Phase 3 in the first draft, behind
+`seed.site`. That was wrong — `seed.site` decides by comparing a declared site
+name against *the operator's own identity*, so identity has to exist first.
+Caught while writing the implementation brief, before any code was written.
 
-## Phase 1 — `seed.site` (independent; unblocks the byte-identical chart)
+- The operator learns its own site name from its installation config (Helm value
+  → env var on the Deployment, alongside the existing `OPERATOR_IMAGE` /
+  `OPERATOR_IMAGE_TAG` precedent). It does **not** come from any CR — that is what
+  keeps every mesh-scoped object byte-identical.
+- Unset is legal and means "no mesh features". Nothing consumes the identity yet
+  in this phase; it is plumbing plus a pure resolver.
+- No `SlapdMesh` type exists yet, so the resolver validates only what it can:
+  present/absent and well-formed. Cross-checking the name against `sites[]`
+  arrives with the type in Phase 3.
+- Tests: unit red-first on the pure resolver (present, absent, empty string,
+  whitespace); a check that the operator logs its identity once at startup.
+- Done when: `helm upgrade` can set it, the operator reports it, and nothing else
+  has changed.
+
+## Phase 2 — `seed.site` (unblocks the byte-identical chart)
 
 - Add a site selector to the seed spec on `SlapdDatabase`. Semantics: the seed is
-  applied only where the operator's own site identity matches; every other site
-  withholds and receives the DIT by replication.
+  applied only where the operator's own site identity (Phase 1) matches; every
+  other site withholds and receives the DIT by replication.
 - Unset keeps today's behaviour, so single-site deployments and the existing
   fixture are untouched.
+- Decide and record: a `seed.site` naming a site this operator is not, with no
+  identity configured at all. Withhold (safe, may never seed) rather than seed
+  (races). State it in the ADR either way.
 - Interaction to preserve: ADR-025's withhold belt (a foreign suffix creator
   suppresses the seed) stays as the belt. This is the braces.
-- Tests: unit red-first on the pure decision (`shouldSeed(site, selector, identity)`),
-  covering unset, match, mismatch, and unknown-identity. e2e: the founder seeds,
-  the peers do not, `DataPresent` goes True everywhere by replication.
+- Tests: unit red-first on the pure decision (`shouldSeed(selector, identity)`),
+  covering unset selector, match, mismatch, and unknown identity. e2e: the founder
+  seeds, the peers do not, `DataPresent` goes True everywhere by replication.
 - Done when: `tests/e2e.sh` no longer needs `strip_seed_block`, and deleting that
   function is part of this phase, not a later cleanup.
 
-## Phase 2 — `SlapdMesh` types + the derivation seam (no behaviour change)
+## Phase 3 — `SlapdMesh` types + the derivation seam (no behaviour change)
 
+- Scaffolding first: `kubebuilder create api` for `SlapdMesh` (namespaced, group
+  `ldap.chuck-chuck-chuck.net`, v1alpha1), RBAC for the new kind, regenerated
+  `config/rbac/role.yaml`, CRD synced into `charts/operator/crds/`.
 - Types: `sites[]` (name, endpoint, kubeconfig secret name), `network`
   (`pod-routed` | `multus` + NAD), trust (CA secret names / issuer ref).
 - Pure functions, no client, no I/O:
@@ -81,25 +103,13 @@ actual values (`scm-s1`→0, `scm-s2`→100, `scm-s3`→200).
   - `externalPeersForSite(mesh, cluster, siteName) []ExternalPeer` — honours the
     `sites` selector on `SlapdCluster`, excludes self, produces exactly the peer
     set `e2e.sh` produces today.
-  - `resolveSelfSite(env, mesh) (string, error)` — errors loudly on a name absent
-    from `sites[]`; see Phase 3.
+  - `validateSelfSite(identity, mesh) error` — extends Phase 1's resolver now
+    that `sites[]` exists: a configured identity absent from the mesh is a loud
+    error, never a silent default to the first site.
 - Tests: table-driven unit tests red-first, including the lab's three-site values
   as a golden case, subset selectors, a single-site mesh, and a self-site not
   present in the mesh.
 - Done when: the functions exist and are tested; nothing calls them yet.
-
-## Phase 3 — Operator self-identity
-
-- The operator learns its own site name from its installation config (Helm value
-  → env var on the Deployment, alongside the existing `OPERATOR_IMAGE` /
-  `OPERATOR_IMAGE_TAG` precedent). It does **not** come from any CR — that is what
-  keeps every mesh-scoped object byte-identical.
-- Unset is legal and means "no mesh features"; a `meshRef` with no identity is an
-  error surfaced on the CR, never a silent default to the first site.
-- Tests: unit on `resolveSelfSite`; a controller test that a `meshRef` without
-  identity reports an error condition rather than guessing.
-- Done when: `helm upgrade` can set it and the operator logs its identity once at
-  startup.
 
 ## Phase 4 — `meshRef` resolution in the `SlapdCluster` controller
 
@@ -138,7 +148,7 @@ actual values (`scm-s1`→0, `scm-s2`→100, `scm-s3`→200).
 - New path behind a flag (e.g. `E2E_MESH=1`), defaulting off. Both paths live
   until Phase 7.
 - What the new path deletes: `setup_slapd_clusters`' peer wiring loop, the
-  `serverIDBase` arithmetic, `strip_seed_block` (already gone in Phase 1), and
+  `serverIDBase` arithmetic, `strip_seed_block` (already gone in Phase 2), and
   eventually `setup_cross_trust`.
 - What it does **not** touch yet: trust bootstrap and shared credentials stay as
   they are. cert-manager and ESO adoption is out of scope here.
@@ -173,7 +183,8 @@ actual values (`scm-s1`→0, `scm-s2`→100, `scm-s3`→200).
 
 - Adding an env var to the operator Deployment rolls the operator; adding a field
   to the StatefulSet template rolls the slapd pods (ADR-013's accepted wart).
-  Sequence Phase 3 and 4 so a single roll covers both.
+  Sequence Phases 1, 3 and 4 so a single roll covers the operator env var and the
+  StatefulSet template change.
 - The `cn=config` pause freeze (2026-09-16 ledger entry) is unfixed. Phases 4 and
   6 write syncrepl stanzas, so a mesh cycle can surface it. A pod that stops
   serving while `Ready` is that entry, not a new defect — check `etime` before
