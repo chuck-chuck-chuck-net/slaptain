@@ -88,16 +88,31 @@ quietly counted as covered.
   other site withholds and receives the DIT by replication.
 - Unset keeps today's behaviour, so single-site deployments and the existing
   fixture are untouched.
-- Decide and record: a `seed.site` naming a site this operator is not, with no
-  identity configured at all. Withhold (safe, may never seed) rather than seed
-  (races). State it in the ADR either way.
+- **Decided 2026-09-17: withhold.** A `seed.site` naming some site while this
+  operator has no identity configured withholds the seed. A database that never
+  seeds is loud and recoverable; a glue suffix is silent and permanent (ADR-025),
+  so the safe direction is the one that may do nothing. Unreadable identity never
+  counts as a match — the same rule ADR-008 applies to CSN evidence.
 - Interaction to preserve: ADR-025's withhold belt (a foreign suffix creator
   suppresses the seed) stays as the belt. This is the braces.
-- Tests: unit red-first on the pure decision (`shouldSeed(selector, identity)`),
-  covering unset selector, match, mismatch, and unknown identity. e2e: the founder
-  seeds, the peers do not, `DataPresent` goes True everywhere by replication.
-- Done when: `tests/e2e.sh` no longer needs `strip_seed_block`, and deleting that
-  function is part of this phase, not a later cleanup.
+
+**Split into 2a and 2b, decided 2026-09-17.** The operator side lands and is
+proven on a single-site lab before the e2e fixture changes, so that a failure in
+the fixture rewrite cannot be confused with a failure in the seed decision.
+
+*Phase 2a — operator side.* The API field, the pure decision
+(`shouldSeed(selector, identity)`), the controller wiring, unit tests red-first
+covering unset selector, match, mismatch and unknown identity. Validated live on
+a single-site lab: a matching `seed.site` seeds, a mismatching one withholds,
+and an unset one behaves exactly as today. `tests/e2e.sh` is NOT touched.
+
+*Phase 2b — fixture.* Delete `strip_seed_block` and its call site, move the
+fixtures to `seed.site`, and prove it with a multi-site cycle. Only after 2a is
+merged and green.
+
+- Done when (2a): the three cases are observed on a live single-site cluster, not
+  only in unit tests. Done when (2b): `strip_seed_block` is gone and a three-site
+  run is green.
 
 ## Phase 3 — `SlapdMesh` types + the derivation seam (no behaviour change)
 
