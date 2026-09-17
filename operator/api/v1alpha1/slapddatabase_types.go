@@ -266,6 +266,32 @@ type DatabaseSeedConfig struct {
 	// one or more LDIF entries separated by blank lines.
 	// +optional
 	ConfigMapRef string `json:"configMapRef,omitempty"`
+	// site names the mesh site whose operator is allowed to apply this seed —
+	// the founder. Every other site reads the same value, finds it is not its
+	// own site, withholds the seed, and receives the DIT by replication.
+	//
+	// This exists so that a multi-site SlapdDatabase can be byte-identical at
+	// every site (ADR-028 §3). The alternative — carrying spec.seed at the
+	// founder and stripping it everywhere else — is a per-site EDIT of an object
+	// that must not differ per site, and the deployment procedure it requires is
+	// exactly what ADR-025 says must not be relied upon. Naming a site turns
+	// single-creator seeding from a procedure into a property of the spec.
+	//
+	// The operator's own site identity comes from its installation config (the
+	// SITE_NAME env var on the operator Deployment), never from a CR — putting
+	// it in a CR would destroy the byte-identical property (ADR-028 §4).
+	//
+	// Unset (the default) means "no site restriction": the seed is applied
+	// wherever this database reconciles, which is today's behaviour and what
+	// every single-site deployment wants.
+	//
+	// Set while the operator has NO site identity configured, the seed is
+	// withheld and the database stays Degraded until SITE_NAME is set. That is
+	// deliberate: an unreadable identity never counts as a match, because a
+	// database that never seeds is loud and recoverable whereas a multi-site
+	// seed race produces a permanent, silent glue suffix (ADR-025).
+	// +optional
+	Site string `json:"site,omitempty"`
 }
 
 // SlapdDatabaseSpec defines the desired state of SlapdDatabase.

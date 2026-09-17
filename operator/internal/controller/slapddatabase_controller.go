@@ -245,19 +245,49 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//    permanent glue suffix. This is the OPPOSITE direction of the reverted
 	//    verifySeedExists (which re-created on absence): we only ever DECLINE
 	//    to create on positive evidence of a foreign creator, never re-apply.
+	//    ADR-028 §3 site gate (the braces to that belt): spec.seed.site names
+	//    the founder site, is read identically at every site, and each operator
+	//    compares it against its OWN identity (r.SiteName, from SITE_NAME —
+	//    ADR-028 §4). The gate acts on what the spec DECLARES and runs before
+	//    any connection; the belt acts on what the directory shows has already
+	//    happened. Both still fire, independently.
 	if seedNeeded(sd) {
-		withheld, err := r.applySeedData(ctx, sc, sd, rootPW)
-		switch {
-		case err != nil:
-			log.Info("seed data not yet applied (will retry)", "err", err)
-			pendingWork = true
-		case withheld:
-			log.Info("seed withheld: suffix entry already created by a foreign serverID "+
-				"(founder site's seed replicated in first — ADR-025); latching SeedApplied",
+		switch decideSeedSite(sd.Spec.Seed.Site, r.SiteName) {
+		case seedSiteWithhold:
+			// Permanent by nature: this site is not, and will not become, the
+			// declared founder. Latching is correct — the DIT arrives by
+			// replication, and re-evaluating every reconcile buys nothing.
+			log.Info("seed withheld: spec.seed.site names another site (ADR-028 §3); "+
+				"latching SeedApplied — the DIT arrives by replication",
+				"seedSite", sd.Spec.Seed.Site, "operatorSite", r.SiteName,
 				"suffix", sd.Spec.Suffix)
 			sd.Status.SeedApplied = true
+		case seedSiteUnknownIdentity:
+			// A MISCONFIGURATION, not a fact about the topology: we cannot tell
+			// whether this site is the founder. Withhold — unreadable identity
+			// never counts as a match — but deliberately do NOT latch, or
+			// setting SITE_NAME later would silently never seed. pendingWork
+			// keeps the database Degraded and on the tight requeue, so the
+			// misconfiguration is loud rather than silent.
+			log.Info("seed deferred: spec.seed.site names a site but this operator has no "+
+				"site identity (SITE_NAME unset — ADR-028 §4); not latching SeedApplied, "+
+				"set the operator chart's siteName to resolve",
+				"seedSite", sd.Spec.Seed.Site, "suffix", sd.Spec.Suffix)
+			pendingWork = true
 		default:
-			sd.Status.SeedApplied = true
+			withheld, err := r.applySeedData(ctx, sc, sd, rootPW)
+			switch {
+			case err != nil:
+				log.Info("seed data not yet applied (will retry)", "err", err)
+				pendingWork = true
+			case withheld:
+				log.Info("seed withheld: suffix entry already created by a foreign serverID "+
+					"(founder site's seed replicated in first — ADR-025); latching SeedApplied",
+					"suffix", sd.Spec.Suffix)
+				sd.Status.SeedApplied = true
+			default:
+				sd.Status.SeedApplied = true
+			}
 		}
 	}
 
@@ -2003,7 +2033,10 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 // reverted verifySeedExists), so the observability latches (DataObserved,
 // RestoreApplied) are deliberately not consulted. Declining to seed on positive
 // evidence of a foreign creator is a different decision, made inside
-// applySeedData by the ADR-025 withhold belt.
+// applySeedData by the ADR-025 withhold belt — and so is declining because
+// spec.seed.site names another site, made by decideSeedSite at the call site.
+// Both of those need inputs from outside this CR (the directory, the operator's
+// own identity); this function stays pure on the CR alone.
 func seedNeeded(sd *ldapv1alpha1.SlapdDatabase) bool {
 	return sd.Spec.Seed != nil && len(sd.Spec.Seed.Entries) > 0 && !sd.Status.SeedApplied
 }

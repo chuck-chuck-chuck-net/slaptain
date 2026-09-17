@@ -146,6 +146,22 @@ multi-site `bootstrapFrom` has never been run.
 → Identical-across-sites becomes checkable as existence plus a hash, with no
 field-by-field comparison to get wrong.
 
+*Implemented for `seed` on the operator side, 2026-09-17 (MESH-PLAN Phase 2a),
+which settled two comparison semantics this ADR had not specified:*
+
+- **Case is not folded.** `site-a` and `SITE-A` are different sites. A site is
+  whatever the operator chart was given, and folding would let two distinct
+  `SITE_NAME` values collide — the precise failure §4 warns about, where two
+  sites claiming one identity collide their `serverID` decades.
+- **Both sides are trimmed**, selector as well as env var. A YAML-sourced
+  `site: "site-a\n"` silently demoting the founder to a non-founder is the same
+  bug the env var is trimmed for, and it would be invisible.
+
+The gate is evaluated before any LDAP connection, so a non-founder never dials a
+pod to seed. ADR-025's evidence belt is untouched and independent: this gate acts
+on what the spec *declares*, the belt on what the directory shows has already
+*happened*. Both still fire.
+
 ### 4. The operator derives the wiring; one per-site fact lives outside all CRs
 
 From `meshRef` plus its own identity the operator derives `serverIDBase` (from the
@@ -290,6 +306,12 @@ is correct everywhere while a pod's `cn=config` has drifted from it. That is
   one property §5 knowingly gives up — or whether `verify` covers it adequately.
 - Whether the operator's parity condition belongs on `SlapdCluster` or on each
   `SlapdDatabase`. The latter is more precise and noisier.
+- Whether a withheld seed deserves its own status condition. Raised by Phase 2a:
+  `SlapdDatabase` carries `Ready`, `TunablesConverged` and `DataPresent`, and
+  none is a natural home for a seed-gate verdict. A misconfigured identity is
+  currently visible as `Degraded` / `PartiallyApplied` plus a log line naming the
+  fix, which is loud but not specific. A `SeedWithheld` condition would be
+  clearer and is API surface, so it was deliberately not added unbriefed.
 
 ## Related
 
