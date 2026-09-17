@@ -49,6 +49,24 @@ the sibling and correctly did not fix it mid-milestone.
 
 ---
 
+## `NeedsAccesslog` and `NeedsAccesslogVolume` have identical bodies
+
+`operator/api/v1alpha1/slapdcluster_types.go:951` and `:978` are byte-identical:
+`return sc.Spec.Replicas > 1 || len(sc.Spec.Replication.ExternalPeers) > 0`. Two
+names for one predicate, so a change to the rule has to be made twice and a
+reader cannot tell which distinction was intended.
+
+Cost observed 2026-09-18: a reviewer mutation-testing the accesslog-mount guard
+patched the first occurrence, saw the test still pass, and nearly recorded a
+coverage gap that did not exist — the guard depends on the *second*. A
+duplicated predicate wastes verification, which is exactly when you least want
+to be misled.
+
+Decide whether the two concepts are genuinely distinct (then the bodies should
+diverge, or one should call the other) or the same (then one should go).
+
+---
+
 ## `make -C operator lint` cannot run under Go 1.27
 
 **What:** the pinned `golangci-lint` v2.7.2 cannot read Go 1.27's export data

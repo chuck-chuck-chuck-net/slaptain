@@ -561,3 +561,71 @@ var credentialsRE = regexp.MustCompile(`credentials=(?:"[^"]*"|\S+)`)
 func redactCredentials(s string) string {
 	return credentialsRE.ReplaceAllString(s, "credentials=<redacted>")
 }
+
+// ── External peers: ask the OPERATOR, never the raw spec ─────────────────────
+
+// clusterExternalPeerNames reports one cluster's external peers by name, as the
+// operator resolved them.
+//
+// Reading spec.replication.externalPeers directly is the trap this exists to
+// close. On a mesh-driven cluster that field is EMPTY by design: the peers are
+// derived from the SlapdMesh plus the operator's own SITE_NAME, applied in
+// memory and deliberately never written back, because writing them back would
+// make each site's SlapdCluster differ from its neighbours' and destroy the
+// byte-identical property ADR-028 §3 rests on. Every consumer therefore has to
+// resolve for itself, and one that forgets does not see a wrong cluster — it
+// sees an UNWIRED one. That is precisely how a guard reading this field ends up
+// skipping a spec that should run, or passing one that asserted nothing.
+//
+// It reads back status.externalPeerStatuses rather than re-deriving, which is
+// the choice MESH-PLAN Phase 6a made for slctl and for the same reason: a second
+// authority on a derivation whose output is baked into replicated data is free
+// to disagree with the operator you are using it to check. The status list is
+// rebuilt from the RESOLVED peer set on every reconcile, one entry per peer with
+// its name populated straight away, so the names are current as soon as the mesh
+// resolves — the discovery and CSN detail that fills in later is not needed here.
+//
+// An empty answer means "this cluster has no external peers", never "I could not
+// tell": when meshRef is set the call waits for MeshResolved=True and FAILS the
+// spec if it never arrives. Silently reading zero is the defect, and returning it
+// one layer up would have been the same defect wearing a helper's name.
+func clusterExternalPeerNames(ctx context.Context, clusterName string) []string {
+	sc := &ldapv1alpha1.SlapdCluster{}
+	Expect(crdClient.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: namespace}, sc)).To(Succeed())
+
+	if sc.Spec.MeshRef == "" {
+		// Hand-wired: the spec IS the resolved set, and it is authoritative the
+		// instant the object exists — nothing to wait for.
+		names := make([]string, 0, len(sc.Spec.Replication.ExternalPeers))
+		for _, ep := range sc.Spec.Replication.ExternalPeers {
+			names = append(names, ep.Name)
+		}
+		return names
+	}
+
+	var cond *metav1.Condition
+	Eventually(ctx, func(g Gomega) metav1.ConditionStatus {
+		cur := &ldapv1alpha1.SlapdCluster{}
+		g.Expect(crdClient.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: namespace}, cur)).To(Succeed())
+		sc = cur
+		cond = findCondition(cur.Status.Conditions, "MeshResolved")
+		g.Expect(cond).NotTo(BeNil(),
+			"cluster %q sets spec.meshRef=%q but publishes no MeshResolved condition",
+			clusterName, cur.Spec.MeshRef)
+		return cond.Status
+	}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).
+		Should(Equal(metav1.ConditionTrue), func() string {
+			if cond == nil {
+				return "MeshResolved was never published"
+			}
+			return fmt.Sprintf("MeshResolved=%s (%s): %s — until the mesh resolves, this cluster's "+
+				"peer set is unknown, and treating unknown as empty is the bug this helper exists "+
+				"to prevent", cond.Status, cond.Reason, cond.Message)
+		})
+
+	names := make([]string, 0, len(sc.Status.ExternalPeerStatuses))
+	for _, ps := range sc.Status.ExternalPeerStatuses {
+		names = append(names, ps.Name)
+	}
+	return names
+}

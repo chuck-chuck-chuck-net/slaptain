@@ -244,6 +244,27 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		sc := &ldapv1alpha1.SlapdCluster{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
 
+		// This spec's premise — patch the peers out of spec.replication and
+		// watch the stanza go — is INEXPRESSIBLE on a mesh-driven cluster, and
+		// not by accident. There the peer set is derived from the SlapdMesh plus
+		// the operator's own SITE_NAME and the spec field is empty; setting it
+		// alongside meshRef is refused outright with MeshResolved=False,
+		// deliberately, because resolving that ambiguity silently is how a
+		// serverID collision gets in (ADR-028 §4). Removing a peer on a mesh
+		// means editing the SlapdMesh, which is a different act on a different
+		// object.
+		//
+		// Skipping is the honest verdict for THIS spec, not for the behaviour.
+		// The mesh equivalent — drop a site from the SlapdMesh, assert the
+		// stanza disappears — is the better test, because it also exercises the
+		// operator's watch on the mesh object. Follow-up, not a silent gap.
+		if sc.Spec.MeshRef != "" {
+			Skip(fmt.Sprintf("cluster is mesh-driven (meshRef=%q): external peers are DERIVED and "+
+				"spec.replication.externalPeers is empty by design — setting it alongside meshRef is "+
+				"refused with MeshResolved=False (ADR-028 §4). Removing a peer here means editing the "+
+				"SlapdMesh; asserting that is a separate spec", sc.Spec.MeshRef))
+		}
+
 		// Save original peers for restoration.
 		originalPeers := sc.Spec.Replication.ExternalPeers
 		Expect(originalPeers).NotTo(BeEmpty(), "test requires at least one external peer")
@@ -353,8 +374,25 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		sc := &ldapv1alpha1.SlapdCluster{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
 
-		// Classify peers by mode.
+		// Every branch below is conditional on a peer MODE, so a spec that finds
+		// no peers at all asserts nothing and passes quietly — which is exactly
+		// what happened on the first mesh run, where spec.replication.externalPeers
+		// is empty by design (ADR-028 §4). Establish the precondition loudly
+		// first: this file only runs under E2E_EXTERNAL_REPL=1, so a cluster with
+		// no external peers is a broken fixture, never a legitimate shape.
+		peerNames := clusterExternalPeerNames(ctx, "slapd")
+		Expect(peerNames).NotTo(BeEmpty(),
+			"external-replication specs require a cluster with external peers, and this one reports "+
+				"none; on a mesh-driven cluster the peers are derived and spec.replication.externalPeers "+
+				"is empty, so read them through clusterExternalPeerNames rather than off the spec")
+
+		// Classify peers by mode. A mesh derives discovery peers and nothing
+		// else (externalPeersForSite never emits uri or podAddresses), so the
+		// mode is known without re-deriving the peer list.
 		var hasURIPeers, hasDiscoveryPeers, hasPodAddrPeers bool
+		if sc.Spec.MeshRef != "" {
+			hasDiscoveryPeers = true
+		}
 		for _, ep := range sc.Spec.Replication.ExternalPeers {
 			if ep.Discovery != nil {
 				hasDiscoveryPeers = true
@@ -364,6 +402,9 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 				hasURIPeers = true
 			}
 		}
+		Expect(hasURIPeers || hasDiscoveryPeers || hasPodAddrPeers).To(BeTrue(),
+			"the cluster reports peers %v but none could be classified by mode, so every assertion "+
+				"below would be skipped and this spec would pass without checking anything", peerNames)
 
 		if hasURIPeers {
 			Expect(sc.Status.ExternalPeerStatuses).NotTo(BeEmpty(),

@@ -129,6 +129,15 @@ if [[ -n "$POD_ROUTED" && -n "$MULTUS_NETWORK" ]]; then
     exit 1
 fi
 
+# Mesh path (ADR-028, MESH-PLAN Phase 6). E2E_MESH=1 deploys the whole bundle —
+# SlapdMesh, SlapdCluster, SlapdDatabases, SlapdSchemas — from charts/slapd-mesh
+# with ONE values file applied identically to every site, and lets the operator
+# derive serverIDBase, externalPeers, the network mode and the trust wiring from
+# the mesh plus its own SITE_NAME. Unset keeps the hand-wired path exactly as it
+# is; both live until MESH-PLAN Phase 7 flips the default.
+E2E_MESH="${E2E_MESH:-}"
+mesh_mode() { [[ "$E2E_MESH" == "1" ]]; }
+
 # discovery_mode: cross-site peers are discovered via the remote k8s API
 # (kubeconfig Secret) rather than a static URI. True for Multus dynamic discovery
 # and for pod-routed. Static Multus podAddresses and NodePort-URI mode are not.
@@ -256,6 +265,17 @@ Reproducibility and triage:
                          duration is unmeasured on a large DIT (docs/BACKLOG.md,
                          "the big-DIT initial-sync e2e"). It still ends in a
                          failure; it is a longer fuse, not an exemption.
+
+Deployment path:
+  E2E_MESH             = Set to 1 to deploy via charts/slapd-mesh (ADR-028): one
+                         values file applied UNCHANGED at every site, with the
+                         operator deriving serverIDBase, externalPeers, network
+                         mode and trust wiring from the SlapdMesh plus its own
+                         siteName. Unset (default) keeps the hand-wired path —
+                         charts/slapd-cluster with per-site serverIDBase and an
+                         explicit peer list. Both live until MESH-PLAN Phase 7.
+                         Multi-site needs POD_ROUTED or MULTUS_NETWORK: the mesh
+                         only derives discovery peers, never NodePort URIs.
 
 Cross-site replication transport (multi-site only):
   (default)            = NodePort URIs, one per remote site.
@@ -398,6 +418,46 @@ setup_remote_kubeconfigs() {
     "$PROJECT_ROOT/scripts/create-remote-kubeconfig.sh" \
         -n "$NAMESPACE_TESTING" \
         "${pairs[@]}"
+
+    rename_kubeconfig_secrets_for_mesh
+}
+
+# scripts/create-remote-kubeconfig.sh names its Secrets "<label>-kubeconfig",
+# and the label is also the kubectl context it dials — the two cannot be
+# separated without changing that script, which is outside this change's scope
+# (ADR-028 §7 has it slated for replacement by External Secrets / a bootstrap
+# CLI, not for a new parameter).
+#
+# The mesh path needs "<site>-kubeconfig", because that is what
+# MeshSite.KubeconfigSecretFor() derives when the site declares no explicit
+# Secret — and declaring one is not an option: it would have to carry a kube
+# context name into a values file the References policy keeps public.
+#
+# So: copy each Secret to its site-derived name and DELETE the original. The
+# delete is the point — it leaves exactly one Secret, under the name the
+# operator derives, so a green run proves the derivation was used rather than
+# merely that a Secret with a plausible name existed.
+rename_kubeconfig_secrets_for_mesh() {
+    mesh_mode || return 0
+    log "Renaming kubeconfig Secrets onto the mesh's site names..."
+    local dst src from to payload
+    for dst in "${CONTEXTS[@]}"; do
+        for src in "${CONTEXTS[@]}"; do
+            [[ "$src" == "$dst" ]] && continue
+            from="${src}-kubeconfig"
+            to="$(peer_kubeconfig_secret "$src")"
+            [[ "$from" == "$to" ]] && continue
+            payload=$(kctl "$dst" -n "$NAMESPACE_TESTING" get secret "$from" \
+                -o jsonpath='{.data.kubeconfig}' | base64 -d)
+            [[ -z "$payload" ]] && die "[$dst] Secret $from carries no kubeconfig key"
+            log "  [$dst] $from → $to"
+            kctl "$dst" -n "$NAMESPACE_TESTING" create secret generic "$to" \
+                --from-literal=kubeconfig="$payload" \
+                --dry-run=client -o yaml \
+                | kctl "$dst" apply -f -
+            kctl "$dst" -n "$NAMESPACE_TESTING" delete secret "$from" --ignore-not-found >/dev/null
+        done
+    done
 }
 
 # Unified entry point: configure Multus external peers post-deploy.
@@ -434,6 +494,47 @@ assign_site_names() {
         SITE_NAMES[$ctx]="site-${idx}"
         ((idx++)) || true
     done
+}
+
+# ── Peer naming: the one place the two paths genuinely differ ────────────────
+#
+# A cross-site peer is referenced by three names that must agree between the
+# thing that CREATES the Secret and the thing that READS it:
+#
+#   peer_name            the ExternalPeer's name. Not cosmetic: the operator
+#                        mounts that peer's CA at
+#                        /etc/openldap/tls/peers/<name>/ca.crt and writes that
+#                        path into the stanza's tls_cacert, so the name is baked
+#                        into cn=config.
+#   peer_ca_secret       the Secret holding that site's CA under ca.crt.
+#   peer_kubeconfig_secret  the Secret holding a kubeconfig for that site's API,
+#                        which ADR-007 dynamic discovery binds with.
+#
+# On the HAND-WIRED path all three are derived from the kube CONTEXT name, which
+# is what every run before ADR-028 Phase 6 used and what this path keeps
+# producing byte for byte.
+#
+# On the MESH path the operator derives the peers itself and names them after
+# mesh SITES — MeshSite.CASecretNameFor() and KubeconfigSecretFor() default to
+# "<site>-ca" and "<site>-kubeconfig" (ADR-028 §4, adr-028 "Peer names are mesh
+# site names"). The harness therefore has to create the Secrets under the names
+# the operator will look for, and a lab's context names cannot become mesh names
+# because the fixtures are public and the References policy forbids them.
+#
+# The rename is deliberately confined to these three functions: every caller —
+# trust distribution, kubeconfig provisioning, peer wiring, teardown — goes
+# through them, so the two paths share one implementation and differ only in
+# what they call things.
+peer_name() { # ctx
+    if mesh_mode; then echo "${SITE_NAMES[$1]}"; else echo "site-$1"; fi
+}
+
+peer_ca_secret() { # ctx
+    if mesh_mode; then echo "${SITE_NAMES[$1]}-ca"; else echo "site-$1-ca"; fi
+}
+
+peer_kubeconfig_secret() { # ctx
+    if mesh_mode; then echo "${SITE_NAMES[$1]}-kubeconfig"; else echo "$1-kubeconfig"; fi
 }
 
 # ── Discovery ────────────────────────────────────────────────────────────────
@@ -626,11 +727,17 @@ setup_cross_trust() {
     done
 
     # Create cross-trust secrets: on each cluster, install every OTHER cluster's CA.
+    # The Secret NAME is whatever the consumer of this trust will look for — see
+    # peer_ca_secret: the hand-wired path names it after the kube context and
+    # writes that name into externalPeers[].tlsSecretName itself, the mesh path
+    # names it after the mesh site because that is the name the operator derives.
     for dst in "${CONTEXTS[@]}"; do
         for src in "${CONTEXTS[@]}"; do
             [[ "$src" == "$dst" ]] && continue
-            log "  site-${src}-ca → $dst"
-            kctl "$dst" -n "$NAMESPACE_TESTING" create secret generic "site-${src}-ca" \
+            local ca_secret
+            ca_secret="$(peer_ca_secret "$src")"
+            log "  ${ca_secret} → $dst"
+            kctl "$dst" -n "$NAMESPACE_TESTING" create secret generic "$ca_secret" \
                 --from-literal=ca.crt="${CA_CERTS[$src]}" \
                 --dry-run=client -o yaml \
                 | kctl "$dst" apply -f -
@@ -638,7 +745,146 @@ setup_cross_trust() {
     done
 }
 
+# ── Mesh path (ADR-028) ──────────────────────────────────────────────────────
+#
+# One values file, built ONCE, applied unchanged at every site. That is not a
+# tidiness choice: "the same bytes everywhere" is the property ADR-028 §3 rests
+# the whole parity design on, and a harness that templated a file per site would
+# be asserting the property by construction while quietly not having it. Building
+# it once and reusing the path makes the claim checkable — `sha256sum` it, and
+# every `helm upgrade` below names the same file.
+MESH_VALUES_FILE=""
+
+# The chart values for one run of the fixture. Three parts:
+#
+#   mesh     — sites (name + serverIDIndex) and the fabric. serverIDIndex is
+#              (position - 1) so site-1/2/3 → decades 0/100/200, which is EXACTLY
+#              what the hand-wired path's site_idx*100 produced. Reproducing it
+#              is mandatory, not tidy: olcServerID is baked into every CSN a pod
+#              has written, so a derivation that renumbers a live site splits its
+#              history across two sids (MESH-PLAN hazard 2, ADR-017).
+#   cluster  — the same tests/values.slapd-persistent.yaml the hand-wired path
+#              feeds to charts/slapd-cluster, lifted under `cluster:` plus the
+#              images. Reused rather than retyped so the two paths cannot drift
+#              into deploying different clusters and calling it a comparison.
+#   databases / schemas
+#            — derived from the SAME tests/resources/<set>/*.yaml the hand-wired
+#              path applies with kubectl, transformed into the chart's
+#              {name, spec} passthrough shape. clusterRef is dropped: the chart
+#              pins it (slapd-mesh.childSpec), and leaving it in would be a
+#              second name to keep in sync.
+build_mesh_values() {
+    local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
+    local crs=()
+    local f
+    for f in "$resource_dir"/*.yaml; do
+        [[ -e "$f" ]] && crs+=("$f")
+    done
+    [[ ${#crs[@]} -eq 0 ]] && die "No test resources found in $resource_dir"
+
+    MESH_VALUES_FILE=$(mktemp /tmp/e2e-mesh-values.XXXXXX.yaml)
+
+    {
+        echo "# Generated by tests/e2e.sh — ONE file, applied unchanged at every site."
+        echo "mesh:"
+        echo "  name: slapd-mesh"
+        echo "  sites:"
+        local idx=0 ctx
+        for ctx in "${CONTEXTS[@]}"; do
+            echo "    - name: ${SITE_NAMES[$ctx]}"
+            echo "      serverIDIndex: ${idx}"
+            ((idx++)) || true
+        done
+        if [[ -n "$POD_ROUTED" ]]; then
+            echo "  network:"
+            echo "    mode: pod-routed"
+        elif [[ -n "$MULTUS_NETWORK" ]]; then
+            echo "  network:"
+            echo "    mode: multus"
+            echo "    multusNetwork: \"$MULTUS_NETWORK\""
+        fi
+
+        local pull_secrets="[]"
+        [[ -n "${PULL_SECRET_NAME:-}" ]] && pull_secrets="[{\"name\": \"$PULL_SECRET_NAME\"}]"
+        MESH_SLAPD_REPO="$REGISTRY/$PROJECT/slapd" \
+        MESH_SLAPD_TAG="$SLAPD_TAG" \
+        MESH_INIT_REPO="$REGISTRY/$PROJECT/slapd-init" \
+        MESH_INIT_TAG="$SLAPD_TAG" \
+        MESH_PULL_SECRETS="$pull_secrets" \
+        yq -N '{"cluster": (. * {
+                    "name": "slapd",
+                    "images": {
+                        "slapd": {"repository": strenv(MESH_SLAPD_REPO), "tag": strenv(MESH_SLAPD_TAG)},
+                        "init":  {"repository": strenv(MESH_INIT_REPO),  "tag": strenv(MESH_INIT_TAG)}
+                    },
+                    "imagePullSecrets": (strenv(MESH_PULL_SECRETS) | from_json)
+                })}' "$VALUES_FILE"
+
+        yq -N ea '[select(.kind == "SlapdDatabase")
+                   | {"name": .metadata.name, "spec": (.spec | del(.clusterRef))}]
+                  | {"databases": .}' "${crs[@]}"
+        yq -N ea '[select(.kind == "SlapdSchema")
+                   | {"name": .metadata.name, "spec": (.spec | del(.clusterRef))}]
+                  | {"schemas": .}' "${crs[@]}"
+    } > "$MESH_VALUES_FILE"
+
+    log "Mesh values: $MESH_VALUES_FILE (sha256 $(sha256sum "$MESH_VALUES_FILE" | cut -c1-16)…)"
+}
+
+# Install the bundle. Same chart, same values file, same release name at every
+# site; the only per-site input in the whole system is the operator's siteName,
+# which setup_foundation already passed to charts/operator.
+#
+# Everything the hand-wired path computes here — the serverIDBase decade and the
+# N-1 external peers with their CA and kubeconfig Secret names — is absent on
+# purpose. The operator derives all of it from the mesh plus its own identity,
+# and a cluster that both references a mesh and hand-writes one of those fields
+# is refused outright with MeshResolved=False (ADR-028 §4). So the absence here
+# is the feature under test, not an omission.
+setup_mesh_bundle() {
+    build_mesh_values
+    local ctx
+    for ctx in "${CONTEXTS[@]}"; do
+        log "[$ctx] Installing the mesh bundle (site ${SITE_NAMES[$ctx]}, identical values)..."
+        hctl "$ctx" upgrade --install slapd "$PROJECT_ROOT/charts/slapd-mesh" \
+            --namespace "$NAMESPACE_TESTING" --create-namespace \
+            -f "$MESH_VALUES_FILE"
+    done
+}
+
+# The mesh's MeshResolved condition is the gate everything else depends on: a
+# cluster that cannot resolve its mesh reconciles NOTHING (deliberately — an
+# empty peer set would tear every cross-site stanza off every pod), so a failure
+# here would otherwise surface much later as an unexplained missing-stanza
+# symptom. Check it explicitly and say what is wrong.
+wait_mesh_resolved() {
+    mesh_mode || return 0
+    local ctx attempts status reason
+    for ctx in "${CONTEXTS[@]}"; do
+        log "[$ctx] Waiting for MeshResolved=True..."
+        attempts=0
+        while true; do
+            status=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapdclusters.ldap.chuck-chuck-chuck.net slapd \
+                -o jsonpath='{.status.conditions[?(@.type=="MeshResolved")].status}' 2>/dev/null || echo "")
+            [[ "$status" == "True" ]] && break
+            ((attempts++)) || true
+            if [[ $attempts -ge 120 ]]; then
+                reason=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get slapdclusters.ldap.chuck-chuck-chuck.net slapd \
+                    -o jsonpath='{.status.conditions[?(@.type=="MeshResolved")].message}' 2>/dev/null || echo "")
+                die "[$ctx] MeshResolved did not become True within 120s (status=${status:-<absent>}): ${reason:-<no message>}"
+            fi
+            sleep 1
+        done
+        log "[$ctx] MeshResolved=True (site ${SITE_NAMES[$ctx]})."
+    done
+}
+
 setup_slapd_clusters() {
+    if mesh_mode; then
+        setup_mesh_bundle
+        return 0
+    fi
+
     local site_idx=0
     for ctx in "${CONTEXTS[@]}"; do
         # Per-site serverIDBase keeps slapd's multimaster CSN tracking
@@ -669,17 +915,17 @@ setup_slapd_clusters() {
                 # remain the ADR-011 override for foreign sources (see
                 # tests/e2e-migration.sh).
                 peer_sets+=(
-                    --set "replication.externalPeers[$peer_idx].name=site-${other}"
+                    --set "replication.externalPeers[$peer_idx].name=$(peer_name "$other")"
                     --set "replication.externalPeers[$peer_idx].port=1025"
-                    --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
-                    --set "replication.externalPeers[$peer_idx].discovery.kubeconfigSecret.name=${other}-kubeconfig"
+                    --set "replication.externalPeers[$peer_idx].tlsSecretName=$(peer_ca_secret "$other")"
+                    --set "replication.externalPeers[$peer_idx].discovery.kubeconfigSecret.name=$(peer_kubeconfig_secret "$other")"
                 )
             elif [[ -z "$MULTUS_NETWORK" ]]; then
                 # NodePort mode: configure externalPeers with URIs.
                 peer_sets+=(
-                    --set "replication.externalPeers[$peer_idx].name=site-${other}"
+                    --set "replication.externalPeers[$peer_idx].name=$(peer_name "$other")"
                     --set "replication.externalPeers[$peer_idx].uri=ldaps://${NODE_IPS[$other]}:${NODEPORT_LDAPS}"
-                    --set "replication.externalPeers[$peer_idx].tlsSecretName=site-${other}-ca"
+                    --set "replication.externalPeers[$peer_idx].tlsSecretName=$(peer_ca_secret "$other")"
                 )
             fi
             # Static podAddresses mode: no peers yet — added after pods are
@@ -841,10 +1087,34 @@ apply_test_resources() {
     # identical everywhere, and precisely the deployment procedure ADR-025 says
     # must not be relied upon. The operator's evidence belt (a suffix with a
     # foreign creator withholds the seed) is unchanged and still the belt.
+    #
+    # On the MESH path the SlapdDatabase and SlapdSchema objects come out of
+    # charts/slapd-mesh instead (ADR-028 §5: the packaging unit is a chart), so
+    # only the fixture's non-CR manifests are applied here — the readpw password
+    # Secret the ACL specs bind with. The CR files stay the single source of
+    # truth either way: build_mesh_values reads THESE files and transforms them
+    # into chart values, so the two paths cannot deploy different fixtures.
     local resource_dir="$PROJECT_ROOT/tests/resources/$TEST_RESOURCES"
+    local files=()
+    local f
+    if mesh_mode; then
+        for f in "$resource_dir"/*.yaml; do
+            [[ -e "$f" ]] || continue
+            # Skip anything the chart renders; keep plain manifests.
+            if yq -N ea 'select(.kind == "SlapdDatabase" or .kind == "SlapdSchema") | .kind' "$f" \
+                 | grep -q .; then
+                continue
+            fi
+            files+=(-f "$f")
+        done
+        [[ ${#files[@]} -eq 0 ]] && { log "No non-CR test resources to apply (mesh path)."; return 0; }
+    else
+        files=(-f "$resource_dir/")
+    fi
+
     for ctx in "${CONTEXTS[@]}"; do
         log "[$ctx] Applying test resources from $resource_dir (site ${SITE_NAMES[$ctx]})..."
-        kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$resource_dir/"
+        kctl "$ctx" apply -n "$NAMESPACE_TESTING" "${files[@]}"
     done
 }
 
@@ -1327,11 +1597,18 @@ teardown_all() {
             kctl "$ctx" delete svc "slapd-readonly-pod-$i" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
         done
 
-        # Cross-trust and kubeconfig secrets.
+        # Cross-trust and kubeconfig secrets. BOTH naming schemes are removed
+        # regardless of which path this run used: the mesh path renames the
+        # kubeconfig Secrets onto the site names and a previous run of the other
+        # path may have left the context-named ones behind, and a stale CA
+        # Secret under the other scheme is exactly the debris that makes the
+        # next run's failure hard to read.
         for other in "${CONTEXTS[@]}"; do
             [[ "$other" == "$ctx" ]] && continue
-            kctl "$ctx" delete secret "site-${other}-ca" -n "$NAMESPACE_TESTING" --ignore-not-found || true
-            kctl "$ctx" delete secret "${other}-kubeconfig" -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
+            kctl "$ctx" delete secret "site-${other}-ca" "${SITE_NAMES[$other]}-ca" \
+                -n "$NAMESPACE_TESTING" --ignore-not-found || true
+            kctl "$ctx" delete secret "${other}-kubeconfig" "${SITE_NAMES[$other]}-kubeconfig" \
+                -n "$NAMESPACE_TESTING" --ignore-not-found 2>/dev/null || true
         done
 
         # Remote reader RBAC (created by create-remote-kubeconfig.sh).
@@ -1384,6 +1661,10 @@ teardown_all() {
         kctl "$ctx" delete crd slapdclusters.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
         kctl "$ctx" delete crd slapddatabases.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
         kctl "$ctx" delete crd slapdschemas.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
+        # SlapdMesh (ADR-028). Helm only installs a chart's crds/ on the FIRST
+        # install, so a CRD left behind here is the one the next run would be
+        # stuck with — and this is the kind whose schema is still moving.
+        kctl "$ctx" delete crd slapdmeshes.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
 
         kctl "$ctx" delete namespace "$NAMESPACE" --ignore-not-found \
             --timeout="${TEARDOWN_TIMEOUT}s" \
@@ -1429,6 +1710,20 @@ if [[ ${#CONTEXTS[@]} -ge 2 ]]; then
     MULTISITE=1
 fi
 
+# A SlapdMesh describes SITES, and a site is reached through its API server, so
+# every peer the operator derives uses ADR-007 dynamic discovery. There is no
+# mesh field that produces a static NodePort `uri`, deliberately
+# (externalPeersForSite: "static addressing is the pre-discovery path and stays
+# hand-configured"). A multi-site mesh run therefore needs a discovery transport
+# — say so here rather than let it surface as a cluster with zero peers.
+if mesh_mode && [[ "$MULTISITE" -eq 1 ]] && ! discovery_mode; then
+    echo "ERROR: E2E_MESH=1 with ${#CONTEXTS[@]} sites needs a discovery transport." >&2
+    echo "       Set POD_ROUTED=1 (ADR-016) or MULTUS_NETWORK=<nad> without" >&2
+    echo "       STATIC_PODADDRESSES. The mesh derives peers via the remote k8s API;" >&2
+    echo "       NodePort URIs and static podAddresses are hand-configured only." >&2
+    exit 1
+fi
+
 declare -A NODE_IPS          # node k8s InternalIP — used for cross-site peer URIs
 declare -A NODE_ACCESS_IPS   # address used to reach node NodePorts + cert SAN (override: E2E_NODE_ACCESS_IP[S])
 declare -A SITE_NAMES        # logical per-site identity handed to the operator (ADR-028 §4)
@@ -1467,6 +1762,10 @@ do_setup() {
     # on first apply — see BUG-ANALYSIS-database-dirs-rolling-restart.md).
     apply_test_resources
     setup_slapd_clusters
+    # A cluster whose meshRef does not resolve reconciles NOTHING, so on the mesh
+    # path the StatefulSet below would simply never appear. Check the condition
+    # that explains why before waiting on the symptom.
+    wait_mesh_resolved
     wait_for_clusters_ready
     configure_multus_external_peers
     setup_nodeport_services
@@ -1481,6 +1780,16 @@ if [[ "$subcommand" == "config" ]]; then
     site_map=""
     for ctx in "${CONTEXTS[@]}"; do site_map+="${ctx}=${SITE_NAMES[$ctx]} "; done
     echo "site identities:      ${site_map% } (founder: site-1, per spec.seed.site)"
+    if mesh_mode; then
+        echo "deployment path:      mesh — charts/slapd-mesh, one values file per run (ADR-028)"
+    else
+        echo "deployment path:      hand-wired — charts/slapd-cluster + kubectl apply (default)"
+    fi
+    peer_map=""
+    for ctx in "${CONTEXTS[@]}"; do
+        peer_map+="$(peer_name "$ctx")[$(peer_ca_secret "$ctx"),$(peer_kubeconfig_secret "$ctx")] "
+    done
+    echo "peer[ca,kubeconfig]:  ${peer_map% }"
     echo "registry/project:     $REGISTRY / $PROJECT"
     echo "image tag:            $GIT_TAG${SLAPD_TAG_SUFFIX:+ (slapd pair: $GIT_TAG$SLAPD_TAG_SUFFIX)}"
     echo "operator namespace:   $NAMESPACE"
@@ -1507,6 +1816,9 @@ case "$subcommand" in
         log ""
         log "Setup complete."
         log "  Contexts: ${CONTEXTS[*]}"
+        if mesh_mode; then
+            log "  Deployment: charts/slapd-mesh, one values file ($MESH_VALUES_FILE) at every site"
+        fi
         if [[ -n "$POD_ROUTED" ]]; then
             log "  Cross-site transport: pod-routed (primary pod IPs, discovery; ADR-016)"
         elif [[ -n "$MULTUS_NETWORK" ]]; then
