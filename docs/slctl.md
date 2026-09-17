@@ -119,7 +119,9 @@ corresponding checks are skipped.
 | **naming-contexts** | RW: one `cn=accesslog-<database>` per replicated database + data suffix. RO: data suffix only. | Missing or unexpected DB | Legacy shared `cn=accesslog` still present (mid-migration), or an orphan log with no `SlapdDatabase` |
 | **accesslog-consistency** | Per replicated DB: `logbase` = `olcAccessLogDB` = log `olcSuffix`; no two DBs share a log | Local disagreement, missing overlay, absent log DB, or two DBs sharing one log (ADR-019) | Legacy shared `cn=accesslog` still in use by a single DB. External-peer `logbase` is reported as information — it is evaluated on the peer (ADR-019 R9) and never fails |
 | **csn-convergence** | Per database: all pods report identical contextCSN vectors for that suffix | A database readable on some pods and not on others | Divergence on a database (groups + lag), or a database with no contextCSN anywhere |
-| **syncrepl-stanza-count** | RW: `(replicas-1) + externalPeers` stanzas. RO: `replicas` stanzas. | Mismatch | — |
+| **syncrepl-stanza-count** | RW: `(replicas-1) + externalPeers` stanzas. RO: `replicas` stanzas. On a `meshRef` cluster the external half is **derived** from the `SlapdMesh`, not read from the spec — see *Mesh-derived peers* below. | Mismatch | — |
+| **mesh-resolution** | `spec.meshRef` is set and the operator reports `MeshResolved=True` | Operator reports `False`/`Unknown`, or has published no verdict at all — in both cases the derived peer set cannot be trusted | — |
+| **external-peers** | Every peer the operator resolved is accounted for | A resolved peer is missing | — |
 | **syncrepl-skip-self** | No RW pod has a syncrepl stanza pointing to itself | Self-replication detected | — |
 | **multi-provider** | `TRUE` on all RW pods; absent/FALSE on RO pods | Wrong value | — |
 | **rid-uniqueness** | All RIDs unique within each pod | Duplicate RIDs | — |
@@ -152,6 +154,36 @@ Done. 28 artifacts collected
 ```
 
 ---
+
+## Mesh-derived peers (ADR-028)
+
+A `SlapdCluster` with `spec.meshRef` does **not** carry its external peers in
+`spec.replication.externalPeers`. The operator derives them from the `SlapdMesh`
+plus its own site identity and applies the result in memory only — deliberately,
+so that every site's `SlapdCluster` object stays byte-identical (ADR-028 §3).
+
+So `slctl` cannot read the peer set off the spec, and it does not re-derive it
+either. Re-deriving would make `slctl` a second authority on a derivation whose
+output is baked into replicated data, free to disagree with the operator you are
+using it to debug — and it would not even be sufficient, since a peer's
+*discovered addresses* come from the operator's live queries to remote API
+servers. Instead `slctl` reads back what the operator published in
+`status.externalPeerStatuses`, and reports the `MeshResolved` condition as the
+provenance of that reading.
+
+Consequences when using `status` or `inspect` on a mesh cluster:
+
+- A `Mesh:` header names the referenced `SlapdMesh` and states that the peers
+  below were read from status as of the operator's last status write. Freshness
+  is therefore bounded by the operator, not by `slctl`.
+- If the operator reports `MeshResolved=False`/`Unknown`, or has published no
+  verdict, the peers shown are labelled `LAST KNOWN` (or explicitly
+  `UNKNOWN, not empty` when status carries none) and `inspect` **fails** the
+  `mesh-resolution` check. An empty peer list is never printed as though it
+  meant "this cluster has no peers".
+- `--json` carries `meshRef`, `externalPeerSource` (`spec` | `mesh` | `unknown`)
+  and `meshNote`. A non-mesh cluster reports `externalPeerSource: "spec"` and is
+  otherwise byte-identical to previous releases.
 
 ## Understanding contextCSN
 

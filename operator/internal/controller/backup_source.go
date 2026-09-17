@@ -176,11 +176,34 @@ func sourceSuffixHealthyCondition(outcome suffixProbeOutcome, detail string, gen
 // isReplicationParticipant reports whether writes can reach this cluster's data
 // anywhere other than the pod a backup reads. False only for a genuinely
 // standalone cluster.
+//
+// False is the CONFIDENT answer — it makes the backup stamp
+// SourceConverged=True/NotReplicated, asserting that pod-0's view is by
+// construction the whole truth. So every clause below must be able to justify
+// that assertion, and anything unproven has to fall to the true side.
+//
+// spec.meshRef is checked in its own right, not merely relied upon to have
+// been derived into externalPeers (MESH-PLAN Phase 6a). Two reasons:
+//
+//   - A cluster that names a mesh has DECLARED that it spans sites. Whether
+//     this particular copy of the object has had the derivation applied to it
+//     is a property of the reader, not of the cluster, and the confident
+//     answer must not depend on the reader.
+//   - It is honest when the derivation FAILS. An unreadable mesh leaves the
+//     peer set unknown, and unknown evidence never counts toward the
+//     confident answer — the same rule ADR-008 applies to CSN evidence.
+//
+// The cost is a degenerate single-site mesh (one site, one replica), which now
+// reports convergence Unknown instead of True/NotReplicated. That is the
+// conservative direction, and a one-site mesh is a configuration on its way to
+// being more than one.
 func isReplicationParticipant(sc *ldapv1alpha1.SlapdCluster) bool {
 	if !sc.Spec.Replication.Enabled {
 		return false
 	}
-	return sc.Spec.Replicas > 1 || len(sc.Spec.Replication.ExternalPeers) > 0
+	return sc.Spec.Replicas > 1 ||
+		len(sc.Spec.Replication.ExternalPeers) > 0 ||
+		sc.Spec.MeshRef != ""
 }
 
 // normalizedCSNVector makes a contextCSN vector safe to store in status:
