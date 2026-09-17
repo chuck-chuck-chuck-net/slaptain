@@ -68,9 +68,18 @@ Caught while writing the implementation brief, before any code was written.
   present/absent and well-formed. Cross-checking the name against `sites[]`
   arrives with the type in Phase 3.
 - Tests: unit red-first on the pure resolver (present, absent, empty string,
-  whitespace); a check that the operator logs its identity once at startup.
+  whitespace).
 - Done when: `helm upgrade` can set it, the operator reports it, and nothing else
   has changed.
+
+*Amended during implementation, 2026-09-17:* this phase originally also asked for
+"a check that the operator logs its identity once at startup". Dropped. `cmd` has
+no test harness in this repo (0.0% coverage), so asserting a log line means either
+building one or extracting the message choice into a pure function that exists
+only to be asserted — machinery out of proportion to one log statement. The
+identity's real consumers get tested where they consume it, from Phase 2 onward.
+The startup log is verified by reading, and is stated here as untested rather than
+quietly counted as covered.
 
 ## Phase 2 — `seed.site` (unblocks the byte-identical chart)
 

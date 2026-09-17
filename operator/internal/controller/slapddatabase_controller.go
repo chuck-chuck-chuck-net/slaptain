@@ -59,6 +59,11 @@ type SlapdDatabaseReconciler struct {
 	// ClusterDomain is the Kubernetes DNS domain used to build pod FQDNs for
 	// per-pod LDAP connections and syncrepl provider URIs. See ADR-015.
 	ClusterDomain string
+	// SiteName is which site of a mesh this operator runs at, from its own
+	// installation config rather than from any CR. Empty means no site identity
+	// is configured, which disables mesh features. Nothing consumes it yet; the
+	// seed site selector is the first reader. See ADR-028 §4.
+	SiteName string
 }
 
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapddatabases,verbs=get;list;watch;create;update;patch;delete
