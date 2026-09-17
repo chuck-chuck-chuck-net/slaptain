@@ -1,0 +1,340 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: slapdmeshes.ldap.chuck-chuck-chuck.net
+spec:
+  group: ldap.chuck-chuck-chuck.net
+  names:
+    kind: SlapdMesh
+    listKind: SlapdMeshList
+    plural: slapdmeshes
+    shortNames:
+    - sm
+    singular: slapdmesh
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.network.mode
+      name: Network
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: "SlapdMesh is the Schema for the slapdmeshes API — the top layer
+          of ADR-028's\nfour:\n\n\tSlapdMesh ←meshRef— SlapdCluster ←clusterRef— SlapdDatabase
+          / SlapdSchema\n\nIt describes the sites of a multi-site deployment and the
+          fabric between\nthem. It is namespaced like everything else in this API
+          group: uniform RBAC,\nand two teams can run independent meshes in one cluster.\n\nThe
+          object is meant to be applied UNCHANGED to every site — that is the\nproperty
+          that makes cross-site parity checkable as existence plus a hash,\ninstead
+          of a field-by-field comparison somebody gets wrong (ADR-028 §3)."
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired mesh topology.
+            properties:
+              network:
+                description: |-
+                  network selects how cross-site syncrepl peers are addressed:
+                  "pod-routed" (ADR-016) or "multus" plus its NAD (ADR-007). This is the
+                  same shape SlapdCluster.spec.replication.network has today, reused rather
+                  than re-declared so the Phase 4 derivation is an assignment and cannot
+                  drift from it.
+
+                  The transport is a property of the fabric between sites, which is why it
+                  belongs to the mesh: two clusters on one mesh cannot sensibly disagree
+                  about whether pod CIDRs are routed.
+                properties:
+                  mode:
+                    description: |-
+                      mode selects how cross-cluster peer IPs are obtained:
+                        "pod-routed" — the primary pod network is natively routed across sites; peer
+                                       IPs are the pods' primary IPs (needs no multusNetwork/NAD, and
+                                       no Multus attachment on the operator). Requires routed pod CIDRs.
+                        "multus"     — a dedicated Multus secondary network; peer IPs come from the
+                                       net1 interface (requires multusNetwork).
+                      When unset, defaults to pod-routed — unless multusNetwork is set, which infers
+                      multus. See ADR-016.
+                    enum:
+                    - multus
+                    - pod-routed
+                    type: string
+                  multusNetwork:
+                    description: |-
+                      multusNetwork is the NetworkAttachmentDefinition reference. Required when
+                      mode is "multus"; leave empty for "pod-routed".
+                      Supports cross-namespace format "namespace/name" (recommended) or plain "name"
+                      (same namespace as SlapdCluster). The NAD must already exist.
+                    type: string
+                  useForInCluster:
+                    default: false
+                    description: |-
+                      useForInCluster controls whether in-cluster syncrepl uses discovered Multus IPs
+                      instead of headless DNS. Default false — cross-site always uses Multus when configured.
+                      Only meaningful in "multus" mode; ignored in "pod-routed" (in-cluster stays on DNS).
+                    type: boolean
+                type: object
+              sites:
+                description: |-
+                  sites lists the mesh's sites. Order is presentation only: each site's
+                  serverID decade comes from its own serverIDIndex field, so the list may
+                  be reordered or edited in the middle freely. Order IS preserved in the
+                  derived external peer set, purely so an unchanged mesh keeps producing an
+                  unchanged cn=config.
+                items:
+                  description: |-
+                    MeshSite describes one site of a mesh: a Kubernetes cluster that carries
+                    slapd pods and exchanges syncrepl traffic with the other sites.
+
+                    A site entry is written from the point of view of every OTHER site — it says
+                    how to reach and trust THIS site — which is what keeps the SlapdMesh object
+                    byte-identical everywhere (ADR-028 §3). Nothing in here may differ per
+                    reader; the one per-site fact in the system, "which of these am I", lives in
+                    the operator's own installation config and never in a CR (ADR-028 §4, see
+                    ResolveSiteName).
+
+                    The site's position in spec.sites is deliberately NOT load-bearing. The
+                    serverID decade comes from the explicit serverIDIndex field below, so the
+                    list may be reordered, sorted or edited in the middle without touching any
+                    site's identity. See that field for why.
+                  properties:
+                    caSecretName:
+                      description: |-
+                        caSecretName names the Secret, in the SlapdCluster's namespace at every
+                        OTHER site, holding this site's CA certificate under "ca.crt". Consumers
+                        verify this site's slapd against it (ADR-007 TLS posture).
+
+                        Optional: defaults by convention to "<site name>-ca". Set it for the same
+                        reason as kubeconfigSecret — cert-manager's trust-manager writes the
+                        bundle where its Bundle resource says, not where we would like. Use
+                        CASecretNameFor to resolve it.
+                      type: string
+                    endpoint:
+                      description: |-
+                        endpoint is the site's Kubernetes API server URL, on the network the
+                        other sites can reach it over (the replication network, not a public
+                        ingress). Recorded for the bootstrap CLI and for `slctl mesh verify`,
+                        which needs to reach peer API servers while replication is broken
+                        (ADR-028 §6).
+
+                        The operator itself does not read this: it dials the address inside the
+                        kubeconfig Secret below, which is authoritative because it is what the
+                        client credentials were minted for. Keep the two consistent.
+                      type: string
+                    kubeconfigSecret:
+                      description: |-
+                        kubeconfigSecret names the Secret, in the SlapdCluster's namespace at
+                        every OTHER site, holding a kubeconfig for this site's API server. It is
+                        what ADR-007's dynamic peer discovery binds with.
+
+                        Optional: when omitted the name defaults by convention to
+                        "<site name>-kubeconfig" with the usual "kubeconfig" key. Set it when the
+                        Secret is provisioned by something with its own naming opinion —
+                        External Secrets, SOPS, a platform team's convention (ADR-028 §7 adopts
+                        the ecosystem rather than growing our own). Use KubeconfigSecretFor to
+                        resolve it; do not read this field directly.
+                      properties:
+                        key:
+                          default: kubeconfig
+                          description: key is the data key containing the kubeconfig
+                            YAML.
+                          type: string
+                        name:
+                          description: name is the Secret name (must be in the same
+                            namespace as the SlapdCluster).
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    name:
+                      description: |-
+                        name identifies the site. It is matched verbatim — not case-folded, only
+                        whitespace-trimmed — against the operator's own SITE_NAME, exactly as
+                        SlapdDatabase.spec.seed.site is (ADR-028 §3 amendment). Two sites whose
+                        names differ only in case are two sites.
+
+                        Names must be unique within the mesh: two sites claiming one identity
+                        collide their serverID decades, which is the failure ADR-028 §4 calls out
+                        as the first thing to verify.
+                      minLength: 1
+                      type: string
+                    serverIDIndex:
+                      description: |-
+                        serverIDIndex fixes this site's slot in the serverID space. The site's
+                        serverID decade is serverIDIndex * 100, and ADR-017's
+                        serverIDBase + ordinal + 1 then gives each pod its own: index 2, pod 3 →
+                        203. That reads straight out of a CSN, which is the point of the scheme.
+
+                        It is an EXPLICIT field rather than the site's position in spec.sites,
+                        and that is the whole design of this field. olcServerID is baked into
+                        every CSN a pod has ever written (timestamp#count#sid#mod), so renumbering
+                        a live site splits its history across two sids and per-site CSN tracking
+                        stops being comparable with itself (MESH-PLAN hazard 2). Deriving the
+                        number from list position would mean that inserting a site in the middle,
+                        or letting a formatter sort the list, silently renumbers every site after
+                        it — and reordering a YAML list is something people do without thinking.
+                        Binding the number to a field instead makes spec.sites freely reorderable
+                        and the identity immovable.
+
+                        Required, deliberately: defaulting it to the position would reintroduce
+                        exactly the fragility the field removes, and would do so invisibly on the
+                        one edit that matters.
+
+                        Indices must be unique across the mesh — two sites on one index share one
+                        decade, and slapd validates nothing: contextCSN keeps the highest CSN per
+                        serverID, so colliding sites merge into one bucket and each other's
+                        writes read as already-seen. Gaps are legal and expected: a decommissioned
+                        site's index is retired, not reused, so 0/1/2 becoming 0/2 is the correct
+                        way to remove a site.
+
+                        The ceiling is index 40: slapd caps olcServerID at 4095 and
+                        SlapdCluster.spec.replication.serverIDBase at 4094, so index 40 (decade
+                        4000) is the last one a whole decade fits in.
+                      format: int32
+                      maximum: 40
+                      minimum: 0
+                      type: integer
+                  required:
+                  - name
+                  - serverIDIndex
+                  type: object
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              trust:
+                description: |-
+                  trust carries mesh-wide trust material. Per-site CA Secrets live on the
+                  site entries.
+                properties:
+                  issuerRef:
+                    description: |-
+                      issuerRef names a cert-manager Issuer or ClusterIssuer from which each
+                      site's slapd server certificate is issued.
+
+                      Declarative only at present: nothing in the operator consumes it, because
+                      ADR-028 §7 puts certificate bootstrap in a CLI run once per site pair
+                      rather than in the reconcile loop. It is carried here so the mesh remains
+                      the single description of the fabric, and so `mesh verify` has something
+                      to compare.
+                    properties:
+                      group:
+                        default: cert-manager.io
+                        description: group is the issuer's API group.
+                        type: string
+                      kind:
+                        default: Issuer
+                        description: kind is "Issuer" (namespaced) or "ClusterIssuer".
+                        enum:
+                        - Issuer
+                        - ClusterIssuer
+                        type: string
+                      name:
+                        description: name is the issuer's name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+            required:
+            - sites
+            type: object
+          status:
+            description: status defines the observed state of the mesh.
+            properties:
+              conditions:
+                description: conditions holds standard Kubernetes condition entries.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: observedGeneration is the .metadata.generation last processed.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

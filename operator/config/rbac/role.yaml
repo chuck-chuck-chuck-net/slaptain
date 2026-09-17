@@ -76,6 +76,7 @@ rules:
   - slapdbackups/status
   - slapdclusters/status
   - slapddatabases/status
+  - slapdmeshes/status
   - slapdrestores/status
   - slapdscheduledbackups/status
   - slapdschemas/status
@@ -94,6 +95,7 @@ rules:
 - apiGroups:
   - ldap.chuck-chuck-chuck.net
   resources:
+  - slapdmeshes
   - slapdrestores
   verbs:
   - get

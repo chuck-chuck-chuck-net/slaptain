@@ -54,6 +54,11 @@ rules:
       - slapdschemas
       - slapdscheduledbackups
       - slapdrestores
+      # slapdmeshes: the site inventory a SlapdCluster resolves meshRef against
+      # (ADR-028). This template is hand-maintained and does NOT track the
+      # generated config/rbac/role.yaml, so a kind added there must be added
+      # here too or the deployed operator reads it as forbidden.
+      - slapdmeshes
     verbs:
       - create
       - delete

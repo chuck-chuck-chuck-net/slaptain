@@ -151,8 +151,25 @@ merged and green.
 - Tests: unit on the resolution decision; e2e asserting a `meshRef` cluster
   produces byte-identical stanzas to an explicitly configured one — that
   equivalence is the phase's real acceptance criterion.
+
+*Corrected during Phase 3, 2026-09-17 — read this before writing the e2e.* The
+control to compare against is **not** today's fixture output. `peer.Name` is
+baked into `cn=config`: the CA is mounted at
+`/etc/openldap/tls/peers/<name>/ca.crt` (`slapdcluster_controller.go:1049`) and
+that path is written into the stanza's `tls_cacert`
+(`slapddatabase_controller.go:2405`). Derived peers are named after **mesh
+sites**, while `tests/e2e.sh` names them after kube contexts — and the lab's
+context names cannot become mesh names, because the fixtures are public and the
+References policy forbids them (which is why Phase 2b chose `site-N`). So
+byte-identity against the current lab output is unreachable by construction.
+Compare instead against a hand-configured control whose peer names are the mesh
+site names; equivalence then holds exactly. What Phase 6 does to a running lab is
+therefore a peer **rename** — a stanza rewrite and a volume remount, i.e. a
+cluster roll. Not a data event, but not invisible either: plan it as a roll.
+
 - Done when: a three-site lab deployed via `meshRef` is indistinguishable, in
-  `cn=config`, from one deployed the current way.
+  `cn=config`, from one deployed with hand-written peers **using the same site
+  names**.
 
 ## Phase 5 — `charts/slapd-mesh`
 
