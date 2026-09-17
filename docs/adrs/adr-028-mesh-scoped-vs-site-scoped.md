@@ -171,8 +171,27 @@ wiring. All four drop out of the user-facing spec.
 Two `SlapdCluster`s on one mesh may safely share `serverID` values: a CSN is
 compared only within one replication topology, and clusters with different
 suffixes never exchange CSNs. That stops holding if two such clusters are ever
-merged, and a decade-per-site scheme tops out near 40 sites against
+merged, and a decade-per-site scheme tops out at index 40 against
 `olcServerID`'s 4095.
+
+*Settled in Phase 3, 2026-09-17: the decade is declared, not positional.* Each
+mesh site carries a required `serverIDIndex`, and the base is `index × 100`. The
+arithmetic is unchanged — and deliberately decimal, because `serverID 203` reads
+as "site 2, pod 3" in a CSN, which is how these are actually debugged — but the
+index no longer comes from the site's position in `sites[]`. Deriving it from
+position would have meant that reordering a YAML list silently renumbers every
+site after the edit, splitting those pods' CSN history across two sids: a booby
+trap on an edit nobody reviews. Indices must be unique and may be sparse, so
+decommissioning a site does not renumber its neighbours. We chose this while the
+only live deployment was a lab that could have been migrated — the point is that
+it needed no migration at all: indices 0/1/2 reproduce the existing 0/100/200
+exactly.
+
+*Peer names are mesh site names.* `peer.Name` is not cosmetic — it is the
+directory component of the CA mount path and therefore appears in every external
+stanza's `tls_cacert`. Naming derived peers after mesh sites means a mesh-driven
+cluster and a hand-written one agree only when both use the same site names; see
+the Phase 4 correction in `docs/MESH-PLAN.md`.
 
 The operator must still answer "which site am I?". That fact belongs in the
 operator's own installation config, not in any CR — putting it in `SlapdMesh`
