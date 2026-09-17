@@ -1,0 +1,53 @@
+{{- include "slapd-mesh.validate" . -}}
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdMesh
+metadata:
+  name: {{ .Values.mesh.name }}
+  labels:
+    {{- include "slapd-mesh.labels" . | nindent 4 }}
+spec:
+  sites:
+    {{- range .Values.mesh.sites }}
+    - name: {{ .name | quote }}
+      serverIDIndex: {{ .serverIDIndex }}
+      {{- with .endpoint }}
+      endpoint: {{ . | quote }}
+      {{- end }}
+      {{- with .kubeconfigSecret }}
+      kubeconfigSecret:
+        name: {{ .name | quote }}
+        {{- with .key }}
+        key: {{ . | quote }}
+        {{- end }}
+      {{- end }}
+      {{- with .caSecretName }}
+      caSecretName: {{ . | quote }}
+      {{- end }}
+    {{- end }}
+
+  {{- with .Values.mesh.network }}
+  network:
+    {{- with .mode }}
+    mode: {{ . | quote }}
+    {{- end }}
+    {{- with .multusNetwork }}
+    multusNetwork: {{ . | quote }}
+    {{- end }}
+    {{- if hasKey . "useForInCluster" }}
+    useForInCluster: {{ .useForInCluster }}
+    {{- end }}
+  {{- end }}
+
+  {{- with .Values.mesh.trust }}
+  {{- with .issuerRef }}
+  trust:
+    issuerRef:
+      name: {{ .name | quote }}
+      {{- with .kind }}
+      kind: {{ . | quote }}
+      {{- end }}
+      {{- with .group }}
+      group: {{ . | quote }}
+      {{- end }}
+  {{- end }}
+  {{- end }}

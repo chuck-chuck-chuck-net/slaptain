@@ -1,0 +1,25 @@
+{{- /*
+The bundle's SlapdDatabases.
+
+spec is passed through verbatim (minus clusterRef, which the chart pins) rather
+than re-declared field by field. SlapdDatabase has some forty spec fields across
+five ADRs' worth of tunables; enumerating them here would silently narrow what
+the chart can express and would go stale on the next CRD change. The values file
+therefore mirrors the CR, and anything valid on a SlapdDatabase is valid here.
+
+The one thing the chart does assert about them is seed.site — see
+slapd-mesh.validate.
+*/ -}}
+{{- $clusterName := .Values.cluster.name -}}
+{{- $labels := include "slapd-mesh.labels" . -}}
+{{- range .Values.databases }}
+---
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdDatabase
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  {{- include "slapd-mesh.childSpec" (dict "spec" .spec "clusterName" $clusterName) | nindent 2 }}
+{{- end }}

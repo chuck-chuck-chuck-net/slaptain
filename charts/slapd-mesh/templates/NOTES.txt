@@ -1,0 +1,37 @@
+slapd-mesh {{ .Chart.Version }} — mesh {{ .Values.mesh.name }}, cluster {{ .Values.cluster.name }}
+
+Sites in this mesh:
+{{- range .Values.mesh.sites }}
+  - {{ .name }} (serverID decade {{ mul .serverIDIndex 100 }})
+{{- end }}
+
+Apply these same values at EVERY site. Every object this chart renders is
+mesh-scoped and must come out byte-identical everywhere (ADR-028 §3).
+
+The one per-site fact is the operator's own identity, and it is NOT in this
+chart. Each site's operator must be installed with its own name:
+
+  helm upgrade --install slaptain-operator ./charts/operator --set siteName=<this site>
+
+Check it landed:
+
+  kubectl -n {{ .Release.Namespace }} get slapdcluster {{ .Values.cluster.name }} \
+    -o jsonpath='{.status.conditions[?(@.type=="MeshResolved")]}'
+
+MeshResolved=False with reason SiteIdentityMissing means that operator has no
+siteName; SiteNotInMesh means its siteName is not one of the sites above.
+Nothing is wired until it resolves — deliberately, because guessing a site is
+how two sites end up sharing a serverID decade.
+{{- $seedless := list }}
+{{- range .Values.databases }}
+{{- $seed := default (dict) (default (dict) .spec).seed }}
+{{- if and $seed.site }}
+{{- else if (default (dict) .spec).seed }}
+{{- $seedless = append $seedless .name }}
+{{- end }}
+{{- end }}
+{{- if $seedless }}
+
+NOTE: single-site mesh — {{ join ", " $seedless }} seed without naming a site.
+Add seed.site before adding a second site to this mesh.
+{{- end }}
