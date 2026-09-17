@@ -171,6 +171,33 @@ cluster roll. Not a data event, but not invisible either: plan it as a roll.
   `cn=config`, from one deployed with hand-written peers **using the same site
   names**.
 
+*Landed 2026-09-17.* Equivalence shown at `cn=config` level on a single-site lab
+(derived vs hand-written: identical `olcServerID` and `olcSyncRepl`, modulo the
+per-installation pod IP and the per-database password). The existing path is
+unchanged and proven by a full three-site cycle with no `meshRef` anywhere.
+**Multi-site `meshRef` is not yet exercised end-to-end** — nothing deploys a
+mesh-driven cluster across sites until Phase 6.
+
+Two findings from the implementation, both structural:
+
+- The derivation is applied **in memory only** and never written back to the
+  spec. Materialising it would make each site's `SlapdCluster` differ from its
+  neighbours', destroying the byte-identical property §3 rests on. The cost is
+  that every consumer of the derived fields must resolve `meshRef` itself.
+- Consequently the `SlapdDatabase` controller resolves too: it fetches the
+  cluster independently and builds the external stanzas and the per-pod
+  `olcServerID` from `sc.Spec.Replication`. Without that call site, `meshRef`
+  would produce CA mounts and a serverID base but **zero syncrepl stanzas**.
+
+### Phase 6 prerequisite — the diagnostics must stop lying first
+
+`slctl status`, `slctl inspect` and `internal/controller/backup_source.go` read
+`Spec.Replication.ExternalPeers` directly, without resolving `meshRef` — eight
+call sites. On a mesh-driven cluster they report **no external peers** while
+`cn=config` carries the stanzas. Harmless while nothing sets `meshRef`;
+unacceptable the moment the lab moves, because `slctl inspect` is the tool
+reached for when a mesh misbehaves. Fix these before Phase 6, not after.
+
 ## Phase 5 — `charts/slapd-mesh`
 
 - One chart containing `SlapdMesh`, `SlapdCluster`, `SlapdDatabase`s and

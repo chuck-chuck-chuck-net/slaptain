@@ -594,6 +594,7 @@ type SlapdReplicationConfig struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.replication) || self.replication.mode != 'consumer-only' || !has(self.readReplicas) || self.readReplicas == 0",message="replication.mode=consumer-only is incompatible with readReplicas>0 (the whole cluster is already read-only)"
 // +kubebuilder:validation:XValidation:rule="!has(self.replication) || self.replication.mode != 'consumer-only' || self.replication.enabled",message="replication.mode=consumer-only requires replication.enabled=true (otherwise the mode is silently ignored)"
 // +kubebuilder:validation:XValidation:rule="!has(self.replication) || !has(self.replication.externalPeers) || size(self.replication.externalPeers) == 0 || self.replication.enabled",message="replication.externalPeers requires replication.enabled=true (otherwise the peers are silently ignored)"
+// +kubebuilder:validation:XValidation:rule="!has(self.sites) || size(self.sites) == 0 || has(self.meshRef)",message="spec.sites is a subset selector over spec.meshRef's site list and is meaningless without it"
 type SlapdClusterSpec struct {
 	// suspend pauses the operator's reconciliation of this resource. Existing
 	// StatefulSets, Services, and Secrets are left in place; the operator stops
@@ -603,6 +604,45 @@ type SlapdClusterSpec struct {
 	// +kubebuilder:default=false
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
+	// meshRef names a SlapdMesh in this namespace whose site list describes the
+	// multi-site deployment this cluster belongs to (ADR-028 §1).
+	//
+	// When set, the operator DERIVES the cross-site wiring — spec.replication.
+	// serverIDBase, spec.replication.externalPeers and spec.replication.network
+	// — from that mesh plus its own site identity (the SITE_NAME on the
+	// operator's Deployment, the single per-site fact in the system, ADR-028
+	// §4). Those fields then drop out of the user-facing spec, which is what
+	// lets one chart be applied byte-identically to every site.
+	//
+	// Setting any of the derived fields explicitly alongside meshRef is
+	// REFUSED rather than silently resolved in either direction: the cluster
+	// reports a MeshResolved=False condition and reconciles nothing. Ambiguity
+	// about serverIDBase is how a CSN-eating serverID collision gets in
+	// quietly, and slapd validates nothing.
+	//
+	// Unset — the default, and what every existing deployment has — changes
+	// nothing at all: the mesh code never runs and the spec is used verbatim.
+	// +optional
+	MeshRef string `json:"meshRef,omitempty"`
+	// sites narrows this cluster to a SUBSET of the mesh's sites, so that
+	// cluster X may span sites A+B while cluster Y on the same mesh spans
+	// A+B+C. Names are matched against SlapdMesh.spec.sites[].name verbatim
+	// (trimmed, never case-folded — ADR-028 §3 amendment).
+	//
+	// Unset means every site in the mesh, which is what a cluster gets when it
+	// says nothing. The selector narrows the derived PEER set only; it never
+	// touches the serverID decade, which is mesh-wide by construction — two
+	// clusters spanning different subsets must still agree about who owns
+	// which decade.
+	//
+	// A name the mesh does not declare, or a selector that excludes this
+	// operator's own site, is an error condition rather than a silently
+	// shrunken peer set: a half-connected topology looks healthy from both
+	// ends of every link that does exist.
+	//
+	// Only meaningful with meshRef.
+	// +optional
+	Sites []string `json:"sites,omitempty"`
 	// images specifies the container images to use. Optional: when omitted, the
 	// operator defaults both slapd and slapd-init to its own registry/path at its
 	// own tag (see SlapdImages). Set to override the repository, tag, or pull policy.

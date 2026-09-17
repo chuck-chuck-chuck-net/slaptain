@@ -193,6 +193,32 @@ stanza's `tls_cacert`. Naming derived peers after mesh sites means a mesh-driven
 cluster and a hand-written one agree only when both use the same site names; see
 the Phase 4 correction in `docs/MESH-PLAN.md`.
 
+*Implemented 2026-09-17 (MESH-PLAN Phase 4), with three decisions the ADR had
+left open:*
+
+- **The derivation is in-memory only.** It is never written back to
+  `spec.replication`. Materialising it would make each site's `SlapdCluster`
+  differ from its neighbours', which destroys the byte-identical property §3
+  rests on — so we pay the price instead: every consumer of a derived field must
+  resolve `meshRef` itself, and one that forgets sees an unwired cluster rather
+  than a wrong one.
+- **`meshRef` plus an explicitly set derived field is refused**, with a
+  `MeshResolved: False` condition and `phase: Error`, one reason per failure
+  cause. A failed resolution reconciles nothing else and requeues — defaulting
+  to an empty peer set would tear every cross-site stanza off every pod on the
+  next pass, which is a far worse outcome than stalling loudly.
+- **`serverIDBase: 0` is read as unset**, because it is a plain `int32` with a
+  CRD default of 0 and the two are indistinguishable on the wire. Accepted
+  rather than changing the field to a pointer: the ambiguity can only cost a
+  missing *error message*, never a wrong serverID, since the mesh's value is
+  collision-free by construction and deriving over a typed 0 can only move
+  toward correctness. Note the asymmetry with `serverIDIndex`, which is a
+  pointer precisely because it had no such safe direction.
+  A `serverIDBase` that *agrees* with the mesh is not a conflict, and that check
+  is deliberately identity-free — otherwise the same object would be valid at one
+  site and invalid at its neighbour, breaking byte-identity for exactly the field
+  most likely to linger through an upgrade.
+
 The operator must still answer "which site am I?". That fact belongs in the
 operator's own installation config, not in any CR — putting it in `SlapdMesh`
 would destroy the byte-identical property the whole design rests on. It is then

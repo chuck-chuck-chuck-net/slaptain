@@ -83,6 +83,13 @@ type SlapdClusterReconciler struct {
 	// "k8s.example") used to build every pod FQDN. Resolved once at startup
 	// via ResolveClusterDomain and injected from main. See ADR-015.
 	ClusterDomain string
+	// SiteName is which site of a mesh this operator runs at, resolved once at
+	// startup from the operator's own installation config (SITE_NAME) rather
+	// than from any CR — the single per-site fact in the system (ADR-028 §4).
+	// Empty means no site identity, which is legal and means "no mesh
+	// features"; a SlapdCluster carrying spec.meshRef then reports
+	// MeshResolved=False/SiteIdentityMissing rather than guessing a site.
+	SiteName string
 }
 
 // imageRef builds the "repository:tag" image reference for a data-plane image,
@@ -183,6 +190,32 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if sc.Spec.Suspend {
 		log.Info("reconciliation suspended via spec.suspend; leaving owned resources untouched")
 		return ctrl.Result{}, nil
+	}
+
+	// 1b. Resolve spec.meshRef (ADR-028 §4, MESH-PLAN Phase 4). When it is set,
+	// the cross-site wiring — serverIDBase, externalPeers, replication network —
+	// is DERIVED from the referenced SlapdMesh plus this operator's own site
+	// identity, and applied to sc in memory so every step below reads the
+	// derived values through the fields it already reads. When meshRef is unset
+	// this is a no-op and the spec is used verbatim, which is the compatibility
+	// invariant every existing deployment depends on.
+	//
+	// A failure here does NOT fall back to defaults and does not half-derive:
+	// an unresolvable mesh would otherwise silently produce an empty peer set,
+	// and the next pass would tear every cross-site stanza off every pod. The
+	// cluster reports MeshResolved=False with the reason naming the fix, and
+	// stalls — ADR-026 R2's "report and stall", restated for the mesh layer in
+	// ADR-028 §6.
+	meshErr := resolveMeshWiring(ctx, r.Client, sc, r.SiteName)
+	if meshErr != nil {
+		log.Info("mesh resolution failed; reconciling nothing", "meshRef", sc.Spec.MeshRef, "err", meshErr)
+		meshResolveCondition(sc, meshErr)
+		sc.Status.Phase = ldapv1alpha1.PhaseError
+		sc.Status.ObservedGeneration = sc.Generation
+		if err := r.applyStatus(ctx, sc); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// 2. Reconcile cn=config credential secret (<name>-config-password).
@@ -388,6 +421,10 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// prod cluster) has performed the reciprocal configuration. The conditions
 	// surface in `kubectl describe slapdcluster` to make the handoff explicit.
 	emitWiringConditions(sc)
+
+	// The mesh verdict on the success path. The failure path returned long
+	// before here, having set the same condition with its own reason.
+	meshResolveCondition(sc, nil)
 
 	// SSA patch on the status subresource: no resourceVersion check, no conflict possible.
 	if err := r.applyStatus(ctx, sc); err != nil {
@@ -1368,6 +1405,42 @@ func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 						Namespace: sr.Namespace,
 					},
 				}}
+			},
+		)).
+		// A SlapdMesh edit changes the derived cross-site wiring of every
+		// cluster that references it (ADR-028 §4), and nothing else would
+		// notice: a SlapdCluster is only requeued on its own changes, its owned
+		// objects, and the 60s CSN tick — which a non-replicated cluster does
+		// not even have (ADR-002 amendment). Without this watch, adding a site
+		// to the mesh would sit unapplied until something unrelated happened to
+		// poke the cluster.
+		//
+		// Fan-out is by listing the namespace's clusters and matching meshRef,
+		// because the reference points the other way. Namespaced, so the list
+		// is small and there is no index to keep.
+		Watches(&ldapv1alpha1.SlapdMesh{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrl.Request {
+				mesh, ok := obj.(*ldapv1alpha1.SlapdMesh)
+				if !ok {
+					return nil
+				}
+				list := &ldapv1alpha1.SlapdClusterList{}
+				if err := r.List(ctx, list, client.InNamespace(mesh.Namespace)); err != nil {
+					return nil
+				}
+				var reqs []ctrl.Request
+				for i := range list.Items {
+					if list.Items[i].Spec.MeshRef != mesh.Name {
+						continue
+					}
+					reqs = append(reqs, ctrl.Request{
+						NamespacedName: client.ObjectKey{
+							Name:      list.Items[i].Name,
+							Namespace: list.Items[i].Namespace,
+						},
+					})
+				}
+				return reqs
 			},
 		)).
 		Named("slapdcluster").
