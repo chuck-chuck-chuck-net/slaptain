@@ -14,18 +14,26 @@ import (
 )
 
 type statusJSON struct {
-	Name                  string                   `json:"name"`
-	Namespace             string                   `json:"namespace"`
-	Phase                 string                   `json:"phase"`
-	Replicas              int32                    `json:"replicas"`
-	ReadyReplicas         int32                    `json:"readyReplicas"`
-	ReadOnlyReplicas      int32                    `json:"readOnlyReplicas,omitempty"`
-	ReadOnlyReadyReplicas int32                    `json:"readOnlyReadyReplicas,omitempty"`
-	ReplicationEnabled    bool                     `json:"replicationEnabled"`
-	TLSEnabled            bool                     `json:"tlsEnabled"`
-	Age                   string                   `json:"age"`
-	ExternalPeers         []externalPeerStatusJSON `json:"externalPeers,omitempty"`
-	Conditions            []conditionJSON          `json:"conditions,omitempty"`
+	Name                  string `json:"name"`
+	Namespace             string `json:"namespace"`
+	Phase                 string `json:"phase"`
+	Replicas              int32  `json:"replicas"`
+	ReadyReplicas         int32  `json:"readyReplicas"`
+	ReadOnlyReplicas      int32  `json:"readOnlyReplicas,omitempty"`
+	ReadOnlyReadyReplicas int32  `json:"readOnlyReadyReplicas,omitempty"`
+	ReplicationEnabled    bool   `json:"replicationEnabled"`
+	TLSEnabled            bool   `json:"tlsEnabled"`
+	Age                   string `json:"age"`
+	// MeshRef / ExternalPeerSource / MeshNote describe where the external peer
+	// set came from, and are emitted ONLY for a cluster that references a
+	// SlapdMesh (ADR-028 §4). All three are omitempty and stay unset
+	// otherwise, so a non-mesh cluster's JSON is byte-identical to what it has
+	// always been.
+	MeshRef            string                   `json:"meshRef,omitempty"`
+	ExternalPeerSource string                   `json:"externalPeerSource,omitempty"`
+	MeshNote           string                   `json:"meshNote,omitempty"`
+	ExternalPeers      []externalPeerStatusJSON `json:"externalPeers,omitempty"`
+	Conditions         []conditionJSON          `json:"conditions,omitempty"`
 }
 
 type externalPeerStatusJSON struct {
@@ -75,13 +83,21 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// A mesh-driven cluster carries its cross-site wiring nowhere in its
+		// own spec — the operator derives it in memory and never writes it
+		// back (ADR-028 §4, MESH-PLAN Phase 4). Recover the resolved peer set
+		// from what the operator published, before anything below reads
+		// spec.replication.externalPeers, so the display cannot report "no
+		// external peers" while cn=config carries the stanzas.
+		peers := applyResolvedPeers(sc)
+
 		if jsonOutput {
-			jsonResults = append(jsonResults, buildStatusJSON(sc))
+			jsonResults = append(jsonResults, buildStatusJSON(sc, peers))
 		} else {
 			if i > 0 {
 				fmt.Println()
 			}
-			printStatusText(sc)
+			printStatusText(sc, peers)
 		}
 	}
 
@@ -92,7 +108,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func buildStatusJSON(sc *ldapv1alpha1.SlapdCluster) statusJSON {
+func buildStatusJSON(sc *ldapv1alpha1.SlapdCluster, peers peerResolution) statusJSON {
 	s := statusJSON{
 		Name:                  sc.Name,
 		Namespace:             sc.Namespace,
@@ -104,6 +120,11 @@ func buildStatusJSON(sc *ldapv1alpha1.SlapdCluster) statusJSON {
 		ReplicationEnabled:    sc.Spec.Replication.Enabled,
 		TLSEnabled:            sc.Spec.LDAP.TLS.Enabled,
 		Age:                   age(sc.CreationTimestamp),
+	}
+	if peers.Source != peerSourceSpec {
+		s.MeshRef = peers.MeshRef
+		s.ExternalPeerSource = string(peers.Source)
+		s.MeshNote = peers.Note
 	}
 	for _, ep := range sc.Status.ExternalPeerStatuses {
 		s.ExternalPeers = append(s.ExternalPeers, externalPeerStatusJSON{
@@ -123,7 +144,7 @@ func buildStatusJSON(sc *ldapv1alpha1.SlapdCluster) statusJSON {
 	return s
 }
 
-func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
+func printStatusText(sc *ldapv1alpha1.SlapdCluster, peers peerResolution) {
 	fmt.Printf("SlapdCluster: %s/%s\n", sc.Namespace, sc.Name)
 	printSeparator()
 	fmt.Printf("  Phase:              %s\n", sc.Status.Phase)
@@ -134,6 +155,13 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 	}
 	fmt.Printf("  TLS:                %v\n", sc.Spec.LDAP.TLS.Enabled)
 	fmt.Printf("  Replication:        %v\n", sc.Spec.Replication.Enabled)
+
+	// Provenance, printed only for a mesh-driven cluster so every existing
+	// example stays byte-identical. It comes BEFORE the peer list, because the
+	// reader needs to know whether to trust that list — and because when the
+	// list is empty this is the only thing distinguishing "no peers" from
+	// "could not tell".
+	printMeshProvenance(peers)
 
 	if len(sc.Spec.Replication.ExternalPeers) > 0 {
 		fmt.Println("  External Peers:")
@@ -223,6 +251,48 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster) {
 		}
 	}
 
+}
+
+// printMeshProvenance says where the external peer set came from, and is
+// silent for a cluster that hand-writes its peers.
+//
+// The UNRESOLVED case is the one that matters: it must be impossible to read
+// that output as a healthy standalone cluster, so it is labelled and carries
+// the operator's own reason verbatim.
+func printMeshProvenance(peers peerResolution) {
+	if peers.Source == peerSourceSpec {
+		return
+	}
+	fmt.Printf("  Mesh:               %s", peers.MeshRef)
+	if !peers.OK() {
+		fmt.Print("  (UNRESOLVED)")
+	}
+	fmt.Println()
+	for _, line := range wrapNote(peers.Note, 76) {
+		fmt.Printf("    %s\n", line)
+	}
+}
+
+// wrapNote breaks a note into terminal-width lines here rather than leaving it
+// to the terminal, whose own wrapping would break the indent.
+func wrapNote(note string, width int) []string {
+	var lines []string
+	var cur string
+	for _, w := range strings.Fields(note) {
+		switch {
+		case cur == "":
+			cur = w
+		case len(cur)+1+len(w) <= width:
+			cur += " " + w
+		default:
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }
 
 func age(t metav1.Time) string {

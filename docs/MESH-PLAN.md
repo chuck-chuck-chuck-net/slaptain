@@ -198,6 +198,32 @@ call sites. On a mesh-driven cluster they report **no external peers** while
 unacceptable the moment the lab moves, because `slctl inspect` is the tool
 reached for when a mesh misbehaves. Fix these before Phase 6, not after.
 
+*Done 2026-09-17 as Phase 6a.* The fix is **not** to re-derive in `slctl`. That
+would make the CLI a second authority on a derivation whose output is baked into
+replicated data, free to disagree with the operator you are using it to debug —
+and it is not even sufficient, because a peer's discovered addresses come from
+the operator's live queries to remote API servers and no local derivation
+produces them. `slctl` reads back `status.externalPeerStatuses` (which the
+operator writes *after* applying the wiring) and reports `MeshResolved` as the
+provenance. No `SITE_NAME` in the CLI, no new flag, no new RBAC, and agreement
+with the operator by construction; the cost is freshness, bounded by the
+operator's last status write and stated in the output.
+
+Where the identity cannot be determined, the output says so — peers labelled
+`LAST KNOWN` or `UNKNOWN, not empty`, and `inspect` fails a new
+`mesh-resolution` check. An empty list that means "I could not tell" was the
+defect being fixed; reintroducing it one layer up would have been worse.
+
+Following the same thread found a defect worse than the display bug:
+`backup_job.go`'s `mountsWithAccesslog` calls `NeedsAccesslogVolume()` — which
+reads `Replicas > 1 || len(ExternalPeers) > 0` — on an **unresolved** cluster. On
+a single-replica mesh member the cluster controller resolves and mounts
+`/accesslog`, while the backup Job would not, and `slapcat` validates every
+`olcDbDirectory` in `cn=config` including the accesslog DB's. That is a failing
+backup, not a cosmetic one. Both it and the `SourceConverged` heuristic are
+repaired by resolving in the backup reconciler. An audit of every other
+`SlapdCluster` fetch found no further unresolved readers.
+
 ## Phase 5 — `charts/slapd-mesh`
 
 - One chart containing `SlapdMesh`, `SlapdCluster`, `SlapdDatabase`s and

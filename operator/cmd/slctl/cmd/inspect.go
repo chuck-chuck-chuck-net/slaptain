@@ -31,12 +31,19 @@ var shortOutput bool
 // ── JSON types ────────────────────────────────────────────────────────────────
 
 type inspectJSON struct {
-	Name          string             `json:"name"`
-	Namespace     string             `json:"namespace"`
-	Pods          []podJSON          `json:"pods"`
-	ExternalPeers []externalPeerInfo `json:"externalPeers,omitempty"`
-	Checks        []checkResult      `json:"checks"`
-	Summary       string             `json:"summary"`
+	Name      string    `json:"name"`
+	Namespace string    `json:"namespace"`
+	Pods      []podJSON `json:"pods"`
+	// MeshRef / ExternalPeerSource / MeshNote describe where ExternalPeers
+	// below came from, and are emitted ONLY for a cluster that references a
+	// SlapdMesh (ADR-028 §4) — omitempty everywhere else, so a non-mesh
+	// cluster's JSON is byte-identical to what it has always been.
+	MeshRef            string             `json:"meshRef,omitempty"`
+	ExternalPeerSource string             `json:"externalPeerSource,omitempty"`
+	MeshNote           string             `json:"meshNote,omitempty"`
+	ExternalPeers      []externalPeerInfo `json:"externalPeers,omitempty"`
+	Checks             []checkResult      `json:"checks"`
+	Summary            string             `json:"summary"`
 }
 
 type externalPeerInfo struct {
@@ -158,6 +165,15 @@ func runInspect(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// A mesh-driven cluster's cross-site wiring exists nowhere in its own
+		// spec: the operator derives it in memory and never writes it back
+		// (ADR-028 §4, MESH-PLAN Phase 4). Recover the resolved peer set from
+		// what the operator published BEFORE any check reads
+		// spec.replication.externalPeers — otherwise every cross-site check
+		// silently degrades to "this cluster has no peers", which is the one
+		// answer a mesh debugging session must never be given.
+		peers := applyResolvedPeers(sc)
+
 		configPW, _ := readSecretKey(ctx, coreClient, key.Namespace, sc.Name+"-config-password", "root-password")
 
 		// SlapdDatabase CRs are the intent side of the per-database accesslog
@@ -167,7 +183,7 @@ func runInspect(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
 		}
 
-		result := inspectAndVerify(ctx, coreClient, config, sc, dbs, configPW)
+		result := inspectAndVerify(ctx, coreClient, config, sc, dbs, configPW, peers)
 
 		if jsonOutput {
 			jsonResults = append(jsonResults, result)
@@ -198,10 +214,15 @@ func runInspect(cmd *cobra.Command, args []string) error {
 
 // ── Core logic ────────────────────────────────────────────────────────────────
 
-func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, configPW string) inspectJSON {
+func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, configPW string, peers peerResolution) inspectJSON {
 	result := inspectJSON{
 		Name:      sc.Name,
 		Namespace: sc.Namespace,
+	}
+	if peers.Source != peerSourceSpec {
+		result.MeshRef = peers.MeshRef
+		result.ExternalPeerSource = string(peers.Source)
+		result.MeshNote = peers.Note
 	}
 
 	// Gather state from all pods (one port-forward + LDAP session per pod)
@@ -285,6 +306,14 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 
 	// Run checks against gathered state
 	result.Checks = runChecks(sc, dbs, rwPods, roPods)
+
+	// The mesh-resolution verdict goes FIRST, and only for a mesh-driven
+	// cluster, so a non-mesh cluster's check list is byte-identical. It leads
+	// because every cross-site check below is only as trustworthy as the peer
+	// set it ran against.
+	if peers.Source != peerSourceSpec {
+		result.Checks = append([]checkResult{meshResolutionCheck(peers)}, result.Checks...)
+	}
 
 	pass, warn, fail := 0, 0, 0
 	for _, c := range result.Checks {
@@ -917,6 +946,19 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 
 func printInspectResult(result inspectJSON) {
 	fmt.Printf("SlapdCluster: %s/%s\n", result.Namespace, result.Name)
+	// Where the external peer set came from, for a mesh-driven cluster only —
+	// a non-mesh cluster's output is unchanged. It sits above the separator
+	// because it qualifies everything that follows.
+	if result.ExternalPeerSource != "" {
+		fmt.Printf("Mesh:         %s", result.MeshRef)
+		if result.ExternalPeerSource != string(peerSourceMesh) {
+			fmt.Print("  (UNRESOLVED)")
+		}
+		fmt.Println()
+		for _, line := range wrapNote(result.MeshNote, 76) {
+			fmt.Printf("  %s\n", line)
+		}
+	}
 	printSeparator()
 
 	if !shortOutput {
@@ -1189,6 +1231,30 @@ func accesslogStates(pods []podState, ro bool) []podAccesslogState {
 		})
 	}
 	return out
+}
+
+// meshResolutionCheck turns the peer-set provenance into a check, so the fact
+// that a mesh could not be resolved reaches CI and the exit code rather than
+// only a human reading the header.
+//
+// It FAILS on an unresolved mesh. The alternative — a warning — was rejected:
+// when the operator is not deriving the wiring, every cross-site check below
+// ran against an unknown or stale peer set, so a green run would be a false
+// all-clear on exactly the question the tool was reached for.
+func meshResolutionCheck(peers peerResolution) checkResult {
+	if !peers.OK() {
+		return checkResult{
+			Name:   "mesh-resolution",
+			Status: "fail",
+			Detail: peers.Note,
+		}
+	}
+	return checkResult{
+		Name:   "mesh-resolution",
+		Status: "pass",
+		Detail: fmt.Sprintf("%d external peer(s) derived from SlapdMesh %q",
+			len(peers.Peers), peers.MeshRef),
+	}
 }
 
 // externalPeerNeedles returns the strings that identify a cross-site syncrepl

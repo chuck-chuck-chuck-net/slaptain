@@ -58,6 +58,13 @@ type SlapdBackupReconciler struct {
 	// for the source contextCSN read (ADR-015). Optional: when unset it is
 	// resolved on demand, so an unwired manager still records honest sources.
 	ClusterDomain string
+	// SiteName is which site of a mesh this operator runs at, from its own
+	// installation config (SITE_NAME) rather than from any CR — the same value
+	// the SlapdCluster and SlapdDatabase controllers carry. Needed because the
+	// mesh derivation is in-memory only, so this controller must resolve
+	// spec.meshRef itself (ADR-028 §4, MESH-PLAN Phase 6a). Empty means "no
+	// mesh features", and a cluster without spec.meshRef never consults it.
+	SiteName string
 }
 
 // clusterDomain returns the configured DNS domain, resolving it on demand when
@@ -132,6 +139,32 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, err
 	}
+	// Resolve spec.meshRef, exactly as the SlapdCluster and SlapdDatabase
+	// controllers do straight after their own Get. The derivation is applied
+	// in memory and never written back (ADR-028 §4), so every consumer of the
+	// derived fields has to resolve for itself — MESH-PLAN Phase 4's landed
+	// note, and this is the third consumer (Phase 6a).
+	//
+	// Two things downstream read those fields, and both were wrong here:
+	//
+	//   - isReplicationParticipant, which decides whether this backup may
+	//     claim SourceConverged=True/NotReplicated;
+	//   - SlapdCluster.NeedsAccesslogVolume, which decides whether the backup
+	//     Job mounts /accesslog. slapcat loads the whole cn=config and
+	//     validates every olcDbDirectory, the accesslog DB's included, so a
+	//     single-replica mesh member's backup Job was built without the mount
+	//     its own cn=config requires.
+	//
+	// A failure here does NOT fail the backup. A backup always takes a backup
+	// (ADR-014 amendment) and this resolution only sharpens the circumstances
+	// it records, so an unreadable mesh is logged and the pass continues on
+	// the unresolved spec — where isReplicationParticipant still answers
+	// honestly, because it checks spec.meshRef in its own right.
+	if err := resolveMeshWiring(ctx, r.Client, sc, r.SiteName); err != nil {
+		logf.FromContext(ctx).Info("mesh resolution failed; recording backup circumstances from the unresolved spec",
+			"cluster", sc.Name, "meshRef", sc.Spec.MeshRef, "err", err)
+	}
+
 	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
 		r.setPending(ctx, sb, "ClusterNotReady", fmt.Sprintf("SlapdCluster %q is %s, waiting for Running", sc.Name, sc.Status.Phase))
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
