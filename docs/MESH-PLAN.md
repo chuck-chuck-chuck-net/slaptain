@@ -209,6 +209,27 @@ reached for when a mesh misbehaves. Fix these before Phase 6, not after.
 - Done when: `helm template` with one values file produces byte-identical output
   for every site, verifiable with `sha256sum`.
 
+*Landed 2026-09-17.* Identical render confirmed across three release names and
+three namespaces (one `sha256`), reproduced independently by review. The chart
+deliberately does **not** mirror the sibling's `.Release.Name`-derived `fullname`
+helper — object names come from the values — and the only release value that
+reaches a rendered object is `.Release.Service`, which Helm always sets to the
+literal `Helm`. No Secret, no `randAlphaNum`, nothing per-install.
+
+Eight render-time guards refuse what the operator would otherwise accept and
+regret: duplicate `serverIDIndex`, duplicate `ridBase`, duplicate site name,
+missing index, a selector naming an unknown site, a `seed.site` naming an unknown
+site, a database without a suffix, and — the one that matters most — a seeded
+database with no `seed.site` **once a second site is declared**. That last makes
+the ADR-025 race unreachable by packaging rather than merely documented.
+
+Three of those guards were themselves defective on first write and were fixed
+only because each was driven to red: `has` compares with `reflect.DeepEqual`, so
+an `int64` from `--set` never matched an `int` from `values.yaml` and duplicates
+passed silently; and `hasKey` returns true for an explicitly null key. A
+duplicate-detector that silently misses duplicates is the exact failure the chart
+exists to prevent, so the red was load-bearing, not ceremony.
+
 ## Phase 6 — Port `tests/e2e.sh`
 
 **Replication-path change — needs a mesh cycle before merge.**

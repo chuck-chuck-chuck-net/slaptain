@@ -1,0 +1,292 @@
+# Default values for slapd-mesh.
+#
+# THIS FILE GOES TO EVERY SITE UNCHANGED.
+#
+# Every object this chart renders is mesh-scoped, so the rendered manifest must
+# be byte-identical at every site — that is what makes cross-site parity
+# checkable as "does it exist, and does it hash the same" instead of a
+# field-by-field comparison somebody gets wrong (ADR-028 §3). Two consequences:
+#
+#   * There are no per-site values here, and there must never be. A value you
+#     want to differ between sites means the design has been violated, not that
+#     the chart is missing a knob.
+#   * The single per-site fact in the system — "which of these sites am I?" —
+#     lives on the OPERATOR's chart, not this one:
+#
+#         helm upgrade --install slaptain-operator ./charts/operator \
+#           --set siteName=site-a
+#
+#     Get it wrong at two sites and they collide their serverID decades, which
+#     slapd does not validate and whose only symptom is that some writes never
+#     propagate. It is the first thing to verify.
+#
+# The chart also generates nothing random and nothing release-derived: object
+# names come from these values, never from the Helm release name, and no Secret
+# is created here. In particular the replication password must be IDENTICAL
+# mesh-wide (ADR-008); a chart that generated one would hand every site a
+# different secret and the breakage would look like an auth bug. Secrets and CAs
+# are bootstrapped out of band — cert-manager / trust-manager for the CA,
+# External Secrets or documented SOPS for the shared password (ADR-028 §7) — and
+# referenced here by name only.
+
+# -- The SlapdMesh: the sites and the fabric between them, and nothing else.
+mesh:
+  # -- Name of the SlapdMesh object. Referenced by the SlapdCluster's meshRef.
+  name: slapd-mesh
+
+  # -- REQUIRED. Every site of the mesh. There is deliberately no default: a
+  # chart that quietly rendered a one-site mesh would be wrong in the way that
+  # is hardest to notice, and it would hand every site the same serverID decade
+  # the moment a second one appeared.
+  #
+  # Each entry is written from the point of view of every OTHER site — it says
+  # how to reach and trust THIS site — which is what keeps the object identical
+  # everywhere.
+  #
+  #   name            (required) matched verbatim against the operator's
+  #                   SITE_NAME: trimmed, never case-folded. `site-a` and
+  #                   `SITE-A` are two different sites.
+  #   serverIDIndex   (required) this site's slot in the serverID space. The
+  #                   decade is index * 100, and ADR-017's
+  #                   serverIDBase + ordinal + 1 then gives each pod its own:
+  #                   index 2, pod 3 -> 203, which is how a CSN is read.
+  #                   Explicit, never the list position — olcServerID is baked
+  #                   into every CSN a pod has written, so a site whose number
+  #                   moves splits its history across two sids. Unique, 0..40,
+  #                   gaps are legal and are how a site is decommissioned.
+  #   endpoint        (optional) the site's Kubernetes API URL on the network
+  #                   the other sites reach it over. Read by the bootstrap CLI
+  #                   and `slctl mesh verify`, not by the operator.
+  #   kubeconfigSecret (optional) Secret holding a kubeconfig for this site's
+  #                   API server, present at every OTHER site. Defaults by
+  #                   convention to "<site name>-kubeconfig" with key
+  #                   "kubeconfig"; set it when External Secrets or a platform
+  #                   convention names it otherwise.
+  #   caSecretName    (optional) Secret holding this site's CA under "ca.crt",
+  #                   present at every OTHER site. Defaults to "<site name>-ca".
+  #
+  # A three-site mesh, which is the shape to copy:
+  #
+  # sites:
+  #   - name: site-a
+  #     serverIDIndex: 0
+  #     endpoint: https://api.site-a.k8s.example:6443
+  #   - name: site-b
+  #     serverIDIndex: 1
+  #     endpoint: https://api.site-b.k8s.example:6443
+  #   - name: site-c
+  #     serverIDIndex: 2
+  #     endpoint: https://api.site-c.k8s.example:6443
+  sites: []
+
+  # -- How cross-site syncrepl peers are addressed. A property of the fabric,
+  # which is why it lives on the mesh and not on the cluster: two clusters on
+  # one mesh cannot sensibly disagree about whether pod CIDRs are routed.
+  #
+  #   pod-routed (default, ADR-016) — peers are addressed by their primary pod
+  #     IP. Needs no NAD and no secondary NIC, and requires the pod CIDRs to be
+  #     natively routed between sites. When they are not, peers are simply
+  #     unreachable and say so; nothing silently half-works.
+  #   multus (ADR-007) — a dedicated replication network; set multusNetwork to
+  #     the NetworkAttachmentDefinition, "namespace/name" recommended.
+  network:
+    mode: pod-routed
+    # multusNetwork: "infra/replication-net"
+    # useForInCluster: false     # multus only; in-cluster syncrepl over net1 too
+
+  # -- Mesh-wide trust material. Per-site CAs live on the site entries above,
+  # because a CA belongs to a site: site B's CA is site B's CA whichever LDAP
+  # cluster is talking to it.
+  #
+  # Declarative only today — nothing in the operator consumes issuerRef, since
+  # certificate bootstrap is a CLI run once per site pair (ADR-028 §7). It is
+  # carried so the mesh stays the single description of the fabric.
+  trust: {}
+  #  issuerRef:
+  #    name: slaptain-ca
+  #    kind: ClusterIssuer
+  #    group: cert-manager.io
+
+# -- The SlapdCluster. Infrastructure only; databases and schemas are below
+# (ADR-004).
+cluster:
+  # -- Name of the SlapdCluster, and therefore of its Services. "slapd" keeps
+  # SLAPD_HOST=slapd working the same way it does for every other chart here.
+  # Object names come from this value and never from the Helm release name —
+  # see the header for why.
+  name: slapd
+
+  # -- Narrow this cluster to a SUBSET of the mesh's sites, so cluster X may
+  # span sites A+B while cluster Y on the same mesh spans A+B+C. Empty means
+  # every site, which is what a cluster gets when it says nothing. The selector
+  # narrows the derived PEER set only; it never touches the serverID decade,
+  # which is mesh-wide by construction.
+  sites: []
+
+  # -- Container images. Left empty on purpose: the operator then defaults both
+  # images to its own registry and tag, so a site runs the slapd that matches
+  # the operator it is running. Set only to pin.
+  images: {}
+  #  slapd:
+  #    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
+  #    tag: latest
+  #    pullPolicy: IfNotPresent
+  #  init:
+  #    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
+  #    tag: latest
+  #    pullPolicy: IfNotPresent
+
+  ldap:
+    # -- TLS. Cross-site syncrepl runs over ldaps, so this stays on for a mesh.
+    # The Secret is per-site material (its cert carries that site's names) but
+    # the NAME is mesh-scoped, which is why naming it here is legal.
+    tls:
+      enabled: true
+      secretName: "slapd-tls"
+    # -- cn=config admin credentials. The operator auto-generates a
+    # <cluster.name>-config-password Secret when this is empty. That Secret is
+    # node-local in effect — cn=config is never replicated (ADR-002) — so sites
+    # need not share it.
+    cnConfigCredentials:
+      secretName: ""
+
+  # -- Slapd replicas PER SITE. 1 means the site has no local HA and relies
+  # entirely on its peers; raise it for per-site autonomy, which is the whole
+  # point of the architecture. Left at 1 because the right number depends on
+  # storage the chart cannot see.
+  replicas: 1
+
+  # -- Read-only consumer replicas per site. Requires replication.enabled.
+  readReplicas: 0
+
+  # -- slapd -d debug bitmask. Commented out means the operator's default
+  # (16640 = stats + sync, ADR-024) — the value a replication incident is
+  # diagnosed from. An explicit 0 silences slapd entirely.
+  # logLevel: 0
+
+  # -- Persistent storage. Persistence is mandatory (ADR-013); there is no
+  # opt-out. Storage classes are named, not provisioned — every site must have
+  # a class by this name, which is a constraint the mesh imposes on the sites
+  # rather than a per-site value.
+  persistence:
+    config:
+      size: 1Gi
+      storageClass: ""
+      accessMode: ReadWriteOnce
+    data:
+      size: 5Gi
+      storageClass: ""
+      accessMode: ReadWriteOnce
+    accesslog:
+      size: 1Gi
+      storageClass: ""
+      accessMode: ReadWriteOnce
+
+  # -- Replication. On by default: this is the mesh chart, and a mesh with
+  # replication off is a set of unrelated clusters.
+  #
+  # serverIDBase, externalPeers and network are NOT here and cannot be set.
+  # The operator derives all three from mesh + SITE_NAME (ADR-028 §4), and
+  # setting one alongside meshRef is refused outright with MeshResolved=False —
+  # deliberately, because resolving that ambiguity silently is how a serverID
+  # collision gets in. The network lives on mesh.network above.
+  replication:
+    enabled: true
+    # -- "peer" (default) or "consumer-only" (ADR-010, hot migration).
+    mode: ""
+    # -- TCP keepalive for syncrepl connections, "idle:probes:interval".
+    keepalive: ""
+    # -- Syncrepl retry interval, "<interval> <count>" pairs.
+    retry: "10 +"
+
+  service:
+    type: ClusterIP
+    ldapPort: 389
+    ldapsPort: 636
+
+  # -- Compute resources for the slapd container.
+  resources: {}
+  #  requests:
+  #    cpu: 100m
+  #    memory: 128Mi
+  #  limits:
+  #    memory: 512Mi
+
+  # -- Image pull secrets for private registries.
+  imagePullSecrets: []
+  #  - name: ghcr-pull-secret
+
+# -- SlapdDatabases. Each entry is {name, spec}; spec is passed through to the
+# CR verbatim, so anything valid on a SlapdDatabase is valid here. clusterRef is
+# pinned by the chart to cluster.name and must not be set.
+#
+# The one rule the chart enforces: on a mesh with more than one site, a database
+# that declares a seed must also declare seed.site. Exactly one site creates the
+# entries and the others receive them by replication. Without it every site
+# seeds, and one pod is left with a permanent hidden glue suffix — invisible to
+# ordinary searches, clean on every CSN health read, and every backup taken from
+# that pod unrestorable (ADR-025). The chart refuses to render rather than let
+# that be applied N times.
+databases: []
+#  - name: example-db
+#    spec:
+#      suffix: "dc=example,dc=org"
+#      acls:
+#        - >-
+#          to attrs=userPassword
+#          by self write
+#          by anonymous auth
+#          by * none
+#        - >-
+#          to *
+#          by * read
+#      indices:
+#        - "objectClass eq"
+#        - "uid eq,sub"
+#        - "entryCSN eq"
+#        - "entryUUID eq"
+#      replication:
+#        ridBase: 100          # unique per database within a site (ADR-003)
+#        deltaSync: true
+#        syncprovCheckpoint: "500 15"
+#        accesslogPurge: "2+00:00 1+00:00"
+#      seed:
+#        site: site-a          # the founder; every other site withholds
+#        entries:
+#          - |
+#            dn: dc=example,dc=org
+#            objectClass: top
+#            objectClass: dcObject
+#            objectClass: organization
+#            o: example
+#            dc: example
+#      cleanupPolicy: Retain
+
+# -- SlapdSchemas. Same shape: {name, spec}, spec passed through verbatim,
+# clusterRef pinned by the chart.
+#
+# Schemas are additive and desired-minimum (ADR-006), and a site missing one
+# diverges silently: entries replicate in carrying an objectClass that site does
+# not know, the add fails, and that site quietly lacks entries the others have.
+# Shipping them in this bundle is what makes "identical everywhere" a property
+# of one artifact.
+schemas: []
+#  - name: example-schema
+#    spec:
+#      priority: 100
+#      attributeTypes:
+#        - >-
+#          ( 1.3.6.1.4.1.99999.1.1.1
+#            NAME 'exampleContextId'
+#            DESC 'Numeric context identifier'
+#            EQUALITY integerMatch
+#            SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+#            SINGLE-VALUE )
+#      objectClasses:
+#        - >-
+#          ( 1.3.6.1.4.1.99999.1.2.1
+#            NAME 'exampleUser'
+#            DESC 'Example application user'
+#            SUP inetOrgPerson
+#            STRUCTURAL
+#            MAY ( exampleContextId ) )

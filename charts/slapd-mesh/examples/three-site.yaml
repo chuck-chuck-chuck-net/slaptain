@@ -1,0 +1,178 @@
+# A complete three-site mesh — the shape to copy.
+#
+# Apply this file UNCHANGED at every site:
+#
+#   helm upgrade --install ldap ./charts/slapd-mesh \
+#     -n slaptain --create-namespace \
+#     -f charts/slapd-mesh/examples/three-site.yaml
+#
+# The only thing that differs per site is the operator's own identity, which is
+# not in this file and never will be:
+#
+#   helm upgrade --install slaptain-operator ./charts/operator --set siteName=site-a
+#
+# The two databases and the schema below are the open-source e2e fixtures
+# (tests/resources/example/), expressed as chart values.
+
+mesh:
+  name: slapd-mesh
+  sites:
+    - name: site-a
+      serverIDIndex: 0
+      endpoint: https://api.site-a.k8s.example:6443
+    - name: site-b
+      serverIDIndex: 1
+      endpoint: https://api.site-b.k8s.example:6443
+    - name: site-c
+      serverIDIndex: 2
+      endpoint: https://api.site-c.k8s.example:6443
+  network:
+    mode: pod-routed
+
+cluster:
+  name: slapd
+  replicas: 2
+  ldap:
+    tls:
+      enabled: true
+      secretName: slapd-tls
+  replication:
+    enabled: true
+    retry: "10 +"
+
+databases:
+  - name: example-db
+    spec:
+      suffix: "dc=example,dc=org"
+      acls:
+        - >-
+          to dn.subtree="ou=Mail,dc=example,dc=org" attrs=userPassword
+          by self write
+          by dn.children="ou=ServiceAccounts,dc=example,dc=org" read
+          by anonymous auth
+          by * none
+        - >-
+          to attrs=userPassword
+          by self write
+          by anonymous auth
+          by * none
+        - >-
+          to attrs=shadowLastChange
+          by self write
+          by * read
+        - >-
+          to *
+          by * read
+      replication:
+        ridBase: 100
+        deltaSync: true
+        syncprovCheckpoint: "500 15"
+        accesslogPurge: "2+00:00 1+00:00"
+      indices:
+        - "objectClass eq"
+        - "uid eq,sub"
+        - "cn eq,sub"
+        - "entryCSN eq"
+        - "entryUUID eq"
+      seed:
+        # Founder site. Every other site reads this same value, finds it is not
+        # its own identity, withholds the seed and receives the DIT by
+        # replication (ADR-025, ADR-028 §3).
+        site: site-a
+        entries:
+          - |
+            dn: dc=example,dc=org
+            objectClass: top
+            objectClass: dcObject
+            objectClass: organization
+            o: example
+            dc: example
+          - |
+            dn: ou=People,dc=example,dc=org
+            objectClass: organizationalUnit
+            ou: People
+          - |
+            dn: ou=Groups,dc=example,dc=org
+            objectClass: organizationalUnit
+            ou: Groups
+          - |
+            dn: ou=Mail,dc=example,dc=org
+            objectClass: organizationalUnit
+            ou: Mail
+          - |
+            dn: ou=ServiceAccounts,dc=example,dc=org
+            objectClass: organizationalUnit
+            ou: ServiceAccounts
+      cleanupPolicy: Retain
+
+  - name: example-db2
+    spec:
+      suffix: "dc=second,dc=example,dc=net"
+      acls:
+        - >-
+          to attrs=userPassword
+          by self write
+          by anonymous auth
+          by * none
+        - >-
+          to *
+          by * read
+      replication:
+        ridBase: 200
+        deltaSync: true
+        syncprovCheckpoint: "500 15"
+      indices:
+        - "objectClass eq"
+        - "uid eq,sub"
+        - "entryCSN eq"
+        - "entryUUID eq"
+      seed:
+        site: site-a
+        entries:
+          - |
+            dn: dc=second,dc=example,dc=net
+            objectClass: top
+            objectClass: dcObject
+            objectClass: organization
+            o: second
+            dc: second
+          - |
+            dn: ou=People,dc=second,dc=example,dc=net
+            objectClass: organizationalUnit
+            ou: People
+      cleanupPolicy: Retain
+
+schemas:
+  - name: example-schema
+    spec:
+      priority: 100
+      attributeTypes:
+        - >-
+          ( 1.3.6.1.4.1.99999.1.1.1
+            NAME 'exampleContextId'
+            DESC 'Numeric context identifier'
+            EQUALITY integerMatch
+            SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+            SINGLE-VALUE )
+        - >-
+          ( 1.3.6.1.4.1.99999.1.1.2
+            NAME 'exampleUserId'
+            DESC 'Numeric user identifier'
+            EQUALITY integerMatch
+            SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+            SINGLE-VALUE )
+        - >-
+          ( 1.3.6.1.4.1.99999.1.1.3
+            NAME 'exampleQuota'
+            DESC 'Storage quota in kilobytes'
+            EQUALITY integerMatch
+            SYNTAX 1.3.6.1.4.1.1466.115.121.1.27
+            SINGLE-VALUE )
+      objectClasses:
+        - >-
+          ( 1.3.6.1.4.1.99999.1.2.1
+            NAME 'exampleUser'
+            DESC 'Example application user with context and quota'
+            SUP inetOrgPerson
+            STRUCTURAL
+            MAY ( exampleContextId $ exampleUserId $ exampleQuota ) )

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: slapd-mesh
+description: >-
+  Deploys a whole multi-site slaptain deployment — SlapdMesh, SlapdCluster,
+  SlapdDatabases and SlapdSchemas — from one values file applied identically to
+  every site (ADR-028 §5).
+type: application
+version: 0.1.1
+appVersion: "0.1.1"

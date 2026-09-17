@@ -1,0 +1,98 @@
+{{- /*
+The SlapdCluster of the bundle.
+
+Three fields are conspicuously absent and must stay absent:
+spec.replication.serverIDBase, spec.replication.externalPeers and
+spec.replication.network. All three are DERIVED by the operator from meshRef
+plus its own SITE_NAME (ADR-028 §4), and setting any of them alongside meshRef
+is refused outright — the cluster reports MeshResolved=False and reconciles
+nothing. That refusal is the design working: ambiguity about serverIDBase is how
+a CSN-eating collision gets in quietly. The network belongs to the mesh
+(mesh.network), because two clusters on one fabric cannot sensibly disagree
+about whether pod CIDRs are routed.
+*/ -}}
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdCluster
+metadata:
+  name: {{ .Values.cluster.name }}
+  labels:
+    {{- include "slapd-mesh.labels" . | nindent 4 }}
+spec:
+  meshRef: {{ .Values.mesh.name | quote }}
+  {{- with .Values.cluster.sites }}
+  sites:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with .Values.cluster.images }}
+  images:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  ldap:
+    {{- with .Values.cluster.ldap.cnConfigCredentials }}
+    {{- with .secretName }}
+    cnConfigCredentials:
+      secretName: {{ . | quote }}
+    {{- end }}
+    {{- end }}
+    tls:
+      enabled: {{ .Values.cluster.ldap.tls.enabled }}
+      {{- if .Values.cluster.ldap.tls.enabled }}
+      secretName: {{ .Values.cluster.ldap.tls.secretName | quote }}
+      {{- end }}
+
+  replicas: {{ .Values.cluster.replicas }}
+  {{- if gt (int .Values.cluster.readReplicas) 0 }}
+  readReplicas: {{ .Values.cluster.readReplicas }}
+  {{- end }}
+  {{- if hasKey .Values.cluster "logLevel" }}
+  logLevel: {{ .Values.cluster.logLevel }}
+  {{- end }}
+
+  persistence:
+    config:
+      size: {{ .Values.cluster.persistence.config.size | quote }}
+      accessMode: {{ .Values.cluster.persistence.config.accessMode }}
+      {{- with .Values.cluster.persistence.config.storageClass }}
+      storageClass: {{ . | quote }}
+      {{- end }}
+    data:
+      size: {{ .Values.cluster.persistence.data.size | quote }}
+      accessMode: {{ .Values.cluster.persistence.data.accessMode }}
+      {{- with .Values.cluster.persistence.data.storageClass }}
+      storageClass: {{ . | quote }}
+      {{- end }}
+    accesslog:
+      size: {{ .Values.cluster.persistence.accesslog.size | quote }}
+      accessMode: {{ .Values.cluster.persistence.accesslog.accessMode }}
+      {{- with .Values.cluster.persistence.accesslog.storageClass }}
+      storageClass: {{ . | quote }}
+      {{- end }}
+
+  service:
+    type: {{ .Values.cluster.service.type }}
+    ldapPort: {{ .Values.cluster.service.ldapPort }}
+    ldapsPort: {{ .Values.cluster.service.ldapsPort }}
+
+  replication:
+    enabled: {{ .Values.cluster.replication.enabled }}
+    {{- with .Values.cluster.replication.mode }}
+    mode: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.cluster.replication.keepalive }}
+    keepalive: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.cluster.replication.retry }}
+    retry: {{ . | quote }}
+    {{- end }}
+
+  {{- with .Values.cluster.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with .Values.cluster.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

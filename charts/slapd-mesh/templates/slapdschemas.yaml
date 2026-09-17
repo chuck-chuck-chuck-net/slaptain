@@ -1,0 +1,23 @@
+{{- /*
+The bundle's SlapdSchemas. Same passthrough rule as the databases.
+
+Schema parity is one of ADR-028's four surviving invariants and one of its two
+named silent-divergence modes: a site missing a schema still replicates, but
+entries carrying an objectClass it does not know fail to add, and that site
+silently lacks entries the others have. Shipping the schemas in the same bundle
+as the databases is what makes "identical everywhere" a property of one artifact
+rather than of two people remembering.
+*/ -}}
+{{- $clusterName := .Values.cluster.name -}}
+{{- $labels := include "slapd-mesh.labels" . -}}
+{{- range .Values.schemas }}
+---
+apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
+kind: SlapdSchema
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  {{- include "slapd-mesh.childSpec" (dict "spec" .spec "clusterName" $clusterName) | nindent 2 }}
+{{- end }}
