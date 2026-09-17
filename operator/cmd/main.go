@@ -190,6 +190,16 @@ func main() {
 	clusterDomain := controller.ResolveClusterDomain()
 	setupLog.Info("resolved cluster DNS domain", "clusterDomain", clusterDomain)
 
+	// Resolve which site of a mesh this operator runs at — the single per-site
+	// fact in the system, set from the operator chart's `siteName` value. Unset
+	// is legal and means "no mesh features". ADR-028 §4.
+	siteName := controller.ResolveSiteName()
+	if siteName == "" {
+		setupLog.Info("no site identity configured; mesh features disabled", "siteName", "")
+	} else {
+		setupLog.Info("resolved site identity", "siteName", siteName)
+	}
+
 	if err := (&controller.SlapdClusterReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
@@ -212,6 +222,7 @@ func main() {
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		ClusterDomain: clusterDomain,
+		SiteName:      siteName,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdDatabase")
 		os.Exit(1)

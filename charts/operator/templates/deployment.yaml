@@ -57,6 +57,13 @@ spec:
             - name: CLUSTER_DOMAIN
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.siteName }}
+            # Which site of a mesh this operator runs at (ADR-028). The single
+            # per-site value in the system — it must differ at every site. Leave
+            # unset for a single-site deployment; mesh features stay off.
+            - name: SITE_NAME
+              value: {{ . | quote }}
+            {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
