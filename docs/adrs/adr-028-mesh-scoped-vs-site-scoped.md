@@ -1,6 +1,6 @@
 # ADR-028: The mesh is a layer of its own — `SlapdMesh`, and what "mesh-scoped" means
 
-**Status:** Proposed
+**Status:** Accepted (implemented and validated on a three-site lab, 2026-09-18)
 **Date:** 2026-09-17
 
 ## Context
@@ -341,6 +341,42 @@ implementation has to do.
 What the audit does not cover: it reads specs, so it would not catch a spec that
 is correct everywhere while a pod's `cn=config` has drifted from it. That is
 `slctl inspect`'s half, and neither tool is a substitute for the other.
+
+## Implemented (2026-09-18)
+
+All seven phases of `docs/MESH-PLAN.md` landed. What the decision now rests on,
+separated by how well it is known:
+
+**Measured on a three-site lab.** `MeshResolved=True` at every site; the
+`SlapdCluster` byte-identical across sites with no per-site field in it; derived
+decades reproducing the hand-wired scheme exactly (`olcServerID` 1 / 101 / 201,
+so no CSN history was split); stanzas naming logical site names; cross-site
+convergence; `slctl inspect --short` 17/17 per site; the full-gate suite at 88/93
+with zero failures, equal to the hand-wired path it replaced. Single-site
+re-verified separately: a one-site mesh at index 0 behaves as a standalone
+cluster always has.
+
+**Constructed rather than checked** — four of the nine invariants stopped
+existing, because the operator derives `serverIDBase`, `externalPeers`, network
+mode and trust wiring. The remaining five survive as properties of one artifact:
+`charts/slapd-mesh` applied identically everywhere, with eight render-time guards
+refusing what the operator would otherwise accept and regret.
+
+**Reasoned, not measured.** The `multus` transport on the mesh path,
+`imagePullSecrets` in the generated values, and `TEST_RESOURCES=lab`. The
+accesslog-mount repair is unit-guarded and was measured live once on a
+single-site lab.
+
+**Lost, and recorded rather than quietly dropped.** Deleting the hand-wired e2e
+path removed the only coverage of two transports the operator still supports:
+cross-site NodePort `uri` peers, and static Multus `podAddresses`. Neither is
+expressible through a `SlapdMesh` — the mesh names sites and lets the operator
+discover addresses, which is the point — so the coverage cannot be recovered by
+porting. See `docs/BACKLOG.md`.
+
+**Not built.** `slctl mesh verify` and the continuous parity condition remain
+out of scope (§6 describes them); the hand-audit prototype is still their
+executable spec. cert-manager and External Secrets adoption (§7) likewise.
 
 ## Open questions
 

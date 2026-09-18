@@ -47,6 +47,11 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		remoteRootPW  string // siteB's OWN cn=config admin password — see BeforeEach
 		replicas      int32
 		extPeerRID    string // expected RID for the first external peer (ridBase + 51)
+		// extPeerRIDBase is the fixture's ridBase + 50, i.e. the point external
+		// peer RIDs count up from: peer j (0-based) gets extPeerRIDBase+j+1.
+		// Kept alongside extPeerRID because the peer-removal spec has to name a
+		// peer OTHER than the first one.
+		extPeerRIDBase int32
 	)
 
 	BeforeEach(func(ctx SpecContext) {
@@ -89,7 +94,8 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 		sd := &ldapv1alpha1.SlapdDatabase{}
 		Expect(crdClient.Get(ctx, types.NamespacedName{Name: dbCRName, Namespace: namespace}, sd)).To(Succeed())
 		Expect(sd.Spec.Replication.RIDBase).NotTo(BeNil(), "test fixture must set spec.replication.ridBase")
-		extPeerRID = fmt.Sprintf("%d", *sd.Spec.Replication.RIDBase+51)
+		extPeerRIDBase = *sd.Spec.Replication.RIDBase + 50
+		extPeerRID = fmt.Sprintf("%d", extPeerRIDBase+1)
 	}, NodeTimeout(30*time.Second))
 
 	// ── 1. Syncrepl stanzas applied ──────────────────────────────────────────
@@ -237,136 +243,156 @@ var _ = Describe("external replication", Label("external-replication"), Ordered,
 			dumpReplDiagnostics(localLDAPAddr, adminPW, rootPW))
 	}, NodeTimeout(3*time.Minute))
 
-	// ── 4. Removing external peer removes stanza ─────────────────────────────
+	// ── 4. Removing a site from the mesh removes that peer's stanza ──────────
 
-	It("removing an external peer from the spec removes its syncrepl stanza", func(ctx SpecContext) {
-		// Read the current SlapdCluster CR.
-		sc := &ldapv1alpha1.SlapdCluster{}
-		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
+	It("removing a site from the SlapdMesh removes that peer's syncrepl stanza",
+		Label("mesh-peer-removal"), func(ctx SpecContext) {
+			// Peer removal, expressed against the object that owns the peer set.
+			//
+			// Until ADR-028 this spec patched spec.replication.externalPeers empty
+			// and watched the stanza go. That premise is inexpressible on a
+			// mesh-driven cluster, and not by accident: there the peers are DERIVED
+			// from the SlapdMesh plus the operator's own siteName, the spec field is
+			// empty, and setting it alongside meshRef is refused outright with
+			// MeshResolved=False — deliberately, because resolving that ambiguity
+			// silently is how a serverID collision gets in (ADR-028 §4). Removing a
+			// peer on a mesh means editing the SlapdMesh, which is a different act
+			// on a different object.
+			//
+			// Re-expressed that way it covers strictly more than the spec it
+			// replaces: the whole derivation path runs (mesh → peer set → stanza),
+			// and the operator's WATCH on the SlapdMesh is exercised — the only
+			// thing that makes a mesh edit reach cn=config before the five-minute
+			// SlapdDatabase resync floor, and nothing else in the suite touches it.
+			sc := &ldapv1alpha1.SlapdCluster{}
+			Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
+			Expect(sc.Spec.MeshRef).NotTo(BeEmpty(),
+				"this spec removes a peer by editing the SlapdMesh, so the fixture cluster must be "+
+					"mesh-driven; a cluster with hand-written spec.replication.externalPeers has no mesh to edit")
 
-		// This spec's premise — patch the peers out of spec.replication and
-		// watch the stanza go — is INEXPRESSIBLE on a mesh-driven cluster, and
-		// not by accident. There the peer set is derived from the SlapdMesh plus
-		// the operator's own SITE_NAME and the spec field is empty; setting it
-		// alongside meshRef is refused outright with MeshResolved=False,
-		// deliberately, because resolving that ambiguity silently is how a
-		// serverID collision gets in (ADR-028 §4). Removing a peer on a mesh
-		// means editing the SlapdMesh, which is a different act on a different
-		// object.
-		//
-		// Skipping is the honest verdict for THIS spec, not for the behaviour.
-		// The mesh equivalent — drop a site from the SlapdMesh, assert the
-		// stanza disappears — is the better test, because it also exercises the
-		// operator's watch on the mesh object. Follow-up, not a silent gap.
-		if sc.Spec.MeshRef != "" {
-			Skip(fmt.Sprintf("cluster is mesh-driven (meshRef=%q): external peers are DERIVED and "+
-				"spec.replication.externalPeers is empty by design — setting it alongside meshRef is "+
-				"refused with MeshResolved=False (ADR-028 §4). Removing a peer here means editing the "+
-				"SlapdMesh; asserting that is a separate spec", sc.Spec.MeshRef))
-		}
+			mesh := &ldapv1alpha1.SlapdMesh{}
+			Expect(crdClient.Get(ctx, types.NamespacedName{Name: sc.Spec.MeshRef, Namespace: namespace}, mesh)).
+				To(Succeed(), "cluster references mesh %q", sc.Spec.MeshRef)
 
-		// Save original peers for restoration.
-		originalPeers := sc.Spec.Replication.ExternalPeers
-		Expect(originalPeers).NotTo(BeEmpty(), "test requires at least one external peer")
+			// The RESOLVED peer set, in the operator's own order — never the raw
+			// spec (see clusterExternalPeerNames for why reading that field is the
+			// trap this suite already fell into once).
+			peerNames := clusterExternalPeerNames(ctx, "slapd")
+			Expect(peerNames).NotTo(BeEmpty(),
+				"external-replication specs require a cluster with external peers, and this one reports none")
 
-		// Remove all external peers.
-		patch := client.MergeFrom(sc.DeepCopy())
-		sc.Spec.Replication.ExternalPeers = nil
-		Expect(crdClient.Patch(ctx, sc, patch)).To(Succeed())
+			// Drop the LAST peer, and only the last one. A peer's RID is positional
+			// — external peer j gets ridBase+50+j+1 (ADR-003) — so removing a site
+			// in the middle renumbers every peer after it, and an assertion on
+			// "rid X is gone" would then be reading a RID that still exists under a
+			// different peer. Removing the tail leaves every surviving stanza
+			// byte-identical, which is also what lets the survivors serve as the
+			// control below.
+			victim := peerNames[len(peerNames)-1]
+			survivors := peerNames[:len(peerNames)-1]
+			victimRID := fmt.Sprintf("%d", extPeerRIDBase+int32(len(peerNames)))
 
-		// Wait for the operator to remove the syncrepl stanza from all RW pods.
-		// Transient bind/search errors are expected while the operator
-		// reconciles cn=config (slapd's replication engine drops connections
-		// when olcSyncRepl is rewritten) — fold them into "not ready yet,
-		// retry" rather than letting them fail the test.
-		Eventually(ctx, func() bool {
-			for i := int32(0); i < replicas; i++ {
-				podName := fmt.Sprintf("slapd-%d", i)
-				localPort := fmt.Sprintf("%d", 14000+i)
-				conn, cancel := dialPodLDAP(namespace, podName, localPort)
-				defer cancel()
-				defer conn.Close()
-
-				// Local pod (dialPodLDAP), so rootPW is correct — see BeforeEach.
-				if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
-					return false
+			var victimSite *ldapv1alpha1.MeshSite
+			remaining := make([]ldapv1alpha1.MeshSite, 0, len(mesh.Spec.Sites))
+			for i := range mesh.Spec.Sites {
+				if mesh.Spec.Sites[i].Name == victim {
+					victimSite = mesh.Spec.Sites[i].DeepCopy()
+					continue
 				}
-				sr, err := conn.Search(ldap.NewSearchRequest(
-					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-					0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
-					[]string{"olcSyncRepl"}, nil))
-				if err != nil {
-					return false
-				}
-				if len(sr.Entries) == 0 {
-					return false
-				}
-				syncreplVals := sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl")
-				for _, v := range syncreplVals {
-					if containsRID(v, extPeerRID) {
-						return false // stanza still present
-					}
-				}
+				remaining = append(remaining, mesh.Spec.Sites[i])
 			}
-			return true
-		}).WithTimeout(60 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
-			"external peer syncrepl stanza (rid=%s) should be removed from all RW pods", extPeerRID)
+			Expect(victimSite).NotTo(BeNil(),
+				"the operator resolved a peer %q that the mesh does not declare as a site — peer names ARE "+
+					"mesh site names (ADR-028 §4), so a mismatch here means the derivation and the object disagree",
+				victim)
 
-		// Restore original peers.
-		Expect(crdClient.Get(ctx, types.NamespacedName{Name: "slapd", Namespace: namespace}, sc)).To(Succeed())
-		patch = client.MergeFrom(sc.DeepCopy())
-		sc.Spec.Replication.ExternalPeers = originalPeers
-		Expect(crdClient.Patch(ctx, sc, patch)).To(Succeed())
+			originalSites := make([]ldapv1alpha1.MeshSite, len(mesh.Spec.Sites))
+			copy(originalSites, mesh.Spec.Sites)
 
-		// Wait for the stanza to reappear on ALL RW pods. Checking only one pod
-		// is insufficient: the controller reconciles pods sequentially, and pods
-		// still being updated have their replication engine restarting — subsequent
-		// tests that open new connections through the ClusterIP service can hit
-		// those unsettled pods and get transient auth failures.
-		// Same transient-error tolerance as the removal Eventually above.
-		Eventually(ctx, func() bool {
-			for i := int32(0); i < replicas; i++ {
-				podName := fmt.Sprintf("slapd-%d", i)
-				localPort := fmt.Sprintf("%d", 14000+i)
-				conn, cancel := dialPodLDAP(namespace, podName, localPort)
-				defer cancel()
-				defer conn.Close()
+			// Leave the mesh as we found it even when an assertion below fails:
+			// this is the ONE object every site's cross-site wiring is derived
+			// from, and a suite that abandoned it a site short would silently
+			// un-wire the rest of the run.
+			restored := false
+			DeferCleanup(func(ctx SpecContext) {
+				if restored {
+					return
+				}
+				cur := &ldapv1alpha1.SlapdMesh{}
+				Expect(crdClient.Get(ctx, types.NamespacedName{Name: mesh.Name, Namespace: namespace}, cur)).To(Succeed())
+				p := client.MergeFrom(cur.DeepCopy())
+				cur.Spec.Sites = originalSites
+				Expect(crdClient.Patch(ctx, cur, p)).To(Succeed())
+				GinkgoLogr.Info("restored the mesh site list after a failed assertion", "site", victim)
+			}, NodeTimeout(time.Minute))
 
-				// Local pod (dialPodLDAP), so rootPW is correct — see BeforeEach.
-				if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
-					return false
-				}
-				sr, err := conn.Search(ldap.NewSearchRequest(
-					"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-					0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
-					[]string{"olcSyncRepl"}, nil))
-				if err != nil {
-					return false
-				}
-				if len(sr.Entries) == 0 {
-					return false
-				}
-				found := false
-				for _, v := range sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl") {
-					if containsRID(v, extPeerRID) {
-						found = true
-						break
+			GinkgoLogr.Info("dropping a site from the mesh",
+				"mesh", mesh.Name, "site", victim, "rid", victimRID, "survivors", survivors)
+
+			patch := client.MergeFrom(mesh.DeepCopy())
+			mesh.Spec.Sites = remaining
+			Expect(crdClient.Patch(ctx, mesh, patch)).To(Succeed())
+
+			// The dropped peer's stanza goes; every survivor's stays. The second
+			// half is the control: "all external stanzas vanished" would satisfy a
+			// removed-peer assertion just as well, and would mean the derivation
+			// had collapsed to an empty peer set — which is exactly the outcome
+			// ADR-028 §4 refuses to reach silently.
+			Eventually(ctx, func() error {
+				return checkRWPodStanzas(replicas, func(pod string, stanzas []string) error {
+					if containsAnyRID(stanzas, victimRID) {
+						return fmt.Errorf("%s still carries the dropped peer's stanza (rid=%s)", pod, victimRID)
 					}
-				}
-				if !found {
-					return false
-				}
-			}
-			return true
-		}).WithTimeout(150 * time.Second).WithPolling(5 * time.Second).Should(BeTrue(),
-			"external peer syncrepl stanza (rid=%s) should be restored on all RW pods after re-adding peer", extPeerRID)
-		// 150 s, not 60: re-adding the peer reconciles immediately, but the
-		// stanza needs the peer's addresses, and address discovery rides the
-		// 60 s CSN-monitoring tick (ADR-016 amendment 2026-08-26; the M8
-		// negative result). Worst case is a full tick plus the follow-up
-		// SlapdDatabase reconcile on every pod — a 60 s budget fails on tick
-		// phase alone, which is exactly how this spec flaked.
-	}, NodeTimeout(4*time.Minute))
+					if namesPeerCAPath(stanzas, victim) {
+						return fmt.Errorf("%s still names the dropped peer in a tls_cacert path (peers/%s/)", pod, victim)
+					}
+					for j := range survivors {
+						rid := fmt.Sprintf("%d", extPeerRIDBase+int32(j)+1)
+						if !containsAnyRID(stanzas, rid) {
+							return fmt.Errorf("%s lost surviving peer %q (rid=%s) as well — the derivation "+
+								"collapsed rather than dropping one site", pod, survivors[j], rid)
+						}
+					}
+					return nil
+				})
+			}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(Succeed(),
+				"dropping site %q from mesh %q should remove exactly its syncrepl stanza from every RW pod",
+				victim, mesh.Name)
+			// 5 minutes, not the 60 s its spec-patching predecessor used: removing
+			// a peer also removes its CA volume from the pod template, so the
+			// StatefulSet rolls while the stanza is being rewritten (ADR-013's
+			// accepted wart). The stanza edit itself lands on the mesh watch within
+			// seconds; the budget is for the roll happening underneath it, and for
+			// the cn=config pause freeze (reconcile-loop-fixes.md 2026-09-16) not
+			// turning one slow pod into a red run.
+
+			// Put it back and watch the stanza return — removal is only half the
+			// behaviour, and a one-way test would pass just as well against an
+			// operator that had stopped writing external stanzas altogether.
+			cur := &ldapv1alpha1.SlapdMesh{}
+			Expect(crdClient.Get(ctx, types.NamespacedName{Name: mesh.Name, Namespace: namespace}, cur)).To(Succeed())
+			patch = client.MergeFrom(cur.DeepCopy())
+			cur.Spec.Sites = originalSites
+			Expect(crdClient.Patch(ctx, cur, patch)).To(Succeed())
+			restored = true
+
+			Eventually(ctx, func() error {
+				return checkRWPodStanzas(replicas, func(pod string, stanzas []string) error {
+					if !containsAnyRID(stanzas, victimRID) {
+						return fmt.Errorf("%s has not regained the restored peer's stanza (rid=%s)", pod, victimRID)
+					}
+					return nil
+				})
+			}).WithTimeout(8 * time.Minute).WithPolling(5 * time.Second).Should(Succeed(),
+				"restoring site %q to mesh %q should bring its syncrepl stanza back on every RW pod",
+				victim, mesh.Name)
+			// 8 minutes: re-adding reconciles on the watch immediately, but the
+			// stanza cannot be written until the peer's ADDRESSES are known, and
+			// discovery rides the 60 s CSN-monitoring tick (ADR-016 amendment
+			// 2026-08-26). Worst case is a full tick, the follow-up SlapdDatabase
+			// reconcile on every pod, and the pod template rolling back underneath
+			// all of it.
+		}, NodeTimeout(20*time.Minute))
 
 	// ── 5. External peer status reported in CR ───────────────────────────────
 
@@ -445,6 +471,74 @@ func containsRID(stanza, rid string) bool {
 	s = strings.TrimSpace(s)
 	prefix := "rid=" + rid
 	return strings.HasPrefix(s, prefix) && (len(s) == len(prefix) || s[len(prefix)] == ' ')
+}
+
+// containsAnyRID reports whether any stanza in the list carries the given RID.
+func containsAnyRID(stanzas []string, rid string) bool {
+	for _, s := range stanzas {
+		if containsRID(s, rid) {
+			return true
+		}
+	}
+	return false
+}
+
+// namesPeerCAPath reports whether any stanza points its tls_cacert at the named
+// peer's CA mount directory.
+//
+// A second, independent witness for "this peer is wired here", and deliberately
+// a name-based one: peer.Name is the directory component of the CA mount path
+// (/etc/openldap/tls/peers/<name>/ca.crt) and therefore ends up verbatim in the
+// stanza (ADR-028 §4, "peer names are mesh site names"). RIDs are positional and
+// get reused as the peer list shrinks; the path does not.
+func namesPeerCAPath(stanzas []string, peer string) bool {
+	needle := "/peers/" + peer + "/"
+	for _, s := range stanzas {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkRWPodStanzas runs check against every RW pod's olcSyncRepl values for the
+// fixture's data database, and returns the first failure.
+//
+// It returns an error rather than asserting, so it composes with Eventually
+// while a StatefulSet rolls underneath it: a pod that is mid-restart makes the
+// dial, the bind or the search fail, and that is "not settled yet", never a
+// verdict. The predecessor spec folded the same errors into a bare `false`,
+// which made a genuinely broken pod indistinguishable from a restarting one in
+// the failure output.
+func checkRWPodStanzas(replicas int32, check func(pod string, stanzas []string) error) error {
+	for i := int32(0); i < replicas; i++ {
+		podName := fmt.Sprintf("slapd-%d", i)
+		if err := func() error {
+			conn, cancel := dialPodLDAP(namespace, podName, fmt.Sprintf("%d", 14000+i))
+			defer cancel()
+			defer conn.Close()
+
+			// Local pod (dialPodLDAP), so the suite-wide rootPW is the right
+			// credential — see the note in BeforeEach.
+			if err := conn.Bind("cn=admin,cn=config", rootPW); err != nil {
+				return fmt.Errorf("%s: bind cn=admin,cn=config: %w", podName, err)
+			}
+			sr, err := conn.Search(ldap.NewSearchRequest(
+				"cn=config", ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
+				0, 0, false, fmt.Sprintf("(olcSuffix=%s)", baseDN),
+				[]string{"olcSyncRepl"}, nil))
+			if err != nil {
+				return fmt.Errorf("%s: search cn=config: %w", podName, err)
+			}
+			if len(sr.Entries) == 0 {
+				return fmt.Errorf("%s: no cn=config entry for suffix %s", podName, baseDN)
+			}
+			return check(podName, sr.Entries[0].GetEqualFoldAttributeValues("olcSyncRepl"))
+		}(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dumpReplDiagnostics connects to a site's LDAP and returns a diagnostic string

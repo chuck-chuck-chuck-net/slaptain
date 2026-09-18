@@ -51,6 +51,8 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)
 │   ├── OPENLDAP-VERSIONS.md        # Dual 2.7/2.6 image pairs, tag scheme, 2.6→2.7 migration runbook (ADR-021)
 │   ├── BACKUP-PLAN.md              # ADR-014 implementation breakdown (phases)
+│   ├── MULTI-SITE.md               # USER guide: the mesh model, the invariants, a multi-site install (ADR-028)
+│   ├── MESH-PLAN.md                # ADR-028 implementation breakdown (7 phases, all landed)
 │   ├── BACKLOG.md                  # Cross-cutting tech debt (e.g. lint debt, e2e framework gaps)
 │   └── adrs/
 │       ├── adr-001-double-reconcile-runs.md
@@ -78,13 +80,17 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-023-rolling-replacement.md
 │       ├── adr-024-tunable-placement.md
 │       ├── adr-025-single-creator-seed-glue-suffix.md
-│       └── adr-026-shared-cn-config-state.md
+│       ├── adr-026-shared-cn-config-state.md
+│       ├── adr-027-node-local-replication-identity.md
+│       └── adr-028-mesh-scoped-vs-site-scoped.md
 ├── charts/
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
 │   │   └── templates/              # deployment, RBAC, serviceaccount, metrics, networkpolicy
 │   ├── slapd/                      # Standalone Helm chart (baseline / comparison / testing vehicle)
 │   ├── slapd-cluster/              # Helm chart deploying a SlapdCluster CR (operator required)
+│   ├── slapd-mesh/                 # Helm chart deploying a whole multi-site mesh: SlapdMesh + SlapdCluster
+│   │                               # + databases + schemas, applied IDENTICALLY at every site (ADR-028)
 │   └── slapd-toolkit/              # Persistent debug pod (ldap-utils, python3, ldap3) wired to operator-managed Secrets
 ├── images/
 │   ├── openldap-deb/               # Vendored Debian packaging fork → OpenLDAP 2.7.1 .debs (ADR-021)
@@ -99,6 +105,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   │   ├── slapdcluster_types.go   # SlapdCluster CRD (+ Restoring phase, status.restore — ADR-014)
 │   │   ├── slapddatabase_types.go  # SlapdDatabase CRD (+ bootstrapFrom, restoreApplied)
 │   │   ├── slapdschema_types.go    # SlapdSchema CRD
+│   │   ├── slapdmesh_types.go      # SlapdMesh CRD — the site inventory a SlapdCluster resolves meshRef against (ADR-028)
 │   │   ├── slapdbackup_types.go    # SlapdBackup + SlapdScheduledBackup CRDs + shared S3StorageSpec (ADR-014)
 │   │   ├── slapdscheduledbackup_types.go
 │   │   └── zz_generated.deepcopy.go
@@ -297,6 +304,17 @@ make testing-delete cluster-helm-uninstall
 ```
 
 Or all-in-one: `./tests/e2e.sh all <context> [more-contexts...]` (single-site with N=1, multi-site with N≥2)
+
+**The suite deploys through `charts/slapd-mesh` (ADR-028).** There is one path, not
+two: `e2e.sh` builds a single values file, applies it unchanged at every site, and
+the operator derives each site's `serverIDBase`, `externalPeers`, network mode and
+trust wiring from the `SlapdMesh` plus its own `SITE_NAME`. The Nth context is the
+logical site `site-N` at `serverIDIndex` N−1, reproducing the historical decades
+(0/100/200) exactly. The hand-wired path — and with it `E2E_MESH`, the peer loop and
+the `serverIDBase` arithmetic — was deleted in Phase 7. A multi-site run now requires
+a discovery transport (`pod-routed` or `multus`) and refuses to start without one;
+NodePort `uri` and static Multus `podAddresses` peers are consequently untested
+(`docs/BACKLOG.md`). User-facing guide: `docs/MULTI-SITE.md`.
 
 **Node access (NodePort reachability):** the runner reaches slapd via NodePorts on
 a per-context *node access IP*, defaulting to each node's k8s `InternalIP`. On
@@ -539,6 +557,7 @@ the original decision — the history of reasoning matters.
 - ADR-026: What a `SlapdDatabase` reconcile may do to `cn=config` state it does not exclusively own — R1 `olcDatabase={N}` is a positional namespace, so re-resolve after any delete (implemented, correct); R2 never destroy shared state on evidence the operator does not own (another database's overlays, a hand edit — ADR-002 sanctions both; report and stall instead, because the bad state here is silent until a restart); R3 trigger a repair on the condition it repairs, never on a sibling artifact the same pass may delete. Origin: the withdrawn ADR-019 R8 migration stranded an `olcAccessLogDB` and made a pod permanently unbootable. R2/R3 are forward-looking guards — after R8's removal no live path violates them — *Accepted 2026-09-14*
 - ADR-027: The replication identity is node-local, not an entry in the replicated tree — `cn=repl-<db>,cn=slaptain-auth` in a per-pod, never-replicated auth database on the data PVC, converged from the Secret (so rotation finally works). Kills the two-store class at its cause: the duplication is inherent to simple bind, but putting the verifier copy in the *replicated customer tree* is what made it shared multi-writer state (ADR-026 R2) and produced both the 19-day dead db2 link and a password-stripped copy. Fixed infrastructure: outside `DATABASE_DIRS`, so no new ADR-013 roll. SASL EXTERNAL/mTLS considered and deferred with its real marginal value recorded — *Accepted 2026-09-15 for what a single site can show; amended twice: 2026-09-14 (M1, the database + entries, additive) and 2026-09-15 (M2, the cutover — stanzas, ACLs and olcLimits and the operator's CSN bind all name the node-local DN, with the legacy grants RETAINED; identity convergence is now an ordering GATE that withholds syncrepl until every RW pod carries the entry; rotation measured at 52 s across four pods). Two live findings: the migration window is one-directional (a stanza carries one binddn, so a NEW consumer against an OLD provider fails — pin `externalPeers[].bindDN` meanwhile), and rotating the Secret mid-window strands the create-only legacy entry. Mesh-validated 2026-09-15 (86/2; the two failures were the gate firing on TLS-less fixture clusters whose auth database a pre-existing short-circuit never created — `runConvergenceSteps`, see docs/reconcile-loop-fixes.md). Mixed-VERSION mesh behaviour remains reasoned, not measured*
 - ADR-028: The mesh is a layer of its own — `SlapdMesh` (sites, network, trust) ← `meshRef` ← `SlapdCluster` (+ a `sites` selector for subsets) ← `clusterRef` ← `SlapdDatabase`/`SlapdSchema`. A mesh-scoped resource carries **no per-site fields**, so it is byte-identical everywhere and parity is existence + a hash (`spec.seed` is the one violation today — it becomes `seed.site`, retiring `strip_seed_block`; `bootstrapFrom` is create-everywhere per ADR-014 and already compliant). The operator derives `serverIDBase`, `externalPeers`, network mode and trust wiring from the mesh, so four of the eight cross-site invariants stop existing; the other four survive as one chart (`charts/slapd-mesh`) applied identically per site — the packaging unit is a chart, not a fused CR. Parity is checked read-only by both the operator (standing condition) and `slctl mesh verify` (out-of-band), sharing one predicate. Imperative bootstrap (trust/secrets, cert-manager + ESO), declarative steady state. Operator fan-out to peer clusters rejected (ADR-026 R2, no single writer) — *Proposed 2026-09-17; nothing implemented, invariant table derived from code and not yet audited against the lab*
+- ADR-028: The mesh is a layer of its own — `SlapdMesh` (sites, network, trust) ← `meshRef` ← `SlapdCluster` (+ a `sites` subset selector) ← `clusterRef` ← `SlapdDatabase`/`SlapdSchema`. A mesh-scoped resource carries **no per-site fields**, so it is byte-identical everywhere and parity is existence + a hash; the single per-site fact is `SITE_NAME` on the operator's own chart, never in a CR. Four of nine cross-site invariants stop existing (the operator derives `serverIDBase` from a **declared, not positional** `serverIDIndex`, plus `externalPeers`, network mode and trust wiring); the rest survive as one chart applied identically. `spec.seed.site` replaces the e2e's seed-stripping, making ADR-025's single-creator rule a property of the spec rather than of a deployment procedure. Packaging unit is a chart, not a fused CR. `meshRef` + an explicitly set derived field is refused, never silently preferred. Operator fan-out to peer clusters rejected (ADR-026 R2) — *Accepted 2026-09-18: all 7 MESH-PLAN phases landed, three-site lab at 88/93 with zero failures, decades reproduced exactly. Deleting the hand-wired e2e path cost the only coverage of NodePort `uri` and static Multus `podAddresses` peers (docs/BACKLOG.md); the mesh `multus` branch is written but untested*
 - ADR-020: An accesslog DB is at least as restrictive as the database it journals — *amended 2026-09-12: the replication identity also gets unlimited olcLimits on the data DB and the journal (slapd's default sizelimit of 500 capped every syncrepl search — found when a journal outgrew it live); never modify olcDbMaxSize on a live database (slapd segfaults — ADR-024 amendment)* — `to * by dn.exact="cn=repl-<db>,cn=slaptain-auth" read by dn.exact="cn=replication,<suffix>" read by * none` (two `by` clauses since the ADR-027 cutover, 2026-09-15 amendment — one rule, still ending `by * none`; the `olcLimits` exemption doubles with it, because a limits value carries exactly one selector); without it a data DB's ACLs are bypassable through its own change journal — *Accepted (impl + e2e green 2026-08-25; the bypass was captured live before the fix — an anonymous read of the shared journal returned `reqMod: userPassword:+ {SSHA}…` for a user whose `userPassword` the data DB denies)*
 
 ---

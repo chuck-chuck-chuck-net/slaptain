@@ -820,8 +820,13 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 					}
 				}
 			}
+			// Do not name a transport here: peer discovery is used by BOTH
+			// pod-routed (ADR-016) and multus (ADR-007), and which one is in
+			// play is spec.replication.network.mode, not the peer shape. This
+			// line used to claim "Multus" for every discovery peer, which was
+			// simply wrong on a pod-routed mesh.
 			check("external-peers", "pass",
-				fmt.Sprintf("all %d discovery peers use Multus (%s)",
+				fmt.Sprintf("all %d peers resolved by discovery (%s)",
 					discoveryPeerCount, strings.Join(details, ", ")))
 		}
 		if multusPeerCount > 0 && uriPeerCount == 0 && discoveryPeerCount == 0 {
