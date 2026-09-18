@@ -67,6 +67,29 @@ diverge, or one should call the other) or the same (then one should go).
 
 ---
 
+## Two cross-site transports have no e2e coverage any more
+
+ADR-028 Phase 7 deleted the hand-wired e2e path, and with it the only coverage of
+two transports the operator still supports:
+
+- cross-site **NodePort `uri` peers** (`externalPeers[].uri`)
+- **static Multus `podAddresses`** (ADR-007, no discovery)
+
+Neither is expressible through a `SlapdMesh` — the mesh names sites and lets the
+operator discover addresses, which is the whole point of the layer — so the
+coverage cannot be recovered by porting the specs. A multi-site run now refuses
+to start without `pod-routed` or `multus` discovery.
+
+The product still offers both on a mesh-less `SlapdCluster`, so the options are:
+drop them from the supported set (they are then dead code to delete, not debt),
+or give them a small dedicated fixture outside the mesh path. Do not leave the
+third state — supported, documented, untested — standing indefinitely.
+
+Note the related gap while deciding: the `multus` branch of the mesh path itself
+is written but untested; every run so far has been `pod-routed`.
+
+---
+
 ## `make -C operator lint` cannot run under Go 1.27
 
 **What:** the pinned `golangci-lint` v2.7.2 cannot read Go 1.27's export data

@@ -310,7 +310,7 @@ writing them is refused by design.
 - Untested on the mesh path: the `multus` branch of `build_mesh_values`,
   `imagePullSecrets` in the generated values, and `TEST_RESOURCES=lab`.
 
-## Phase 7 — Flip the default; docs
+## Phase 7 — Flip the default; delete the old path; docs
 
 - Default the e2e to the mesh path, delete the old path once one more full cycle
   is green.
@@ -318,6 +318,74 @@ writing them is refused by design.
   a getting-started for a multi-site install.
 - Move ADR-028 to Accepted, recording what was validated and what was not.
 
+*Landed 2026-09-18.* There is one deployment path and no flag selects it.
+`E2E_MESH` is gone, and with it `setup_slapd_clusters`' peer-wiring loop, the
+`site_idx * 100` arithmetic, the dual context-vs-site naming helpers
+(`peer_name` in full; `peer_ca_secret` and `peer_kubeconfig_secret` survive as
+one-line statements of the operator's convention), `discover_multus_ips`,
+`configure_multus_external_peers*` and the `STATIC_PODADDRESSES` knob.
+`tests/e2e.sh` goes +170/−371.
+
+    single-site  one context, plain `all`                       65 of 93, 0 failed
+    multi-site   three sites, E2E_RESILIENCE/SCALEUP/BACKUP=1   88 of 93, 0 failed
+
+88/93 is the **default-path** number Phase 6 measured, not the 87/93 the mesh
+path scored there: re-expressing peer removal closed the one-spec gap, so the
+mesh path now matches the path it replaced spec for spec. The single-site run
+is a one-site mesh (index 0 → decade 0) and behaves exactly as a standalone
+cluster always has, teardown included.
+
+**Peer removal was re-expressed against the mesh FIRST**, because deleting the
+old path would otherwise have deleted the only coverage of it. The new spec
+(`mesh-peer-removal`) drops the last site from the `SlapdMesh` and asserts that
+exactly that peer's stanza leaves every RW pod while the survivors' stanzas
+stay, then restores the site and waits for the stanza to return. It covers more
+than the spec it replaces: the whole derivation path runs, and it is the only
+thing in the suite that exercises the operator's **watch on the SlapdMesh** —
+the mechanism that makes a mesh edit reach `cn=config` before the five-minute
+`SlapdDatabase` resync floor.
+
+The behaviour already existed, so the spec could not go red honestly. Two
+mutation checks gave it teeth instead, each observed failing for its own reason
+on the live three-site lab:
+
+- *the mesh edit is not applied* → `slapd-0 still carries the dropped peer's
+  stanza (rid=152)`;
+- *every peer site is dropped, not just the last* → `slapd-0 lost surviving peer
+  "site-2" (rid=151) as well — the derivation collapsed rather than dropping one
+  site`.
+
+Unmutated it passes in 45 s standalone and 20 s inside the full suite.
+Dropping the **last** peer is load-bearing: external
+peer RIDs are positional (`ridBase+50+j+1`), so removing one in the middle
+renumbers the peers after it and a RID assertion would be reading a live peer's
+number. Removing a peer also changes the pod template (its CA mount), so the
+`SlapdCluster` rolls — twice over the spec — which the budgets allow for.
+
+### What the deletion cost
+
+Two cross-site transports lost their e2e coverage, and neither has a `SlapdMesh`
+expression to gain it back in: **NodePort `uri` peers** and **static Multus
+`podAddresses`**. A mesh describes sites and reaches them through their API
+servers, so it derives discovery peers and nothing else — those two are
+hand-configured shapes, still supported by the operator and still reachable
+through `spec.replication.externalPeers` on a mesh-less `SlapdCluster`, but
+nothing exercises them any more. A multi-site `e2e.sh` run now refuses to start
+without `POD_ROUTED` or `MULTUS_NETWORK` rather than producing a peerless
+cluster. Recorded here rather than quietly absorbed; `tests/README.md`'s
+transport table names both as uncovered.
+
+### Follow-ups from Phase 6, resolved
+
+- **Re-express peer removal against the mesh** — done, above.
+- **`E2E_ACCESSLOG_MIGRATION=1` is a no-op** — closed by inspection. No such
+  gate exists in `tests/` and no committed invocation line carries it; the
+  remaining mentions are in `docs/reconcile-loop-fixes.md`, which is a
+  historical log of a gate that was retired with ADR-019 R8. Nothing to delete.
+- **Untested on the mesh path** — unchanged and still true: the `multus` branch
+  of `build_mesh_values`, `imagePullSecrets` in the generated values (exercised
+  incidentally by any lab with a pull secret, not asserted), and
+  `TEST_RESOURCES=lab`.
 ## Out of scope (separate work, deliberately)
 
 - `slctl mesh verify` — independently useful and independently shippable; the

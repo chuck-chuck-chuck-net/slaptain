@@ -21,7 +21,13 @@ make e2e-run
 make testing-delete cluster-helm-uninstall
 ```
 
-The all-in-one wrapper does the same: `./tests/e2e.sh all <kube-context>`.
+The all-in-one wrapper is **not** the same: `./tests/e2e.sh all <kube-context>`
+deploys the whole bundle from `charts/slapd-mesh` — mesh, cluster, databases and
+schemas from one values file — which is what a real deployment looks like since
+ADR-028. See [How a site is deployed](#how-a-site-is-deployed-adr-028). The
+`make` targets above are the quicker inner loop against `charts/slapd-cluster`
+and a `kubectl apply` of the fixtures, and stay useful for iterating on a single
+site.
 
 ---
 
@@ -57,7 +63,9 @@ exercised by the test suite — use the operator path.
 ## Deploy test resources
 
 Test fixtures (`SlapdDatabase`, `SlapdSchema`, `slapd-test-passwords` Secret) are plain
-manifests under `tests/resources/example/`. They get applied with:
+manifests under `tests/resources/example/`. `tests/e2e.sh` turns the two CR kinds into
+`charts/slapd-mesh` values and applies only the plain manifests with `kubectl`; the `make`
+targets apply the directory as-is:
 
 ```bash
 make testing-apply    # kubectl apply tests/resources/$TEST_RESOURCES/
@@ -202,7 +210,6 @@ separates measured isolated staleness (3) from the measured storm (thousands).
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
 | `E2E_CONFIG` | `<repo-root>/lab.yaml` if present | Lab config file (site inventory, registry, network mode). Env vars win over file values. Schema: `lab.yaml.sample` |
-| `E2E_MESH` | *(unset — hand-wired path)* | Set to `1` to deploy the mesh path (ADR-028): `charts/slapd-mesh` installed with **one values file, unchanged, at every site**, with the operator deriving `serverIDBase`, `externalPeers`, the network mode and the trust wiring from the `SlapdMesh` plus its own `siteName`. See [Mesh path](#mesh-path-e2e_mesh1) below. |
 | `SLAPD_TAG_SUFFIX` | *(empty — OpenLDAP 2.7.1)* | Appended to the slapd/slapd-init image tags only (operator/toolkit untouched). `-ol26` deploys the legacy OpenLDAP 2.6 pair (ADR-011 interop / ADR-021). |
 | `E2E_LABEL_FILTER` | *(unset — full suite)* | Ginkgo label filter to run a subset, e.g. `accesslog`, `sessionlog`, `resilience` (the dataloss container), `external-replication`. |
 | `E2E_NODE_ACCESS_IP` | *(node `InternalIP`)* | Single-site override for the address the runner uses to reach NodePorts (+ cert SAN). Set when the `InternalIP` isn't reachable from the runner. |
@@ -282,12 +289,19 @@ The test runner runs on your workstation. It connects to siteA via `LDAP_ADDR`
 
 Cross-site connectivity modes:
 
-| Mode | ExternalPeer config | When to use |
-|---|---|---|
-| **Pod-routed** (ADR-016) | `discovery.kubeconfigSecret` + `network.mode: pod-routed` | Pod network natively routed across sites. Peers via primary pod IP; no Multus/NAD |
-| **Dynamic discovery** (Multus) | `discovery.kubeconfigSecret` + `network.multusNetwork` | Dedicated Multus network. Operator queries remote k8s API for net1 IPs |
-| **Static podAddresses** | `podAddresses: [IPs]` | Multus without remote API access. Manual IP management |
-| **URI (NodePort/LB)** | `uri: ldaps://host:port` | No Multus. Single endpoint per site |
+| Mode | How peers are addressed | When to use | Exercised by `e2e.sh`? |
+|---|---|---|---|
+| **Pod-routed** (ADR-016) | discovery via the remote k8s API, `network.mode: pod-routed` | pod network natively routed across sites; peers via primary pod IP, no Multus/NAD | yes — `POD_ROUTED=1` |
+| **Dynamic discovery** (Multus, ADR-007) | discovery via the remote k8s API, `network.mode: multus` | dedicated Multus network; the operator reads net1 IPs | yes — `MULTUS_NETWORK=<nad>` (untested on the mesh path) |
+| **Static podAddresses** | `externalPeers[].podAddresses: [IPs]` | Multus without remote API access; manual IP management | **no** |
+| **URI (NodePort/LB)** | `externalPeers[].uri: ldaps://host:port` | no Multus, a single endpoint per site | **no** |
+
+The last two are hand-configured shapes with no `SlapdMesh` expression — a mesh
+describes *sites* and reaches them through their API servers — so they left the
+suite with the hand-wired path (MESH-PLAN Phase 7). The operator still supports
+both; nothing in the suite covers them any more. A multi-site `e2e.sh` run
+without `POD_ROUTED` or `MULTUS_NETWORK` is refused up front rather than
+quietly producing a cluster with no peers.
 
 **Selecting the transport in `e2e.sh`** (multi-site, i.e. ≥2 contexts):
 
@@ -300,72 +314,70 @@ POD_ROUTED=1 \
   ./tests/e2e.sh all <ctx1> <ctx2> <ctx3>
 
 # Multus:   MULTUS_NETWORK=infra/replication-net ./tests/e2e.sh all <ctx1> <ctx2>
-# NodePort: (default, neither set)               ./tests/e2e.sh all <ctx1> <ctx2>
 ```
 
-### Mesh path (`E2E_MESH=1`)
+### How a site is deployed (ADR-028)
 
-Everything above describes the **hand-wired** path, which is still the default:
-`e2e.sh` computes each site's `serverIDBase`, builds its N−1 `externalPeers` by
-hand and feeds them to `charts/slapd-cluster`, then applies the
-`SlapdDatabase`/`SlapdSchema` fixtures with `kubectl`.
-
-`E2E_MESH=1` runs the same suite over the ADR-028 mesh layer instead:
+There is one deployment path and no flag selects it. `e2e.sh` installs
+`charts/slapd-mesh` — the `SlapdMesh`, the `SlapdCluster`, the `SlapdDatabase`s
+and the `SlapdSchema`s — with **one generated values file applied unchanged at
+every site**, and the operator derives each site's `serverIDBase`, its external
+peers, the network mode and the trust wiring from the mesh plus its own
+`siteName`.
 
 ```bash
-E2E_MESH=1 POD_ROUTED=1 ./tests/e2e.sh all <ctx1> <ctx2> <ctx3>
+POD_ROUTED=1 ./tests/e2e.sh all <ctx1> <ctx2> <ctx3>
 ```
 
-What changes:
+What that means in practice:
 
-- **One chart, one values file.** `charts/slapd-mesh` renders the `SlapdMesh`,
-  the `SlapdCluster`, the `SlapdDatabase`s and the `SlapdSchema`s, and the same
-  generated values file is applied **unchanged** at every site. The file is
-  built once per run and its path is logged, so `sha256sum` settles any doubt
-  about whether the sites really got the same bytes.
+- **One chart, one values file.** The file is built once per run and its path
+  and `sha256` are logged, so there is no doubt about whether the sites really
+  got the same bytes.
 - **Nothing per-site in it.** No `serverIDBase`, no `externalPeers`, no network
-  block on the cluster. The operator derives all four from the mesh plus its own
-  `siteName` (which `setup_foundation` already passes to `charts/operator`), and
-  a cluster that sets one of them alongside `meshRef` is refused outright with
-  `MeshResolved=False`.
+  block on the cluster. A cluster that sets one of them alongside `meshRef` is
+  refused outright with `MeshResolved=False`, and `e2e.sh` waits on that
+  condition before waiting on the StatefulSet — a cluster that cannot resolve
+  its mesh reconciles *nothing*, so the symptom would otherwise be an
+  unexplained missing StatefulSet.
+- **The single per-site input is the operator's `siteName`**, passed to
+  `charts/operator` in `setup_foundation`. The names are logical and
+  positional — the Nth context becomes `site-N` — so the public fixtures can
+  name the founder without naming anybody's kube contexts, and the fixture
+  works against any lab.
 - **The fixtures are the same files.** `tests/resources/<set>/*.yaml` stays the
-  single source of truth: the mesh path transforms those same CRs into chart
-  values (`{name, spec}`, minus `clusterRef`, which the chart pins) rather than
-  keeping a second copy. Non-CR manifests — the readpw Secret — are still
-  applied with `kubectl`.
-- **Peers are named after mesh sites, not kube contexts.** The hand-wired path
-  calls a peer `site-<context>` and reads its CA from `site-<context>-ca`; the
-  mesh derives `site-N` and `site-N-ca` / `site-N-kubeconfig`, because a peer's
-  name is the directory component of its CA mount path and therefore ends up in
-  every external stanza's `tls_cacert`. `./tests/e2e.sh config` prints the
-  resolved names for whichever path is selected.
+  single source of truth: `build_mesh_values` reads those CRs and transforms
+  them into chart values (`{name, spec}`, minus `clusterRef`, which the chart
+  pins). Non-CR manifests — the readpw Secret — are still applied with
+  `kubectl`.
+- **Peers are named after mesh sites**, so their CA and kubeconfig Secrets are
+  `site-N-ca` and `site-N-kubeconfig`: a peer's name is the directory component
+  of its CA mount path and therefore ends up in every external stanza's
+  `tls_cacert`. `./tests/e2e.sh config` prints the resolved names.
 - **`serverIDIndex` is the context's position minus one**, so site-1/2/3 get
-  decades 0/100/200 — exactly what the hand-wired `site_idx * 100` produced. That
-  is a hard requirement, not a nicety: `olcServerID` is baked into every CSN a
-  pod has written (MESH-PLAN hazard 2).
+  decades 0/100/200 — exactly what the pre-ADR-028 harness produced with
+  `site_idx * 100`. That is a hard requirement, not a nicety: `olcServerID` is
+  baked into every CSN a pod has written (MESH-PLAN hazard 2).
 
 Multi-site needs a **discovery** transport (`POD_ROUTED=1` or
-`MULTUS_NETWORK=…`): a mesh describes sites and reaches them through their API
-servers, so it never derives a static NodePort `uri`. The script refuses the
-combination up front rather than producing a cluster with no peers.
+`MULTUS_NETWORK=…`) — see the table above for what that leaves uncovered.
 
-One spec differs in coverage, deliberately. `external replication > removing an
-external peer from the spec removes its syncrepl stanza` **skips on the mesh
-path**: its premise is to patch `spec.replication.externalPeers` empty, and on a
-mesh-driven cluster that field is derived and setting it is refused outright with
-`MeshResolved=False` (ADR-028 §4). Removing a peer there means editing the
-`SlapdMesh`. The mesh equivalent — drop a site, assert the stanza disappears — is
-the better test, because it also exercises the operator's watch on the mesh
-object; it is a tracked follow-up, not a silent gap.
+Anything that needs to know whether the cluster has external peers must go
+through `clusterExternalPeerNames` (`helpers_test.go`) rather than read
+`spec.replication.externalPeers`: on a mesh-driven cluster that field is empty
+by design, so reading it directly makes a guard skip a spec that should run, or
+makes a spec pass while asserting nothing. Three guards and one vacuous pass
+were found that way when the mesh path first ran.
 
-Every other spec runs on both paths. Anything that needs to know whether the
-cluster has external peers must go through `clusterExternalPeerNames`
-(`helpers_test.go`) rather than read `spec.replication.externalPeers`: on a
-mesh-driven cluster that field is empty by design, so reading it directly makes a
-guard skip a spec that should run, or makes a spec pass while asserting nothing.
-Three guards and one vacuous pass were found that way on the first mesh run.
-
-Both paths live side by side until MESH-PLAN Phase 7 flips the default.
+**Peer removal** is covered by `external replication > removing a site from the
+SlapdMesh removes that peer's syncrepl stanza` (label `mesh-peer-removal`). It
+drops the last mesh site from the `SlapdMesh`, asserts that exactly that peer's
+stanza disappears from every RW pod while the survivors' stanzas stay, then
+restores the site and waits for the stanza to come back. Dropping the *last*
+site matters: external peer RIDs are positional (`ridBase+50+j+1`), so removing
+one in the middle renumbers the peers after it. The spec restores the mesh from
+a `DeferCleanup` too, so a failed assertion does not leave the rest of the run
+wired a site short.
 
 ### Prerequisites
 
@@ -640,15 +652,13 @@ pod Multus IPs automatically. No IPs need to be known in advance. The script pro
 cross-site RBAC and kubeconfig Secrets via `scripts/create-remote-kubeconfig.sh`, then
 configures `ExternalPeer.Discovery` on the SlapdCluster CRs.
 
-**Multus static podAddresses** (legacy — explicit IP injection):
-
-```bash
-MULTUS_NETWORK=infra/replication-net STATIC_PODADDRESSES=1 make e2e-multisite CONTEXTS="s1 s2"
-```
-
-The script waits for pods to come up, reads their Multus IPs from annotations, and patches
-the SlapdCluster CRs with static `podAddresses`. Use this if the operator pod does not have
-a Multus interface or the remote k8s API is not reachable over the replication network.
+**Multus static podAddresses** — removed from the harness (MESH-PLAN Phase 7).
+The mode injected IPs read from pod annotations into `externalPeers[].podAddresses`,
+which a `SlapdMesh` has no way to express, so it went with the hand-wired path.
+The operator still accepts static `podAddresses` on a mesh-less `SlapdCluster`;
+nothing in the suite exercises it. Use it by hand if the operator pod has no
+Multus interface, or the remote k8s API is unreachable over the replication
+network.
 
 **Step-by-step:**
 
@@ -703,9 +713,8 @@ make e2e-multisite-teardown CONTEXTS="s1 s2"
 | `NAMESPACE` | `slaptain-system` | Operator namespace |
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
 | `NODEPORT_LDAP` | `30389` | NodePort for plain LDAP (test runner access) |
-| `NODEPORT_LDAPS` | `30636` | NodePort for LDAPS (cross-cluster syncrepl in NodePort mode) |
+| `NODEPORT_LDAPS` | `30636` | NodePort for LDAPS (test-runner access; cross-site peers no longer use it) |
 | `MULTUS_NETWORK` | *(unset)* | NAD reference (e.g. `infra/replication-net`). Enables Multus mode |
-| `STATIC_PODADDRESSES` | *(unset)* | Set to `1` for legacy static podAddresses instead of dynamic discovery |
 
 ---
 

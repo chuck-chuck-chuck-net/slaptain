@@ -184,23 +184,49 @@ image pair — needed for hot-migration clusters that must match a 2.6 source.
 - **Security**: rootless execution (UID 1024), no privilege escalation, read-only root filesystem, distroless runtime images, TLS encryption.
 - **Database lifecycle**: cleanup policy (Retain/Delete) controls what happens when a `SlapdDatabase` CR is deleted. Default: Retain (database stays in slapd, becomes unmanaged).
 - **Backup & restore**: on-demand and scheduled `slapcat`→S3 backups with retention (`SlapdBackup` / `SlapdScheduledBackup`); restore into a fresh database (`SlapdDatabase.spec.bootstrapFrom`) or roll back an existing one in place (`SlapdRestore`). See [Backup & Restore](docs/BACKUP.md).
+- **Multi-site meshes**: describe the sites once in a `SlapdMesh` and apply one chart with one values file at every site; the operator derives each site's serverID decade, its cross-site peers, the network mode and the trust wiring from the mesh plus its own `siteName`. See [Multi-Site Deployments](docs/MULTI-SITE.md).
 - **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts.
 
 ## Cross-Cluster Replication
 
-Slaptain supports cross-cluster replication via `spec.replication.externalPeers` on the `SlapdCluster` CR. Each peer is an independent SlapdCluster running in a separate Kubernetes cluster. Replication is bidirectional (N-way multi-master) using simple bind over TLS.
+One directory across several Kubernetes clusters, replicating bidirectionally
+(N-way multi-master delta-syncrepl) over TLS. The clusters share no API server
+and no control plane.
+
+Describe the sites once, in a `SlapdMesh`, and apply **one chart with one values
+file, unchanged, at every site**. The operator derives each site's
+`serverIDBase`, its peer list, the network mode and the trust wiring from the
+mesh plus its own `siteName`:
 
 ```yaml
-replication:
-  enabled: true
-  keepalive: "300:10:60"
-  externalPeers:
-    - name: site-b
-      uri: "ldaps://ldap.site-b.example.com:636"
-      tlsSecretName: "site-b-ca"
-      bindDN: "cn=replication,dc=example,dc=org"
-      bindPasswordSecretName: "site-b-repl-pw"
+mesh:
+  name: slapd-mesh
+  sites:
+    - {name: site-a, serverIDIndex: 0, endpoint: https://api.site-a.k8s.example:6443}
+    - {name: site-b, serverIDIndex: 1, endpoint: https://api.site-b.k8s.example:6443}
+    - {name: site-c, serverIDIndex: 2, endpoint: https://api.site-c.k8s.example:6443}
+  network:
+    mode: pod-routed
 ```
+
+```bash
+# The one command whose arguments differ per site:
+helm upgrade --install slaptain-operator ./charts/operator --set siteName=site-a
+
+# The bundle — same chart, same values, everywhere:
+helm upgrade --install ldap ./charts/slapd-mesh -n slaptain -f my-mesh.yaml
+```
+
+Full guide: **[Multi-Site Deployments](docs/MULTI-SITE.md)** — the model, the
+cross-site invariants, getting started, and how to tell a mesh is healthy.
+Chart reference: [`charts/slapd-mesh`](charts/slapd-mesh/README.md). Design
+record: [ADR-028](docs/adrs/adr-028-mesh-scoped-vs-site-scoped.md).
+
+Peers can also be written out by hand on a mesh-less `SlapdCluster`
+(`spec.replication.externalPeers`, with a `uri`, static `podAddresses` or a
+`discovery` block) — the lower-level form the mesh derives, and still the way
+to peer with something that is not a slaptain cluster (see
+[ADR-011](docs/adrs/adr-011-hot-migration-topology.md) on migration topologies).
 
 RID scheme: each `SlapdDatabase` declares a `ridBase`. In-cluster peers use RIDs `ridBase+1..ridBase+49`, external peers use `ridBase+51..ridBase+99`. See [ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md).
 
@@ -256,10 +282,11 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 ## Documentation
 
 - [Team Onboarding](docs/ONBOARDING.md) — LDAP concepts, OpenLDAP specifics, operator model
+- [Multi-Site Deployments](docs/MULTI-SITE.md) — the mesh model, the cross-site invariants, a multi-site install, and how to check a mesh is healthy
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
 - [Backup & Restore](docs/BACKUP.md) — S3 backup, scheduled backups + retention, restore into a fresh DB, in-place rollback
 - [Tuning & Sizing](docs/TUNING.md) — what is tunable, slaptain's defaults and how they differ from slapd's, and sizing a cluster from lab to production
-- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-022
+- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-028
 - [Development Guide](docs/DEVELOPMENT.md) — prerequisites, image builds, operator dev loop, e2e cycle, debugging, project discipline
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 
