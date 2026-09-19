@@ -10,6 +10,15 @@ CONTAINER_ENGINE ?= podman
 # why the dirty suffix is content-hashed.
 GIT_TAG := $(shell scripts/image-tag.sh)
 
+# IMAGE_TAG: how that build is ADDRESSED, which is a different question from
+# what it IS, and one variable cannot answer both (docs/VERSIONING.md). The `v`
+# belongs to the git tag and to nothing downstream of it, so a release tag
+# v0.2.1 addresses images as :0.2.1 — matching the chart version and appVersion
+# exactly, which is what makes the charts' `image.tag | default .Chart.AppVersion`
+# fallback correct by construction instead of by coincidence.
+# Off-tag forms (<hash>, <hash>-dirty-<state8>) carry no `v` and pass through.
+IMAGE_TAG := $(GIT_TAG:v%=%)
+
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= push
 
@@ -39,17 +48,17 @@ endif
 # Node IPs: auto-discover from kubectl, override with NODE_IPS="1.2.3.4 5.6.7.8"
 NODE_IPS ?= $(shell $(KUBECTL) get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
 
-INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:$(GIT_TAG)
-SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:$(GIT_TAG)
-TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:$(GIT_TAG)
-OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:$(GIT_TAG)
+INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)
+SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)
+TOOLKIT_IMAGE    = $(REGISTRY)/$(PROJECT)/slapd-toolkit:$(IMAGE_TAG)
+OPERATOR_IMAGE   = $(REGISTRY)/$(PROJECT)/operator:$(IMAGE_TAG)
 
 # Legacy OpenLDAP 2.6 variants of the slapd pair (ADR-021). The plain tags above
 # are OpenLDAP 2.7.1; these keep the previous Debian-package build reachable for
 # hot-migration / legacy-interop clusters (ADR-011). Pin them per SlapdCluster
 # with spec.images.{slapd,init}.tag=<tag>-ol26 — both, never one.
-INIT_IMAGE_OL26  = $(REGISTRY)/$(PROJECT)/slapd-init:$(GIT_TAG)-ol26
-SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(GIT_TAG)-ol26
+INIT_IMAGE_OL26  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol26
+SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26
 
 # Tag suffix applied to the slapd/slapd-init image tags when DEPLOYING (only —
 # the operator and toolkit tags are untouched). Empty = OpenLDAP 2.7.1;
@@ -60,7 +69,7 @@ SLAPD_TAG_SUFFIX ?=
 # OpenLDAP 2.7.1 .deb build. Local-only image (localhost/ prefix — never pushed):
 # it carries nothing but /debs and is consumed by both the slapd and slapd-init
 # 2.7 Containerfiles, so the package build runs once per tag for both.
-OPENLDAP_DEB_IMAGE = localhost/$(PROJECT)/openldap-deb:$(GIT_TAG)
+OPENLDAP_DEB_IMAGE = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)
 # Set RUN_UPSTREAM_TESTS=1 to run OpenLDAP's own test suite during the package
 # build (slow; off by default — see images/openldap-deb/README.md).
 RUN_UPSTREAM_TESTS ?= 0
@@ -82,10 +91,13 @@ PUBLISH_CHARTS ?= operator slapd-mesh slapd slapd-toolkit
 # Chart version derived from GIT_TAG; must be SemVer-2 for Helm.
 # - On a release tag (vX.Y.Z): strip the leading 'v' → X.Y.Z.
 # - Off-tag dev builds: 0.0.0-<commit>[-dirty] pseudo-version (valid SemVer pre-release).
+# On a release tag IMAGE_TAG is already the bare semver, so chart version,
+# appVersion and image tag are all one string. Off-tag it is a hash, which is
+# not SemVer-2 and which Helm rejects, so it becomes a valid pre-release.
 ifneq ($(filter v%,$(GIT_TAG)),)
-    CHART_VERSION := $(GIT_TAG:v%=%)
+    CHART_VERSION := $(IMAGE_TAG)
 else
-    CHART_VERSION := 0.0.0-$(GIT_TAG)
+    CHART_VERSION := 0.0.0-$(IMAGE_TAG)
 endif
 
 # Stamp-file directory for incremental builds.
@@ -147,8 +159,8 @@ $(STAMPS):
 # (e.g. new commit, dirty→clean transition). The file is only touched
 # when its content actually changes.
 $(STAMPS)/tag: FORCE | $(STAMPS)
-	@if [ "$$(cat $@ 2>/dev/null)" != "$(GIT_TAG)" ]; then \
-		echo "$(GIT_TAG)" > $@; \
+	@if [ "$$(cat $@ 2>/dev/null)" != "$(IMAGE_TAG)" ]; then \
+		echo "$(IMAGE_TAG)" > $@; \
 	fi
 .PHONY: FORCE
 
@@ -304,8 +316,8 @@ cluster-helm-install:
 	$(HELM) upgrade --install slapd ./charts/slapd \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
 		-f tests/values.slapd-persistent.yaml \
-		--set images.slapd.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX) \
-		--set images.init.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX)
+		--set images.slapd.tag=$(IMAGE_TAG)$(SLAPD_TAG_SUFFIX) \
+		--set images.init.tag=$(IMAGE_TAG)$(SLAPD_TAG_SUFFIX)
 
 cluster-helm-uninstall:
 	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
@@ -319,7 +331,7 @@ operator-helm-install: operator-crd-apply
 	$(HELM) upgrade --install slaptain ./charts/operator \
 		--namespace $(NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(PROJECT)/operator \
-		--set image.tag=$(GIT_TAG)
+		--set image.tag=$(IMAGE_TAG)
 
 operator-helm-uninstall:
 	$(HELM) uninstall slaptain --namespace $(NAMESPACE)
@@ -334,7 +346,7 @@ charts-package: operator-sync-crd
 	@for d in $(PUBLISH_CHARTS); do \
 		echo ">>> packaging charts/$$d"; \
 		$(HELM) package ./charts/$$d -d $(CHART_OUT) \
-			--version $(CHART_VERSION) --app-version $(GIT_TAG) || exit 1; \
+			--version $(CHART_VERSION) --app-version $(IMAGE_TAG) || exit 1; \
 	done
 
 ## charts-push: push every packaged chart to $(CHART_REGISTRY).
@@ -352,7 +364,7 @@ charts-push: charts-package
 operator-chart-package: operator-sync-crd
 	@mkdir -p $(CHART_OUT)
 	$(HELM) package ./charts/operator -d $(CHART_OUT) \
-		--version $(CHART_VERSION) --app-version $(GIT_TAG)
+		--version $(CHART_VERSION) --app-version $(IMAGE_TAG)
 
 operator-chart-push: operator-chart-package
 	$(HELM) push $(CHART_OUT)/slaptain-$(CHART_VERSION).tgz $(CHART_REGISTRY)
@@ -361,7 +373,7 @@ operator-chart-push: operator-chart-package
 toolkit-install:
 	$(HELM) upgrade --install toolkit ./charts/slapd-toolkit \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
-		--set image.tag=$(GIT_TAG)
+		--set image.tag=$(IMAGE_TAG)
 
 toolkit-uninstall:
 	$(HELM) uninstall toolkit --namespace $(NAMESPACE_TESTING)
@@ -413,8 +425,10 @@ e2e-migration-test:
 e2e-migration-teardown:
 	./tests/e2e-migration.sh teardown $(CONTEXT)
 
-show-tag: ## Print the current GIT_TAG used for image tagging
-	@echo $(GIT_TAG)
+show-tag: ## Print the git tag and the image/chart tag derived from it
+	@echo "git:    $(GIT_TAG)"
+	@echo "image:  $(IMAGE_TAG)"
+	@echo "chart:  $(CHART_VERSION)"
 
 clean:
 	rm -rf .stamps .charts bin/ *.tar

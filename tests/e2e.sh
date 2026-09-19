@@ -165,12 +165,18 @@ if [[ -z "${GIT_TAG:-}" ]]; then
     GIT_TAG="$("$PROJECT_ROOT/scripts/image-tag.sh")"
 fi
 
+# IMAGE_TAG is how that build is ADDRESSED: the `v` belongs to the git tag and
+# to nothing downstream of it (docs/VERSIONING.md), so v0.2.1 -> 0.2.1 while the
+# off-tag hash forms pass through unchanged. Mirrors the Makefile exactly —
+# pinning GIT_TAG=v0.2.1 here must reach the same images `make push` produced.
+IMAGE_TAG="${GIT_TAG#v}"
+
 # SLAPD_TAG_SUFFIX: appended to the slapd/slapd-init image tags only (the
 # operator tag is untouched). Empty = OpenLDAP 2.7.1; "-ol26" runs the suite
 # against the legacy OpenLDAP 2.6 pair, which is expected to FAIL the ITS#9580
 # assertion in dataloss_recovery_test.go — see ADR-021.
 SLAPD_TAG_SUFFIX="${SLAPD_TAG_SUFFIX:-}"
-SLAPD_TAG="${GIT_TAG}${SLAPD_TAG_SUFFIX}"
+SLAPD_TAG="${IMAGE_TAG}${SLAPD_TAG_SUFFIX}"
 
 # ── Image pull secret ────────────────────────────────────────────────────────
 PULL_SECRET_FILE="$SCRIPT_DIR/image-pull-secret.yaml"
@@ -584,7 +590,7 @@ setup_foundation() {
                 slapd-tls
         )
 
-        log "[$ctx] Installing operator (tag: $GIT_TAG, site: ${SITE_NAMES[$ctx]})..."
+        log "[$ctx] Installing operator (tag: $IMAGE_TAG, site: ${SITE_NAMES[$ctx]})..."
         local operator_multus_sets=()
         if [[ -n "$MULTUS_NETWORK" ]]; then
             operator_multus_sets=(--set "multus.network=$MULTUS_NETWORK")
@@ -592,7 +598,7 @@ setup_foundation() {
         hctl "$ctx" upgrade --install slaptain "$PROJECT_ROOT/charts/operator" \
             --namespace "$NAMESPACE" --create-namespace \
             --set "image.repository=$REGISTRY/$PROJECT/operator" \
-            --set "image.tag=$GIT_TAG" \
+            --set "image.tag=$IMAGE_TAG" \
             --set "siteName=${SITE_NAMES[$ctx]}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${operator_multus_sets[@]}"
@@ -1560,7 +1566,7 @@ require_image_in_registry() { # image-name tag
 do_setup() {
     require_discovery_transport
     require_image_in_registry slapd "$SLAPD_TAG"
-    require_image_in_registry operator "$GIT_TAG"
+    require_image_in_registry operator "$IMAGE_TAG"
     setup_foundation
     setup_cross_trust
     setup_remote_kubeconfigs
@@ -1596,7 +1602,7 @@ if [[ "$subcommand" == "config" ]]; then
     done
     echo "peer[ca,kubeconfig]:  ${peer_map% }"
     echo "registry/project:     $REGISTRY / $PROJECT"
-    echo "image tag:            $GIT_TAG${SLAPD_TAG_SUFFIX:+ (slapd pair: $GIT_TAG$SLAPD_TAG_SUFFIX)}"
+    echo "image tag:            $IMAGE_TAG${SLAPD_TAG_SUFFIX:+ (slapd pair: $IMAGE_TAG$SLAPD_TAG_SUFFIX)}"
     echo "operator namespace:   $NAMESPACE"
     echo "testing namespace:    $NAMESPACE_TESTING"
     echo "test resources:       $TEST_RESOURCES"

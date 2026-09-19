@@ -34,6 +34,10 @@ different question:
 helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/<chart> --version <X.Y.Z>
 ```
 
+`--version` takes the bare version, **without the leading `v`** — `--version 0.2.0` for the
+`v0.2.0` release. Helm passes it through to the registry as a tag and does not normalise it,
+so the wrong spelling is a 404 rather than a warning. See [Versioning](docs/VERSIONING.md).
+
 ### 2. Deploy a Cluster
 
 Create a TLS Secret and a `SlapdCluster` CR (infrastructure only — no databases yet):
@@ -359,6 +363,7 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
 - [Backup & Restore](docs/BACKUP.md) — S3 backup, scheduled backups + retention, restore into a fresh DB, in-place rollback
 - [Tuning & Sizing](docs/TUNING.md) — what is tunable, slaptain's defaults and how they differ from slapd's, and sizing a cluster from lab to production
+- [Versioning](docs/VERSIONING.md) — where the `v` goes (git tags) and where it must not (images, charts, `--version`)
 - [TLS Certificates](docs/TLS.md) — where certificates come from (org PKI, cert-manager, the cluster CA), and how clients come to trust them
 - [slctl](docs/slctl.md) — the diagnostic CLI: status, inspect, debug-dump, ldapsearch/add/modify/delete against a managed cluster
 - [OpenLDAP Versions](docs/OPENLDAP-VERSIONS.md) — the 2.7/2.6 image pairs, the tag scheme, and the 2.6 -> 2.7 migration runbook

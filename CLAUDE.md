@@ -48,6 +48,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── MIGRATION-PLAN.md           # Phased plan for replacing a legacy OpenLDAP with slaptain
 │   ├── MIGRATION-LEGACY-SOURCE.md  # Source-side (legacy slapd) prep for hot migration
 │   ├── BACKUP.md                   # S3 backup/restore user guide (ADR-014)
+│   ├── VERSIONING.md               # Where the `v` goes: git tags only; images/charts/appVersion bare
 │   ├── TLS.md                      # Certificates: where they come from, and how clients come to trust them (ADR-029)
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)
 │   ├── OPENLDAP-VERSIONS.md        # Dual 2.7/2.6 image pairs, tag scheme, 2.6→2.7 migration runbook (ADR-021)
@@ -369,7 +370,8 @@ runs without readpw configuration but skips those test cases.
 | `make build-init` | Build slapd-init image |
 | `make build-slapd` | Build slapd image |
 | `make build-operator` | Build operator image (build context = repo root) |
-| `make push` | Build + push all six images (both slapd pairs, toolkit, operator) |
+| `make push` | Build + push all six images (both slapd pairs, toolkit, operator) at `IMAGE_TAG` |
+| `make show-tag` | Print the git tag and the image/chart versions derived from it (`v0.2.1` → image `0.2.1`, chart `0.2.1`) |
 | `make build-openldap-deb` | Build the local-only OpenLDAP 2.7.1 .deb carrier image (feeds both 2.7 image builds; never pushed) |
 | `make build-ol26` / `make import-ol26` | Build / CRI-import the legacy 2.6 slapd+init pair (`:<tag>-ol26`, ADR-021) |
 | `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |
@@ -430,6 +432,17 @@ kubectl rollout status statefulset/slapd -n slaptain-testing --timeout=120s
 
 # 6. Phase 1 guard smoke test: apply with replicas:2, verify status.phase=Error
 ```
+
+### Versioning: where the `v` goes
+
+The `v` belongs to the **git tag** and to nothing downstream of it. Images, chart `version`,
+chart `appVersion` and `helm --version` all take the bare semver — `v0.2.1` is tagged in git
+and published as `operator:0.2.1` / chart `0.2.1`. The Makefile keeps the two questions in two
+variables: `GIT_TAG` is what HEAD *is*, `IMAGE_TAG := $(GIT_TAG:v%=%)` is how it is
+*addressed*. This makes the charts' `image.tag | default .Chart.AppVersion` fallback an
+identity rather than a coincidence. Adopted at v0.2.1 (images through `v0.2.0` keep the `v`;
+that discontinuity is deliberate and documented). Full rules, traps and verification recipes:
+`docs/VERSIONING.md`.
 
 ### Important Notes
 - **No kustomize.** All deployment is via Helm. The `operator/config/` tree is kubebuilder scaffolding only — used to generate code/CRDs, not applied directly to clusters.
