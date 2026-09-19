@@ -27,7 +27,7 @@ spec:
         {{- toYaml .Values.securityContext | nindent 8 }}
       initContainers:
         - name: init
-          image: "{{ .Values.images.init.repository }}:{{ .Values.images.init.tag }}"
+          image: "{{ .Values.images.init.repository }}:{{ .Values.images.init.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.images.init.pullPolicy }}
           # bootstrap.sh writes /tmp/slapd.conf; "tmp" emptyDir below backs it
           # so we can keep the root FS read-only.
@@ -78,7 +78,7 @@ spec:
             {{- end }}
       containers:
         - name: slapd
-          image: "{{ .Values.images.slapd.repository }}:{{ .Values.images.slapd.tag }}"
+          image: "{{ .Values.images.slapd.repository }}:{{ .Values.images.slapd.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.images.slapd.pullPolicy }}
           args:
             - "-h"

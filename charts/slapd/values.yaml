@@ -1,13 +1,30 @@
 # Default values for slapd.
+#
+# This chart deploys ONE slapd instance and nothing else — no operator, no CRDs,
+# everything configured here. It is the helm-centric option for a single
+# directory server, and it is complete for that: TLS, credentials, persistence
+# and a restricted-PSA security context.
+#
+# What it deliberately does not do, because these need a control plane that
+# reconciles cn=config per pod: replication (N-way multi-master or read-only
+# replicas), multi-site meshes, declarative schemas and ACLs, and S3
+# backup/restore. For any of those, install the operator and use
+# charts/slapd-cluster (one site) or charts/slapd-mesh (several) instead.
 
 images:
   slapd:
     repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
-    tag: latest
+    # -- Image tag. Empty string falls back to the chart's appVersion, which is
+    # set at package time from the git tag (e.g. v0.2.0) and matches the
+    # published image tag — see Makefile target charts-package. There is no
+    # `latest` tag in the registry: images are pushed under their git tag only.
+    tag: ""
     pullPolicy: IfNotPresent
   init:
     repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
-    tag: latest
+    # -- See images.slapd.tag. Pin both images or neither — slapcat/slapadd in
+    # the init container must match the slapd version (docs/OPENLDAP-VERSIONS.md).
+    tag: ""
     pullPolicy: IfNotPresent
 
 # imagePullSecrets: list of LocalObjectReferences for pulling images from a

@@ -70,6 +70,17 @@ RUN_UPSTREAM_TESTS ?= 0
 CHART_REGISTRY ?= oci://$(REGISTRY)/charts
 CHART_OUT      := .charts
 
+# Charts that get published. Directory names under charts/; the packaged file
+# is named from each Chart.yaml (charts/operator -> slaptain-operator-X.Y.Z.tgz).
+# All five are user-facing entry points and each answers a different question:
+#   operator       the control plane; everything below except `slapd` needs it
+#   slapd-mesh     a whole multi-site mesh, same values file at every site
+#   slapd-cluster  one site's SlapdCluster
+#   slapd-toolkit  the debug pod
+#   slapd          a single standalone slapd, no operator and no CRDs, for a
+#                  purely helm/values.yaml-centric workflow
+PUBLISH_CHARTS ?= operator slapd-mesh slapd-cluster slapd-toolkit slapd
+
 # Chart version derived from GIT_TAG; must be SemVer-2 for Helm.
 # - On a release tag (vX.Y.Z): strip the leading 'v' → X.Y.Z.
 # - Off-tag dev builds: 0.0.0-<commit>[-dirty] pseudo-version (valid SemVer pre-release).
@@ -123,7 +134,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
 
 ## all: the six pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -273,7 +284,9 @@ gencert:
 
 helm-install:
 	$(HELM) upgrade --install slapd ./charts/slapd \
-		--namespace $(NAMESPACE_TESTING) --create-namespace
+		--namespace $(NAMESPACE_TESTING) --create-namespace \
+		--set images.slapd.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX) \
+		--set images.init.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX)
 
 helm-deploy: deliver gencert helm-install ## Full pipeline: build images, deliver, generate certs, deploy
 
@@ -319,23 +332,44 @@ operator-helm-install: operator-crd-apply
 operator-helm-uninstall:
 	$(HELM) uninstall slaptain-operator --namespace $(NAMESPACE)
 
-## operator-chart-package: package the operator Helm chart into $(CHART_OUT)/.
-## Version and appVersion are overridden from the git tag (see CHART_VERSION/GIT_TAG).
-## CRDs are synced first so the packaged chart includes the current CRD.
+## charts-package: package every chart in $(PUBLISH_CHARTS) into $(CHART_OUT)/.
+## Version and appVersion are overridden from the git tag (see CHART_VERSION/
+## GIT_TAG), so a chart's appVersion always names an image tag that exists — the
+## charts default their image tags to .Chart.AppVersion for exactly this reason.
+## CRDs are synced first so the packaged operator chart carries the current CRD.
+charts-package: operator-sync-crd
+	@mkdir -p $(CHART_OUT)
+	@for d in $(PUBLISH_CHARTS); do \
+		echo ">>> packaging charts/$$d"; \
+		$(HELM) package ./charts/$$d -d $(CHART_OUT) \
+			--version $(CHART_VERSION) --app-version $(GIT_TAG) || exit 1; \
+	done
+
+## charts-push: push every packaged chart to $(CHART_REGISTRY).
+## Requires `helm registry login` against $(REGISTRY) first.
+charts-push: charts-package
+	@for d in $(PUBLISH_CHARTS); do \
+		n=$$($(HELM) show chart ./charts/$$d | awk '/^name:/{print $$2}'); \
+		echo ">>> pushing $$n-$(CHART_VERSION).tgz"; \
+		$(HELM) push $(CHART_OUT)/$$n-$(CHART_VERSION).tgz $(CHART_REGISTRY) || exit 1; \
+	done
+
+## operator-chart-package / operator-chart-push: the operator chart alone.
+## Kept because the release flow and docs name them, and because pushing just
+## the control plane is a real thing to want.
 operator-chart-package: operator-sync-crd
 	@mkdir -p $(CHART_OUT)
 	$(HELM) package ./charts/operator -d $(CHART_OUT) \
 		--version $(CHART_VERSION) --app-version $(GIT_TAG)
 
-## operator-chart-push: push the packaged operator chart to $(CHART_REGISTRY).
-## Requires `helm registry login` against $(REGISTRY) first.
 operator-chart-push: operator-chart-package
 	$(HELM) push $(CHART_OUT)/slaptain-operator-$(CHART_VERSION).tgz $(CHART_REGISTRY)
 
 ## toolkit-install: deploy the slapd-toolkit debug pod (ldap-utils, python3, ldap3).
 toolkit-install:
 	$(HELM) upgrade --install toolkit ./charts/slapd-toolkit \
-		--namespace $(NAMESPACE_TESTING) --create-namespace
+		--namespace $(NAMESPACE_TESTING) --create-namespace \
+		--set image.tag=$(GIT_TAG)
 
 toolkit-uninstall:
 	$(HELM) uninstall toolkit --namespace $(NAMESPACE_TESTING)
