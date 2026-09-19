@@ -38,7 +38,8 @@ cluster:
       secretName: slapd-tls
   replication:
     enabled: true
-    retry: "10 +"
+    # keepalive and retry are deliberately absent: the operator's defaults
+    # (240:3:30 and "10 +") are the tuned ones — see docs/TUNING.md.
 
 databases:
   - name: example-db

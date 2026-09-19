@@ -152,12 +152,13 @@ cluster:
 
   # -- Slapd replicas PER SITE. 1 means the site has no local HA and relies
   # entirely on its peers; raise it for per-site autonomy, which is the whole
-  # point of the architecture. Left at 1 because the right number depends on
-  # storage the chart cannot see.
-  replicas: 1
+  # point of the architecture. Commented out means the operator's default (1),
+  # which is where this sits because the right number depends on storage the
+  # chart cannot see.
+  # replicas: 1
 
   # -- Read-only consumer replicas per site. Requires replication.enabled.
-  readReplicas: 0
+  # readReplicas: 0                 # unset → the operator default (0)
 
   # -- slapd -d debug bitmask. Commented out means the operator's default
   # (16640 = stats + sync, ADR-024) — the value a replication incident is
@@ -168,19 +169,23 @@ cluster:
   # opt-out. Storage classes are named, not provisioned — every site must have
   # a class by this name, which is a constraint the mesh imposes on the sites
   # rather than a per-site value.
+  # Only data.size is set, and only because it deviates: 5Gi against the
+  # operator's 1Gi, deliberately lopsided against the 32Gi default LMDB map
+  # (docs/TUNING.md). The rest is commented out because restating a default in
+  # the rendered CR freezes it at install time — see charts/slapd.
   persistence:
-    config:
-      size: 1Gi
-      storageClass: ""
-      accessMode: ReadWriteOnce
     data:
       size: 5Gi
-      storageClass: ""
-      accessMode: ReadWriteOnce
-    accesslog:
-      size: 1Gi
-      storageClass: ""
-      accessMode: ReadWriteOnce
+    #   accessMode: ReadWriteOnce   # unset → the operator default (ReadWriteOnce)
+    #   storageClass: ""            # unset → the site's default StorageClass
+    # config:
+    #   size: 1Gi                   # unset → the operator default (1Gi)
+    #   accessMode: ReadWriteOnce
+    #   storageClass: ""
+    # accesslog:
+    #   size: 1Gi                   # unset → the operator default (1Gi)
+    #   accessMode: ReadWriteOnce
+    #   storageClass: ""
 
   # -- Replication. On by default: this is the mesh chart, and a mesh with
   # replication off is a set of unrelated clusters.
@@ -197,12 +202,17 @@ cluster:
     # -- TCP keepalive for syncrepl connections, "idle:probes:interval".
     keepalive: ""
     # -- Syncrepl retry interval, "<interval> <count>" pairs.
-    retry: "10 +"
+    # retry: "10 +"                 # unset → the operator default ("10 +")
 
-  service:
-    type: ClusterIP
-    ldapPort: 389
-    ldapsPort: 636
+  # -- Client-facing Service. Every key matches the operator's default, so
+  # uncomment only what you change. Whatever you set applies at EVERY site —
+  # that is the point of the chart, and a per-site Service type means the sites
+  # are not interchangeable.
+  # service:
+  #   type: ClusterIP               # unset → the operator default (ClusterIP)
+  #   ldapPort: 389                 # unset → the operator default (389)
+  #   ldapsPort: 636                # unset → the operator default (636)
+  #   annotations: {}               # LB-controller hints (MetalLB/Cilium pool, NLB attrs)
 
   # -- Compute resources for the slapd container.
   resources: {}

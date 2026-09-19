@@ -42,50 +42,73 @@ spec:
       secretName: {{ .Values.cluster.ldap.tls.secretName | quote }}
       {{- end }}
 
-  replicas: {{ .Values.cluster.replicas }}
-  {{- if gt (int .Values.cluster.readReplicas) 0 }}
-  readReplicas: {{ .Values.cluster.readReplicas }}
+  {{- /* Presence-based, never truthiness: 0 is a meaningful value for all three
+         (logLevel 0 silences slapd), and kindIs catches `key:` with nothing
+         after it, which hasKey reports as present. The chart does not restate
+         the operator's defaults — see charts/slapd for the full reasoning; a
+         value written here would be frozen at install time. */ -}}
+  {{- range $k := list "replicas" "readReplicas" "logLevel" }}
+  {{- if and (hasKey $.Values.cluster $k) (not (kindIs "invalid" (index $.Values.cluster $k))) }}
+  {{ $k }}: {{ index $.Values.cluster $k }}
   {{- end }}
-  {{- if hasKey .Values.cluster "logLevel" }}
-  logLevel: {{ .Values.cluster.logLevel }}
   {{- end }}
 
+  {{- $p := .Values.cluster.persistence | default dict -}}
+  {{- $pc := $p.config | default dict -}}
+  {{- $pd := $p.data | default dict -}}
+  {{- $pa := $p.accesslog | default dict -}}
+  {{- if or $pc $pd $pa }}
   persistence:
-    config:
-      size: {{ .Values.cluster.persistence.config.size | quote }}
-      accessMode: {{ .Values.cluster.persistence.config.accessMode }}
-      {{- with .Values.cluster.persistence.config.storageClass }}
+    {{- range $k, $v := (dict "config" $pc "data" $pd "accesslog" $pa) }}
+    {{- if $v }}
+    {{ $k }}:
+      {{- with $v.size }}
+      size: {{ . | quote }}
+      {{- end }}
+      {{- with $v.accessMode }}
+      accessMode: {{ . }}
+      {{- end }}
+      {{- with $v.storageClass }}
       storageClass: {{ . | quote }}
       {{- end }}
-    data:
-      size: {{ .Values.cluster.persistence.data.size | quote }}
-      accessMode: {{ .Values.cluster.persistence.data.accessMode }}
-      {{- with .Values.cluster.persistence.data.storageClass }}
-      storageClass: {{ . | quote }}
-      {{- end }}
-    accesslog:
-      size: {{ .Values.cluster.persistence.accesslog.size | quote }}
-      accessMode: {{ .Values.cluster.persistence.accesslog.accessMode }}
-      {{- with .Values.cluster.persistence.accesslog.storageClass }}
-      storageClass: {{ . | quote }}
-      {{- end }}
+    {{- end }}
+    {{- end }}
+  {{- end }}
 
+  {{- $svc := .Values.cluster.service | default dict -}}
+  {{- if or $svc.type $svc.ldapPort $svc.ldapsPort $svc.annotations }}
   service:
-    type: {{ .Values.cluster.service.type }}
-    ldapPort: {{ .Values.cluster.service.ldapPort }}
-    ldapsPort: {{ .Values.cluster.service.ldapsPort }}
+    {{- with $svc.type }}
+    type: {{ . }}
+    {{- end }}
+    {{- with $svc.ldapPort }}
+    ldapPort: {{ . }}
+    {{- end }}
+    {{- with $svc.ldapsPort }}
+    ldapsPort: {{ . }}
+    {{- end }}
+    {{- with $svc.annotations }}
+    annotations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
 
+  {{- $r := .Values.cluster.replication | default dict -}}
+  {{- if or $r.enabled $r.mode $r.keepalive $r.retry }}
   replication:
-    enabled: {{ .Values.cluster.replication.enabled }}
-    {{- with .Values.cluster.replication.mode }}
+    {{- if $r.enabled }}
+    enabled: true
+    {{- end }}
+    {{- with $r.mode }}
     mode: {{ . | quote }}
     {{- end }}
-    {{- with .Values.cluster.replication.keepalive }}
+    {{- with $r.keepalive }}
     keepalive: {{ . | quote }}
     {{- end }}
-    {{- with .Values.cluster.replication.retry }}
+    {{- with $r.retry }}
     retry: {{ . | quote }}
     {{- end }}
+  {{- end }}
 
   {{- with .Values.cluster.resources }}
   resources:
