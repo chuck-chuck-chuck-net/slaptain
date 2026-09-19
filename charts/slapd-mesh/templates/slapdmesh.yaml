@@ -14,6 +14,14 @@ spec:
       endpoint: {{ . | quote }}
       {{- end }}
       {{- with .kubeconfigSecret }}
+      {{- /* name is REQUIRED by the CRD, so emitting it empty produces an
+             object the API server rejects — after it has been applied at every
+             site. The whole field may be omitted (the operator then defaults to
+             "<site>-kubeconfig"), but a half-filled one cannot be rescued:
+             dropping it silently would discard a deliberate `key` override. */}}
+      {{- if not .name }}
+      {{- fail (printf "slapd-mesh: mesh.sites entry gives kubeconfigSecret without a name. Omit kubeconfigSecret entirely to take the default \"<site>-kubeconfig\", or name the Secret — an empty name is refused by the CRD, not defaulted.") }}
+      {{- end }}
       kubeconfigSecret:
         name: {{ .name | quote }}
         {{- with .key }}
