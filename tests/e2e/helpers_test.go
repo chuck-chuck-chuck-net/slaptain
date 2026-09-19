@@ -475,6 +475,16 @@ const crossSiteRecoveryBudget = 8 * time.Minute
 // contextCSN for siteA's serverIDs frozen five seconds before the deletion. The
 // spec that invalidates the addresses is the one that must wait for them.
 //
+// AMENDED 2026-09-19, after the same spec failed the same way a second time:
+// "the spec that invalidates them" is not the whole rule, because a spec is not
+// the only thing that can. That run's site-1 pods were created 62 s before the
+// first spec ran — by SETUP, not by any spec — and the propagation assertion
+// (60 s budget) raced a recovery measured at 146-432 s. So the rule is: ANY
+// pod-IP change must be followed by this wait, including one that happens
+// before the suite starts. BeforeSuite now calls it unconditionally, and
+// cleanup_policy_test does too, because its DATABASE_DIRS churn rolls the
+// SHARED fixture cluster (ADR-013).
+//
 // No-op unless E2E_EXTERNAL_REPL=1, so single-site runs pay nothing.
 func waitForCrossSiteReplication(ctx SpecContext, why string) {
 	if os.Getenv("E2E_EXTERNAL_REPL") != "1" {

@@ -222,7 +222,10 @@ func waitCRGone(ctx context.Context, name string) {
 // each named database absent from both StatefulSets' DATABASE_DIRS, the
 // StatefulSet controller caught up with that generation, and every pod updated
 // and ready.
-func waitClusterSettled(ctx context.Context, absent ...string) {
+// Takes a SpecContext rather than a context.Context because it ends in a
+// cross-site probe, which is a Ginkgo node. Every caller is inside a spec, so
+// they already have one.
+func waitClusterSettled(ctx SpecContext, absent ...string) {
 	By("waiting for the cluster to settle after the DATABASE_DIRS roll")
 	Eventually(ctx, func() bool {
 		for _, sts := range []string{"slapd", "slapd-readonly"} {
@@ -255,6 +258,13 @@ func waitClusterSettled(ctx context.Context, absent ...string) {
 		return true
 	}).WithTimeout(10*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
 		"cluster did not settle (databases still in DATABASE_DIRS, or pods not rolled)")
+
+	// The roll gave every pod a new IP, which every PEER site still has baked
+	// into its syncrepl stanzas (ADR-016). Local settling says nothing about
+	// that, and the next spec to write across sites would pay for it — the
+	// cascade waitForCrossSiteReplication was written for. No-op on a
+	// single-site run.
+	waitForCrossSiteReplication(ctx, "the cleanupPolicy DATABASE_DIRS roll")
 }
 
 // databaseDirsOf reads the init container's DATABASE_DIRS list off a

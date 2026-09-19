@@ -156,7 +156,22 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 		return ldapExists(ldapConn, ouPeopleDN)
 	}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
 		"ou=People not visible — bootstrap may not have run or replication has not converged")
-}, NodeTimeout(12*time.Minute))
+
+	// The wait above proves LOCAL convergence and says nothing about the peers.
+	// Under ADR-016 every peer's syncrepl stanzas name our pod IPs, so a mesh
+	// whose pods were created shortly before the suite started is silently
+	// one-directional until each peer rediscovers them — measured at 146-432 s
+	// for a whole site (docs/BACKLOG.md, "Cross-site recovery after a pod-IP
+	// change"). Nothing local detects that: the StatefulSet is ready, the
+	// cluster is Running, CSNs converge among OUR pods.
+	//
+	// waitForCrossSiteReplication already exists for specs that replace pods,
+	// on the principle "the spec that invalidates the addresses must wait for
+	// them". This is the case that principle missed: SETUP invalidates them
+	// too, and no spec is responsible. Observed 2026-09-19 — site-1's pods were
+	// 62 s old when "a write on siteA propagates to siteB" gave up after 60 s.
+	waitForCrossSiteReplication(ctx, "suite start (setup may have rolled the pods)")
+}, NodeTimeout(20*time.Minute))
 
 // Refresh the shared ldapConn before every test. Tests that restart pods or
 // trigger operator reconciliation (syncrepl replacement) can cause the server
