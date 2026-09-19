@@ -1,3 +1,28 @@
+{{- /*
+THE CHART DOES NOT RESTATE THE OPERATOR'S DEFAULTS.
+
+Every field below is emitted only when it is actually set in values. A chart that
+writes out `service.type: ClusterIP` or `accessMode: ReadWriteOnce` — values the
+CRD and the operator already default to the same thing — becomes a SECOND source
+of defaults: the value is frozen into the object at install time, so when the
+operator's default changes in a later release, every chart-installed cluster
+silently keeps the old one. Unset means "slaptain decides", which is the same
+rule ADR-024 applies to slapd's own tunables.
+
+The operator defaults these twice over, so omission is safe in both directions:
+the CRD carries `+kubebuilder:default` (materialised at admission when the parent
+object is present) and the controller falls back to the identical value when it
+reads an empty field (slapdcluster_controller.go — sizes, access modes, service
+type and ports).
+
+Two deliberate exceptions, and they are the only opinions this chart holds:
+  * ldap.tls defaults to ENABLED, where the CRD defaults to false. A directory
+    server should not ship plaintext-by-default, and the block is always emitted
+    so the rendered spec is never empty.
+  * persistence.data.size is 5Gi against the operator's 1Gi — deliberately
+    lopsided against the 32Gi default map size, and documented as such in
+    docs/TUNING.md.
+*/}}
 apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
 kind: SlapdCluster
 metadata:
@@ -5,38 +30,29 @@ metadata:
   labels:
     {{- include "slapd.labels" . | nindent 4 }}
 spec:
-  {{- /* Emitted only for the fields actually set. An omitted image is not a
-         missing one: the operator derives each image from its OWN image and tag
-         (CloudNativePG-style), which keeps slapd, slapd-init and the operator on
-         one version. Pinning a repository/tag here overrides that per field. */}}
-  {{- if or .Values.images.slapd.repository .Values.images.slapd.tag .Values.images.slapd.pullPolicy .Values.images.init.repository .Values.images.init.tag .Values.images.init.pullPolicy }}
+  {{- /* An omitted image is not a missing one: the operator derives each image
+         from its OWN image and tag (CloudNativePG-style), which keeps slapd,
+         slapd-init and the operator on one version. Pinning a repository or tag
+         here overrides that for the field it names. */ -}}
+  {{- $si := .Values.images.slapd | default dict -}}
+  {{- $ii := .Values.images.init | default dict -}}
+  {{- if or $si.repository $si.tag $si.pullPolicy $ii.repository $ii.tag $ii.pullPolicy }}
   images:
-    {{- if or .Values.images.slapd.repository .Values.images.slapd.tag .Values.images.slapd.pullPolicy }}
-    slapd:
-      {{- with .Values.images.slapd.repository }}
+    {{- range $k, $img := (dict "slapd" $si "init" $ii) }}
+    {{- if or $img.repository $img.tag $img.pullPolicy }}
+    {{ $k }}:
+      {{- with $img.repository }}
       repository: {{ . | quote }}
       {{- end }}
-      {{- with .Values.images.slapd.tag }}
+      {{- with $img.tag }}
       tag: {{ . | quote }}
       {{- end }}
-      {{- with .Values.images.slapd.pullPolicy }}
+      {{- with $img.pullPolicy }}
       pullPolicy: {{ . }}
       {{- end }}
     {{- end }}
-    {{- if or .Values.images.init.repository .Values.images.init.tag .Values.images.init.pullPolicy }}
-    init:
-      {{- with .Values.images.init.repository }}
-      repository: {{ . | quote }}
-      {{- end }}
-      {{- with .Values.images.init.tag }}
-      tag: {{ . | quote }}
-      {{- end }}
-      {{- with .Values.images.init.pullPolicy }}
-      pullPolicy: {{ . }}
-      {{- end }}
     {{- end }}
   {{- end }}
-
   ldap:
     {{- if .Values.ldap.cnConfigCredentials.secretName }}
     cnConfigCredentials:
@@ -48,73 +64,93 @@ spec:
       secretName: {{ .Values.ldap.tls.secretName | quote }}
       {{- end }}
 
-  replicas: {{ .Values.replicas }}
-  {{- if gt (int .Values.readReplicas) 0 }}
-  readReplicas: {{ .Values.readReplicas }}
-  {{- end }}
   {{- /* Presence-based, not truthiness: `with`/`if` would drop an explicit 0,
-         which is the documented way to silence slapd. kindIs catches `logLevel:`
-         with nothing after it, which hasKey reports as present.
-         Same idiom as charts/slapd-mesh's serverIDIndex. */}}
-  {{- if and (hasKey .Values "logLevel") (not (kindIs "invalid" .Values.logLevel)) }}
-  logLevel: {{ .Values.logLevel }}
+         and 0 is meaningful for logLevel (silence slapd) and for
+         serverIDBase/readReplicas. kindIs catches `key:` with nothing after it,
+         which hasKey reports as present. Same idiom as slapd-mesh's
+         serverIDIndex. */ -}}
+  {{- range $k := list "replicas" "readReplicas" "logLevel" }}
+  {{- if and (hasKey $.Values $k) (not (kindIs "invalid" (index $.Values $k))) }}
+  {{ $k }}: {{ index $.Values $k }}
+  {{- end }}
   {{- end }}
 
+  {{- $p := .Values.persistence | default dict -}}
+  {{- $pc := $p.config | default dict -}}
+  {{- $pd := $p.data | default dict -}}
+  {{- $pa := $p.accesslog | default dict -}}
+  {{- if or $pc $pd $pa }}
   persistence:
-    config:
-      size: {{ .Values.persistence.config.size | quote }}
-      accessMode: {{ .Values.persistence.config.accessMode }}
-      {{- if .Values.persistence.config.storageClass }}
-      storageClass: {{ .Values.persistence.config.storageClass | quote }}
+    {{- range $k, $v := (dict "config" $pc "data" $pd "accesslog" $pa) }}
+    {{- if $v }}
+    {{ $k }}:
+      {{- with $v.size }}
+      size: {{ . | quote }}
       {{- end }}
-    data:
-      size: {{ .Values.persistence.data.size | quote }}
-      accessMode: {{ .Values.persistence.data.accessMode }}
-      {{- if .Values.persistence.data.storageClass }}
-      storageClass: {{ .Values.persistence.data.storageClass | quote }}
+      {{- with $v.accessMode }}
+      accessMode: {{ . }}
       {{- end }}
-    accesslog:
-      size: {{ .Values.persistence.accesslog.size | quote }}
-      accessMode: {{ .Values.persistence.accesslog.accessMode }}
-      {{- if .Values.persistence.accesslog.storageClass }}
-      storageClass: {{ .Values.persistence.accesslog.storageClass | quote }}
+      {{- with $v.storageClass }}
+      storageClass: {{ . | quote }}
       {{- end }}
+    {{- end }}
+    {{- end }}
+  {{- end }}
 
+  {{- $svc := .Values.service | default dict -}}
+  {{- if or $svc.type $svc.ldapPort $svc.ldapsPort $svc.annotations }}
   service:
-    type: {{ .Values.service.type }}
-    ldapPort: {{ .Values.service.ldapPort }}
-    ldapsPort: {{ .Values.service.ldapsPort }}
+    {{- with $svc.type }}
+    type: {{ . }}
+    {{- end }}
+    {{- with $svc.ldapPort }}
+    ldapPort: {{ . }}
+    {{- end }}
+    {{- with $svc.ldapsPort }}
+    ldapsPort: {{ . }}
+    {{- end }}
+    {{- with $svc.annotations }}
+    annotations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
 
+  {{- $r := .Values.replication | default dict -}}
+  {{- $hasServerIDBase := and (hasKey $r "serverIDBase") (not (kindIs "invalid" $r.serverIDBase)) -}}
+  {{- if or $r.enabled $hasServerIDBase $r.mode $r.keepalive $r.retry $r.network $r.externalPeers }}
   replication:
-    enabled: {{ .Values.replication.enabled }}
-    {{- if and (hasKey .Values.replication "serverIDBase") (not (kindIs "invalid" .Values.replication.serverIDBase)) }}
-    serverIDBase: {{ .Values.replication.serverIDBase }}
+    {{- if $r.enabled }}
+    enabled: true
     {{- end }}
-    {{- if .Values.replication.mode }}
-    mode: {{ .Values.replication.mode | quote }}
+    {{- if $hasServerIDBase }}
+    serverIDBase: {{ $r.serverIDBase }}
     {{- end }}
-    {{- if .Values.replication.keepalive }}
-    keepalive: {{ .Values.replication.keepalive | quote }}
+    {{- with $r.mode }}
+    mode: {{ . | quote }}
     {{- end }}
-    {{- if .Values.replication.retry }}
-    retry: {{ .Values.replication.retry | quote }}
+    {{- with $r.keepalive }}
+    keepalive: {{ . | quote }}
     {{- end }}
-    {{- with .Values.replication.network }}
+    {{- with $r.retry }}
+    retry: {{ . | quote }}
+    {{- end }}
+    {{- with $r.network }}
     network:
-      {{- if .mode }}
-      mode: {{ .mode | quote }}
+      {{- with .mode }}
+      mode: {{ . | quote }}
       {{- end }}
-      {{- if .multusNetwork }}
-      multusNetwork: {{ .multusNetwork | quote }}
+      {{- with .multusNetwork }}
+      multusNetwork: {{ . | quote }}
       {{- end }}
       {{- if .useForInCluster }}
-      useForInCluster: {{ .useForInCluster }}
+      useForInCluster: true
       {{- end }}
     {{- end }}
-    {{- if .Values.replication.externalPeers }}
+    {{- with $r.externalPeers }}
     externalPeers:
-      {{- toYaml .Values.replication.externalPeers | nindent 6 }}
+      {{- toYaml . | nindent 6 }}
     {{- end }}
+  {{- end }}
 
   {{- with .Values.resources }}
   resources:

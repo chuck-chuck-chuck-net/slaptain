@@ -6,6 +6,12 @@
 # For a MULTI-SITE deployment use the slapd-mesh chart instead — it renders this
 # same SlapdCluster plus the SlapdMesh the operator derives the cross-site
 # wiring from, and it is applied byte-identically at every site (ADR-028).
+#
+# COMMENTED-OUT KEYS ARE NOT MISSING FEATURES. This chart emits only the fields
+# you set, and every commented default below is the operator's own — restating
+# it in the rendered CR would freeze it at install time, so a later release's
+# changed default would never reach an existing cluster. Uncomment to override;
+# `--set` works on every key whether or not it is uncommented here.
 
 # -- Override the resource name prefix. Empty uses the chart name ("slapd"), so
 # `helm install slapd` yields objects named plainly "slapd" and SLAPD_HOST=slapd
@@ -14,6 +20,16 @@ nameOverride: ""
 
 # -- LDAP configuration.
 ldap:
+  # -- TLS/LDAPS. Enabled by DEFAULT here, unlike the CRD (which defaults to
+  # false): a directory server should not ship plaintext-by-default. This is one
+  # of only two places where this chart holds an opinion instead of deferring to
+  # the operator.
+  #
+  # PREREQUISITE: the Secret named below must exist before install, carrying
+  # tls.crt and tls.key (plus ca.crt for a private CA). cert-manager, your own
+  # PKI, or `make gencert` from a clone of the repository all produce one. With
+  # TLS enabled and the Secret absent, pods stay in ContainerCreating.
+  # Set enabled: false for a plaintext deployment.
   tls:
     enabled: true
     secretName: "slapd-tls"
@@ -39,39 +55,52 @@ images:
     tag: ""
     pullPolicy: ""
 
-# -- Number of replicas. Set replication.enabled=true when using replicas > 1.
-replicas: 1
+# -- Number of read-write replicas. Set replication.enabled=true for >1.
+# replicas: 1                       # unset → the operator default (1)
 
 # -- Number of read-only consumer replicas. Requires replication.enabled=true.
-readReplicas: 0
+# readReplicas: 0                   # unset → the operator default (0)
 
-# -- slapd -d debug bitmask. 256 = "stats" (startup banner + connection/op lines).
-# Set to 0 to silence slapd entirely. See SlapdCluster.spec.logLevel godoc for
-# the full bit table.
+# -- slapd -d debug bitmask. 0 silences slapd entirely; see the
+# SlapdCluster.spec.logLevel godoc for the full bit table.
 # logLevel: 0                       # unset → the operator default (16640, stats+sync; ADR-024)
 
-# -- Persistent storage (PVC sizes / storage classes). Persistence itself is
-# mandatory per ADR-013 — there is no opt-out.
+# -- Persistent storage. Persistence itself is mandatory per ADR-013 — these
+# keys size it, they do not enable it. The accesslog PVC is provisioned on every
+# read-write pod regardless of replication state (its volumeClaimTemplate is
+# immutable, so it cannot be added later without recreating the StatefulSet).
+#
+# data.size is the chart's second and last opinion: 5Gi against the operator's
+# 1Gi, deliberately lopsided against the 32Gi default LMDB map so a cluster runs
+# out of PVC — visible, alertable, expandable — long before it runs out of map.
+# Size it to your directory before production; see docs/TUNING.md.
 persistence:
-  config:
-    size: 1Gi
-    storageClass: ""
-    accessMode: ReadWriteOnce
   data:
     size: 5Gi
-    storageClass: ""
-    accessMode: ReadWriteOnce
-  # accesslog PVC is only provisioned when replication.enabled=true.
-  accesslog:
-    size: 1Gi
-    storageClass: ""
-    accessMode: ReadWriteOnce
+  #   accessMode: ReadWriteOnce     # unset → the operator default (ReadWriteOnce)
+  #   storageClass: ""              # unset → the cluster's default StorageClass
+  # config:
+  #   size: 1Gi                     # unset → the operator default (1Gi)
+  #   accessMode: ReadWriteOnce
+  #   storageClass: ""
+  # accesslog:
+  #   size: 1Gi                     # unset → the operator default (1Gi)
+  #   accessMode: ReadWriteOnce
+  #   storageClass: ""
+
+# -- Client-facing Service. Every key matches the operator's default, so
+# uncomment only what you change (e.g. type: LoadBalancer).
+# service:
+#   type: ClusterIP                 # unset → the operator default (ClusterIP)
+#   ldapPort: 389                   # unset → the operator default (389)
+#   ldapsPort: 636                  # unset → the operator default (636)
+#   annotations: {}                 # LB-controller hints (MetalLB/Cilium pool, NLB attrs)
 
 # -- Replication. N-way multi-master delta-syncrepl.
 # Set enabled=true together with replicas>1 to activate.
 # Per-database replication settings (deltaSync, ridBase, etc.) are on SlapdDatabase CRs.
 #
-# FOR A MULTI-SITE MESH, USE charts/slapd-mesh INSTEAD. This chart writes one
+# FOR A MULTI-SITE MESH, USE THE slapd-mesh CHART INSTEAD. This chart writes one
 # site's SlapdCluster by hand; the mesh chart describes the sites once and lets
 # the operator derive each site's serverIDBase, its external peers, the network
 # mode and the trust wiring (ADR-028, docs/MULTI-SITE.md). The hand-written form
@@ -80,10 +109,9 @@ persistence:
 replication:
   enabled: false
   # -- TCP keepalive for syncrepl connections. Format: "idle:probes:interval".
-  # Empty takes slaptain's default, 240:3:30 (ADR-024; see docs/TUNING.md).
-  keepalive: ""
+  # keepalive: "240:3:30"           # unset → the operator default (240:3:30; docs/TUNING.md)
   # -- Syncrepl retry interval. Format: "<interval> <count>" pairs.
-  retry: "10 +"
+  # retry: "10 +"                   # unset → the operator default ("10 +")
   # -- Cross-cluster replication network. Selects how remote peers are addressed.
   # network:
   #   mode: pod-routed          # ADR-016: peers via primary pod IP; no NAD/secondary NIC.
@@ -116,13 +144,8 @@ replication:
   #   tlsSecretName: "site-b-ca"
   #   bindPasswordSecretName: "site-b-replication-password"
 
-# -- Service configuration.
-service:
-  type: ClusterIP
-  ldapPort: 389
-  ldapsPort: 636
-
-# -- Compute resources for the slapd container.
+# -- Compute resources for the slapd container. Unset means no requests or
+# limits; see docs/TUNING.md for sizing.
 resources: {}
 #  requests:
 #    cpu: 100m
