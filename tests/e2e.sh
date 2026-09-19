@@ -1553,6 +1553,45 @@ assign_site_names
 # Anonymous HEAD against the OCI distribution API; only a definite 404 dies.
 # Registries that demand auth even for manifest HEADs (401/403) and unreachable
 # ones get a warning — the probe must never false-fail a working private setup.
+# Probe the registry for an image, following the Docker registry v2 auth dance.
+#
+# A bare GET is not enough: ghcr.io (and Docker Hub, and any registry with
+# token auth) answers 401 with a WWW-Authenticate challenge even for images
+# that are PUBLIC, and expects the client to exchange it for a bearer token.
+# Without that the probe could never return 200 there — it fell into the
+# "cannot verify, continuing" branch on every call, which is the worst outcome:
+# the check that exists to fail fast instead waved the run through, and the
+# missing image surfaced minutes later as ImagePullBackOff.
+#
+# The challenge is parsed rather than hardcoded, so this works against ghcr,
+# Docker Hub, Harbor and a plain open registry alike. Credentials are never
+# sent: an anonymous token is all a public image needs, and a private one
+# legitimately stays unverifiable (still a WARN, not a failure).
+registry_probe() { # url -> http code on stdout
+    local url="$1" hdrs code challenge realm service scope token
+    hdrs=$(curl -s -o /dev/null -D - --max-time 10 \
+        -H "$REGISTRY_ACCEPT" "$url" 2>/dev/null) || { echo 000; return; }
+    code=$(printf '%s' "$hdrs" | awk 'NR==1{print $2}')
+    [[ "$code" != "401" ]] && { echo "${code:-000}"; return; }
+
+    challenge=$(printf '%s' "$hdrs" | grep -i '^www-authenticate:' | head -1)
+    realm=$(sed -n 's/.*realm="\([^"]*\)".*/\1/p' <<<"$challenge")
+    service=$(sed -n 's/.*service="\([^"]*\)".*/\1/p' <<<"$challenge")
+    scope=$(sed -n 's/.*scope="\([^"]*\)".*/\1/p' <<<"$challenge")
+    [[ -z "$realm" ]] && { echo 401; return; }
+
+    token=$(curl -s --max-time 10 --get \
+        ${service:+--data-urlencode "service=$service"} \
+        ${scope:+--data-urlencode "scope=$scope"} \
+        "$realm" 2>/dev/null | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    [[ -z "$token" ]] && { echo 401; return; }
+
+    curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        -H "Authorization: Bearer $token" -H "$REGISTRY_ACCEPT" "$url" 2>/dev/null || echo 000
+}
+
+REGISTRY_ACCEPT="Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json"
+
 require_image_in_registry() { # image-name tag
     local host path url code
     case "$REGISTRY" in
@@ -1560,10 +1599,11 @@ require_image_in_registry() { # image-name tag
         *)   host="$REGISTRY";       path="$PROJECT/$1" ;;
     esac
     url="https://$host/v2/$path/manifests/$2"
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10         -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json"         "$url" 2>/dev/null || echo 000)
+    code=$(registry_probe "$url")
     case "$code" in
         200) : ;;
-        404) die "$REGISTRY/$PROJECT/$1:$2 is not in the registry. Build and push first (make push REGISTRY=$REGISTRY), or pin GIT_TAG=<pushed-tag>. Untagged builds are addressed sha-<hash>, and a dirty tree derives a content-hashed sha-<hash>-dirty-<state8> (scripts/image-tag.sh + docs/VERSIONING.md) that exists only after you push it." ;;
+        404) die "$REGISTRY/$PROJECT/$1:$2 is not in the registry. Build and push first (make push REGISTRY=$REGISTRY), or pin GIT_TAG=<a pushed tag>. Untagged builds are addressed sha-<hash>, and a dirty tree derives sha-<hash>-dirty-<state8> (scripts/image-tag.sh + docs/VERSIONING.md) — those exist only after you push them." ;;
+        401|403) log "WARN: $REGISTRY/$PROJECT/$1:$2 needs credentials to verify (HTTP $code) — continuing. A private image is fine if the cluster can pull it; a typo in the registry path looks the same from here." ;;
         *)   log "WARN: cannot verify $1:$2 in the registry (HTTP $code) — continuing" ;;
     esac
 }
