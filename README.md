@@ -12,7 +12,7 @@ Slaptain manages the full lifecycle of multi-master OpenLDAP clusters on Kuberne
 ### 1. Install the Operator
 
 ```bash
-helm upgrade --install slaptain-operator oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain-operator \
+helm upgrade --install slaptain oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain \
   -n slaptain-system --create-namespace
 ```
 
@@ -25,7 +25,7 @@ different question:
 
 | Chart | Use it for |
 |---|---|
-| `slaptain-operator` | The control plane. Everything below except `slapd` needs it. |
+| `slaptain` | The control plane. Everything below except `slapd` needs it. |
 | `slapd-mesh` | A whole multi-site mesh — same values file, applied at every site. |
 | `slapd-cluster` | One site's `SlapdCluster`. |
 | `slapd-toolkit` | A debug pod wired to an operator-managed cluster. |
@@ -257,8 +257,8 @@ mesh:
 
 ```bash
 # The one command whose arguments differ per site:
-helm upgrade --install slaptain-operator \
-  oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain-operator \
+helm upgrade --install slaptain \
+  oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain \
   -n slaptain-system --create-namespace --set siteName=site-a
 
 # The bundle — same chart, same values, everywhere:

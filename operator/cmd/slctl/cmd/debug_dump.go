@@ -219,7 +219,7 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 	// 9. Operator logs
 	collect("operator-logs.txt", func() (string, error) {
 		pods, err := coreClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{
-			LabelSelector: "app.kubernetes.io/name=slaptain-operator",
+			LabelSelector: "app.kubernetes.io/name=slaptain",
 		})
 		if err != nil || len(pods.Items) == 0 {
 			pods, err = coreClient.CoreV1().Pods("").List(ctx, metav1.ListOptions{

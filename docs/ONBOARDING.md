@@ -536,7 +536,7 @@ or no inbound replication connections at all after ~30 seconds.
 
 **3. Operator logs — did bootstrap complete?**
 ```bash
-kubectl logs -n slaptain -l app.kubernetes.io/name=slaptain-operator
+kubectl logs -n slaptain -l app.kubernetes.io/name=slaptain
 ```
 Look for: "bootstrap complete", "pod-0 not yet ready" (if still waiting), or error messages
 with stack traces.

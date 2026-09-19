@@ -589,7 +589,7 @@ setup_foundation() {
         if [[ -n "$MULTUS_NETWORK" ]]; then
             operator_multus_sets=(--set "multus.network=$MULTUS_NETWORK")
         fi
-        hctl "$ctx" upgrade --install slaptain-operator "$PROJECT_ROOT/charts/operator" \
+        hctl "$ctx" upgrade --install slaptain "$PROJECT_ROOT/charts/operator" \
             --namespace "$NAMESPACE" --create-namespace \
             --set "image.repository=$REGISTRY/$PROJECT/operator" \
             --set "image.tag=$GIT_TAG" \
@@ -1454,7 +1454,7 @@ teardown_all() {
 
         log "[$ctx] Removing cluster-scoped resources..."
 
-        hctl "$ctx" uninstall slaptain-operator -n "$NAMESPACE" 2>/dev/null || true
+        hctl "$ctx" uninstall slaptain -n "$NAMESPACE" 2>/dev/null || true
 
         kctl "$ctx" delete crd slapdclusters.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
         kctl "$ctx" delete crd slapddatabases.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true

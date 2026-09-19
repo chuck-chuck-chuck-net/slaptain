@@ -19,9 +19,9 @@ lives on the **operator's** chart, never here:
 
 ```bash
 # Site A:
-helm upgrade --install slaptain-operator ./charts/operator --set siteName=site-a
+helm upgrade --install slaptain ./charts/operator --set siteName=site-a
 # Site B:
-helm upgrade --install slaptain-operator ./charts/operator --set siteName=site-b
+helm upgrade --install slaptain ./charts/operator --set siteName=site-b
 ```
 
 `charts/slapd-mesh/examples/three-site.yaml` is a complete working example.

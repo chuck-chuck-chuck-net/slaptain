@@ -291,7 +291,7 @@ through the toolkit image: `make toolkit-install` for a persistent pod with
 credentials and the CA pre-wired, or `tests/pod-debug.sh` for an ephemeral
 `kubectl debug` container with the low-level capabilities.
 
-Operator logs: `kubectl logs -n slaptain-system deploy/slaptain-operator`. slapd's own
+Operator logs: `kubectl logs -n slaptain-system deploy/slaptain`. slapd's own
 logs use hex epoch timestamps — pipe them through
 `tests/decode-slapd-ts.sh` to get ISO 8601. Raising slapd's verbosity is
 `spec.logLevel` on the `SlapdCluster` (the e2e fixture uses 16640: sync debug

@@ -13,7 +13,7 @@
 #   * The single per-site fact in the system — "which of these sites am I?" —
 #     lives on the OPERATOR's chart, not this one:
 #
-#         helm upgrade --install slaptain-operator ./charts/operator \
+#         helm upgrade --install slaptain ./charts/operator \
 #           --set siteName=site-a
 #
 #     Get it wrong at two sites and they collide their serverID decades, which

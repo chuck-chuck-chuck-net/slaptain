@@ -375,7 +375,7 @@ runs without readpw configuration but skips those test cases.
 | `make operator-manifests` | Run `make manifests` in `operator/`, then sync CRD to `charts/operator/crds/` |
 | `make operator-sync-crd` | Copy CRD from `operator/config/crd/bases/` to `charts/operator/crds/` |
 | `make operator-crd-apply` | `kubectl apply --server-side` the CRDs from `operator/config/crd/bases/` (Helm only installs `crds/` on first `install`, never on `upgrade`) |
-| `make operator-helm-install` | `helm upgrade --install slaptain-operator ./charts/operator` (depends on `operator-crd-apply`, so a new/changed CRD lands on upgrade too). t3e loop: `make operator-helm-install CONTEXT=t3e GIT_TAG=<tag>` |
+| `make operator-helm-install` | `helm upgrade --install slaptain ./charts/operator` (depends on `operator-crd-apply`, so a new/changed CRD lands on upgrade too). t3e loop: `make operator-helm-install CONTEXT=t3e GIT_TAG=<tag>` |
 | `make operator-helm-uninstall` | Uninstall the operator Helm release |
 | `make gencert` | Generate self-signed TLS cert via `tests/gencert.sh` |
 | `make helm-install` | `helm upgrade --install slapd ./charts/slapd`, pinning both images to `GIT_TAG`(`+SLAPD_TAG_SUFFIX`) |

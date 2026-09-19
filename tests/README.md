@@ -509,7 +509,7 @@ The operator pod also needs a Multus interface to reach remote APIs. Set `multus
 in the operator Helm values:
 
 ```bash
-helm upgrade --install slaptain-operator charts/operator \
+helm upgrade --install slaptain charts/operator \
   --set multus.network=infra/replication-net
 ```
 
@@ -594,7 +594,7 @@ step connects to each pod via headless DNS. If the external peer's `bindPassword
 Secret is missing or empty, the operator logs a warning and skips that peer.
 
 ```bash
-kubectl logs -n slaptain-system deploy/slaptain-operator | grep -i replication
+kubectl logs -n slaptain-system deploy/slaptain | grep -i replication
 ```
 
 **Data not replicating:** Verify syncrepl status from inside a pod:

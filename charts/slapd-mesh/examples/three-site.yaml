@@ -9,7 +9,7 @@
 # The only thing that differs per site is the operator's own identity, which is
 # not in this file and never will be:
 #
-#   helm upgrade --install slaptain-operator ./charts/operator --set siteName=site-a
+#   helm upgrade --install slaptain ./charts/operator --set siteName=site-a
 #
 # The two databases and the schema below are the open-source e2e fixtures
 # (tests/resources/example/), expressed as chart values.

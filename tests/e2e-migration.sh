@@ -95,12 +95,12 @@ setup_namespaces() {
 
 setup_operator() {
     log "Installing operator..."
-    $HELM upgrade --install slaptain-operator "$PROJECT_ROOT/charts/operator" \
+    $HELM upgrade --install slaptain "$PROJECT_ROOT/charts/operator" \
         --namespace "$NAMESPACE_OPERATOR" --create-namespace \
         --set "image.repository=$REGISTRY/$PROJECT/operator" \
         --set "image.tag=$GIT_TAG" \
         "${PULL_SECRET_HELM_ARGS[@]}"
-    $KUBECTL -n "$NAMESPACE_OPERATOR" rollout status deployment/slaptain-operator --timeout=120s
+    $KUBECTL -n "$NAMESPACE_OPERATOR" rollout status deployment/slaptain --timeout=120s
 }
 
 # Pre-create credentials secrets so the operator's auto-gen logic adopts them
@@ -403,7 +403,7 @@ teardown_all() {
         $KUBECTL delete slapdclusters.ldap.chuck-chuck-chuck.net --all -n "$ns" --ignore-not-found || true
         $KUBECTL delete pvc --all -n "$ns" --ignore-not-found || true
     done
-    $HELM uninstall slaptain-operator -n "$NAMESPACE_OPERATOR" 2>/dev/null || true
+    $HELM uninstall slaptain -n "$NAMESPACE_OPERATOR" 2>/dev/null || true
     $KUBECTL delete crd slapdclusters.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
     $KUBECTL delete crd slapddatabases.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true
     $KUBECTL delete crd slapdschemas.ldap.chuck-chuck-chuck.net --ignore-not-found 2>/dev/null || true

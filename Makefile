@@ -66,12 +66,12 @@ OPENLDAP_DEB_IMAGE = localhost/$(PROJECT)/openldap-deb:$(GIT_TAG)
 RUN_UPSTREAM_TESTS ?= 0
 
 # Helm chart OCI registry. Charts land under <registry>/<project>/charts/<name>.
-# Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain-operator --version X.Y.Z
+# Pull example: helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain --version X.Y.Z
 CHART_REGISTRY ?= oci://$(REGISTRY)/charts
 CHART_OUT      := .charts
 
 # Charts that get published. Directory names under charts/; the packaged file
-# is named from each Chart.yaml (charts/operator -> slaptain-operator-X.Y.Z.tgz).
+# is named from each Chart.yaml (charts/operator -> slaptain-X.Y.Z.tgz).
 # All five are user-facing entry points and each answers a different question:
 #   operator       the control plane; everything below except `slapd` needs it
 #   slapd-mesh     a whole multi-site mesh, same values file at every site
@@ -257,7 +257,7 @@ deliver-operator: $(DELIVERY)-operator
 
 ## Operator dev fast-path: build + deliver + helm upgrade + restart
 deploy-operator: deliver-operator operator-helm-install
-	$(KUBECTL) rollout restart deployment/slaptain-operator -n $(NAMESPACE)
+	$(KUBECTL) rollout restart deployment/slaptain -n $(NAMESPACE)
 
 operator-generate:
 	$(MAKE) -C operator generate
@@ -324,13 +324,13 @@ cluster-helm-uninstall:
 ## stale after an upgrade. This is the t3e iteration-loop command:
 ##   make operator-helm-install CONTEXT=t3e GIT_TAG=<pushed-tag>
 operator-helm-install: operator-crd-apply
-	$(HELM) upgrade --install slaptain-operator ./charts/operator \
+	$(HELM) upgrade --install slaptain ./charts/operator \
 		--namespace $(NAMESPACE) --create-namespace \
 		--set image.repository=$(REGISTRY)/$(PROJECT)/operator \
 		--set image.tag=$(GIT_TAG)
 
 operator-helm-uninstall:
-	$(HELM) uninstall slaptain-operator --namespace $(NAMESPACE)
+	$(HELM) uninstall slaptain --namespace $(NAMESPACE)
 
 ## charts-package: package every chart in $(PUBLISH_CHARTS) into $(CHART_OUT)/.
 ## Version and appVersion are overridden from the git tag (see CHART_VERSION/
@@ -363,7 +363,7 @@ operator-chart-package: operator-sync-crd
 		--version $(CHART_VERSION) --app-version $(GIT_TAG)
 
 operator-chart-push: operator-chart-package
-	$(HELM) push $(CHART_OUT)/slaptain-operator-$(CHART_VERSION).tgz $(CHART_REGISTRY)
+	$(HELM) push $(CHART_OUT)/slaptain-$(CHART_VERSION).tgz $(CHART_REGISTRY)
 
 ## toolkit-install: deploy the slapd-toolkit debug pod (ldap-utils, python3, ldap3).
 toolkit-install:

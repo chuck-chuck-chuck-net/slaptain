@@ -189,11 +189,11 @@ for this step; nothing in the operator requires them.
 
 ```bash
 # Site A:
-helm upgrade --install slaptain-operator ./charts/operator \
+helm upgrade --install slaptain ./charts/operator \
   -n slaptain-system --create-namespace --set siteName=site-a
 
 # Site B:
-helm upgrade --install slaptain-operator ./charts/operator \
+helm upgrade --install slaptain ./charts/operator \
   -n slaptain-system --create-namespace --set siteName=site-b
 ```
 
