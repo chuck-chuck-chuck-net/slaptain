@@ -43,10 +43,10 @@ spec:
       tag: <tag>-ol26
 ```
 
-With the `slapd-cluster` chart:
+With the `slapd` chart:
 
 ```bash
-helm upgrade --install slapd ./charts/slapd-cluster \
+helm upgrade --install slapd ./charts/slapd \
   --set images.slapd.tag=<tag>-ol26 \
   --set images.init.tag=<tag>-ol26
 ```

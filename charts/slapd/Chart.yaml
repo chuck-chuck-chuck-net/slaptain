@@ -1,6 +1,6 @@
 apiVersion: v2
 name: slapd
-description: A multi-master replicating OpenLDAP operator/standalone server
+description: Deploys a SlapdCluster custom resource managed by the slaptain operator.
 type: application
 version: 0.2.0
 appVersion: "0.2.0"

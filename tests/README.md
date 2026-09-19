@@ -25,7 +25,7 @@ The all-in-one wrapper is **not** the same: `./tests/e2e.sh all <kube-context>`
 deploys the whole bundle from `charts/slapd-mesh` — mesh, cluster, databases and
 schemas from one values file — which is what a real deployment looks like since
 ADR-028. See [How a site is deployed](#how-a-site-is-deployed-adr-028). The
-`make` targets above are the quicker inner loop against `charts/slapd-cluster`
+`make` targets above are the quicker inner loop against `charts/slapd`
 and a `kubectl apply` of the fixtures, and stay useful for iterating on a single
 site.
 
@@ -54,11 +54,6 @@ make operator-helm-install
 
 Both `tests/e2e.sh` and `make cluster-helm-install` pass
 `tests/values.slapd-persistent.yaml` automatically — no env-var knob.
-
-The standalone (non-operator) chart at `charts/slapd` is kept for reference but is no longer
-exercised by the test suite — use the operator path.
-
----
 
 ## Deploy test resources
 
@@ -522,7 +517,7 @@ KUBECONFIG=~/.kube/config-siteA make cluster-helm-install
 
 # siteB (with its own externalPeers pointing at siteA — pass extra `-f` to helm directly)
 KUBECONFIG=~/.kube/config-siteB make operator-helm-install
-KUBECONFIG=~/.kube/config-siteB helm upgrade --install slapd ./charts/slapd-cluster \
+KUBECONFIG=~/.kube/config-siteB helm upgrade --install slapd ./charts/slapd \
     --namespace slaptain-testing --create-namespace \
     -f tests/values.slapd-persistent.yaml \
     -f tests/values.slapd-site-b.yaml

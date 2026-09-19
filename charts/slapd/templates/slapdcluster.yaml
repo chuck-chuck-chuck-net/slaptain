@@ -1,9 +1,9 @@
 apiVersion: ldap.chuck-chuck-chuck.net/v1alpha1
 kind: SlapdCluster
 metadata:
-  name: {{ include "slapd-cluster.fullname" . }}
+  name: {{ include "slapd.fullname" . }}
   labels:
-    {{- include "slapd-cluster.labels" . | nindent 4 }}
+    {{- include "slapd.labels" . | nindent 4 }}
 spec:
   {{- /* Emitted only for the fields actually set. An omitted image is not a
          missing one: the operator derives each image from its OWN image and tag

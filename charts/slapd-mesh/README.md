@@ -161,4 +161,4 @@ site:
 - `docs/adrs/adr-017-bare-integer-serverid.md` — the serverID arithmetic
 - `docs/adrs/adr-016-pod-routed-cross-cluster-replication.md`,
   `docs/adrs/adr-007-multus-replication-network.md` — the two network modes
-- `charts/slapd-cluster` — a single-site `SlapdCluster` without the mesh layer
+- `charts/slapd` — a single-site `SlapdCluster` without the mesh layer

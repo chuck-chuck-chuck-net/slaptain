@@ -28,27 +28,6 @@ errcheck 40, lll 31, modernize 15, goconst 13, prealloc 13, gocyclo 9, unused 4,
 unparam 2, revive 1 (uncapped counts, unchanged by this change). Worth a separate
 sweep.
 
-## `charts/slapd-cluster` renders `logLevel: null`
-
-`templates/slapdcluster.yaml:33` emits `logLevel: {{ .Values.logLevel }}`
-unconditionally, and `values.yaml` ships the value commented out — so every
-rendered `SlapdCluster` carries `logLevel:` with an empty value. `LogLevel` is
-`*int32` with `omitempty`, so an explicit null reads as unset and the operator
-applies its own default (16640, ADR-024); the effect today is a stray null in
-the applied object rather than wrong behaviour, plus whatever field ownership
-server-side apply records for it.
-
-**The trap in the obvious fix:** `{{- with .Values.logLevel }}` drops an
-explicit `0`, and `0` is the documented way to silence slapd entirely
-(CLAUDE.md). The guard has to be presence-based — `kindIs "invalid"` or
-`hasKey` — not truthiness. `charts/slapd-mesh` gets this right for
-`serverIDIndex`, where `0` is likewise a legitimate value, and is worth copying.
-
-Found 2026-09-17 while building `charts/slapd-mesh`, whose implementer noticed
-the sibling and correctly did not fix it mid-milestone.
-
----
-
 ## `NeedsAccesslog` and `NeedsAccesslogVolume` have identical bodies
 
 `operator/api/v1alpha1/slapdcluster_types.go:951` and `:978` are byte-identical:

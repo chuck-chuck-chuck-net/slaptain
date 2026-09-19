@@ -5,7 +5,7 @@ Helm chart for the slaptain Kubernetes operator — manages `SlapdMesh`,
 `SlapdScheduledBackup`, and `SlapdRestore` custom resources that make up a
 multi-master OpenLDAP deployment. This chart installs the operator itself (CRDs,
 RBAC, and the manager Deployment) — it does not deploy an LDAP cluster. For
-that, see the `slapd-cluster` chart (one site) or `slapd-mesh` (a whole
+that, see the `slapd` chart (one site) or `slapd-mesh` (a whole
 multi-site mesh).
 
 This README documents chart usage only. For concepts (replication model,

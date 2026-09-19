@@ -72,14 +72,12 @@ CHART_OUT      := .charts
 
 # Charts that get published. Directory names under charts/; the packaged file
 # is named from each Chart.yaml (charts/operator -> slaptain-X.Y.Z.tgz).
-# All five are user-facing entry points and each answers a different question:
-#   operator       the control plane; everything below except `slapd` needs it
+# All four are user-facing entry points and each answers a different question:
+#   operator       the control plane; the other three need it
 #   slapd-mesh     a whole multi-site mesh, same values file at every site
-#   slapd-cluster  one site's SlapdCluster
+#   slapd          one site's SlapdCluster
 #   slapd-toolkit  the debug pod
-#   slapd          a single standalone slapd, no operator and no CRDs, for a
-#                  purely helm/values.yaml-centric workflow
-PUBLISH_CHARTS ?= operator slapd-mesh slapd-cluster slapd-toolkit slapd
+PUBLISH_CHARTS ?= operator slapd-mesh slapd slapd-toolkit
 
 # Chart version derived from GIT_TAG; must be SemVer-2 for Helm.
 # - On a release tag (vX.Y.Z): strip the leading 'v' → X.Y.Z.
@@ -134,7 +132,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-install helm-deploy helm-uninstall cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag
 
 ## all: the six pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -282,16 +280,10 @@ gencert:
 	$(KUBECTL) get namespace $(NAMESPACE_TESTING) >/dev/null 2>&1 || $(KUBECTL) create namespace $(NAMESPACE_TESTING)
 	cd tests && ./gencert.sh $(if $(CONTEXT),-c $(CONTEXT)) -n $(NAMESPACE_TESTING) -t slapd -s slapd -H slapd-headless slapd-tls
 
-helm-install:
-	$(HELM) upgrade --install slapd ./charts/slapd \
-		--namespace $(NAMESPACE_TESTING) --create-namespace \
-		--set images.slapd.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX) \
-		--set images.init.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX)
-
-helm-deploy: deliver gencert helm-install ## Full pipeline: build images, deliver, generate certs, deploy
-
-helm-uninstall:
-	$(HELM) uninstall slapd --namespace $(NAMESPACE_TESTING)
+## helm-deploy: full pipeline — build images, deliver them, generate certs, and
+## install the SlapdCluster chart. (The separate helm-install/helm-uninstall
+## targets are gone with the standalone chart; cluster-helm-* is the one path.)
+helm-deploy: deliver gencert cluster-helm-install ## Full pipeline: build images, deliver, generate certs, deploy
 
 ## Test resources: SlapdSchema + SlapdDatabase + readpw Secret.
 ## Set TEST_RESOURCES to "example" or "lab" (default: example; "lab" is the
@@ -309,7 +301,7 @@ testing-helm-install: testing-apply
 testing-helm-uninstall: testing-delete
 
 cluster-helm-install:
-	$(HELM) upgrade --install slapd ./charts/slapd-cluster \
+	$(HELM) upgrade --install slapd ./charts/slapd \
 		--namespace $(NAMESPACE_TESTING) --create-namespace \
 		-f tests/values.slapd-persistent.yaml \
 		--set images.slapd.tag=$(GIT_TAG)$(SLAPD_TAG_SUFFIX) \

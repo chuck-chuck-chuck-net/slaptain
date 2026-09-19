@@ -50,9 +50,9 @@ Debian packaging fork that produces the 2.7.1 `.deb` files
 [ADR-021](adrs/adr-021-openldap-2.7-dual-images.md)).
 
 `charts/` holds four: `operator` (the operator itself, with the generated CRDs
-under `crds/`), `slapd-cluster` (a `SlapdCluster` CR — this is what the tests
-deploy), `slapd-toolkit` (debug pod), and `slapd` (the pre-operator standalone
-chart, kept for reference only, not exercised by the suite).
+under `crds/`), `slapd` (a `SlapdCluster` CR — one site), `slapd-mesh` (a whole
+multi-site mesh, applied identically at every site — this is what the tests
+deploy), and `slapd-toolkit` (debug pod).
 
 `tests/` holds the Ginkgo suite (`tests/e2e/`), its fixtures
 (`tests/resources/{example,lab,storm-repro}/`) and the orchestration scripts —
@@ -203,7 +203,7 @@ make testing-apply CONTEXT=<context>
 ```
 
 `gencert` creates `slaptain-testing` if needed and is idempotent.
-`cluster-helm-install` deploys `charts/slapd-cluster` with
+`cluster-helm-install` deploys `charts/slapd` with
 `tests/values.slapd-persistent.yaml` (3 RW pods, 1 RO replica, replication on)
 and pins the slapd image tags to `$(GIT_TAG)$(SLAPD_TAG_SUFFIX)`.
 `testing-apply` applies `tests/resources/$(TEST_RESOURCES)/` — the `SlapdSchema`,

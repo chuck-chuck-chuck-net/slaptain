@@ -25,11 +25,10 @@ different question:
 
 | Chart | Use it for |
 |---|---|
-| `slaptain` | The control plane. Everything below except `slapd` needs it. |
+| `slaptain` | The control plane. The other three need it. |
 | `slapd-mesh` | A whole multi-site mesh — same values file, applied at every site. |
-| `slapd-cluster` | One site's `SlapdCluster`. |
+| `slapd` | One site's `SlapdCluster`. |
 | `slapd-toolkit` | A debug pod wired to an operator-managed cluster. |
-| `slapd` | A single standalone slapd — no operator, no CRDs, all of it configured in `values.yaml`. |
 
 ```bash
 helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/<chart> --version <X.Y.Z>
@@ -53,14 +52,9 @@ kubectl apply -n slaptain-testing -f operator/config/samples/ldap_v1alpha1_slapd
 Or, entirely through Helm — the same `SlapdCluster`, written from `values.yaml`:
 
 ```bash
-helm upgrade --install slapd oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-cluster \
+helm upgrade --install slapd oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd \
   -n slaptain-testing --create-namespace -f my-values.yaml
 ```
-
-> **No operator wanted?** The `slapd` chart deploys a single standalone slapd
-> with no CRDs and no control plane, configured entirely in `values.yaml`. It is
-> the right answer for one directory server; it does not do replication,
-> meshes, declarative schemas/ACLs or S3 backup, all of which need the operator.
 
 For a replicated cluster, set `replicas` and `replication.enabled`:
 

@@ -1,4 +1,4 @@
-## Test values for the slapd-cluster chart. Deploys a 3-replica RW + 1 RO
+## Test values for the slapd chart. Deploys a 3-replica RW + 1 RO
 ## cluster with replication enabled, full persistence (config/data/accesslog
 ## PVCs).
 ##

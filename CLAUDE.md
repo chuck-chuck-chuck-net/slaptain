@@ -26,7 +26,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] slapd runtime image: Debian trixie-slim build → `gcr.io/distroless/base-debian13` (`images/slapd/Containerfile`).
 - [x] slapd-init image: Debian trixie-slim, full shell environment for bootstrap (`images/slapd-init/Containerfile`).
 - [x] Bootstrap logic with `slaptest` conversion (`images/slapd-init/bootstrap.sh`).
-- [x] Helm Chart for standalone deployment (`charts/slapd`) — not superseded: it is the supported answer for a single slapd configured entirely in `values.yaml`, with no operator and no CRDs. Published alongside the other four charts (0.2.0). It does not do replication, meshes, declarative schemas/ACLs or backup — those need the operator.
+- [x] ~~Helm Chart for standalone deployment~~ — **removed in 0.2.0.** The pre-operator `charts/slapd` spoke the pre-ADR-004 init contract (`LDAP_DOMAIN_DC`, `LDAP_ADMIN_PW`, `/ldap-config`, `/ldap-data`, no `DATABASE_DIRS`) and bootstrap.sh reads none of it, so it produced a slapd with `cn=config` and no data database at all. `charts/slapd` is now the SlapdCluster chart (formerly `slapd-cluster`). An operator-free single slapd would be a new feature: a standalone data-DB bootstrap plus e2e coverage.
 - [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller. e2e: 33/33 green.
 - [x] **Operator Phase 2**: N-way multi-master delta-syncrepl; operator-orchestrated bootstrap; per-pod `volumeClaimTemplates`; replication credential management. e2e: pending.
 - [x] **Operator Phase 3**: cross-cluster replication via `ExternalPeers`. Operator owns all syncrepl configuration (in-cluster + external). See ADR-003. **TLS posture, stated precisely (verified 2026-09-14):** consumers verify the provider against a distributed CA (`tls_cacert`), relaxed to `tls_reqcert=allow` for IP-addressed peers (ADR-007). It is NOT mutual: `olcTLSVerifyClient` is never set, so slapd never requests a client certificate — the `tls_cert`/`tls_key` presented on external-peer stanzas are not verified by anything. Peer *authentication* is the simple bind, not the certificate. Cert-based peer auth (SASL EXTERNAL) is considered and deferred in ADR-027.
@@ -87,8 +87,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
 │   │   └── templates/              # deployment, RBAC, serviceaccount, metrics, networkpolicy
-│   ├── slapd/                      # Standalone Helm chart: one slapd, no operator, values.yaml-only
-│   ├── slapd-cluster/              # Helm chart deploying a SlapdCluster CR (operator required)
+│   ├── slapd/                      # Helm chart deploying a SlapdCluster CR (operator required)
 │   ├── slapd-mesh/                 # Helm chart deploying a whole multi-site mesh: SlapdMesh + SlapdCluster
 │   │                               # + databases + schemas, applied IDENTICALLY at every site (ADR-028)
 │   └── slapd-toolkit/              # Persistent debug pod (ldap-utils, python3, ldap3) wired to operator-managed Secrets
@@ -266,8 +265,8 @@ database yielded no readable contextCSN (`lastError` names it).
 **Service naming (Bitnami convention):**
 - Headless: `<name>-headless` — used by StatefulSet for pod DNS (`<name>-0.<name>-headless.ns.svc`)
 - ClusterIP: `<name>` — client-facing, maps standard ports 389→1024 and 636→1025
-- This ensures `SLAPD_HOST=slapd` works identically for standalone chart and operator deployments
-- `charts/slapd-cluster` has `nameOverride: slapd` so `helm install slapd ./charts/slapd-cluster` → fullname `slapd`
+- This ensures `SLAPD_HOST=slapd` resolves the same way for every deployment of the chart
+- The `slapd` chart is itself named `slapd`, so `helm install slapd ./charts/slapd` → fullname `slapd`
 
 **Owned resources:** StatefulSet, Service (×2), Secret, PersistentVolumeClaim — all get `SetControllerReference`.
 
@@ -378,15 +377,13 @@ runs without readpw configuration but skips those test cases.
 | `make operator-helm-install` | `helm upgrade --install slaptain ./charts/operator` (depends on `operator-crd-apply`, so a new/changed CRD lands on upgrade too). t3e loop: `make operator-helm-install CONTEXT=t3e GIT_TAG=<tag>` |
 | `make operator-helm-uninstall` | Uninstall the operator Helm release |
 | `make gencert` | Generate self-signed TLS cert via `tests/gencert.sh` |
-| `make helm-install` | `helm upgrade --install slapd ./charts/slapd`, pinning both images to `GIT_TAG`(`+SLAPD_TAG_SUFFIX`) |
-| `make helm-deploy` | Full pipeline: `push` + `gencert` + `helm-install` |
-| `make helm-uninstall` | Uninstall the slapd Helm release |
-| `make cluster-helm-install` | `helm upgrade --install slapd ./charts/slapd-cluster` |
-| `make cluster-helm-uninstall` | Uninstall the slapd-cluster Helm release |
+| `make helm-deploy` | Full pipeline: `deliver` + `gencert` + `cluster-helm-install` |
+| `make cluster-helm-install` | `helm upgrade --install slapd ./charts/slapd` |
+| `make cluster-helm-uninstall` | Uninstall the slapd Helm release |
 | `make testing-apply` | `kubectl apply` test resources (SlapdDatabase, SlapdSchema, Secrets) |
 | `make testing-delete` | `kubectl delete` test resources |
 | `make toolkit-install` | `helm upgrade --install toolkit ./charts/slapd-toolkit` (debug pod), image pinned to `GIT_TAG` |
-| `make charts-package` | Package every chart in `PUBLISH_CHARTS` (operator, slapd-mesh, slapd-cluster, slapd-toolkit, slapd) into `.charts/`, with `--version`/`--app-version` from the git tag |
+| `make charts-package` | Package every chart in `PUBLISH_CHARTS` (operator, slapd-mesh, slapd, slapd-toolkit) into `.charts/`, with `--version`/`--app-version` from the git tag |
 | `make charts-push` | Push all packaged charts to `$(CHART_REGISTRY)` (`helm registry login` first) |
 | `make operator-chart-package` / `make operator-chart-push` | The operator chart alone (same mechanism) |
 | `make toolkit-uninstall` | Uninstall the toolkit Helm release |

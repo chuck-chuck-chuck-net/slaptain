@@ -1,56 +1,58 @@
 # Default values for slapd.
+# Deploys a SlapdCluster CR (infrastructure only); the slaptain operator must
+# be installed first. Data databases and schemas are created separately via
+# SlapdDatabase and SlapdSchema CRs. See ADR-004.
 #
-# This chart deploys ONE slapd instance and nothing else — no operator, no CRDs,
-# everything configured here. It is the helm-centric option for a single
-# directory server, and it is complete for that: TLS, credentials, persistence
-# and a restricted-PSA security context.
-#
-# What it deliberately does not do, because these need a control plane that
-# reconciles cn=config per pod: replication (N-way multi-master or read-only
-# replicas), multi-site meshes, declarative schemas and ACLs, and S3
-# backup/restore. For any of those, install the operator and use
-# charts/slapd-cluster (one site) or charts/slapd-mesh (several) instead.
+# For a MULTI-SITE deployment use the slapd-mesh chart instead — it renders this
+# same SlapdCluster plus the SlapdMesh the operator derives the cross-site
+# wiring from, and it is applied byte-identically at every site (ADR-028).
 
-images:
-  slapd:
-    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
-    # -- Image tag. Empty string falls back to the chart's appVersion, which is
-    # set at package time from the git tag (e.g. v0.2.0) and matches the
-    # published image tag — see Makefile target charts-package. There is no
-    # `latest` tag in the registry: images are pushed under their git tag only.
-    tag: ""
-    pullPolicy: IfNotPresent
-  init:
-    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
-    # -- See images.slapd.tag. Pin both images or neither — slapcat/slapadd in
-    # the init container must match the slapd version (docs/OPENLDAP-VERSIONS.md).
-    tag: ""
-    pullPolicy: IfNotPresent
+# -- Override the resource name prefix. Empty uses the chart name ("slapd"), so
+# `helm install slapd` yields objects named plainly "slapd" and SLAPD_HOST=slapd
+# resolves.
+nameOverride: ""
 
-# imagePullSecrets: list of LocalObjectReferences for pulling images from a
-# private registry. Alternative: patch the default ServiceAccount in the
-# workload namespace with its own imagePullSecrets and leave this empty.
-imagePullSecrets: []
-# - name: ghcr-pull-secret
-
+# -- LDAP configuration.
 ldap:
-  domain: "dc=example,dc=org"
   tls:
     enabled: true
     secretName: "slapd-tls"
+  # -- cn=config admin credentials.
+  # The operator auto-generates a <name>-config-password Secret when not set.
+  # To supply your own, create a Secret with a "root-password" key.
+  cnConfigCredentials:
+    secretName: ""
 
-# Password secret.
-# The chart creates a Secret named <fullname>-passwords with the plaintexts below,
-# unless existingSecret is set — in which case no Secret is created and the named
-# Secret is referenced directly.  It must contain admin-password and root-password keys.
-# Hashes are computed at runtime by slappasswd inside the init container.
-passwords:
-  existingSecret: ""
-  adminPassword: ""  # required plaintext admin password
-  rootPassword: ""   # required plaintext config DB password
+# -- Container images. Every field is optional and EMPTY IS THE RECOMMENDED
+# SETTING: the operator then derives both images from its own image and tag, so
+# slapd, slapd-init and the operator that drives them stay on one version. A
+# repository/tag pinned here overrides that for the field it names — useful for
+# a private mirror or for the `-ol26` pair (OpenLDAP 2.6, hot-migration interop;
+# both images must be pinned or neither — see docs/OPENLDAP-VERSIONS.md).
+images:
+  slapd:
+    repository: ""
+    tag: ""
+    pullPolicy: ""
+  init:
+    repository: ""
+    tag: ""
+    pullPolicy: ""
 
+# -- Number of replicas. Set replication.enabled=true when using replicas > 1.
+replicas: 1
+
+# -- Number of read-only consumer replicas. Requires replication.enabled=true.
+readReplicas: 0
+
+# -- slapd -d debug bitmask. 256 = "stats" (startup banner + connection/op lines).
+# Set to 0 to silence slapd entirely. See SlapdCluster.spec.logLevel godoc for
+# the full bit table.
+# logLevel: 0                       # unset → the operator default (16640, stats+sync; ADR-024)
+
+# -- Persistent storage (PVC sizes / storage classes). Persistence itself is
+# mandatory per ADR-013 — there is no opt-out.
 persistence:
-  enabled: true
   config:
     size: 1Gi
     storageClass: ""
@@ -59,23 +61,75 @@ persistence:
     size: 5Gi
     storageClass: ""
     accessMode: ReadWriteOnce
+  # accesslog PVC is only provisioned when replication.enabled=true.
+  accesslog:
+    size: 1Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
 
-# Pod-level securityContext. Defaults are PSA "restricted"-compliant out of the box.
-securityContext:
-  runAsUser: 1024
-  runAsGroup: 1024
-  fsGroup: 1024
-  runAsNonRoot: true
-  seccompProfile:
-    type: RuntimeDefault
+# -- Replication. N-way multi-master delta-syncrepl.
+# Set enabled=true together with replicas>1 to activate.
+# Per-database replication settings (deltaSync, ridBase, etc.) are on SlapdDatabase CRs.
+#
+# FOR A MULTI-SITE MESH, USE charts/slapd-mesh INSTEAD. This chart writes one
+# site's SlapdCluster by hand; the mesh chart describes the sites once and lets
+# the operator derive each site's serverIDBase, its external peers, the network
+# mode and the trust wiring (ADR-028, docs/MULTI-SITE.md). The hand-written form
+# below stays supported — it is what the mesh derives, and it is still the way
+# to peer with something that is not a slaptain cluster (ADR-011).
+replication:
+  enabled: false
+  # -- TCP keepalive for syncrepl connections. Format: "idle:probes:interval".
+  # Empty takes slaptain's default, 240:3:30 (ADR-024; see docs/TUNING.md).
+  keepalive: ""
+  # -- Syncrepl retry interval. Format: "<interval> <count>" pairs.
+  retry: "10 +"
+  # -- Cross-cluster replication network. Selects how remote peers are addressed.
+  # network:
+  #   mode: pod-routed          # ADR-016: peers via primary pod IP; no NAD/secondary NIC.
+  #                             # Requires pod CIDRs routed between sites.
+  #   # -- or Multus (ADR-007); slapd pods get a secondary NIC for replication:
+  #   mode: multus              # (inferred when multusNetwork is set)
+  #   multusNetwork: "infra/replication-net"  # NAD reference (namespace/name recommended)
+  #   useForInCluster: false                  # Use Multus IPs for in-cluster syncrepl too
+  # When mode is unset it defaults to pod-routed, unless multusNetwork is set (then multus).
 
-# slapd -d log level. 0 = no debug output. See slapd(8) for levels.
-logLevel: 0
+  # -- Cross-cluster external peers.
+  # Each peer requires a name and either uri (single-endpoint) or podAddresses (per-pod Multus).
+  externalPeers: []
+  # Single-endpoint mode (NodePort / LoadBalancer):
+  # - name: site-b
+  #   uri: "ldaps://ldap.site-b.example.com:636"
+  #   tlsSecretName: "site-b-ca"
+  #   bindPasswordSecretName: "site-b-replication-password"
+  #   # bindDN is normally OMITTED: the operator binds as the node-local
+  #   # identity cn=repl-<database>,cn=slaptain-auth (ADR-027). Pin it to the
+  #   # peer's legacy cn=replication,<suffix> only while that peer still runs a
+  #   # pre-ADR-027 operator — that migration window is one-directional.
+  #
+  # Per-pod Multus mode (replication network, ADR-007):
+  # - name: site-b
+  #   podAddresses:
+  #     - "192.168.99.128"   # site-b slapd-0
+  #     - "192.168.99.129"   # site-b slapd-1
+  #   port: 1025
+  #   tlsSecretName: "site-b-ca"
+  #   bindPasswordSecretName: "site-b-replication-password"
 
+# -- Service configuration.
 service:
   type: ClusterIP
   ldapPort: 389
   ldapsPort: 636
-  # nodePort: 31024
 
+# -- Compute resources for the slapd container.
 resources: {}
+#  requests:
+#    cpu: 100m
+#    memory: 128Mi
+#  limits:
+#    memory: 512Mi
+
+# -- List of image pull secrets for private registries.
+imagePullSecrets: []
+# - name: ghcr-pull-secret

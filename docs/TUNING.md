@@ -152,7 +152,7 @@ the volume is the limit you can see, alert on and expand, and the map size is th
 you cannot change afterwards without recreating the database.
 
 That is why slaptain's default map is 32Gi against a default `persistence.data.size`
-of 1Gi (5Gi in the `slapd-cluster` chart, and `tests/values.slapd-persistent.yaml`
+of 1Gi (5Gi in the `slapd` chart, and `tests/values.slapd-persistent.yaml`
 takes the chart's value). The fixtures are deliberately lopsided: a lab cluster runs
 out of PVC long before it runs out of map, which is exactly the failure you want in a
 lab — it is visible, and it is fixable by expanding the volume. In production the same

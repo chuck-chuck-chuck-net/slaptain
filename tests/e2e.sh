@@ -139,7 +139,7 @@ fi
 # serverIDBase, externalPeers, the network mode and the trust wiring from the
 # mesh plus its own siteName.
 #
-# The hand-wired path this replaced — charts/slapd-cluster with a per-site
+# The hand-wired path this replaced — charts/slapd with a per-site
 # serverIDBase and an N-1 peer list computed here in shell — is gone, and so is
 # the E2E_MESH flag that used to select between the two. A flag permanently set
 # to one value is debt with a nicer name, and keeping the loop alive would have
@@ -652,7 +652,7 @@ MESH_VALUES_FILE=""
 #   cluster  — tests/values.slapd-persistent.yaml, lifted under `cluster:` plus
 #              the images. Read from that file rather than retyped here so the
 #              fixture has one definition, shared with every other consumer of
-#              it (charts/slapd-cluster still takes it directly).
+#              it (charts/slapd still takes it directly).
 #   databases / schemas
 #            — derived from tests/resources/<set>/*.yaml, transformed into the
 #              chart's {name, spec} passthrough shape. Those files stay the
