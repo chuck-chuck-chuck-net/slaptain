@@ -16,20 +16,51 @@ helm upgrade --install slaptain-operator oci://ghcr.io/chuck-chuck-chuck-net/cha
   -n slaptain-system --create-namespace
 ```
 
-This installs the CRDs (`SlapdCluster`, `SlapdDatabase`, `SlapdSchema`), RBAC, and operator Deployment.
+This installs the RBAC, the operator Deployment, and the CRDs: `SlapdCluster`,
+`SlapdDatabase`, `SlapdSchema`, `SlapdMesh`, `SlapdBackup`, `SlapdScheduledBackup`
+and `SlapdRestore`.
+
+The other charts are published to the same registry, and each answers a
+different question:
+
+| Chart | Use it for |
+|---|---|
+| `slaptain-operator` | The control plane. Everything below except `slapd` needs it. |
+| `slapd-mesh` | A whole multi-site mesh — same values file, applied at every site. |
+| `slapd-cluster` | One site's `SlapdCluster`. |
+| `slapd-toolkit` | A debug pod wired to an operator-managed cluster. |
+| `slapd` | A single standalone slapd — no operator, no CRDs, all of it configured in `values.yaml`. |
+
+```bash
+helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/<chart> --version <X.Y.Z>
+```
 
 ### 2. Deploy a Cluster
 
 Create a TLS Secret and a `SlapdCluster` CR (infrastructure only — no databases yet):
 
 ```bash
-# Generate a self-signed TLS cert (or use your own).
-# gencert creates the slaptain-testing namespace and puts the slapd-tls Secret there.
+# Any TLS Secret with tls.crt/tls.key (and ca.crt for a private CA) will do —
+# cert-manager, your own PKI, or, from a clone of this repo, the self-signed
+# helper: make gencert creates the slaptain-testing namespace and the slapd-tls
+# Secret in it.
 make gencert
 
 # Single replica (simplest)
 kubectl apply -n slaptain-testing -f operator/config/samples/ldap_v1alpha1_slapdcluster.yaml
 ```
+
+Or, entirely through Helm — the same `SlapdCluster`, written from `values.yaml`:
+
+```bash
+helm upgrade --install slapd oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-cluster \
+  -n slaptain-testing --create-namespace -f my-values.yaml
+```
+
+> **No operator wanted?** The `slapd` chart deploys a single standalone slapd
+> with no CRDs and no control plane, configured entirely in `values.yaml`. It is
+> the right answer for one directory server; it does not do replication,
+> meshes, declarative schemas/ACLs or S3 backup, all of which need the operator.
 
 For a replicated cluster, set `replicas` and `replication.enabled`:
 
@@ -39,6 +70,9 @@ kind: SlapdCluster
 metadata:
   name: slapd
 spec:
+  # Optional. Omit it and the operator derives both images from its own image
+  # and tag, which keeps slapd, slapd-init and the operator on one version.
+  # Set a repository to point at a mirror, or a tag to pin (e.g. the -ol26 pair).
   images:
     slapd:
       repository: registry.example.com/slaptain/slapd
@@ -53,16 +87,17 @@ spec:
   replicas: 3
   replication:
     enabled: true
-    keepalive: "300:10:60"
 
   readReplicas: 1
 
+  # Persistence is mandatory (ADR-013) — these size it, they do not enable it.
   persistence:
-    enabled: true
     config:
       size: 1Gi
     data:
       size: 5Gi
+    accesslog:
+      size: 1Gi
 ```
 
 ### 3. Add a Database
@@ -93,6 +128,9 @@ spec:
     deltaSync: true
     syncprovCheckpoint: "500 15"
 
+  # On a multi-site mesh, add `site: <founder>` here: exactly ONE site may apply
+  # a seed. Several sites seeding one suffix independently produces a permanent
+  # hidden glue entry that reads healthy on every CSN check (ADR-025).
   seed:
     entries:
       - |
@@ -144,6 +182,13 @@ kubectl get slapdschema
 # myapp-schema    slapd     100        true      1m
 ```
 
+For anything past "is it Running", use **`slctl`** — the diagnostic CLI shipped
+with the operator. `slctl inspect` queries every pod directly and runs
+consistency checks (CSN convergence per database, topology, suffix visibility),
+`slctl debug-dump` collects a full incident bundle, and `slctl ldapsearch`
+wraps `ldapsearch` with the endpoint and credentials discovered for you. See
+[`docs/slctl.md`](docs/slctl.md).
+
 ## OpenLDAP 2.7 by default
 
 The slapd images ship **OpenLDAP 2.7.1**, built from a vendored Debian
@@ -175,7 +220,7 @@ image pair — needed for hot-migration clusters that must match a 2.6 source.
 
 ## Key Features
 
-- **Multi-resource CRD architecture**: `SlapdCluster` manages infrastructure (StatefulSet, Services, TLS); `SlapdDatabase` manages per-database lifecycle (ACLs, indices, replication, seed data); `SlapdSchema` manages global schemas. Clean separation of concerns.
+- **Layered CRD architecture**: `SlapdMesh` describes the sites; `SlapdCluster` manages one site's infrastructure (StatefulSet, Services, TLS); `SlapdDatabase` manages per-database lifecycle (ACLs, indices, replication, seed data); `SlapdSchema` manages global schemas. Each layer references the one above it by name.
 - **N-way multi-master replication**: all pods are symmetric read-write peers via delta-syncrepl. No permanent primary, no leader election. Per-database replication with user-controlled RID assignment.
 - **Read-only consumer replicas**: scale read-heavy workloads without adding write complexity. RO pods consume from all RW masters for resilience.
 - **Declarative ACLs and schemas**: declare ACL rules on `SlapdDatabase`, schema elements on `SlapdSchema`; the operator applies them to every pod's `cn=config` individually and self-heals after pod replacement.
@@ -185,6 +230,7 @@ image pair — needed for hot-migration clusters that must match a 2.6 source.
 - **Database lifecycle**: cleanup policy (Retain/Delete) controls what happens when a `SlapdDatabase` CR is deleted. Default: Retain (database stays in slapd, becomes unmanaged).
 - **Backup & restore**: on-demand and scheduled `slapcat`→S3 backups with retention (`SlapdBackup` / `SlapdScheduledBackup`); restore into a fresh database (`SlapdDatabase.spec.bootstrapFrom`) or roll back an existing one in place (`SlapdRestore`). See [Backup & Restore](docs/BACKUP.md).
 - **Multi-site meshes**: describe the sites once in a `SlapdMesh` and apply one chart with one values file at every site; the operator derives each site's serverID decade, its cross-site peers, the network mode and the trust wiring from the mesh plus its own `siteName`. See [Multi-Site Deployments](docs/MULTI-SITE.md).
+- **Diagnostics**: `slctl` inspects every pod directly and judges what it finds — CSN convergence per database, topology, stanza counts, suffix visibility — and collects a full incident bundle with `debug-dump`. See [slctl](docs/slctl.md).
 - **Server-side apply**: all resource management uses SSA — no optimistic concurrency conflicts.
 
 ## Cross-Cluster Replication
@@ -211,11 +257,20 @@ mesh:
 
 ```bash
 # The one command whose arguments differ per site:
-helm upgrade --install slaptain-operator ./charts/operator --set siteName=site-a
+helm upgrade --install slaptain-operator \
+  oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain-operator \
+  -n slaptain-system --create-namespace --set siteName=site-a
 
 # The bundle — same chart, same values, everywhere:
-helm upgrade --install ldap ./charts/slapd-mesh -n slaptain -f my-mesh.yaml
+helm upgrade --install ldap \
+  oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh \
+  -n slaptain --create-namespace -f my-mesh.yaml
 ```
+
+A wrong `siteName` is the dangerous misconfiguration, not a missing one: two
+sites that claim the same name collide their serverID decades, which slapd does
+not validate and whose only symptom is that some writes never propagate. A
+missing one is loud — mesh features simply stay off.
 
 Full guide: **[Multi-Site Deployments](docs/MULTI-SITE.md)** — the model, the
 cross-site invariants, getting started, and how to tell a mesh is healthy.
@@ -227,6 +282,10 @@ Peers can also be written out by hand on a mesh-less `SlapdCluster`
 `discovery` block) — the lower-level form the mesh derives, and still the way
 to peer with something that is not a slaptain cluster (see
 [ADR-011](docs/adrs/adr-011-hot-migration-topology.md) on migration topologies).
+The `discovery` form is what the e2e suite exercises; the `uri` and static
+`podAddresses` forms lost their end-to-end coverage when the mesh became the
+only test path, and are carried as open items in
+[`docs/BACKLOG.md`](docs/BACKLOG.md).
 
 RID scheme: each `SlapdDatabase` declares a `ridBase`. In-cluster peers use RIDs `ridBase+1..ridBase+49`, external peers use `ridBase+51..ridBase+99`. See [ADR-003](docs/adrs/adr-003-operator-owns-syncrepl.md).
 
@@ -259,17 +318,39 @@ Restores are *destroy-last* — the backup is validated (reachable, decompresses
 
 ## Architecture
 
-Slaptain uses three Custom Resource Definitions:
+Slaptain splits the directory into the layers OpenLDAP itself has, rather than
+one CR per deployment:
+
+```
+SlapdMesh  <--- meshRef ---  SlapdCluster  <--- clusterRef ---  SlapdDatabase
+(sites, network, trust)      (one site)                         SlapdSchema
+```
 
 | CRD | Scope | Purpose |
 |---|---|---|
-| `SlapdCluster` | Infrastructure | StatefulSet, Services, PVCs, TLS, cn=config admin |
-| `SlapdDatabase` | Per-database | Suffix, credentials, ACLs, indices, replication, seed data |
-| `SlapdSchema` | Global schemas | attributeTypes, objectClasses applied to cn=schema,cn=config |
+| `SlapdMesh` | Multi-site | The site inventory: each site's `serverIDIndex`, the replication network, the trust wiring. Referenced by `meshRef`. |
+| `SlapdCluster` | Infrastructure | StatefulSet, Services, PVCs, TLS, cn=config admin — one site's server fleet. |
+| `SlapdDatabase` | Per-database | Suffix, credentials, ACLs, indices, replication, seed data. |
+| `SlapdSchema` | Global schemas | attributeTypes, objectClasses applied to cn=schema,cn=config. |
+| `SlapdBackup` | One-shot | A `slapcat` backup of one database to S3. |
+| `SlapdScheduledBackup` | Recurring | Cron-scheduled backups with retention. |
+| `SlapdRestore` | One-shot | In-place rollback of an existing, populated database. |
 
-Each has its own controller. The `SlapdCluster` controller watches `SlapdDatabase` CRs to ensure data directories exist before databases are created. See [ADR-004](docs/adrs/adr-004-multi-resource-crd-architecture.md) for the full design rationale.
+**Why this split rather than one big CR?** OpenLDAP natively supports multiple
+independent databases per process, each with its own suffix, credentials, and
+ACLs, while schemas are global. The CRD model mirrors that — no impedance
+mismatch between the Kubernetes API and OpenLDAP's architecture
+([ADR-004](docs/adrs/adr-004-multi-resource-crd-architecture.md)).
 
-**Why three CRDs?** OpenLDAP natively supports multiple independent databases per process, each with its own suffix, credentials, and ACLs. Schemas are global (visible to all databases). The CRD model mirrors this — no impedance mismatch between the Kubernetes API and OpenLDAP's architecture.
+**Why the mesh is its own object.** Every mesh-scoped resource carries *no
+per-site fields*, so the same YAML is applied byte-identically at every site and
+cross-site parity is checkable as "does it exist and does it hash the same". The
+one per-site fact in the whole system is the operator's own `siteName`
+([ADR-028](docs/adrs/adr-028-mesh-scoped-vs-site-scoped.md)).
+
+Each kind has its own controller; `SlapdCluster`'s also watches `SlapdDatabase`
+CRs so data directories exist before databases are created, and drives the
+restore machine.
 
 ## Why Slaptain?
 
@@ -286,6 +367,8 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
 - [Backup & Restore](docs/BACKUP.md) — S3 backup, scheduled backups + retention, restore into a fresh DB, in-place rollback
 - [Tuning & Sizing](docs/TUNING.md) — what is tunable, slaptain's defaults and how they differ from slapd's, and sizing a cluster from lab to production
+- [slctl](docs/slctl.md) — the diagnostic CLI: status, inspect, debug-dump, ldapsearch/add/modify/delete against a managed cluster
+- [OpenLDAP Versions](docs/OPENLDAP-VERSIONS.md) — the 2.7/2.6 image pairs, the tag scheme, and the 2.6 -> 2.7 migration runbook
 - [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-028
 - [Development Guide](docs/DEVELOPMENT.md) — prerequisites, image builds, operator dev loop, e2e cycle, debugging, project discipline
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
@@ -311,9 +394,14 @@ make cluster-helm-install testing-apply
 # Run e2e tests
 make e2e-run
 
-# Or: full setup/test/teardown via NodePort (single command; omit the
-# context to use the current kubectl context)
-./tests/e2e.sh all [kubectl-context]
+# Or: full setup/test/teardown via NodePort (single command). One context is a
+# single-site run; two or more stand up a real multi-site mesh, one logical site
+# per context. Omit it entirely to use the current kubectl context.
+./tests/e2e.sh all [kubectl-context...]
+
+# Package and push the charts (needs `helm registry login` first)
+make charts-package
+make charts-push
 ```
 
 Full CRD type definitions: [`operator/api/v1alpha1/`](operator/api/v1alpha1/).
