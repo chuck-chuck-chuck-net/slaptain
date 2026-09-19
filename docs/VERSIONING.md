@@ -26,6 +26,7 @@ nothing.
 | Surface | Spelling | Example |
 |---|---|---|
 | git tag | **with `v`** | `v0.2.0`, `v0.2.0-rc1` |
+| image tag, untagged commit | `sha-` + hash | `slapd:sha-09ecf10`, `slapd:sha-09ecf10-dirty-<state8>` |
 | GitHub release title | **with `v`** (mirrors the tag) | `v0.2.0` |
 | container image tag | bare | `slapd:0.2.0` |
 | Helm chart version (the OCI tag) | bare | `charts/slapd:0.2.0` |
@@ -60,18 +61,22 @@ Two of these are not free choices:
 the Makefile and `tests/e2e.sh` implement it.
 
 What changed was one variable becoming two. `GIT_TAG` (from `scripts/image-tag.sh`) answers
-*what is HEAD* and is unchanged — a release tag, else a short hash, else a content-hashed
-dirty form. `IMAGE_TAG := $(GIT_TAG:v%=%)` answers *how is it addressed*, and every image
-name, every `--set image.tag=`, `--app-version` and `CHART_VERSION` now derives from it. The
-off-tag hash forms carry no `v` and pass through untouched, so only release builds are
-affected.
+*what is HEAD* and is unchanged — a version tag, else a short hash, else a content-hashed
+dirty form. `IMAGE_TAG` answers *how is it addressed*: the bare semver on a version tag,
+`sha-<hash>` on anything else. Every image name, every `--set image.tag=` and `--app-version`
+derives from it.
 
-    $ make show-tag GIT_TAG=v0.2.1
-    git:    v0.2.1
-    image:  0.2.1
-    chart:  0.2.1
+The predicate is "is HEAD on a version tag **at all**", prefix-matched so an `-rc1` counts —
+a release candidate is addressed like any other tagged build. Whether something is a *final*
+release is a different question with a different answer (it gates things like `:latest`, which
+an rc must not move), and conflating the two is trap 2 below.
 
-One string for all three, which is the point: the charts default their image tag to
+    $ make show-tag GIT_TAG=v0.2.1     $ make show-tag GIT_TAG=09ecf10
+    git:    v0.2.1                    git:    09ecf10
+    image:  0.2.1                     image:  sha-09ecf10
+    chart:  0.2.1                     chart:  0.0.0-09ecf10
+
+On a tag, one string for all three, which is the point: the charts default their image tag to
 `.Chart.AppVersion`, so `helm install ./charts/operator` from a checkout and the image a
 release build pushes now name the same thing *by construction*.
 
@@ -86,6 +91,22 @@ rule, but wrong *together*, so it resolves. Verified against the registry rather
 
     helm template slaptain oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain --version 0.2.0
       → image: "ghcr.io/chuck-chuck-chuck-net/slaptain/operator:v0.2.0"   (registry: 200)
+
+**Why `sha-` on untagged builds.** In the sibling project the prefix is forced: its CI uses
+`docker/metadata-action`, whose `type=sha` publishes exactly that, so a Makefile default
+asking for `:<hash>` could never address a CI-built image. slaptain publishes by hand today
+and has no such constraint — it takes the spelling so the two projects read alike, and so the
+defaults already fit when slaptain adopts those workflows, which is planned. It also makes a
+registry listing self-describing: `0.2.0` is a release, `sha-09ecf10` is a build of a commit.
+
+The `-dirty-<state8>` half is slaptain's own and predates this (`scripts/image-tag.sh`): a
+bare `-dirty` would alias every dirty state of a commit to one tag, so a stale image could
+masquerade as the current tree. It survives inside the new prefix unchanged.
+
+**The `sha-` prefix never enters a version number.** `CHART_VERSION` derives from `GIT_TAG`,
+not `IMAGE_TAG`: an untagged build produces chart `0.0.0-09ecf10` while addressing images at
+`sha-09ecf10`. A registry addressing convention has no business inside a semver, and the
+sibling project splits it the same way.
 
 **The discontinuity is deliberate and stops here.** Images through `v0.2.0` carry the `v`
 (`v0.0.18` … `v0.2.0`); `0.2.1` onwards do not. History is immutable and honest; a partial

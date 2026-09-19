@@ -438,8 +438,10 @@ kubectl rollout status statefulset/slapd -n slaptain-testing --timeout=120s
 The `v` belongs to the **git tag** and to nothing downstream of it. Images, chart `version`,
 chart `appVersion` and `helm --version` all take the bare semver — `v0.2.1` is tagged in git
 and published as `operator:0.2.1` / chart `0.2.1`. The Makefile keeps the two questions in two
-variables: `GIT_TAG` is what HEAD *is*, `IMAGE_TAG := $(GIT_TAG:v%=%)` is how it is
-*addressed*. This makes the charts' `image.tag | default .Chart.AppVersion` fallback an
+variables: `GIT_TAG` is what HEAD *is* (version tag, else short hash, else `<hash>-dirty-<state8>`),
+`IMAGE_TAG` is how it is *addressed* — bare semver on a version tag, `sha-<hash>` otherwise,
+matching what `docker/metadata-action` publishes in the sibling project whose workflows
+slaptain plans to adopt. This makes the charts' `image.tag | default .Chart.AppVersion` fallback an
 identity rather than a coincidence. Adopted at v0.2.1 (images through `v0.2.0` keep the `v`;
 that discontinuity is deliberate and documented). Full rules, traps and verification recipes:
 `docs/VERSIONING.md`.

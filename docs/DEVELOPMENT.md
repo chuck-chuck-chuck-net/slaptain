@@ -87,7 +87,15 @@ images), `build-toolkit`, `build-operator`, `build-openldap-deb`, `build-slctl`
 `GIT_TAG` is derived, not configured — by `scripts/image-tag.sh`, the single
 source shared by the Makefile and `tests/e2e.sh`: an exact git tag if `HEAD` is
 on one, otherwise the short commit hash, and on a dirty working tree
-`<hash>-dirty-<contenthash>`. The dirty suffix hashes the actual diff, so the
+`<hash>-dirty-<contenthash>`.
+
+That is what the build *is*. How it is **addressed** in a registry is a second
+question with a second variable, `IMAGE_TAG` (`docs/VERSIONING.md`): a version
+tag loses its `v` (`v0.2.1` → `:0.2.1`), anything else gains a `sha-` prefix
+(`:sha-09ecf10`, `:sha-09ecf10-dirty-<contenthash>`). `make show-tag` prints
+all three — git, image, chart.
+
+The dirty suffix hashes the actual diff, so the
 same dirty state always derives the same tag (builds and e2e runs agree),
 while a different edit derives a different one — a stale image can never
 masquerade as your current tree. Untracked files are invisible to the tag

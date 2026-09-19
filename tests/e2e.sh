@@ -165,11 +165,16 @@ if [[ -z "${GIT_TAG:-}" ]]; then
     GIT_TAG="$("$PROJECT_ROOT/scripts/image-tag.sh")"
 fi
 
-# IMAGE_TAG is how that build is ADDRESSED: the `v` belongs to the git tag and
-# to nothing downstream of it (docs/VERSIONING.md), so v0.2.1 -> 0.2.1 while the
-# off-tag hash forms pass through unchanged. Mirrors the Makefile exactly —
-# pinning GIT_TAG=v0.2.1 here must reach the same images `make push` produced.
-IMAGE_TAG="${GIT_TAG#v}"
+# IMAGE_TAG is how that build is ADDRESSED (docs/VERSIONING.md): a version tag
+# loses its `v` (v0.2.1 -> 0.2.1), anything else gains a sha- prefix
+# (09ecf10 -> sha-09ecf10). Mirrors the Makefile exactly — pinning
+# GIT_TAG=v0.2.1 here must reach the same images `make push` produced, and so
+# must an untagged build of the same tree.
+if [[ "$GIT_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    IMAGE_TAG="${GIT_TAG#v}"
+else
+    IMAGE_TAG="sha-${GIT_TAG}"
+fi
 
 # SLAPD_TAG_SUFFIX: appended to the slapd/slapd-init image tags only (the
 # operator tag is untouched). Empty = OpenLDAP 2.7.1; "-ol26" runs the suite
@@ -1558,7 +1563,7 @@ require_image_in_registry() { # image-name tag
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10         -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json"         "$url" 2>/dev/null || echo 000)
     case "$code" in
         200) : ;;
-        404) die "$REGISTRY/$PROJECT/$1:$2 is not in the registry. Build and push first (make push REGISTRY=$REGISTRY), or pin GIT_TAG=<pushed-tag>. A dirty tree derives a content-hashed tag (scripts/image-tag.sh) that exists only after you push it." ;;
+        404) die "$REGISTRY/$PROJECT/$1:$2 is not in the registry. Build and push first (make push REGISTRY=$REGISTRY), or pin GIT_TAG=<pushed-tag>. Untagged builds are addressed sha-<hash>, and a dirty tree derives a content-hashed sha-<hash>-dirty-<state8> (scripts/image-tag.sh + docs/VERSIONING.md) that exists only after you push it." ;;
         *)   log "WARN: cannot verify $1:$2 in the registry (HTTP $code) — continuing" ;;
     esac
 }

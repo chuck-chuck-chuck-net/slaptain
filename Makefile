@@ -10,14 +10,30 @@ CONTAINER_ENGINE ?= podman
 # why the dirty suffix is content-hashed.
 GIT_TAG := $(shell scripts/image-tag.sh)
 
+# IS_VERSION_TAG answers "is HEAD on a version tag at all" — deliberately NOT
+# "is this a final release", which is a different question (that one gates
+# things like :latest, and must exclude an rc; this one must not, because an rc
+# is addressed like any other tagged build). Prefix match, so v0.2.1-rc1
+# counts. See docs/VERSIONING.md trap 2 — reusing one predicate for both is how
+# an rc ends up published under a nonsense tag.
+IS_VERSION_TAG := $(shell echo '$(GIT_TAG)' | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+' && echo true)
+
 # IMAGE_TAG: how that build is ADDRESSED, which is a different question from
-# what it IS, and one variable cannot answer both (docs/VERSIONING.md). The `v`
-# belongs to the git tag and to nothing downstream of it, so a release tag
-# v0.2.1 addresses images as :0.2.1 — matching the chart version and appVersion
-# exactly, which is what makes the charts' `image.tag | default .Chart.AppVersion`
-# fallback correct by construction instead of by coincidence.
-# Off-tag forms (<hash>, <hash>-dirty-<state8>) carry no `v` and pass through.
-IMAGE_TAG := $(GIT_TAG:v%=%)
+# what it IS, and one variable cannot answer both (docs/VERSIONING.md).
+#   tagged    the bare semver — v0.2.1 is addressed :0.2.1, matching the chart
+#             version and appVersion exactly, which is what makes the charts'
+#             `image.tag | default .Chart.AppVersion` fallback correct by
+#             construction instead of by maintenance.
+#   untagged  sha-<hash>, sha-<hash>-dirty-<state8>. The prefix matches the
+#             sibling project (littlered), where it is forced: its CI's
+#             docker/metadata-action `type=sha` publishes exactly that, so a
+#             Makefile default asking for :<hash> could never address a
+#             CI-built image. slaptain publishes by hand and has no such
+#             constraint — it adopts the spelling so the two projects read the
+#             same, and so the defaults already fit if slaptain gains the same
+#             workflows. It also makes a registry listing self-describing:
+#             `0.2.0` is a release, `sha-09ecf10` is a build of a commit.
+IMAGE_TAG := $(if $(IS_VERSION_TAG),$(GIT_TAG:v%=%),sha-$(GIT_TAG))
 
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= push
@@ -91,14 +107,13 @@ PUBLISH_CHARTS ?= operator slapd-mesh slapd slapd-toolkit
 # Chart version derived from GIT_TAG; must be SemVer-2 for Helm.
 # - On a release tag (vX.Y.Z): strip the leading 'v' → X.Y.Z.
 # - Off-tag dev builds: 0.0.0-<commit>[-dirty] pseudo-version (valid SemVer pre-release).
-# On a release tag IMAGE_TAG is already the bare semver, so chart version,
-# appVersion and image tag are all one string. Off-tag it is a hash, which is
-# not SemVer-2 and which Helm rejects, so it becomes a valid pre-release.
-ifneq ($(filter v%,$(GIT_TAG)),)
-    CHART_VERSION := $(IMAGE_TAG)
-else
-    CHART_VERSION := 0.0.0-$(IMAGE_TAG)
-endif
+# On a version tag IMAGE_TAG is already the bare semver, so chart version,
+# appVersion and image tag are all one string. Off-tag, a hash is not SemVer-2
+# and Helm rejects it, so it becomes a valid pre-release — built from GIT_TAG,
+# NOT from IMAGE_TAG: `0.0.0-09ecf10`, not `0.0.0-sha-09ecf10`. The sha- prefix
+# is an addressing convention for registries and has no business inside a
+# version number. Same split as the sibling project.
+CHART_VERSION := $(if $(IS_VERSION_TAG),$(IMAGE_TAG),0.0.0-$(GIT_TAG))
 
 # Stamp-file directory for incremental builds.
 STAMPS := .stamps
