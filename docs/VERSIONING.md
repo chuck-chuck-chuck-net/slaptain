@@ -31,7 +31,7 @@ nothing.
 | container image tag | bare | `slapd:0.2.0` |
 | Helm chart version (the OCI tag) | bare | `charts/slapd:0.2.0` |
 | `Chart.yaml` `version:` | bare | `version: 0.2.0` |
-| `Chart.yaml` `appVersion:` | bare | `appVersion: "0.2.0"` |
+| `Chart.yaml` `appVersion:` | bare, and equal to the **image tag** | `appVersion: "0.2.0"` |
 | `helm --version <x>` | bare | `--version 0.2.0` |
 | CHANGELOG heading | bare | `## [0.2.0] - 2026-09-19` |
 
@@ -41,6 +41,13 @@ Two of these are not free choices:
   leading `v` is not SemVer. Off-tag builds therefore need a pseudo-version such as
   `0.0.0-<hash>`, which is a valid pre-release. (This is also why there is no `latest` *chart*
   tag anywhere: Helm reads `--version` as a semver constraint, and `latest` is not one.)
+- **`appVersion` is packaged from `IMAGE_TAG`, not from `CHART_VERSION`.** In both projects the
+  chart templates read `{{ .Values.image.tag | default .Chart.AppVersion }}`, so `appVersion`
+  is not merely descriptive — it is *consumed as a registry address*. It therefore has to be
+  the address. On a version tag the two are the same string and the choice is invisible; off
+  a tag they diverge (`0.0.0-09ecf10` vs `sha-09ecf10`) and only one of them names an image
+  that exists. See trap 5.
+
 - **`helm --version` against an OCI registry is passed through as the registry tag.** It does
   not normalise, and it does not fall back. Measured on the sibling project:
 
@@ -108,6 +115,14 @@ not `IMAGE_TAG`: an untagged build produces chart `0.0.0-09ecf10` while addressi
 `sha-09ecf10`. A registry addressing convention has no business inside a semver, and the
 sibling project splits it the same way.
 
+**`appVersion` takes `IMAGE_TAG`.** Both `charts-package` and `operator-chart-package` package
+with `--version $(CHART_VERSION) --app-version $(IMAGE_TAG)`. That is deliberate and was
+checked rather than assumed: off-tag, `--app-version $(CHART_VERSION)` produces a chart whose
+default image is `operator:0.0.0-09ecf10` while `make push` publishes `operator:sha-09ecf10`.
+The sibling project reached the same conclusion and changed to match (its
+`fix(chart): appVersion must be the image ADDRESS, not the chart version`), so the two are
+aligned on the corrected form rather than on the first one written.
+
 **The discontinuity is deliberate and stops here.** Images through `v0.2.0` carry the `v`
 (`v0.0.18` … `v0.2.0`); `0.2.1` onwards do not. History is immutable and honest; a partial
 re-tag would be worse than either extreme. Chart *versions* never carried it, so the chart
@@ -134,7 +149,7 @@ series is continuous — only `appVersion` changes spelling, from `v0.2.0` to `0
 
 ---
 
-## 4. Four traps, all of them observed in practice
+## 4. Five traps, all of them observed in practice
 
 These are the ways the rule gets broken *after* someone has written it down. Each one was hit
 for real on the sibling project; none was caught by a test.
@@ -163,7 +178,18 @@ for real on the sibling project; none was caught by a test.
    out: *"add `--version <version>` — without the leading `v`, e.g. `--version 0.2.0` for the
    `v0.2.0` release."*
 
-The common shape of all four: **one variable was asked two different questions.** The fix is
+5. **Packaging `--app-version $(CHART_VERSION)` when the chart uses `appVersion` as its image
+   tag.** The two agree on every release, so the mistake is invisible exactly where anyone
+   would look for it, and diverges only off-tag — where a locally packaged dev chart then
+   defaults to an image tag (`0.0.0-<hash>`) that nothing ever publishes (`sha-<hash>`).
+   Found in slaptain 2026-09-19 while homogenising the two projects, and present latently in
+   the sibling for the same reason: its CI packages charts only on tags, so its own copy was
+   never exercised in the case that distinguishes them. Both now package from `IMAGE_TAG`.
+
+   The tell that `appVersion` is the *address* and not the *version*: something resolves it
+   against a registry. If nothing did, `CHART_VERSION` would be the better answer.
+
+The common shape of all five: **one variable was asked two different questions.** The fix is
 never a cleverer regex; it is a second variable with a name that says which question it
 answers.
 
