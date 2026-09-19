@@ -5,15 +5,37 @@ metadata:
   labels:
     {{- include "slapd-cluster.labels" . | nindent 4 }}
 spec:
+  {{- /* Emitted only for the fields actually set. An omitted image is not a
+         missing one: the operator derives each image from its OWN image and tag
+         (CloudNativePG-style), which keeps slapd, slapd-init and the operator on
+         one version. Pinning a repository/tag here overrides that per field. */}}
+  {{- if or .Values.images.slapd.repository .Values.images.slapd.tag .Values.images.slapd.pullPolicy .Values.images.init.repository .Values.images.init.tag .Values.images.init.pullPolicy }}
   images:
+    {{- if or .Values.images.slapd.repository .Values.images.slapd.tag .Values.images.slapd.pullPolicy }}
     slapd:
-      repository: {{ .Values.images.slapd.repository | quote }}
-      tag: {{ .Values.images.slapd.tag | quote }}
-      pullPolicy: {{ .Values.images.slapd.pullPolicy }}
+      {{- with .Values.images.slapd.repository }}
+      repository: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.images.slapd.tag }}
+      tag: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.images.slapd.pullPolicy }}
+      pullPolicy: {{ . }}
+      {{- end }}
+    {{- end }}
+    {{- if or .Values.images.init.repository .Values.images.init.tag .Values.images.init.pullPolicy }}
     init:
-      repository: {{ .Values.images.init.repository | quote }}
-      tag: {{ .Values.images.init.tag | quote }}
-      pullPolicy: {{ .Values.images.init.pullPolicy }}
+      {{- with .Values.images.init.repository }}
+      repository: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.images.init.tag }}
+      tag: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.images.init.pullPolicy }}
+      pullPolicy: {{ . }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
 
   ldap:
     {{- if .Values.ldap.cnConfigCredentials.secretName }}
@@ -30,7 +52,13 @@ spec:
   {{- if gt (int .Values.readReplicas) 0 }}
   readReplicas: {{ .Values.readReplicas }}
   {{- end }}
+  {{- /* Presence-based, not truthiness: `with`/`if` would drop an explicit 0,
+         which is the documented way to silence slapd. kindIs catches `logLevel:`
+         with nothing after it, which hasKey reports as present.
+         Same idiom as charts/slapd-mesh's serverIDIndex. */}}
+  {{- if and (hasKey .Values "logLevel") (not (kindIs "invalid" .Values.logLevel)) }}
   logLevel: {{ .Values.logLevel }}
+  {{- end }}
 
   persistence:
     config:
@@ -59,7 +87,7 @@ spec:
 
   replication:
     enabled: {{ .Values.replication.enabled }}
-    {{- if hasKey .Values.replication "serverIDBase" }}
+    {{- if and (hasKey .Values.replication "serverIDBase") (not (kindIs "invalid" .Values.replication.serverIDBase)) }}
     serverIDBase: {{ .Values.replication.serverIDBase }}
     {{- end }}
     {{- if .Values.replication.mode }}

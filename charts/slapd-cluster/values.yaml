@@ -20,16 +20,21 @@ ldap:
   cnConfigCredentials:
     secretName: ""
 
-# -- Container images.
+# -- Container images. Every field is optional and EMPTY IS THE RECOMMENDED
+# SETTING: the operator then derives both images from its own image and tag, so
+# slapd, slapd-init and the operator that drives them stay on one version. A
+# repository/tag pinned here overrides that for the field it names — useful for
+# a private mirror or for the `-ol26` pair (OpenLDAP 2.6, hot-migration interop;
+# both images must be pinned or neither — see docs/OPENLDAP-VERSIONS.md).
 images:
   slapd:
-    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd
-    tag: latest
-    pullPolicy: IfNotPresent
+    repository: ""
+    tag: ""
+    pullPolicy: ""
   init:
-    repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init
-    tag: latest
-    pullPolicy: IfNotPresent
+    repository: ""
+    tag: ""
+    pullPolicy: ""
 
 # -- Number of replicas. Set replication.enabled=true when using replicas > 1.
 replicas: 1
@@ -62,9 +67,17 @@ persistence:
 # -- Replication. N-way multi-master delta-syncrepl.
 # Set enabled=true together with replicas>1 to activate.
 # Per-database replication settings (deltaSync, ridBase, etc.) are on SlapdDatabase CRs.
+#
+# FOR A MULTI-SITE MESH, USE charts/slapd-mesh INSTEAD. This chart writes one
+# site's SlapdCluster by hand; the mesh chart describes the sites once and lets
+# the operator derive each site's serverIDBase, its external peers, the network
+# mode and the trust wiring (ADR-028, docs/MULTI-SITE.md). The hand-written form
+# below stays supported — it is what the mesh derives, and it is still the way
+# to peer with something that is not a slaptain cluster (ADR-011).
 replication:
   enabled: false
   # -- TCP keepalive for syncrepl connections. Format: "idle:probes:interval".
+  # Empty takes slaptain's default, 240:3:30 (ADR-024; see docs/TUNING.md).
   keepalive: ""
   # -- Syncrepl retry interval. Format: "<interval> <count>" pairs.
   retry: "10 +"
@@ -85,8 +98,11 @@ replication:
   # - name: site-b
   #   uri: "ldaps://ldap.site-b.example.com:636"
   #   tlsSecretName: "site-b-ca"
-  #   bindDN: "cn=replication,o=myapp"
   #   bindPasswordSecretName: "site-b-replication-password"
+  #   # bindDN is normally OMITTED: the operator binds as the node-local
+  #   # identity cn=repl-<database>,cn=slaptain-auth (ADR-027). Pin it to the
+  #   # peer's legacy cn=replication,<suffix> only while that peer still runs a
+  #   # pre-ADR-027 operator — that migration window is one-directional.
   #
   # Per-pod Multus mode (replication network, ADR-007):
   # - name: site-b
@@ -95,7 +111,6 @@ replication:
   #     - "192.168.99.129"   # site-b slapd-1
   #   port: 1025
   #   tlsSecretName: "site-b-ca"
-  #   bindDN: "cn=replication,o=myapp"
   #   bindPasswordSecretName: "site-b-replication-password"
 
 # -- Service configuration.

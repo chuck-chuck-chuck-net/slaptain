@@ -20,7 +20,7 @@ spec:
       {{- end }}
       containers:
         - name: toolkit
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["sleep", "infinity"]
           env:
@@ -36,12 +36,17 @@ spec:
                 secretKeyRef:
                   name: {{ printf "%s-config-password" .Values.clusterName | quote }}
                   key: root-password
+            {{- if .Values.tls.secretName }}
             - name: LDAPTLS_CACERT
               value: /etc/ldap/tls/ca.crt
+            {{- end }}
+          {{- if .Values.tls.secretName }}
           volumeMounts:
             - name: tls
               mountPath: /etc/ldap/tls
               readOnly: true
+          {{- end }}
+      {{- if .Values.tls.secretName }}
       volumes:
         - name: tls
           secret:
@@ -49,3 +54,4 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+      {{- end }}

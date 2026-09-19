@@ -13,11 +13,17 @@ dbName: default
 # -- Toolkit image (built from images/slapd-toolkit/).
 image:
   repository: ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit
-  tag: latest
+  # -- Image tag. Empty string falls back to the chart's appVersion, which is
+  # set at package time from the git tag (e.g. v0.2.0) and matches the published
+  # image tag — see Makefile target charts-package. There is no `latest` tag in
+  # the registry: images are pushed under their git tag only.
+  tag: ""
   pullPolicy: IfNotPresent
 
-# -- TLS Secret created by `make gencert`; mounted at /etc/ldap/tls so
-# LDAPTLS_CACERT can point at the cluster CA.
+# -- TLS Secret carrying the cluster CA (`make gencert` creates one), mounted at
+# /etc/ldap/tls so LDAPTLS_CACERT can point at it. Set secretName to "" for a
+# cluster without TLS (spec.ldap.tls.enabled=false): the mount and the env var
+# are then omitted rather than left dangling on a Secret that does not exist.
 tls:
   secretName: slapd-tls
 
