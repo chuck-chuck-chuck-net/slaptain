@@ -218,6 +218,24 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// 1c. The certificate gate (ADR-029). slapd mounts its TLS material from a
+	// Secret the operator only ever copied a NAME from; a name that resolved to
+	// nothing produced pods wedged in ContainerCreating while the SlapdCluster
+	// reported nothing. Check it here, before anything creates or updates the
+	// StatefulSet, and report what is wrong on the CR.
+	//
+	// WITHHOLDS, NEVER UNDOES. Services and the credential Secret still
+	// reconcile — they cost nothing and a Service without endpoints is
+	// harmless — but the StatefulSet is left exactly as it is. For a cluster
+	// that is already running, that means the pods keep serving with the
+	// material they already mounted: deleting a Secret must not take a
+	// directory down. For one that has never started, it means no pods are
+	// created that could only wedge.
+	tlsReady, tlsErr := r.reconcileTLSGate(ctx, sc)
+	if tlsErr != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileTLSGate: %w", tlsErr)
+	}
+
 	// 2. Reconcile cn=config credential secret (<name>-config-password).
 	if err := r.reconcileSecret(ctx, sc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileSecret: %w", err)
@@ -240,7 +258,15 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("listDatabaseNames: %w", err)
 	}
 
-	// 5. Reconcile StatefulSet.
+	// 5. Reconcile StatefulSet — unless the certificate gate is holding it.
+	if !tlsReady {
+		log.Info("TLS material not available; withholding the StatefulSet",
+			"secret", sc.Spec.LDAP.TLS.SecretName)
+		if err := r.observeAndApplyTLSBlockedStatus(ctx, sc); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
 	if err := r.reconcileStatefulSet(ctx, sc, databaseNames); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
 	}

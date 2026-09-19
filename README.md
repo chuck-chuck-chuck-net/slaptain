@@ -359,6 +359,7 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
 - [Backup & Restore](docs/BACKUP.md) — S3 backup, scheduled backups + retention, restore into a fresh DB, in-place rollback
 - [Tuning & Sizing](docs/TUNING.md) — what is tunable, slaptain's defaults and how they differ from slapd's, and sizing a cluster from lab to production
+- [TLS Certificates](docs/TLS.md) — where certificates come from (org PKI, cert-manager, the cluster CA), and how clients come to trust them
 - [slctl](docs/slctl.md) — the diagnostic CLI: status, inspect, debug-dump, ldapsearch/add/modify/delete against a managed cluster
 - [OpenLDAP Versions](docs/OPENLDAP-VERSIONS.md) — the 2.7/2.6 image pairs, the tag scheme, and the 2.6 -> 2.7 migration runbook
 - [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-028

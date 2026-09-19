@@ -1,6 +1,6 @@
 # ADR-029: TLS is on by default, and a missing certificate is a legible state
 
-**Status:** Proposed
+**Status:** Partially accepted (the gate, v0.2.1) / Proposed (the default flip)
 **Date:** 2026-09-19
 
 ## Context
@@ -124,3 +124,57 @@ yet is a named, self-healing state rather than a hung pod.**
 - ADR-007 — the TLS posture these certificates serve, including the public-CA
   case that makes `ca.crt` optional.
 - ADR-028 — `*bool`/pointer-for-unset precedent (`serverIDIndex`).
+
+## Amendment, 2026-09-19: the gate ships without the default flip
+
+The two halves of this ADR were separated on the way to v0.2.1, because they
+have opposite risk profiles.
+
+**The gate is a pure win and shipped in v0.2.1.** It changes no default and no
+API shape: a cluster that asks for TLS and has no certificate reports
+`TLSReady=False` with a reason that names the Secret, and withholds only the
+StatefulSet. Nothing that worked before behaves differently.
+
+**The default flip did not ship, and should not until the operator can issue
+certificates itself.** Turning TLS on by default without an issuance story means
+every minimal `SlapdCluster` stops at `TLSReady=False` until a human produces a
+certificate — deliberately making the first run worse, to fix it a release
+later. The flip costs nobody anything the moment slaptain can issue its own
+material (the CloudNativePG/Strimzi pattern: an operator-managed CA, server
+certs derived from names the operator already knows, and rotation). The two
+belong in the same release.
+
+Three findings from the certificate survey that motivated the split, recorded
+because each one closes off an option that looks open:
+
+1. **The cluster root CA cannot be the default path.** Issuing from it means the
+   `kubernetes.io/kubelet-serving` signer, which is unavailable on several
+   managed providers, requires manual approval (a privilege), and never renews.
+   Decisively: the ecosystem's approver for that signer,
+   kubelet-csr-approver, requires the CSR CommonName to equal the *requester's*
+   username and permits at most one DNS SAN — our CSRs satisfy neither, and it
+   **denies** by default rather than ignoring. A denied CSR cannot be approved
+   afterwards. So in a cluster running the standard approver for that signer,
+   the technique stops working. It stays documented as what it is: a
+   convenience with free in-cluster trust, used by the test suite, not the
+   recommended path (docs/TLS.md §3).
+
+2. **A CLI subcommand was considered and rejected.** `slctl tls issue` would
+   have re-implemented `tests/gencert.sh` in Go. It buys nothing over the shell
+   for the crypto, and inherits the same defect — a one-shot with no renewal.
+   If slaptain should work out of the box with TLS, the operator must issue and
+   *rotate*, which a CLI cannot do. Reimplementing a lab tool as a first-class
+   CLI surface would also make it look like a production path.
+
+3. **No Kubernetes Event.** The decision above said the gate would emit one. It
+   does not: no controller in this operator has an EventRecorder, and the
+   condition plus the withholding log line is how every other gate here reports
+   (mesh resolution, the ADR-027 identity gate). Adding the wiring and RBAC to
+   say a third time what the condition already says was not worth it.
+
+The phase behaviour was also made more precise than "Pending" (a phase this API
+does not have). A cluster whose StatefulSet does not exist yet reports
+`Bootstrapping` — it is waiting on a prerequisite and has never served. A
+cluster that already has one keeps the phase its pods justify, `Running` or
+`Degraded`, with `TLSReady` carrying the news: calling a healthy directory
+`Error` because a Secret was deleted would be a false alarm.
