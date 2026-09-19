@@ -26,7 +26,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 - [x] slapd runtime image: Debian trixie-slim build → `gcr.io/distroless/base-debian13` (`images/slapd/Containerfile`).
 - [x] slapd-init image: Debian trixie-slim, full shell environment for bootstrap (`images/slapd-init/Containerfile`).
 - [x] Bootstrap logic with `slaptest` conversion (`images/slapd-init/bootstrap.sh`).
-- [x] Helm Chart for standalone deployment (`charts/slapd`) — superseded by operator, kept for reference.
+- [x] Helm Chart for standalone deployment (`charts/slapd`) — not superseded: it is the supported answer for a single slapd configured entirely in `values.yaml`, with no operator and no CRDs. Published alongside the other four charts (0.2.0). It does not do replication, meshes, declarative schemas/ACLs or backup — those need the operator.
 - [x] **Kubernetes Operator — Phase 1** (`operator/`): standalone single-replica StatefulSet managed by a kubebuilder controller. e2e: 33/33 green.
 - [x] **Operator Phase 2**: N-way multi-master delta-syncrepl; operator-orchestrated bootstrap; per-pod `volumeClaimTemplates`; replication credential management. e2e: pending.
 - [x] **Operator Phase 3**: cross-cluster replication via `ExternalPeers`. Operator owns all syncrepl configuration (in-cluster + external). See ADR-003. **TLS posture, stated precisely (verified 2026-09-14):** consumers verify the provider against a distributed CA (`tls_cacert`), relaxed to `tls_reqcert=allow` for IP-addressed peers (ADR-007). It is NOT mutual: `olcTLSVerifyClient` is never set, so slapd never requests a client certificate — the `tls_cert`/`tls_key` presented on external-peer stanzas are not verified by anything. Peer *authentication* is the simple bind, not the certificate. Cert-based peer auth (SASL EXTERNAL) is considered and deferred in ADR-027.
@@ -87,7 +87,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── operator/                   # Helm chart for deploying the operator itself
 │   │   ├── crds/                   # CRD YAML (synced from operator/config/crd/bases/ via make operator-manifests)
 │   │   └── templates/              # deployment, RBAC, serviceaccount, metrics, networkpolicy
-│   ├── slapd/                      # Standalone Helm chart (baseline / comparison / testing vehicle)
+│   ├── slapd/                      # Standalone Helm chart: one slapd, no operator, values.yaml-only
 │   ├── slapd-cluster/              # Helm chart deploying a SlapdCluster CR (operator required)
 │   ├── slapd-mesh/                 # Helm chart deploying a whole multi-site mesh: SlapdMesh + SlapdCluster
 │   │                               # + databases + schemas, applied IDENTICALLY at every site (ADR-028)
@@ -378,14 +378,17 @@ runs without readpw configuration but skips those test cases.
 | `make operator-helm-install` | `helm upgrade --install slaptain-operator ./charts/operator` (depends on `operator-crd-apply`, so a new/changed CRD lands on upgrade too). t3e loop: `make operator-helm-install CONTEXT=t3e GIT_TAG=<tag>` |
 | `make operator-helm-uninstall` | Uninstall the operator Helm release |
 | `make gencert` | Generate self-signed TLS cert via `tests/gencert.sh` |
-| `make helm-install` | Bare `helm upgrade --install slapd ./charts/slapd` |
+| `make helm-install` | `helm upgrade --install slapd ./charts/slapd`, pinning both images to `GIT_TAG`(`+SLAPD_TAG_SUFFIX`) |
 | `make helm-deploy` | Full pipeline: `push` + `gencert` + `helm-install` |
 | `make helm-uninstall` | Uninstall the slapd Helm release |
 | `make cluster-helm-install` | `helm upgrade --install slapd ./charts/slapd-cluster` |
 | `make cluster-helm-uninstall` | Uninstall the slapd-cluster Helm release |
 | `make testing-apply` | `kubectl apply` test resources (SlapdDatabase, SlapdSchema, Secrets) |
 | `make testing-delete` | `kubectl delete` test resources |
-| `make toolkit-install` | `helm upgrade --install toolkit ./charts/slapd-toolkit` (debug pod) |
+| `make toolkit-install` | `helm upgrade --install toolkit ./charts/slapd-toolkit` (debug pod), image pinned to `GIT_TAG` |
+| `make charts-package` | Package every chart in `PUBLISH_CHARTS` (operator, slapd-mesh, slapd-cluster, slapd-toolkit, slapd) into `.charts/`, with `--version`/`--app-version` from the git tag |
+| `make charts-push` | Push all packaged charts to `$(CHART_REGISTRY)` (`helm registry login` first) |
+| `make operator-chart-package` / `make operator-chart-push` | The operator chart alone (same mechanism) |
 | `make toolkit-uninstall` | Uninstall the toolkit Helm release |
 | `make e2e-run` | Run Ginkgo e2e tests in `tests/e2e/` (requires NodePort cluster pre-deployed) |
 | `make e2e-multisite CONTEXTS="c1 c2"` | All-in-one multi-site e2e cycle via the unified `tests/e2e.sh` |
