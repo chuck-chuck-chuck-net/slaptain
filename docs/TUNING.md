@@ -109,7 +109,7 @@ back-mdb — no `slapindex` run, no downtime.
 | `spec.replication.keepalive` | `240:3:30`; `none` disables | converged into the stanzas |
 | `spec.replication.retry` | `10 +` | converged into the stanzas |
 | `spec.backend.idlExponent` | none — slapd's 16 | **bootstrap-time** |
-| `spec.persistence.{config,data,accesslog}.size` | 1Gi each | StatefulSet `volumeClaimTemplates` |
+| `spec.persistence.{config,data,accesslog}.size` | 1Gi / **5Gi** / 1Gi | StatefulSet `volumeClaimTemplates` — **create-only in practice**: the templates are immutable, so a changed size needs the StatefulSet recreated |
 
 `spec.ldap.passwordHash` governs only what slapd hashes on a client's behalf. The
 root passwords the operator generates are hashed by the operator before they reach
@@ -152,11 +152,17 @@ the volume is the limit you can see, alert on and expand, and the map size is th
 you cannot change afterwards without recreating the database.
 
 That is why slaptain's default map is 32Gi against a default `persistence.data.size`
-of 1Gi (5Gi in the `slapd` chart, and `tests/values.slapd-persistent.yaml`
-takes the chart's value). The fixtures are deliberately lopsided: a lab cluster runs
-out of PVC long before it runs out of map, which is exactly the failure you want in a
-lab — it is visible, and it is fixable by expanding the volume. In production the same
-relationship holds, at different absolute numbers.
+of 5Gi. The ratio is deliberately lopsided: a cluster runs out of PVC long before it
+runs out of map, which is exactly the failure you want — it is visible, it can be
+alerted on, and it is fixable by expanding the volume, whereas exhausting the map is
+none of those things. In production the same relationship holds, at different
+absolute numbers.
+
+The 5Gi is the OPERATOR's default and lives in exactly one place
+(`internal/controller/persistence_defaults.go`). The charts deliberately do not
+restate it: a size written into a `SlapdCluster` is frozen there at creation time, so
+a chart that repeated the number would pin every cluster it installed to whatever the
+default was on the day of install. Unset means "this operator version decides".
 
 Work it in this order:
 

@@ -238,14 +238,23 @@ type SlapdLDAPConfig struct {
 
 // SlapdPVCConfig holds sizing and storage class settings for a single PVC.
 type SlapdPVCConfig struct {
-	// size is the requested storage size.
-	// +kubebuilder:default="1Gi"
+	// size is the requested storage size. Unset means slaptain's default for
+	// this volume: 1Gi for config and accesslog, 5Gi for data (see
+	// internal/controller/persistence_defaults.go and docs/TUNING.md).
+	//
+	// Deliberately carries no +kubebuilder:default. A CRD default is written
+	// into the stored object at admission and only when its parent object is
+	// present, so it would fill `persistence: {}` while an omitted
+	// `persistence:` fell through to the operator — two sources for one number,
+	// and the CR would show a value nobody chose, frozen at creation time.
+	// +optional
 	Size string `json:"size,omitempty"`
 	// storageClass is the storage class name. Defaults to the cluster default if empty.
 	// +optional
 	StorageClass string `json:"storageClass,omitempty"`
-	// accessMode is the PVC access mode.
-	// +kubebuilder:default=ReadWriteOnce
+	// accessMode is the PVC access mode. Unset means ReadWriteOnce, resolved by
+	// the operator for the same reason size is.
+	// +optional
 	AccessMode corev1.PersistentVolumeAccessMode `json:"accessMode,omitempty"`
 }
 

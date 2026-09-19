@@ -864,25 +864,10 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// matched at first-create-time, and StatefulSet volumeClaimTemplates
 	// are immutable, so a later mismatch makes the cluster controller
 	// hard-fail with "Forbidden: updates to statefulset spec".
-	cfgSize := sc.Spec.Persistence.Config.Size
-	if cfgSize == "" {
-		cfgSize = "1Gi"
-	}
-	dataSize := sc.Spec.Persistence.Data.Size
-	if dataSize == "" {
-		dataSize = "1Gi"
-	}
-	cfgAM := sc.Spec.Persistence.Config.AccessMode
-	if cfgAM == "" {
-		cfgAM = corev1.ReadWriteOnce
-	}
-	dataAM := sc.Spec.Persistence.Data.AccessMode
-	if dataAM == "" {
-		dataAM = corev1.ReadWriteOnce
-	}
+	cfgPVC, dataPVC, accesslogPVC := resolvePersistence(sc.Spec.Persistence)
 	volumeClaimTemplates := []corev1.PersistentVolumeClaim{
-		pvcTemplate("config", cfgSize, sc.Spec.Persistence.Config.StorageClass, cfgAM),
-		pvcTemplate("data", dataSize, sc.Spec.Persistence.Data.StorageClass, dataAM),
+		pvcTemplate("config", cfgPVC.Size, cfgPVC.StorageClass, cfgPVC.AccessMode),
+		pvcTemplate("data", dataPVC.Size, dataPVC.StorageClass, dataPVC.AccessMode),
 	}
 	// Accesslog PVC: provisioned on every RW pod regardless of current
 	// replication state. StatefulSet volumeClaimTemplates is immutable, so
@@ -892,16 +877,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// standalone clusters. The MOUNT is still gated on accesslogMountNeeded
 	// so slapd doesn't see an empty /accesslog when there's no DB for it.
 	if !readOnly {
-		accesslogSize := sc.Spec.Persistence.Accesslog.Size
-		if accesslogSize == "" {
-			accesslogSize = "1Gi"
-		}
-		accesslogAM := sc.Spec.Persistence.Accesslog.AccessMode
-		if accesslogAM == "" {
-			accesslogAM = corev1.ReadWriteOnce
-		}
 		volumeClaimTemplates = append(volumeClaimTemplates,
-			pvcTemplate("accesslog", accesslogSize, sc.Spec.Persistence.Accesslog.StorageClass, accesslogAM),
+			pvcTemplate("accesslog", accesslogPVC.Size, accesslogPVC.StorageClass, accesslogPVC.AccessMode),
 		)
 	}
 

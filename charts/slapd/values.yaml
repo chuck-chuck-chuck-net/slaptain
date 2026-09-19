@@ -20,10 +20,10 @@ nameOverride: ""
 
 # -- LDAP configuration.
 ldap:
-  # -- TLS/LDAPS. Enabled by DEFAULT here, unlike the CRD (which defaults to
-  # false): a directory server should not ship plaintext-by-default. This is one
-  # of only two places where this chart holds an opinion instead of deferring to
-  # the operator.
+  # -- TLS/LDAPS. Enabled by DEFAULT here, unlike the operator (which defaults
+  # to off): a directory server should not ship plaintext-by-default. This is
+  # the ONLY place this chart holds an opinion instead of deferring to the
+  # operator — everything else it renders is something you set.
   #
   # PREREQUISITE: the Secret named below must exist before install, carrying
   # tls.crt and tls.key (plus ca.crt for a private CA). cert-manager, your own
@@ -70,23 +70,18 @@ images:
 # read-write pod regardless of replication state (its volumeClaimTemplate is
 # immutable, so it cannot be added later without recreating the StatefulSet).
 #
-# data.size is the chart's second and last opinion: 5Gi against the operator's
-# 1Gi, deliberately lopsided against the 32Gi default LMDB map so a cluster runs
-# out of PVC — visible, alertable, expandable — long before it runs out of map.
-# Size it to your directory before production; see docs/TUNING.md.
-persistence:
-  data:
-    size: 5Gi
-  #   accessMode: ReadWriteOnce     # unset → the operator default (ReadWriteOnce)
-  #   storageClass: ""              # unset → the cluster's default StorageClass
-  # config:
-  #   size: 1Gi                     # unset → the operator default (1Gi)
-  #   accessMode: ReadWriteOnce
-  #   storageClass: ""
-  # accesslog:
-  #   size: 1Gi                     # unset → the operator default (1Gi)
-  #   accessMode: ReadWriteOnce
-  #   storageClass: ""
+# SIZE data TO YOUR DIRECTORY BEFORE PRODUCTION. The default is a starting
+# point, and the PVC — not spec.maxSize — is what actually stops a database.
+# See docs/TUNING.md.
+# persistence:
+#   data:
+#     size: 5Gi                     # unset → the operator default (5Gi)
+#     accessMode: ReadWriteOnce     # unset → the operator default (ReadWriteOnce)
+#     storageClass: ""              # unset → the cluster's default StorageClass
+#   config:
+#     size: 1Gi                     # unset → the operator default (1Gi)
+#   accesslog:
+#     size: 1Gi                     # unset → the operator default (1Gi)
 
 # -- Client-facing Service. Every key matches the operator's default, so
 # uncomment only what you change (e.g. type: LoadBalancer).

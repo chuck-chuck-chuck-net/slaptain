@@ -169,23 +169,17 @@ cluster:
   # opt-out. Storage classes are named, not provisioned — every site must have
   # a class by this name, which is a constraint the mesh imposes on the sites
   # rather than a per-site value.
-  # Only data.size is set, and only because it deviates: 5Gi against the
-  # operator's 1Gi, deliberately lopsided against the 32Gi default LMDB map
-  # (docs/TUNING.md). The rest is commented out because restating a default in
-  # the rendered CR freezes it at install time — see charts/slapd.
-  persistence:
-    data:
-      size: 5Gi
-    #   accessMode: ReadWriteOnce   # unset → the operator default (ReadWriteOnce)
-    #   storageClass: ""            # unset → the site's default StorageClass
-    # config:
-    #   size: 1Gi                   # unset → the operator default (1Gi)
-    #   accessMode: ReadWriteOnce
-    #   storageClass: ""
-    # accesslog:
-    #   size: 1Gi                   # unset → the operator default (1Gi)
-    #   accessMode: ReadWriteOnce
-    #   storageClass: ""
+  # Commented out because restating a default in the rendered CR freezes it at
+  # install time — see charts/slapd. Whatever you DO set applies at every site.
+  # persistence:
+  #   data:
+  #     size: 5Gi                   # unset → the operator default (5Gi)
+  #     accessMode: ReadWriteOnce   # unset → the operator default (ReadWriteOnce)
+  #     storageClass: ""            # unset → the site's default StorageClass
+  #   config:
+  #     size: 1Gi                   # unset → the operator default (1Gi)
+  #   accesslog:
+  #     size: 1Gi                   # unset → the operator default (1Gi)
 
   # -- Replication. On by default: this is the mesh chart, and a mesh with
   # replication off is a set of unrelated clusters.

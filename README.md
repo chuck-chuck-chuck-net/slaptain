@@ -84,14 +84,12 @@ spec:
 
   readReplicas: 1
 
-  # Persistence is mandatory (ADR-013) — these size it, they do not enable it.
+  # Persistence is mandatory (ADR-013) — this sizes it, it does not enable it,
+  # and it is optional: unset takes the operator's defaults (config 1Gi,
+  # data 5Gi, accesslog 1Gi). Size data to your directory — see docs/TUNING.md.
   persistence:
-    config:
-      size: 1Gi
     data:
-      size: 5Gi
-    accesslog:
-      size: 1Gi
+      size: 50Gi
 ```
 
 ### 3. Add a Database
