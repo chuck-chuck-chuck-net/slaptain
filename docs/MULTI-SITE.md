@@ -100,11 +100,11 @@ properties of the artifact you apply, checked by hash and by tooling.
 | `externalPeers` | N×(N−1), full mesh | derived from `sites[]` |
 | network mode | identical | derived from `mesh.network` |
 | trust wiring (CA mounts) | N×(N−1) | derived from each site's `caSecretName` |
-| `SlapdDatabase` name and `suffix` | identical | one chart, one values file |
-| `spec.replication.ridBase` | identical per database across sites | one chart, one values file |
+| `SlapdDatabase` name and `suffix` | identical | one chart, same values everywhere |
+| `spec.replication.ridBase` | identical per database across sites | one chart, same values everywhere |
 | `spec.replication.ridBase` | unique *between* databases within a site | chart render-time check |
 | `<db>-credentials` / `replication-password` | identical everywhere | provisioned out of band; the chart never generates one |
-| `SlapdSchema` set | identical, or a superset everywhere | one chart, one values file |
+| `SlapdSchema` set | identical, or a superset everywhere | one chart, same values everywhere |
 | `spec.seed` | exactly one site carries it | `seed.site` + the operator's evidence belt |
 
 Two failure modes are worth stating plainly, because "the resource is simply
@@ -129,13 +129,20 @@ manifests.
 
 - One Kubernetes cluster per site, each reachable with its own `kubectl`
   context.
+- `helm`, `kubectl`, `openssl` and `yq` v4 on the machine you bootstrap from —
+  the scripts below read `lab.yaml` with `yq`.
 - A network path between sites for replication — either natively routed pod
   CIDRs (`pod-routed`, the default) or a dedicated Multus network
   (`multus`). See [Networking](#networking).
 - Each site's Kubernetes API reachable from the other sites over that same
   network: peer discovery reads the remote API to find pod addresses.
 
-### 1. Name your sites
+### 1. Describe the lab in `lab.yaml`
+
+Copy `lab.yaml.sample` and fill it in: one entry per site, carrying the site's
+name, its `serverIDIndex`, its kube `context` (optional — defaults to the name)
+and its `endpoint`, the API address reachable *from pods at the other sites*.
+Everything below reads that file, so nothing asks you for a site twice.
 
 Pick logical, stable names — `site-a`, `ams`, `fra`. They are matched
 **verbatim**: trimmed of whitespace, never case-folded, so `site-a` and
@@ -152,31 +159,7 @@ from list position, because `olcServerID` is baked into every CSN a pod has
 ever written: a site whose number moves files its future writes under a
 different sid from its history.
 
-### 2. Bootstrap trust and shared secrets (once per site pair)
-
-Cross-site trust is pairwise and circular — site A needs site B's CA before
-site B exists — so it is an imperative, one-off step, not something the
-reconcile loop can establish. The operator picks up the results by name.
-
-At every site you need:
-
-| Secret | Contents | Default name the operator looks for |
-|---|---|---|
-| this site's server cert | `tls.crt`, `tls.key`, optional `ca.crt` | whatever `cluster.ldap.tls.secretName` says |
-| every **other** site's CA | `ca.crt` | `<site>-ca` |
-| every **other** site's kubeconfig | `kubeconfig` | `<site>-kubeconfig` |
-| each database's credentials | `root-password`, `replication-password` | `<database>-credentials` |
-
-Both defaults are overridable per site (`caSecretName`, `kubeconfigSecret`) for
-when something else owns the naming — trust-manager writes a Bundle where its
-own resource says, External Secrets likewise.
-
-The `<database>-credentials` Secret must be **identical at every site**: the
-replication bind password is one value mesh-wide. Create it **before** the
-`SlapdDatabase`, or the operator generates a different random one per site and
-every cross-site bind fails with `err=49`.
-
-### From a naked lab to a replicating mesh
+### 2. Run the bootstrap
 
 Seven steps, in this order. Each is re-runnable, each takes its site list from
 `lab.yaml`, and every script has `--dry-run`. Nothing below asks you to name a
@@ -184,9 +167,7 @@ site twice — which matters, because the two names a site has (its identity and
 its kube context) are easy to confuse and expensive to get wrong.
 
 ```bash
-# 1. Describe the lab once: sites, serverIDIndex, contexts, endpoints.
-#    See lab.yaml.sample. Nothing below asks you for a site again.
-$EDITOR lab.yaml
+# (lab.yaml is step 1, above.)
 
 # 2. Credentials — per database, IDENTICAL at every site (ADR-008).
 ./scripts/mesh-share-credentials.sh -f values.directory.yaml -n slaptain
@@ -282,32 +263,55 @@ cert-manager plus trust-manager for the CAs, and External Secrets or a
 documented SOPS flow for the shared password, are the intended long-term tools
 for this step; nothing in the operator requires them.
 
-### 3. Install the operator at every site, with its identity
+### 3. What the bootstrap created, and under which names
+
+Each script above writes Secrets the operator then looks for BY NAME. When
+something else owns the naming — trust-manager writes a Bundle where its own
+resource says, External Secrets likewise — override it per site (`caSecretName`,
+`kubeconfigSecret`) rather than renaming what they produced.
+
+| Secret | Contents | Default name the operator looks for | Written by |
+|---|---|---|---|
+| this site's server cert | `tls.crt`, `tls.key`, optional `ca.crt` | whatever `cluster.ldap.tls.secretName` says | `mesh-establish-trust.sh` |
+| every **other** site's CA | `ca.crt` | `<site>-ca` | `mesh-establish-trust.sh` |
+| every **other** site's kubeconfig | `kubeconfig` | `<site>-kubeconfig` | `mesh-authorize-peers.sh` |
+| each database's credentials | `root-password`, `replication-password` | `<database>-credentials` | `mesh-share-credentials.sh` |
+
+Cross-site trust is pairwise and circular — site A needs site B's CA before site
+B exists — so it is an imperative, one-off step and not something a reconcile
+loop can establish. That is why these are scripts and not controller logic
+(ADR-028 §7); cert-manager with trust-manager, and External Secrets or a
+documented SOPS flow, are the intended long-term replacements. Nothing in the
+operator requires either.
+
+The `<database>-credentials` Secret must be **identical at every site**: the
+replication bind password is one value mesh-wide. Create it **before** the
+`SlapdDatabase`, or each site's operator generates a different random one and
+every cross-site bind fails with `err=49`. `mesh-share-credentials.sh` exists to
+make that true by construction — it adopts what the mesh already uses rather
+than generating per site.
+
+### 4. The two values files
+
+The chart takes `mesh`, `cluster`, `databases` and `schemas`. They come from two
+places because they have two different origins:
 
 ```bash
-# Site A:
-helm upgrade --install slaptain ./charts/operator \
-  -n slaptain-system --create-namespace --set siteName=site-a
-
-# Site B:
-helm upgrade --install slaptain ./charts/operator \
-  -n slaptain-system --create-namespace --set siteName=site-b
+./scripts/mesh-derive-topology.sh > values.topology.yaml   # generated: mesh:
+$EDITOR values.directory.yaml                              # yours: the rest
 ```
 
-This is the only command whose arguments differ between sites.
+**`values.topology.yaml`** is a pure function of `lab.yaml` — sites, their
+serverID indices, endpoints, the network mode. Regenerate it whenever the lab
+changes; never edit it.
 
-### 4. Apply one chart, with one values file, everywhere
+**`values.directory.yaml`** is the directory itself: the cluster shape, the
+databases and the schemas. No script can derive these, because they are choices
+rather than facts about the lab.
 
-```bash
-for ctx in site-a site-b site-c; do
-  helm --kube-context "$ctx" upgrade --install ldap ./charts/slapd-mesh \
-    -n slaptain --create-namespace \
-    -f my-mesh.yaml
-done
-```
-
-`charts/slapd-mesh/examples/three-site.yaml` is a complete working values file.
-The skeleton:
+One file works just as well if you prefer — the split is about provenance, not
+about helm. `charts/slapd-mesh/examples/three-site.yaml` is a complete working
+example in a single file. The skeleton:
 
 ```yaml
 mesh:
@@ -600,10 +604,15 @@ at each site.
 
 ### Adding a site
 
-1. Bootstrap trust and the shared credential Secrets for the new pair(s).
-2. Install the operator at the new site with its own `siteName`.
-3. Add the site to `mesh.sites` with a fresh `serverIDIndex`, and apply the
-   updated values file **everywhere**.
+1. Add it to `lab.yaml` with a fresh `serverIDIndex` — never a retired one.
+2. Re-run the bootstrap. All four scripts are re-runnable and converge on the
+   new site list: existing certificates are left alone, the new site's CA is
+   distributed to the others (and theirs to it), new kubeconfig pairs appear,
+   and `mesh-share-credentials.sh` copies the passwords the mesh ALREADY uses
+   rather than minting new ones — which is the step that would otherwise break
+   replication with `err=49`.
+3. Install the operator at the new site with its own `siteName`.
+4. Regenerate `values.topology.yaml` and apply both values files **everywhere**.
 
 During the rollout the sites run different generations of the mesh — site A
 already knows a site that site B does not. That is expected and tolerated:
@@ -616,14 +625,15 @@ Adding a peer changes the pod template (the new peer's CA mount), so the
 
 ### Removing a site
 
-Drop it from `mesh.sites` **everywhere**; do not reuse its `serverIDIndex`.
+Drop it from `lab.yaml`, regenerate the topology, and apply **everywhere**; do
+not reuse its `serverIDIndex`.
 Every remaining site's syncrepl stanza for it disappears on the next reconcile
 — the operator watches the mesh object, so this does not wait for a resync —
 and the pods roll to drop the now-unused CA mount.
 
 ### Changing a database or a schema
 
-Edit the one values file and apply it at every site. The invariant table above
+Edit the directory values file and apply it at every site. The invariant table above
 is the checklist for what must not end up differing.
 
 ### Blast radius
