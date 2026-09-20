@@ -324,83 +324,14 @@ EOF
 setup_remote_kubeconfigs() {
     [[ "$MULTISITE" -eq 0 ]] && return
     discovery_mode || return
-    log "Setting up cross-site kubeconfig Secrets for dynamic discovery..."
-
-    # The script reads the lab file itself: each site's API address on the
-    # REPLICATION network (sites[].endpoint) and its logical name, which it uses
-    # for the Secret name — "<site>-kubeconfig", exactly what
-    # MeshSite.KubeconfigSecretFor() derives. Two things went away with that:
-    #
-    #  * this function used to synthesise the address as
-    #    "https://<node InternalIP>:<port scraped from the kubectl URL>", which
-    #    pinned peer discovery to ONE node — the node the lab's own `vms:`
-    #    inventory exists to shut down — and ignored sites[].endpoint even
-    #    though every lab file already declares it;
-    #  * and a rename pass, which copied each context-named Secret to its
-    #    site-derived name and deleted the original, because the script could
-    #    not name by site. It can now.
-    #
-    # Without a lab file (contexts on the command line) there is no declared
-    # endpoint and no site name to use, so fall back to the old derivation.
-    if [[ -n "${E2E_CONFIG:-}" ]]; then
-        E2E_CONFIG="$E2E_CONFIG" "$PROJECT_ROOT/scripts/mesh-authorize-peers.sh" \
-            -n "$NAMESPACE_TESTING" --from-lab "$E2E_CONFIG"
-        return
-    fi
-
-    local pairs=()
-    for ctx in "${CONTEXTS[@]}"; do
-        local api_ip="${NODE_IPS[$ctx]}"
-        local api_server api_port
-        api_server=$(kctl "$ctx" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-        if [[ "$api_server" =~ :([0-9]+)$ ]]; then
-            api_port="${BASH_REMATCH[1]}"
-        else
-            api_port="6443"
-        fi
-        pairs+=("${ctx}=https://${api_ip}:${api_port}")
-    done
+    log "Authorizing peer discovery (RBAC + kubeconfig Secrets)..."
+    # The script reads the derived lab file: each site's endpoint (declared, or
+    # the InternalIP fallback build_script_lab_file computed) and its name,
+    # which it uses for the Secret — "<site>-kubeconfig", exactly what
+    # MeshSite.KubeconfigSecretFor() derives. The rename pass that used to
+    # follow this call is gone with it.
     "$PROJECT_ROOT/scripts/mesh-authorize-peers.sh" \
-        -n "$NAMESPACE_TESTING" \
-        "${pairs[@]}"
-    rename_kubeconfig_secrets_for_mesh
-}
-
-# scripts/mesh-authorize-peers.sh names its Secrets "<label>-kubeconfig",
-# and the label is also the kubectl context it dials — the two cannot be
-# separated without changing that script, which is outside this change's scope
-# (ADR-028 §7 has it slated for replacement by External Secrets / a bootstrap
-# CLI, not for a new parameter).
-#
-# The mesh path needs "<site>-kubeconfig", because that is what
-# MeshSite.KubeconfigSecretFor() derives when the site declares no explicit
-# Secret — and declaring one is not an option: it would have to carry a kube
-# context name into a values file the References policy keeps public.
-#
-# So: copy each Secret to its site-derived name and DELETE the original. The
-# delete is the point — it leaves exactly one Secret, under the name the
-# operator derives, so a green run proves the derivation was used rather than
-# merely that a Secret with a plausible name existed.
-rename_kubeconfig_secrets_for_mesh() {
-    log "Renaming kubeconfig Secrets onto the mesh's site names..."
-    local dst src from to payload
-    for dst in "${CONTEXTS[@]}"; do
-        for src in "${CONTEXTS[@]}"; do
-            [[ "$src" == "$dst" ]] && continue
-            from="${src}-kubeconfig"
-            to="$(peer_kubeconfig_secret "$src")"
-            [[ "$from" == "$to" ]] && continue
-            payload=$(kctl "$dst" -n "$NAMESPACE_TESTING" get secret "$from" \
-                -o jsonpath='{.data.kubeconfig}' | base64 -d)
-            [[ -z "$payload" ]] && die "[$dst] Secret $from carries no kubeconfig key"
-            log "  [$dst] $from → $to"
-            kctl "$dst" -n "$NAMESPACE_TESTING" create secret generic "$to" \
-                --from-literal=kubeconfig="$payload" \
-                --dry-run=client -o yaml \
-                | kctl "$dst" apply -f -
-            kctl "$dst" -n "$NAMESPACE_TESTING" delete secret "$from" --ignore-not-found >/dev/null
-        done
-    done
+        -n "$NAMESPACE_TESTING" --from-lab "$SCRIPT_LAB_FILE"
 }
 
 # ── Site identity (ADR-028) ──────────────────────────────────────────────────
@@ -564,18 +495,75 @@ resolve_cr_names() {
     fi
 }
 
-# ── Setup phases ─────────────────────────────────────────────────────────────
+# ── The lab file the bootstrap scripts read ───────────────────────────────────
+#
+# scripts/mesh-*.sh all take their sites from a lab file, which is the whole
+# point: one format, one place, and the tool a user runs is the tool this suite
+# runs. But the suite knows two things the user's file does not necessarily
+# state — the node InternalIPs it discovered, and the endpoint derivation for a
+# run whose contexts came from the command line — so it hands the scripts a
+# DERIVED file rather than the user's own.
+#
+# Derived, never edited in place: the user's lab.yaml is an input to this suite
+# and the suite has no business writing to it.
+#
+# certIPs carries the node InternalIP as an extra SAN. The pre-delegation code
+# SANed it alongside the access IP, and dropping it here would have quietly
+# changed what every fixture certificate covers — the kind of difference that
+# only shows up when two paths are forced together, which is the reason for
+# forcing them together.
+SCRIPT_LAB_FILE=""
+build_script_lab_file() {
+    SCRIPT_LAB_FILE=$(mktemp /tmp/e2e-lab.XXXXXX.yaml)
+    {
+        echo "# Generated by tests/e2e.sh for scripts/mesh-*.sh — not the user's lab.yaml."
+        echo "sites:"
+        local ctx
+        for ctx in "${CONTEXTS[@]}"; do
+            local endpoint=""
+            if [[ -n "${E2E_CONFIG:-}" ]]; then
+                endpoint=$(yq -r "(.sites[] | select((.context // .name) == \"$ctx\") | .endpoint) // \"\"" "$E2E_CONFIG")
+            fi
+            if [[ -z "$endpoint" ]]; then
+                # No declared endpoint (command-line contexts, or a lab file
+                # that omits it): fall back to the node's InternalIP with the
+                # port from its kubeconfig entry. Pins peer discovery to one
+                # node, which is exactly why sites[].endpoint exists — so this
+                # is the fallback, not the rule.
+                local api_server api_port="6443"
+                api_server=$(kctl "$ctx" config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)
+                [[ "$api_server" =~ :([0-9]+)$ ]] && api_port="${BASH_REMATCH[1]}"
+                endpoint="https://${NODE_IPS[$ctx]}:${api_port}"
+            fi
+            echo "  - name: ${SITE_NAMES[$ctx]}"
+            echo "    serverIDIndex: ${SITE_INDICES[$ctx]}"
+            echo "    context: ${ctx}"
+            echo "    endpoint: ${endpoint}"
+            echo "    nodeAccessIP: ${NODE_ACCESS_IPS[$ctx]}"
+            if [[ "${NODE_ACCESS_IPS[$ctx]}" != "${NODE_IPS[$ctx]}" ]]; then
+                echo "    certIPs: [${NODE_IPS[$ctx]}]"
+            fi
+        done
+    } > "$SCRIPT_LAB_FILE"
+    log "Lab file for the bootstrap scripts: $SCRIPT_LAB_FILE"
+}
 
-generate_shared_credentials() {
-    log "Generating shared database credentials..."
-    SHARED_ROOT_PW=$(openssl rand -base64 18)
-    SHARED_REPL_PW=$(openssl rand -base64 24)
-    # Distinct pair for the second database: per-database credentials are the
-    # documented model (one <dbname>-credentials Secret per SlapdDatabase), and
-    # reusing db1's values would make a wrong-secret-wiring bug invisible — a
-    # bind carrying db1's password against db2's entry would falsely succeed.
-    SHARED_ROOT_PW2=$(openssl rand -base64 18)
-    SHARED_REPL_PW2=$(openssl rand -base64 24)
+# Credentials and TLS trust, both delegated to the scripts a user runs.
+#
+# They were inline loops here until the scripts existed, and keeping copies
+# would have guaranteed drift: the suite's copy is exercised every cycle and the
+# user's is exercised at demo time. Delegating makes the documented path the
+# tested one.
+setup_shared_credentials() {
+    local dbs=(--database "$DB_CR_NAME")
+    [[ -n "$DB2_CR_NAME" ]] && dbs+=(--database "$DB2_CR_NAME")
+    "$PROJECT_ROOT/scripts/mesh-share-credentials.sh" \
+        --from-lab "$SCRIPT_LAB_FILE" -n "$NAMESPACE_TESTING" "${dbs[@]}"
+}
+
+setup_tls_trust() {
+    "$PROJECT_ROOT/scripts/mesh-establish-trust.sh" \
+        --from-lab "$SCRIPT_LAB_FILE" -n "$NAMESPACE_TESTING" --cluster slapd
 }
 
 setup_foundation() {
@@ -592,55 +580,6 @@ setup_foundation() {
             kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$PULL_SECRET_FILE"
         fi
 
-        log "[$ctx] Pre-creating shared database credentials ($DB_CREDENTIALS_SECRET)..."
-        kctl "$ctx" create secret generic "$DB_CREDENTIALS_SECRET" \
-            -n "$NAMESPACE_TESTING" \
-            --from-literal=root-password="$SHARED_ROOT_PW" \
-            --from-literal=replication-password="$SHARED_REPL_PW" \
-            --dry-run=client -o yaml \
-            | kctl "$ctx" apply -f -
-
-        # The second database needs its Secret pre-created and shared for the
-        # same reason the first does: cn=replication,<suffix> is an entry
-        # INSIDE the replicated DIT, so exactly one password can match across
-        # the mesh (ADR-008's uniform-password assumption — "the Secret is
-        # copied between clusters before deploying the SlapdDatabase CR").
-        # Without this, each site's SlapdDatabase controller auto-generates its
-        # own random pair and db2's cross-site binds fail with err=49 —
-        # reconcile-loop-fixes.md 2026-09-13.
-        if [[ -n "$DB2_CR_NAME" ]]; then
-            log "[$ctx] Pre-creating shared database credentials ($DB2_CREDENTIALS_SECRET)..."
-            kctl "$ctx" create secret generic "$DB2_CREDENTIALS_SECRET" \
-                -n "$NAMESPACE_TESTING" \
-                --from-literal=root-password="$SHARED_ROOT_PW2" \
-                --from-literal=replication-password="$SHARED_REPL_PW2" \
-                --dry-run=client -o yaml \
-                | kctl "$ctx" apply -f -
-        fi
-
-        # TLS certificate: node IPs for NodePort access. SAN both the runner-facing
-        # address (internal NIC, for the test runner's ldaps) and the InternalIP
-        # (replication net, for cross-site peers' ldaps); they coincide unless a
-        # runner override is set. Multus IPs are NOT needed as SANs — the operator
-        # sets tls_reqcert=allow on syncrepl stanzas for IP-based providers, so CA
-        # verification suffices (ADR-007).
-        local cert_ips="${NODE_IPS[$ctx]}"
-        if [[ "${NODE_ACCESS_IPS[$ctx]}" != "${NODE_IPS[$ctx]}" ]]; then
-            cert_ips="${NODE_ACCESS_IPS[$ctx]},${NODE_IPS[$ctx]}"
-        fi
-        log "[$ctx] Generating TLS certificate (IP SANs: ${cert_ips})..."
-        (
-            cd "$SCRIPT_DIR"
-            ./gencert.sh \
-                -c "$ctx" \
-                -n "$NAMESPACE_TESTING" \
-                -t slapd \
-                -s slapd \
-                -H slapd-headless \
-                -i "${cert_ips}" \
-                slapd-tls
-        )
-
         log "[$ctx] Installing operator (tag: $IMAGE_TAG, site: ${SITE_NAMES[$ctx]})..."
         local operator_multus_sets=()
         if [[ -n "$MULTUS_NETWORK" ]]; then
@@ -653,37 +592,6 @@ setup_foundation() {
             --set "siteName=${SITE_NAMES[$ctx]}" \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${operator_multus_sets[@]}"
-    done
-}
-
-setup_cross_trust() {
-    [[ "$MULTISITE" -eq 0 ]] && return
-    log "Setting up cross-cluster TLS trust..."
-
-    # Extract CA cert from each cluster.
-    declare -A CA_CERTS
-    for ctx in "${CONTEXTS[@]}"; do
-        CA_CERTS[$ctx]=$(kctl "$ctx" -n "$NAMESPACE_TESTING" get secret slapd-tls \
-            -o jsonpath='{.data.ca\.crt}' | base64 -d)
-        [[ -z "${CA_CERTS[$ctx]}" ]] && die "Could not extract CA cert from $ctx"
-    done
-
-    # Create cross-trust secrets: on each cluster, install every OTHER cluster's CA.
-    # The Secret NAME is whatever the consumer of this trust will look for — see
-    # peer_ca_secret. The operator derives it from the mesh site, so it is
-    # "<site>-ca"; nothing writes a tlsSecretName into a peer spec any more, and
-    # getting this name right is what wires the trust.
-    for dst in "${CONTEXTS[@]}"; do
-        for src in "${CONTEXTS[@]}"; do
-            [[ "$src" == "$dst" ]] && continue
-            local ca_secret
-            ca_secret="$(peer_ca_secret "$src")"
-            log "  ${ca_secret} → $dst"
-            kctl "$dst" -n "$NAMESPACE_TESTING" create secret generic "$ca_secret" \
-                --from-literal=ca.crt="${CA_CERTS[$src]}" \
-                --dry-run=client -o yaml \
-                | kctl "$dst" apply -f -
-        done
     done
 }
 
@@ -1116,7 +1024,7 @@ run_tests() {
         # The cn=config admin password is per-cluster: each SlapdCluster
         # auto-generates its own <name>-config-password, and unlike the database
         # credentials (pre-created identically on every site by
-        # generate_shared_credentials) it is NOT shared. So the suite's rootPW —
+        # scripts/mesh-share-credentials.sh) it is NOT shared. So the suite's rootPW —
         # read from the LOCAL cluster — cannot bind cn=admin,cn=config on a
         # remote site, and any diagnostic that tried got
         # `LDAP Result Code 49 "Invalid Credentials"`. Export the remote site's
@@ -1666,8 +1574,12 @@ do_setup() {
     require_discovery_transport
     require_image_in_registry slapd "$SLAPD_TAG"
     require_image_in_registry operator "$IMAGE_TAG"
+    build_script_lab_file
     setup_foundation
-    setup_cross_trust
+    # The bootstrap proper, in the order docs/MULTI-SITE.md documents, each step
+    # delegated to the script a user would run.
+    setup_shared_credentials
+    setup_tls_trust
     setup_remote_kubeconfigs
     # The fixture's non-CR manifests (the readpw Secret). The SlapdDatabases and
     # SlapdSchemas themselves come out of charts/slapd-mesh below, in the same
@@ -1720,7 +1632,6 @@ fi
 
 discover_node_ips
 resolve_cr_names
-generate_shared_credentials  # one shared password set across all contexts
 
 case "$subcommand" in
     setup)

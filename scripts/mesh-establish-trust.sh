@@ -60,6 +60,8 @@ Options:
       --cluster NAME     SlapdCluster name; drives the cert's SANs and the
                          headless Service name (default: slapd)
       --from-lab FILE    Lab file to read (default: \$E2E_CONFIG or lab.yaml)
+                         Per site it reads: name, context, nodeAccessIP, and
+                         certIPs (optional extra IP SANs)
       --distribute-only  Skip issuance; only spread the CAs already present
       --dry-run          Say what would happen; change nothing
   -h, --help             Show this help
@@ -97,7 +99,17 @@ for i in $(seq 0 $((count - 1))); do
     name=$(yq -r ".sites[$i].name // \"\"" "$LAB_FILE")
     ctx=$(yq -r ".sites[$i].context // .sites[$i].name // \"\"" "$LAB_FILE")
     nip=$(yq -r ".sites[$i].nodeAccessIP // \"\"" "$LAB_FILE")
+    # certIPs: further addresses this site's certificate must cover, beyond
+    # nodeAccessIP. Optional, and normally empty — pod IPs do NOT belong here
+    # (IP-addressed peers use tls_reqcert=allow, ADR-007). It exists because a
+    # caller can know about an address the lab file does not describe: the test
+    # harness SANs the node InternalIP as well, and dropping that silently when
+    # it delegated here would change what its certificates cover.
+    extra=$(yq -r ".sites[$i].certIPs // [] | join(\",\")" "$LAB_FILE")
     [[ -z "$name" ]] && die "$LAB_FILE: sites[$i] has no name"
+    if [[ -n "$extra" ]]; then
+        nip="${nip:+$nip,}$extra"
+    fi
     SITES+=("$name"); CONTEXTS+=("$ctx"); NODEIPS+=("$nip")
 done
 
