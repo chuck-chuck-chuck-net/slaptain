@@ -486,7 +486,7 @@ replication:
     - name: site-b
       discovery:
         kubeconfigSecret:
-          name: siteB-kubeconfig     # Created by scripts/create-remote-kubeconfig.sh
+          name: siteB-kubeconfig     # Created by scripts/mesh-authorize-peers.sh
       tlsSecretName: "site-b-ca"
       # bindDN/bindPasswordSecretName unset: per-database identity derived
 ```
@@ -494,7 +494,7 @@ replication:
 Provision the kubeconfig Secrets:
 
 ```bash
-./scripts/create-remote-kubeconfig.sh \
+./scripts/mesh-authorize-peers.sh \
   -n slaptain-testing \
   siteA=https://192.168.99.1:6443 \
   siteB=https://192.168.99.2:6443
@@ -644,7 +644,7 @@ MULTUS_NETWORK=infra/replication-net make e2e-multisite CONTEXTS="s1 s2"
 
 The operator queries each remote cluster's k8s API over the replication network to discover
 pod Multus IPs automatically. No IPs need to be known in advance. The script provisions
-cross-site RBAC and kubeconfig Secrets via `scripts/create-remote-kubeconfig.sh`, then
+cross-site RBAC and kubeconfig Secrets via `scripts/mesh-authorize-peers.sh`, then
 configures `ExternalPeer.Discovery` on the SlapdCluster CRs.
 
 **Multus static podAddresses** — removed from the harness (MESH-PLAN Phase 7).
@@ -688,7 +688,7 @@ make e2e-multisite-teardown CONTEXTS="s1 s2"
 3. Per cluster: creates namespace, credentials Secret, TLS cert (with node IP SAN), operator
    (with Multus annotation in dynamic discovery mode)
 4. Extracts each cluster's CA, creates cross-trust Secrets on every other cluster
-5. **(Dynamic discovery only)** Runs `scripts/create-remote-kubeconfig.sh` to create RBAC and
+5. **(Dynamic discovery only)** Runs `scripts/mesh-authorize-peers.sh` to create RBAC and
    kubeconfig Secrets for cross-site API access over the replication network
 6. Deploys SlapdCluster on each cluster **without** externalPeers (Multus) or **with**
    NodePort-based externalPeers (no Multus)

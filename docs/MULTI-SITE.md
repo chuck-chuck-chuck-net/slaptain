@@ -187,13 +187,13 @@ from `lab.yaml`, so nothing is typed twice. Every script has `--dry-run`.
 $EDITOR lab.yaml
 
 # 2. Credentials — per database, IDENTICAL at every site (ADR-008).
-./scripts/mesh-credentials.sh -f values.directory.yaml -n slaptain
+./scripts/mesh-share-credentials.sh -f values.directory.yaml -n slaptain
 
 # 3+4. A certificate per site, then every site's CA to all the others.
-./scripts/mesh-trust.sh -n slaptain --cluster slapd
+./scripts/mesh-establish-trust.sh -n slaptain --cluster slapd
 
 # 5. RBAC + one kubeconfig Secret per ordered site pair, for peer discovery.
-./scripts/create-remote-kubeconfig.sh -n slaptain
+./scripts/mesh-authorize-peers.sh -n slaptain
 
 # 6. The operator, per site. The --set is the ONLY per-site argument anywhere.
 for s in site-1 site-2 site-3; do
@@ -203,7 +203,7 @@ for s in site-1 site-2 site-3; do
 done
 
 # 7. The mesh itself: topology generated from lab.yaml, directory hand-written.
-./scripts/mesh-topology.sh > values.topology.yaml
+./scripts/mesh-derive-topology.sh > values.topology.yaml
 for s in site-1 site-2 site-3; do
   helm --kube-context "$s" upgrade --install ldap \
     oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh \
@@ -219,14 +219,14 @@ the databases agree.
 **Why the order.** Steps 2-5 are the imperative bootstrap: material the operator
 needs to already exist. Step 7 is the declarative steady state. Within the
 bootstrap, only one ordering is forced — CA distribution cannot run before every
-site has a certificate, which is why `mesh-trust.sh` does both and you do not
+site has a certificate, which is why `mesh-establish-trust.sh` does both and you do not
 run them separately.
 
 **Why credentials and certificates are separate scripts**, when both merely
 create Secrets: the rules are opposite. A replication password must be
 *identical* at every site, because the legacy `cn=replication,<suffix>` identity
 lives inside the replicated tree and only one password can match. A certificate
-must *differ* per site, because it carries that site's names. `mesh-credentials.sh`
+must *differ* per site, because it carries that site's names. `mesh-share-credentials.sh`
 therefore adopts whatever the mesh already uses rather than generating per site —
 get that wrong and replication fails with `err=49`, an authentication error that
 sends you looking at TLS and firewalls.
@@ -235,7 +235,7 @@ sends you looking at TLS and firewalls.
 The cluster shape, the databases and the schemas are choices, not facts about the
 lab, so no script can derive them. That file is yours.
 
-`scripts/create-remote-kubeconfig.sh` provisions the RBAC and the kubeconfig
+`scripts/mesh-authorize-peers.sh` provisions the RBAC and the kubeconfig
 Secrets for a set of sites. **Run it with no arguments**: it reads `lab.yaml`
 (`$E2E_CONFIG`, else the repo root, else `--from-lab FILE`) and takes each
 site's `name`, its `context`, and its `endpoint` — the API address reachable
@@ -252,7 +252,7 @@ to whatever came out.
 grouped by the cluster it would land on, and contacts nothing:
 
 ```bash
-./scripts/create-remote-kubeconfig.sh --dry-run -n slaptain \
+./scripts/mesh-authorize-peers.sh --dry-run -n slaptain \
     site-1=https://api.site-1.k8s.example:6443 \
     site-2=https://api.site-2.k8s.example:6443
 ```

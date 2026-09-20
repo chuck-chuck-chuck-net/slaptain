@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# The per-database credential Secrets a mesh needs, IDENTICAL at every site.
+# Share one set of database credentials across every site of a mesh.
+#
+# Shares, rather than creates: the Secrets are incidental, the INVARIANT is the
+# point — the same replication password at every site.
 #
 # THIS IS THE ONE PREREQUISITE THAT FAILS AS SOMETHING ELSE. Each SlapdDatabase
 # reads <database>-credentials for two values: root-password (the database's
@@ -25,11 +28,11 @@
 # joins with the passwords the mesh already uses. Nothing is ever rotated here —
 # rotation is a deliberate act (ADR-027) and belongs nowhere near bootstrap.
 #
-# DELIBERATELY NOT HERE: certificates. See scripts/mesh-trust.sh for why the
+# DELIBERATELY NOT HERE: certificates. See scripts/mesh-establish-trust.sh for why the
 # opposite rules (identical everywhere vs different per site) keep them apart.
 #
 # Usage:
-#   ./scripts/mesh-credentials.sh -f values.directory.yaml [-n NAMESPACE]
+#   ./scripts/mesh-share-credentials.sh -f values.directory.yaml [-n NAMESPACE]
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"

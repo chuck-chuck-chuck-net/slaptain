@@ -48,8 +48,8 @@ sites:
                                       # On dual-homed nodes this is NOT the
                                       # address in your kubeconfig — that one
                                       # is the admin network. Read by
-                                      # scripts/create-remote-kubeconfig.sh and
-                                      # scripts/mesh-topology.sh.
+                                      # scripts/mesh-authorize-peers.sh and
+                                      # scripts/mesh-derive-topology.sh.
     nodeAccessIP: 198.51.100.10       # slaptain: NodePort + TLS-SAN address.
                                       # Needed on dual-homed nodes whose k8s
                                       # InternalIP the test runner cannot

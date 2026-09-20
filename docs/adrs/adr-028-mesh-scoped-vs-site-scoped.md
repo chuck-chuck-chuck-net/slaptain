@@ -322,7 +322,7 @@ once, where per-site manifests would localise the mistake. More visible, and mor
 dangerous.
 
 Continuous parity checking needs RBAC we do not have: the operator reads CRs on
-peer clusters, so `scripts/create-remote-kubeconfig.sh` must grant CR reads
+peer clusters, so `scripts/mesh-authorize-peers.sh` must grant CR reads
 alongside pod discovery.
 
 The e2e suite is rewritten onto the tooling, which is the proof the tooling is

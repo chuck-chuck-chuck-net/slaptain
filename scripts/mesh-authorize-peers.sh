@@ -1,5 +1,6 @@
 #!/bin/bash
-# Create the cross-site kubeconfig Secrets that peer discovery needs.
+# Authorize peer discovery: RBAC on every cluster, plus one kubeconfig Secret
+# per ordered site pair.
 #
 # Every site's operator has to read the OTHER sites' pod IPs to write its
 # syncrepl stanzas, and it does that by querying their Kubernetes APIs. This
@@ -27,13 +28,13 @@
 #                and a kubeconfig carrying it would work from your laptop and
 #                fail from a pod. Required in this mode, for that reason.
 #
-#   ./scripts/create-remote-kubeconfig.sh -n slaptain-testing
-#   ./scripts/create-remote-kubeconfig.sh --from-lab other-lab.yaml
+#   ./scripts/mesh-authorize-peers.sh -n slaptain-testing
+#   ./scripts/mesh-authorize-peers.sh --from-lab other-lab.yaml
 #
 # FROM THE COMMAND LINE (overrides the file). Positional CONTEXT=API_URL pairs,
 # where API_URL is again the pod-reachable address:
 #
-#   ./scripts/create-remote-kubeconfig.sh siteA=https://192.0.2.10:6443 \
+#   ./scripts/mesh-authorize-peers.sh siteA=https://192.0.2.10:6443 \
 #                                         siteB=https://192.0.2.20:6443
 #
 # One difference, and it is the reason to prefer the file: with no lab file
@@ -52,7 +53,7 @@
 # output shows the SHAPE faithfully and the credentials not at all. Applying it
 # will not produce a working mesh, and is not the point.
 #
-#   ./scripts/create-remote-kubeconfig.sh --dry-run -n slaptain-testing
+#   ./scripts/mesh-authorize-peers.sh --dry-run -n slaptain-testing
 #
 # ── WHAT IT CREATES, PER SITE ────────────────────────────────────────────────
 #

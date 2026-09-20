@@ -100,8 +100,12 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── slapd-init/Containerfile    # Bootstrap init container image (2.7.1; Containerfile.ol26 = legacy 2.6)
 │   ├── slapd-toolkit/Containerfile # Toolkit image (ldap-utils, python3, pyyaml, ldap3)
 │   └── operator/Containerfile      # Operator image (multi-stage, distroless/static)
-├── scripts/
-│   └── create-remote-kubeconfig.sh # Cross-site RBAC + kubeconfig Secret provisioning (ADR-007)
+├── scripts/                        # Mesh bootstrap, all reading lab.yaml, all with --dry-run
+│   ├── mesh-derive-topology.sh     # lab.yaml → the chart's mesh: block (pure; stdout)
+│   ├── mesh-share-credentials.sh   # one credential set per database, IDENTICAL per site (ADR-008)
+│   ├── mesh-establish-trust.sh     # a cert per site, then every site's CA to the others (ADR-007)
+│   ├── mesh-authorize-peers.sh     # RBAC + one kubeconfig Secret per ordered site pair
+│   └── image-tag.sh                # the one tag derivation, shared by Makefile and e2e.sh
 ├── operator/                       # kubebuilder v4 Go operator (own Go module)
 │   ├── api/v1alpha1/
 │   │   ├── slapdcluster_types.go   # SlapdCluster CRD (+ Restoring phase, status.restore — ADR-014)

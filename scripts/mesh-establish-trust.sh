@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# TLS trust for a mesh: a server certificate per site, then every site's CA
-# distributed to all the others.
+# Establish TLS trust across a mesh: a server certificate per site, then every
+# site's CA distributed to all the others.
+#
+# Establishes, rather than issues: a certificate nobody else trusts is not trust,
+# and neither half alone is useful.
 #
 # These are one script because they are one ordered operation. The CA
 # distribution consumes what the certificate issuance produces, and it cannot
@@ -20,7 +23,7 @@
 # replication password must be IDENTICAL at every site (ADR-008), while a
 # certificate must DIFFER per site because it carries that site's names. One
 # script with both behaviours under one name would be a trap. See
-# scripts/mesh-credentials.sh.
+# scripts/mesh-share-credentials.sh.
 #
 # Issuance uses tests/gencert.sh, which asks the cluster's own CA to sign via
 # the CSR API — free trust inside each cluster, four sharp edges, all of them in
@@ -29,7 +32,7 @@
 # the CAs it finds.
 #
 # Usage:
-#   ./scripts/mesh-trust.sh [-n NAMESPACE] [--cluster NAME] [options]
+#   ./scripts/mesh-establish-trust.sh [-n NAMESPACE] [--cluster NAME] [options]
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"

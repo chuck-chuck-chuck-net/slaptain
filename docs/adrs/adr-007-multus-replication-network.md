@@ -541,7 +541,7 @@ rules:
 Read-only. The operator never modifies remote resources. Slaptain's operator only reads pod
 annotations for IP discovery.
 
-A helper script `scripts/create-remote-kubeconfig.sh` automates the cross-site RBAC setup:
+A helper script `scripts/mesh-authorize-peers.sh` automates the cross-site RBAC setup:
 
 1. Creates `slaptain-remote-reader` ServiceAccount + Role + RoleBinding on the remote cluster.
 2. Creates a long-lived token Secret (not projected — the operator needs it without token
@@ -551,7 +551,7 @@ A helper script `scripts/create-remote-kubeconfig.sh` automates the cross-site R
 
 Usage:
 ```bash
-./scripts/create-remote-kubeconfig.sh \
+./scripts/mesh-authorize-peers.sh \
   --local-context t3e \
   --remote-context bento \
   --remote-api-addr 192.168.99.2:6443 \
@@ -638,7 +638,7 @@ type ExternalPeerStatus struct {
 
 Existing `podAddresses` configurations continue to work. To migrate to discovery mode:
 
-1. Run `scripts/create-remote-kubeconfig.sh` to set up cross-site RBAC and Secrets.
+1. Run `scripts/mesh-authorize-peers.sh` to set up cross-site RBAC and Secrets.
 2. Enable Multus on the operator Deployment (set `multus.network` in operator Helm values).
 3. Replace `podAddresses` with `discovery` blocks on each `ExternalPeer`.
 4. The operator discovers the same IPs that were previously static — no replication

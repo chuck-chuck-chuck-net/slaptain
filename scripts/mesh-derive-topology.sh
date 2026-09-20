@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# lab.yaml → the slapd-mesh chart's `mesh:` block.
+# Derive the slapd-mesh chart's `mesh:` block from lab.yaml.
+#
+# Derives, rather than creates: this is a pure function of the lab file. It
+# contacts no cluster, changes nothing, and writes to stdout.
 #
 # This fills the gap between two well-defined things: lab.yaml describes a
 # SUBSTRATE (which clusters exist, how to reach them, which hypervisor holds
@@ -12,7 +15,7 @@
 # Those are choices, not facts about the lab. Keep them in a second values file
 # and hand both to helm:
 #
-#   ./scripts/mesh-topology.sh > values.topology.yaml
+#   ./scripts/mesh-derive-topology.sh > values.topology.yaml
 #   helm upgrade --install ldap charts/slapd-mesh \
 #       -f values.topology.yaml -f values.directory.yaml
 #
@@ -21,7 +24,7 @@
 # lab.yaml and stop here (ADR-028 §3).
 #
 # Usage:
-#   ./scripts/mesh-topology.sh [-f lab.yaml] [--mesh-name NAME]
+#   ./scripts/mesh-derive-topology.sh [-f lab.yaml] [--mesh-name NAME]
 set -euo pipefail
 
 LAB="${E2E_CONFIG:-}"
