@@ -50,12 +50,6 @@ sites:
                                       # is the admin network. Read by
                                       # scripts/mesh-authorize-peers.sh and
                                       # scripts/mesh-derive-topology.sh.
-    certIPs: []                       # OPTIONAL extra IP SANs for this site's
-                                      # certificate, beyond nodeAccessIP. Pod IPs
-                                      # do NOT belong here: IP-addressed peers use
-                                      # tls_reqcert=allow (ADR-007). tests/e2e.sh
-                                      # sets it to the node InternalIP for its own
-                                      # derived copy of this file.
     nodeAccessIP: 198.51.100.10       # slaptain: NodePort + TLS-SAN address.
                                       # Needed on dual-homed nodes whose k8s
                                       # InternalIP the test runner cannot

@@ -507,11 +507,13 @@ resolve_cr_names() {
 # Derived, never edited in place: the user's lab.yaml is an input to this suite
 # and the suite has no business writing to it.
 #
-# certIPs carries the node InternalIP as an extra SAN. The pre-delegation code
-# SANed it alongside the access IP, and dropping it here would have quietly
-# changed what every fixture certificate covers — the kind of difference that
-# only shows up when two paths are forced together, which is the reason for
-# forcing them together.
+# The node InternalIP is deliberately NOT a certificate SAN, though the
+# pre-delegation code made it one. Nothing verifies slapd against it: cross-site
+# peers dial POD IPs with tls_reqcert=allow (ADR-007), the operator uses
+# InsecureSkipVerify, slctl sets LDAPTLS_REQCERT=never, and this suite connects
+# over plain ldap:// on the NodePort. The old comment justified the SAN as
+# "for cross-site peers' ldaps", which named the wrong address and the wrong
+# verification.
 SCRIPT_LAB_FILE=""
 build_script_lab_file() {
     SCRIPT_LAB_FILE=$(mktemp /tmp/e2e-lab.XXXXXX.yaml)
@@ -540,9 +542,6 @@ build_script_lab_file() {
             echo "    context: ${ctx}"
             echo "    endpoint: ${endpoint}"
             echo "    nodeAccessIP: ${NODE_ACCESS_IPS[$ctx]}"
-            if [[ "${NODE_ACCESS_IPS[$ctx]}" != "${NODE_IPS[$ctx]}" ]]; then
-                echo "    certIPs: [${NODE_IPS[$ctx]}]"
-            fi
         done
     } > "$SCRIPT_LAB_FILE"
     log "Lab file for the bootstrap scripts: $SCRIPT_LAB_FILE"

@@ -60,17 +60,23 @@ Options:
       --cluster NAME     SlapdCluster name; drives the cert's SANs and the
                          headless Service name (default: slapd)
       --from-lab FILE    Lab file to read (default: \$E2E_CONFIG or lab.yaml)
-                         Per site it reads: name, context, nodeAccessIP, and
-                         certIPs (optional extra IP SANs)
+                         Per site it reads: name, context, nodeAccessIP
       --distribute-only  Skip issuance; only spread the CAs already present
       --dry-run          Say what would happen; change nothing
   -h, --help             Show this help
 
 The certificate's SANs cover the ClusterIP Service, its FQDNs, the per-pod
 wildcard *.<cluster>-headless.<ns>.svc.<domain>, and the site's nodeAccessIP
-when lab.yaml declares one (NodePort access). Pod IPs are NOT SANs: IP-addressed
-cross-site peers use tls_reqcert=allow, because a certificate cannot carry an
-address assigned after it was issued (ADR-007).
+when lab.yaml declares one.
+
+That list is deliberately short. The only thing in slaptain that VERIFIES this
+certificate is in-cluster syncrepl, pod to pod over headless DNS, which is what
+the wildcard is for. Cross-site peers dial IPs with tls_reqcert=allow (ADR-007
+— a certificate cannot carry an address assigned after it was issued), the
+operator dials with InsecureSkipVerify, and slctl sets LDAPTLS_REQCERT=never.
+nodeAccessIP is here for YOUR clients, which are the only parties that might
+verify by IP. Adding addresses "just in case" obscures which of them anything
+actually checks.
 EOF
     exit 1
 }
@@ -99,17 +105,7 @@ for i in $(seq 0 $((count - 1))); do
     name=$(yq -r ".sites[$i].name // \"\"" "$LAB_FILE")
     ctx=$(yq -r ".sites[$i].context // .sites[$i].name // \"\"" "$LAB_FILE")
     nip=$(yq -r ".sites[$i].nodeAccessIP // \"\"" "$LAB_FILE")
-    # certIPs: further addresses this site's certificate must cover, beyond
-    # nodeAccessIP. Optional, and normally empty — pod IPs do NOT belong here
-    # (IP-addressed peers use tls_reqcert=allow, ADR-007). It exists because a
-    # caller can know about an address the lab file does not describe: the test
-    # harness SANs the node InternalIP as well, and dropping that silently when
-    # it delegated here would change what its certificates cover.
-    extra=$(yq -r ".sites[$i].certIPs // [] | join(\",\")" "$LAB_FILE")
     [[ -z "$name" ]] && die "$LAB_FILE: sites[$i] has no name"
-    if [[ -n "$extra" ]]; then
-        nip="${nip:+$nip,}$extra"
-    fi
     SITES+=("$name"); CONTEXTS+=("$ctx"); NODEIPS+=("$nip")
 done
 

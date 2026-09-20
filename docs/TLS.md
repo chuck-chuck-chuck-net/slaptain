@@ -161,6 +161,26 @@ an incident review.
 The gate requires the first two to be present and non-empty. `ca.crt` is never
 required, because demanding it would break the public-CA case.
 
+## Who actually verifies this certificate
+
+Short answer, in slaptain itself: **one thing**. Worth knowing before you spend
+an afternoon on a SAN list.
+
+| client | posture |
+|---|---|
+| in-cluster syncrepl (pod → pod, headless DNS) | `tls_reqcert=demand` — **verifies**; this is what the per-pod wildcard SAN is for |
+| cross-site syncrepl (IP-addressed peers) | `tls_reqcert=allow` (ADR-007) — a certificate cannot carry an address assigned after it was issued |
+| cross-site syncrepl (DNS-addressed `uri` peers) | `demand` — verifies, against the peer's distributed CA |
+| the operator (CSN monitoring, backup source, connectivity) | `InsecureSkipVerify` |
+| `slctl` | sets `LDAPTLS_REQCERT=never` whenever it uses TLS |
+| the e2e suite | connects over plain `ldap://` |
+
+So **IP SANs exist for your clients, not for slaptain**. The only address
+slaptain itself validates is a DNS name. A SAN list that grows "just in case"
+obscures which entries anything checks — and the peer CA Secrets are still
+required regardless, because each stanza's `tls_cacert` names a file that must
+exist even where verification is relaxed.
+
 ## SANs the certificate needs
 
 | Name | Why |
