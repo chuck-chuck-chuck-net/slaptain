@@ -177,9 +177,17 @@ replication bind password is one value mesh-wide. Create it **before** the
 every cross-site bind fails with `err=49`.
 
 `scripts/create-remote-kubeconfig.sh` provisions the RBAC and the kubeconfig
-Secrets for a set of sites. Note that it names its Secrets after the **kubectl
-context**, so either name your contexts after your sites, or set
-`kubeconfigSecret.name` on the mesh site entry to the name it produced.
+Secrets for a set of sites. **Run it with no arguments**: it reads `lab.yaml`
+(`$E2E_CONFIG`, else the repo root, else `--from-lab FILE`) and takes each
+site's `name`, its `context`, and its `endpoint` — the API address reachable
+*from pods at the other sites*, which on dual-homed nodes is not the address in
+your kubeconfig. The Secrets are then named `<site>-kubeconfig`, exactly what
+the operator derives from the mesh, so nothing needs pinning.
+
+Naming sites explicitly still works — `CONTEXT=API_URL` pairs override the file
+— but with no site name available the Secrets are named after the **kubectl
+context**, and you must then set `kubeconfigSecret.name` on the mesh site entry
+to whatever came out.
 
 **Read it before you run it.** `--dry-run` prints every object it would create,
 grouped by the cluster it would land on, and contacts nothing:

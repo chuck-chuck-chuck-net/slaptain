@@ -1,45 +1,79 @@
 #!/bin/bash
-# Create kubeconfig Secrets for cross-site SlapdCluster peer discovery (ADR-007).
+# Create the cross-site kubeconfig Secrets that peer discovery needs.
 #
-# For each site pair, creates RBAC on the remote cluster and deploys a kubeconfig
-# Secret on the local cluster. The operator uses this kubeconfig to query the
-# remote k8s API over the replication network and discover pod Multus IPs.
+# Every site's operator has to read the OTHER sites' pod IPs to write its
+# syncrepl stanzas, and it does that by querying their Kubernetes APIs. This
+# script provisions what that requires: on each cluster a ServiceAccount with a
+# Role granting `get`/`list` on pods and nothing else, plus — on every site, for
+# every other site — a Secret holding a kubeconfig for that peer's API. N sites
+# means N×(N−1) such Secrets, because every site needs its own credential for
+# every other one. Works for both transports: pod-routed (ADR-016, the default)
+# reads the primary pod IP, multus (ADR-007) reads net1.
 #
-# Usage:
-#   ./scripts/create-remote-kubeconfig.sh [options] ctx1=API1 ctx2=API2 [ctx3=API3 ...]
+# ── TWO WAYS TO SAY WHICH SITES ───────────────────────────────────────────────
 #
-# Options:
-#   -n, --namespace NS    Namespace on all clusters (default: slaptain)
-#       --dry-run         Print the manifests instead of applying them, and
-#                         contact no cluster at all (see below)
-#   -h, --help            Show this help
+# FROM A LAB FILE (the default). With no positional arguments the script reads
+# lab.yaml — $E2E_CONFIG, else <repo-root>/lab.yaml, else whatever --from-lab
+# names — and takes each site's:
 #
-# DRY RUN. `--dry-run` prints every object this script would create, to stdout,
-# grouped by the cluster it would be applied to, with the progress log on
-# stderr — so it pipes and redirects like `helm template`. It talks to no
-# cluster, which also means it cannot fetch the ServiceAccount tokens: those are
-# replaced by an obvious placeholder. The output therefore shows the SHAPE
-# faithfully and the credentials not at all. Applying it will not produce a
-# working mesh, and is not the point: the point is to see what the real run
-# does, and where each piece lands.
+#     name       the site identity. Secrets are named "<name>-kubeconfig",
+#                which is exactly what the operator derives from the SlapdMesh
+#                (MeshSite.KubeconfigSecretFor), so nothing has to be pinned.
+#     context    the kubectl context to reach that cluster as an admin.
+#                Optional; defaults to name.
+#     endpoint   the API address to put IN the kubeconfig — the one reachable
+#                FROM PODS at the other sites. On dual-homed nodes this is NOT
+#                the address in your kubeconfig: that one is the admin network,
+#                and a kubeconfig carrying it would work from your laptop and
+#                fail from a pod. Required in this mode, for that reason.
 #
-# Each argument is CONTEXT=API_URL where API_URL is the k8s API server address
-# on the replication network (e.g., https://192.168.99.1:6443).
+#   ./scripts/create-remote-kubeconfig.sh -n slaptain-testing
+#   ./scripts/create-remote-kubeconfig.sh --from-lab other-lab.yaml
 #
-# Example (two sites):
-#   ./scripts/create-remote-kubeconfig.sh siteA=https://192.168.99.1:6443 siteB=https://192.168.99.2:6443
+# FROM THE COMMAND LINE (overrides the file). Positional CONTEXT=API_URL pairs,
+# where API_URL is again the pod-reachable address:
 #
-# This creates:
-#   - RBAC on both clusters (ServiceAccount + Role + RoleBinding)
-#   - Secret "siteB-kubeconfig" on siteA (kubeconfig for siteB's API)
-#   - Secret "siteA-kubeconfig" on siteB (kubeconfig for siteA's API)
+#   ./scripts/create-remote-kubeconfig.sh siteA=https://192.0.2.10:6443 \
+#                                         siteB=https://192.0.2.20:6443
 #
-# Then reference in SlapdCluster CR:
+# One difference, and it is the reason to prefer the file: with no lab file
+# there is no site name to use, so the Secrets are named after the CONTEXT
+# ("siteB-kubeconfig" for context siteB). If your contexts are not named after
+# your sites, point each mesh site's kubeconfigSecret.name at what came out.
+#
+# ── LOOK BEFORE YOU RUN ──────────────────────────────────────────────────────
+#
+# `--dry-run` prints every object this script would create, to stdout, grouped
+# by the cluster it would be applied to, with the progress log on stderr — so it
+# pipes and redirects like `helm template`. Each kubeconfig Secret is followed
+# by its payload decoded into comments, because base64 hides the one thing worth
+# reading. It talks to no cluster, which also means it cannot fetch the
+# ServiceAccount tokens: those are replaced by an obvious placeholder. The
+# output shows the SHAPE faithfully and the credentials not at all. Applying it
+# will not produce a working mesh, and is not the point.
+#
+#   ./scripts/create-remote-kubeconfig.sh --dry-run -n slaptain-testing
+#
+# ── WHAT IT CREATES, PER SITE ────────────────────────────────────────────────
+#
+#   Namespace, ServiceAccount, Role + RoleBinding (pods: get,list)
+#   Secret <sa>-token                  long-lived token, filled by the API server
+#   Secret <peer>-kubeconfig  × (N−1)  one per other site
+#
+# A mesh-driven SlapdCluster needs no further wiring: the operator derives the
+# Secret name per site. On a mesh-less cluster, reference it explicitly:
+#
 #   externalPeers:
 #     - name: site-b
 #       discovery:
 #         kubeconfigSecret:
-#           name: siteB-kubeconfig
+#           name: site-b-kubeconfig
+#
+# Note the kubeconfigs use insecure-skip-tls-verify: the peer API's certificate
+# rarely carries the replication-network address as a SAN. The credential is the
+# token; this affects how the API server is authenticated, not how the client is.
+#
+# tests/e2e.sh runs this script, so the documented path is the exercised one.
 set -euo pipefail
 
 NAMESPACE="slaptain"
@@ -59,24 +93,35 @@ die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat >&2 <<EOF
-Usage: $0 [options] ctx1=API1 ctx2=API2 [ctx3=API3 ...]
+Usage: $0 [options]                          # sites from lab.yaml (default)
+       $0 [options] ctx1=API1 ctx2=API2 ...  # sites named explicitly
 
-Creates cross-site kubeconfig Secrets for SlapdCluster peer discovery.
-Each site gets a Secret per remote site, used by ExternalPeer.Discovery.
+Provisions the RBAC and kubeconfig Secrets that cross-site peer discovery needs:
+N sites get N×(N-1) Secrets, one per ordered pair.
+
+With no positional arguments the sites come from a lab file — \$E2E_CONFIG, else
+<repo-root>/lab.yaml — using each site's name (which names the Secret, matching
+what the operator derives from the SlapdMesh), its context, and its endpoint:
+the API address reachable FROM PODS at the other sites, which on dual-homed
+nodes is not the one in your kubeconfig.
 
 Arguments:
-  CONTEXT=API_URL   kubectl context and its k8s API address on the
-                    replication network (e.g., siteA=https://192.168.99.1:6443)
+  CONTEXT=API_URL   kubectl context and that cluster's pod-reachable API address
+                    (e.g. siteA=https://192.0.2.10:6443). Overrides the lab
+                    file. Secrets are then named after the CONTEXT, since no
+                    site name is available.
 
 Options:
   -n, --namespace NS    Namespace on all clusters (default: slaptain)
+      --from-lab [FILE] Read sites from FILE (default: \$E2E_CONFIG or lab.yaml)
       --dry-run         Print the manifests instead of applying them; contacts
                         no cluster, so tokens are placeholders
   -h, --help            Show this help
 
 Examples:
-  $0 siteA=https://192.168.99.1:6443 siteB=https://192.168.99.2:6443
-  $0 -n slaptain-testing s1=https://192.168.99.1:6443 s2=https://192.168.99.2:6443
+  $0 -n slaptain-testing                     # the lab, as described in lab.yaml
+  $0 --dry-run -n slaptain-testing           # ...but just show me
+  $0 siteA=https://192.0.2.10:6443 siteB=https://192.0.2.20:6443
 EOF
     exit 1
 }
