@@ -178,8 +178,10 @@ every cross-site bind fails with `err=49`.
 
 ### From a naked lab to a replicating mesh
 
-Six commands, in this order. Each is re-runnable and each takes its site list
-from `lab.yaml`, so nothing is typed twice. Every script has `--dry-run`.
+Seven steps, in this order. Each is re-runnable, each takes its site list from
+`lab.yaml`, and every script has `--dry-run`. Nothing below asks you to name a
+site twice — which matters, because the two names a site has (its identity and
+its kube context) are easy to confuse and expensive to get wrong.
 
 ```bash
 # 1. Describe the lab once: sites, serverIDIndex, contexts, endpoints.
@@ -195,17 +197,23 @@ $EDITOR lab.yaml
 # 5. RBAC + one kubeconfig Secret per ordered site pair, for peer discovery.
 ./scripts/mesh-authorize-peers.sh -n slaptain
 
-# 6. The operator, per site. The --set is the ONLY per-site argument anywhere.
-for s in site-1 site-2 site-3; do
-  helm --kube-context "$s" upgrade --install slaptain \
+# 6. The operator, per site. siteName is the ONLY per-site argument anywhere —
+#    and note it is the SITE name, while --kube-context is the CONTEXT. They
+#    are different fields (context defaults to name, and in many labs differs),
+#    so read both from lab.yaml rather than assuming one is the other.
+yq -r '.sites[] | (.context // .name) + " " + .name' lab.yaml |
+while read -r ctx site; do
+  helm --kube-context "$ctx" upgrade --install slaptain \
     oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain \
-    -n slaptain-system --create-namespace --set "siteName=$s"
+    -n slaptain-system --create-namespace --set "siteName=$site"
 done
 
 # 7. The mesh itself: topology generated from lab.yaml, directory hand-written.
+#    The same two files go to every site, unchanged — that is the whole point.
 ./scripts/mesh-derive-topology.sh > values.topology.yaml
-for s in site-1 site-2 site-3; do
-  helm --kube-context "$s" upgrade --install ldap \
+yq -r '.sites[].context // .sites[].name' lab.yaml |
+while read -r ctx; do
+  helm --kube-context "$ctx" upgrade --install ldap \
     oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh \
     -n slaptain --create-namespace \
     -f values.topology.yaml -f values.directory.yaml
