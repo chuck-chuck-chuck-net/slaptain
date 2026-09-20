@@ -47,6 +47,9 @@ if [[ -z "$E2E_CONFIG" && -f "$_E2E_SELF_DIR/../lab.yaml" ]]; then
 fi
 
 LAB_CONTEXTS=()
+LAB_SITE_NAMES=()
+LAB_SITE_INDICES=()
+LAB_SITE_ENDPOINTS=()
 if [[ -n "$E2E_CONFIG" ]]; then
     if [[ ! -f "$E2E_CONFIG" ]]; then
         echo "ERROR: E2E_CONFIG=$E2E_CONFIG: no such file" >&2; exit 1
@@ -78,13 +81,21 @@ if [[ -n "$E2E_CONFIG" ]]; then
     # Per-site node-access IPs → E2E_NODE_ACCESS_IPS ("ctx=ip ..."). Sites
     # without nodeAccessIP keep the InternalIP default (single-homed nodes).
     if [[ -z "${E2E_NODE_ACCESS_IPS:-}" ]]; then
-        E2E_NODE_ACCESS_IPS="$(yq -r '[.sites[] | select(.nodeAccessIP) | .context + "=" + .nodeAccessIP] | join(" ")' "$E2E_CONFIG")"
+        E2E_NODE_ACCESS_IPS="$(yq -r '[.sites[] | select(.nodeAccessIP) | (.context // .name) + "=" + .nodeAccessIP] | join(" ")' "$E2E_CONFIG")"
         export E2E_NODE_ACCESS_IPS
     fi
 
     # Site contexts, in file order — the default context list when the command
-    # line names none.
-    mapfile -t LAB_CONTEXTS < <(yq -r '.sites[].context // ""' "$E2E_CONFIG" | grep -v '^$' || true)
+    # line names none. `context` is OPTIONAL and defaults to the site name,
+    # because a lab whose kube contexts are already named after its sites
+    # should not have to say so twice.
+    mapfile -t LAB_CONTEXTS < <(yq -r '.sites[] | (.context // .name) // ""' "$E2E_CONFIG" | grep -v '^$' || true)
+
+    # The site IDENTITY and its serverID slot, keyed by context. Both come from
+    # the file; neither is positional. See assign_site_names for why.
+    mapfile -t LAB_SITE_NAMES   < <(yq -r '.sites[].name // ""' "$E2E_CONFIG")
+    mapfile -t LAB_SITE_INDICES < <(yq -r '.sites[] | (.serverIDIndex // -1) | tostring' "$E2E_CONFIG")
+    mapfile -t LAB_SITE_ENDPOINTS < <(yq -r '.sites[] | (.endpoint // "")' "$E2E_CONFIG")
 fi
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -313,22 +324,35 @@ EOF
 setup_remote_kubeconfigs() {
     [[ "$MULTISITE" -eq 0 ]] && return
     discovery_mode || return
-
     log "Setting up cross-site kubeconfig Secrets for dynamic discovery..."
 
-    # Build context=API pairs. The API server address uses the node's replication
-    # network IP — discovered from the Multus network-status on the first running
-    # pod, or falling back to the node's InternalIP (which works when the API
-    # server binds 0.0.0.0 and the replication network is routable).
+    # The script reads the lab file itself: each site's API address on the
+    # REPLICATION network (sites[].endpoint) and its logical name, which it uses
+    # for the Secret name — "<site>-kubeconfig", exactly what
+    # MeshSite.KubeconfigSecretFor() derives. Two things went away with that:
+    #
+    #  * this function used to synthesise the address as
+    #    "https://<node InternalIP>:<port scraped from the kubectl URL>", which
+    #    pinned peer discovery to ONE node — the node the lab's own `vms:`
+    #    inventory exists to shut down — and ignored sites[].endpoint even
+    #    though every lab file already declares it;
+    #  * and a rename pass, which copied each context-named Secret to its
+    #    site-derived name and deleted the original, because the script could
+    #    not name by site. It can now.
+    #
+    # Without a lab file (contexts on the command line) there is no declared
+    # endpoint and no site name to use, so fall back to the old derivation.
+    if [[ -n "${E2E_CONFIG:-}" ]]; then
+        E2E_CONFIG="$E2E_CONFIG" "$PROJECT_ROOT/scripts/create-remote-kubeconfig.sh" \
+            -n "$NAMESPACE_TESTING" --from-lab "$E2E_CONFIG"
+        return
+    fi
+
     local pairs=()
     for ctx in "${CONTEXTS[@]}"; do
-        # Use node IP as the API server address on the replication network.
-        # The k8s API is reachable at the
-        # node's replication-network IP because it binds 0.0.0.0.
         local api_ip="${NODE_IPS[$ctx]}"
         local api_server api_port
         api_server=$(kctl "$ctx" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-        # Extract port from https://host:port — default 6443 if no port specified.
         if [[ "$api_server" =~ :([0-9]+)$ ]]; then
             api_port="${BASH_REMATCH[1]}"
         else
@@ -336,11 +360,9 @@ setup_remote_kubeconfigs() {
         fi
         pairs+=("${ctx}=https://${api_ip}:${api_port}")
     done
-
     "$PROJECT_ROOT/scripts/create-remote-kubeconfig.sh" \
         -n "$NAMESPACE_TESTING" \
         "${pairs[@]}"
-
     rename_kubeconfig_secrets_for_mesh
 }
 
@@ -387,20 +409,44 @@ rename_kubeconfig_secrets_for_mesh() {
 # per-site fact in the system (ADR-028 §4), and `spec.seed.site` is decided by
 # comparing the declared founder against it.
 #
-# The names are LOGICAL and POSITIONAL — the Nth context is `site-N` — not the
-# kube context names. Two reasons:
-#   * the fixtures in tests/resources/ are committed to a public repository and
-#     must name the founder, so the name has to be neutral (CLAUDE.md
-#     "References"); a lab's context names are not.
-#   * it keeps the fixture independent of which lab it runs against: any set of
-#     contexts, in any naming scheme, yields site-1..site-N.
-# Consequence worth stating: the founder is whichever context is listed FIRST,
-# exactly as it was when the seed was stripped from every context after the
-# first — the rule moved from the procedure into the spec, it did not change.
+# The name is LOGICAL — it is not the kube context name, though it may equal
+# one. The fixtures in tests/resources/ are committed to a public repository and
+# must name their founder (`seed.site`), so the name has to be neutral (CLAUDE.md
+# "References") and stable across labs; a lab's context names are neither.
+#
+# WHERE IT COMES FROM. lab.yaml's `sites[].name` is authoritative, and
+# `serverIDIndex` with it. Without a lab file — contexts named on the command
+# line — the historical positional rule applies: the Nth context is `site-N` at
+# index N-1. Both paths yield site-1..site-N for the standard lab, which is what
+# keeps the committed `seed.site: site-1` working.
+#
+# Neither is positional WITHIN the file, deliberately. A site name reaches into
+# tls_cacert paths, the <site>-ca and <site>-kubeconfig Secret names, seed.site
+# and the operator's SITE_NAME; the serverID index is baked into every CSN the
+# site's pods have written. Deriving either from list order would make
+# reordering YAML a silent rename or a silent renumber (ADR-017, ADR-028).
 assign_site_names() {
     local idx=1 ctx
     for ctx in "${CONTEXTS[@]}"; do
-        SITE_NAMES[$ctx]="site-${idx}"
+        local name="" index=""
+        local i
+        for i in "${!LAB_CONTEXTS[@]}"; do
+            if [[ "${LAB_CONTEXTS[$i]}" == "$ctx" ]]; then
+                name="${LAB_SITE_NAMES[$i]:-}"
+                index="${LAB_SITE_INDICES[$i]:-}"
+                break
+            fi
+        done
+        [[ -z "$name" ]] && name="site-${idx}"
+        if [[ -z "$index" || "$index" == "-1" ]]; then
+            if [[ -n "${E2E_CONFIG:-}" && -n "${LAB_SITE_NAMES[*]:-}" ]] && \
+               printf '%s\n' "${LAB_CONTEXTS[@]}" | grep -qxF "$ctx"; then
+                die "$E2E_CONFIG: site '$name' has no serverIDIndex. It is required and never inferred from list position — the index is the site's serverID decade, baked into every CSN its pods have written (ADR-017, ADR-028)."
+            fi
+            index=$((idx - 1))
+        fi
+        SITE_NAMES[$ctx]="$name"
+        SITE_INDICES[$ctx]="$index"
         ((idx++)) || true
     done
 }
@@ -683,14 +729,20 @@ build_mesh_values() {
 
     {
         echo "# Generated by tests/e2e.sh — ONE file, applied unchanged at every site."
+        # The mesh block comes from scripts/mesh-topology.sh whenever a lab file
+        # describes the sites, so the tool the docs tell users to run is the one
+        # the suite exercises on every cycle. A second implementation here would
+        # be free to drift, and would drift.
+        if [[ -n "${E2E_CONFIG:-}" ]]; then
+            "$PROJECT_ROOT/scripts/mesh-topology.sh" -f "$E2E_CONFIG" | grep -v '^#'
+        else
         echo "mesh:"
         echo "  name: slapd-mesh"
         echo "  sites:"
-        local idx=0 ctx
+        local ctx
         for ctx in "${CONTEXTS[@]}"; do
             echo "    - name: ${SITE_NAMES[$ctx]}"
-            echo "      serverIDIndex: ${idx}"
-            ((idx++)) || true
+            echo "      serverIDIndex: ${SITE_INDICES[$ctx]}"
         done
         if [[ -n "$POD_ROUTED" ]]; then
             echo "  network:"
@@ -700,6 +752,7 @@ build_mesh_values() {
             echo "    mode: multus"
             echo "    multusNetwork: \"$MULTUS_NETWORK\""
         fi
+        fi   # end: generator vs command-line-contexts fallback
 
         local pull_secrets="[]"
         [[ -n "${PULL_SECRET_NAME:-}" ]] && pull_secrets="[{\"name\": \"$PULL_SECRET_NAME\"}]"
@@ -1545,6 +1598,7 @@ require_discovery_transport() {
 declare -A NODE_IPS          # node k8s InternalIP — the cross-site API-server address
 declare -A NODE_ACCESS_IPS   # address used to reach node NodePorts + cert SAN (override: E2E_NODE_ACCESS_IP[S])
 declare -A SITE_NAMES        # logical per-site identity handed to the operator (ADR-028 §4)
+declare -A SITE_INDICES      # that site's serverID slot; decade = index * 100 (ADR-017)
 
 assign_site_names
 

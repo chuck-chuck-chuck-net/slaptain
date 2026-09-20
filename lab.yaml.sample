@@ -29,11 +29,27 @@ slaptain:
 # ── shared site inventory ────────────────────────────────────────────────────
 # Order matters: the first site is the primary. When the e2e is invoked
 # without context arguments, all sites are used (N≥2 → multi-site).
+# THE SITE INVENTORY. `name` is the site IDENTITY: it becomes the operator's
+# SITE_NAME, the mesh site name, the <site>-ca and <site>-kubeconfig Secret
+# names, the /peers/<site>/ca.crt mount path, and what a database's seed.site is
+# matched against. Choose it once; changing it later on a live mesh is a peer
+# rename — a stanza rewrite and a volume remount, i.e. a cluster roll.
+#
+# `serverIDIndex` is the site's serverID decade (index × 100, ADR-017). Required
+# and never inferred from list position: olcServerID is baked into every CSN the
+# site's pods have written, so a site whose number moves splits its history
+# across two sids. Reordering this list must be safe.
 sites:
   - name: site-a
-    context: site-a                   # kubectl context name
+    serverIDIndex: 0                  # REQUIRED. decade 0 → pods 1,2,3
+    context: site-a                   # kubectl context; OPTIONAL, defaults to name
     endpoint: https://192.0.2.10:6443 # site API URL routable FROM PODS on the
-                                      # other sites (remote peer discovery)
+                                      # other sites (remote peer discovery).
+                                      # On dual-homed nodes this is NOT the
+                                      # address in your kubeconfig — that one
+                                      # is the admin network. Read by
+                                      # scripts/create-remote-kubeconfig.sh and
+                                      # scripts/mesh-topology.sh.
     nodeAccessIP: 198.51.100.10       # slaptain: NodePort + TLS-SAN address.
                                       # Needed on dual-homed nodes whose k8s
                                       # InternalIP the test runner cannot
@@ -44,6 +60,7 @@ sites:
       - {name: site-a-node1, uri: qemu+ssh://user@hypervisor.example/system}
       - {name: site-a-node2, uri: qemu+ssh://user@hypervisor.example/system}
   - name: site-b
+    serverIDIndex: 1                  # decade 100 → pods 101,102,103
     context: site-b
     endpoint: https://192.0.2.20:6443
     nodeAccessIP: 198.51.100.20

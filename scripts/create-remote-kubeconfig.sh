@@ -45,6 +45,7 @@ set -euo pipefail
 NAMESPACE="slaptain"
 SA_NAME="slaptain-remote-reader"
 DRY_RUN=""
+LAB_FILE=""
 
 # Shaped like a token, unmistakably not one. A dry run never reads a real
 # credential, so nothing here can leak one — and nobody can mistake the output
@@ -84,17 +85,62 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -n|--namespace) NAMESPACE="$2"; shift 2 ;;
         --dry-run)      DRY_RUN=1; shift ;;
+        --from-lab)     LAB_FILE="${2:-}"; [[ -n "$LAB_FILE" && "$LAB_FILE" != -* ]] && shift 2 || { LAB_FILE="auto"; shift; } ;;
         -h|--help)      usage ;;
         -*)             die "Unknown option: $1" ;;
         *)              break ;;
     esac
 done
 
-[ $# -lt 2 ] && { echo "At least 2 context=api pairs required." >&2; usage; }
+# ── Where the sites come from ─────────────────────────────────────────────
+#
+# Default: the lab file, because the information is already there and in one
+# place — each site's kube context, its API address ON THE REPLICATION NETWORK
+# (which on dual-homed nodes is NOT the address in your kubeconfig), and its
+# logical name. Positional CONTEXT=API pairs still work and win.
+#
+# One deliberate difference between the two modes: with a lab file the Secrets
+# are named after the SITE (site-2-kubeconfig), which is what the operator
+# derives from the mesh (MeshSite.KubeconfigSecretFor). With positional pairs
+# there is no site name to use, so they are named after the context, and you
+# must point kubeconfigSecret.name at whatever came out.
+declare -A SITE_APIS
+declare -A SITE_LABELS
+CONTEXTS=()
+
+if [[ $# -eq 0 && -z "$LAB_FILE" ]]; then
+    _self="$(cd "$(dirname "$0")/.." && pwd)"
+    [[ -n "${E2E_CONFIG:-}" ]] && LAB_FILE="$E2E_CONFIG"
+    [[ -z "$LAB_FILE" && -f "$_self/lab.yaml" ]] && LAB_FILE="$_self/lab.yaml"
+fi
+if [[ "$LAB_FILE" == "auto" ]]; then
+    _self="$(cd "$(dirname "$0")/.." && pwd)"
+    LAB_FILE="${E2E_CONFIG:-$_self/lab.yaml}"
+fi
+
+if [[ -n "$LAB_FILE" && $# -eq 0 ]]; then
+    [[ -f "$LAB_FILE" ]] || die "no lab file at $LAB_FILE"
+    command -v yq >/dev/null 2>&1 || die "reading $LAB_FILE requires yq v4"
+    log "Reading sites from $LAB_FILE"
+    count=$(yq -r '.sites | length' "$LAB_FILE")
+    [[ "$count" == "null" || "$count" -eq 0 ]] && die "$LAB_FILE declares no sites"
+    for i in $(seq 0 $((count - 1))); do
+        name=$(yq -r ".sites[$i].name // \"\"" "$LAB_FILE")
+        ctx=$(yq -r ".sites[$i].context // .sites[$i].name // \"\"" "$LAB_FILE")
+        api=$(yq -r ".sites[$i].endpoint // \"\"" "$LAB_FILE")
+        [[ -z "$name" ]] && die "$LAB_FILE: sites[$i] has no name"
+        [[ -z "$api" ]] && die "$LAB_FILE: site '$name' has no endpoint. It is the API address reachable FROM PODS at the other sites, which on dual-homed nodes is not the one in your kubeconfig — that is the whole reason this field exists."
+        CONTEXTS+=("$ctx")
+        SITE_APIS[$ctx]="$api"
+        SITE_LABELS[$ctx]="$name"
+    done
+    [[ ${#CONTEXTS[@]} -lt 2 ]] && die "$LAB_FILE declares ${#CONTEXTS[@]} site(s); cross-site kubeconfigs need at least 2"
+    set -- # consume: the loop below must not re-parse
+fi
+
+[[ ${#CONTEXTS[@]} -eq 0 && $# -lt 2 ]] && { echo "At least 2 context=api pairs required (or a lab file)." >&2; usage; }
 
 # Parse context=api pairs.
-declare -A SITE_APIS
-CONTEXTS=()
 for arg in "$@"; do
     if [[ "$arg" != *=* ]]; then
         die "Invalid argument '$arg'. Expected CONTEXT=API_URL (e.g., siteA=https://192.168.99.1:6443)"
@@ -102,6 +148,7 @@ for arg in "$@"; do
     ctx="${arg%%=*}"
     api="${arg#*=}"
     SITE_APIS[$ctx]="$api"
+    SITE_LABELS[$ctx]="$ctx"   # no site name available in positional mode
     CONTEXTS+=("$ctx")
 done
 
@@ -215,7 +262,7 @@ for local_ctx in "${CONTEXTS[@]}"; do
 
         api="${SITE_APIS[$remote_ctx]}"
         token="${SITE_TOKENS[$remote_ctx]}"
-        secret_name="${remote_ctx}-kubeconfig"
+        secret_name="${SITE_LABELS[$remote_ctx]}-kubeconfig"
 
         kubeconfig="apiVersion: v1
 kind: Config
