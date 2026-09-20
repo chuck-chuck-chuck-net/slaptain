@@ -181,6 +181,28 @@ Secrets for a set of sites. Note that it names its Secrets after the **kubectl
 context**, so either name your contexts after your sites, or set
 `kubeconfigSecret.name` on the mesh site entry to the name it produced.
 
+**Read it before you run it.** `--dry-run` prints every object it would create,
+grouped by the cluster it would land on, and contacts nothing:
+
+```bash
+./scripts/create-remote-kubeconfig.sh --dry-run -n slaptain \
+    site-1=https://api.site-1.k8s.example:6443 \
+    site-2=https://api.site-2.k8s.example:6443
+```
+
+Manifests go to stdout and the progress log to stderr, so it redirects like
+`helm template`. Per site you get a Namespace, a ServiceAccount, a Role granting
+`get`/`list` on pods **and nothing else**, and a long-lived token Secret; then
+one kubeconfig Secret per ordered pair — N×(N−1), because every site needs its
+own credential for every other. Each kubeconfig Secret is followed by its
+payload decoded into comments, since base64 hides precisely the thing worth
+looking at.
+
+The tokens are placeholders. Minting one requires an API server, so a dry run
+cannot produce a working credential and does not pretend to: the output shows
+the shape faithfully and the secrets not at all. Applying it will not give you a
+mesh.
+
 cert-manager plus trust-manager for the CAs, and External Secrets or a
 documented SOPS flow for the shared password, are the intended long-term tools
 for this step; nothing in the operator requires them.

@@ -10,7 +10,18 @@
 #
 # Options:
 #   -n, --namespace NS    Namespace on all clusters (default: slaptain)
+#       --dry-run         Print the manifests instead of applying them, and
+#                         contact no cluster at all (see below)
 #   -h, --help            Show this help
+#
+# DRY RUN. `--dry-run` prints every object this script would create, to stdout,
+# grouped by the cluster it would be applied to, with the progress log on
+# stderr — so it pipes and redirects like `helm template`. It talks to no
+# cluster, which also means it cannot fetch the ServiceAccount tokens: those are
+# replaced by an obvious placeholder. The output therefore shows the SHAPE
+# faithfully and the credentials not at all. Applying it will not produce a
+# working mesh, and is not the point: the point is to see what the real run
+# does, and where each piece lands.
 #
 # Each argument is CONTEXT=API_URL where API_URL is the k8s API server address
 # on the replication network (e.g., https://192.168.99.1:6443).
@@ -33,8 +44,16 @@ set -euo pipefail
 
 NAMESPACE="slaptain"
 SA_NAME="slaptain-remote-reader"
+DRY_RUN=""
 
-log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+# Shaped like a token, unmistakably not one. A dry run never reads a real
+# credential, so nothing here can leak one — and nobody can mistake the output
+# for something that would authenticate.
+DUMMY_TOKEN="DRY-RUN.NOT-A-REAL-SERVICEACCOUNT-TOKEN.%s"
+
+# Progress goes to stderr, so `--dry-run > bootstrap.yaml` yields manifests
+# alone, exactly as `helm template` does.
+log()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
@@ -50,6 +69,8 @@ Arguments:
 
 Options:
   -n, --namespace NS    Namespace on all clusters (default: slaptain)
+      --dry-run         Print the manifests instead of applying them; contacts
+                        no cluster, so tokens are placeholders
   -h, --help            Show this help
 
 Examples:
@@ -62,6 +83,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -n|--namespace) NAMESPACE="$2"; shift 2 ;;
+        --dry-run)      DRY_RUN=1; shift ;;
         -h|--help)      usage ;;
         -*)             die "Unknown option: $1" ;;
         *)              break ;;
@@ -83,6 +105,33 @@ for arg in "$@"; do
     CONTEXTS+=("$ctx")
 done
 
+# emit reads a manifest on stdin and either applies it to the named context or
+# prints it. Both modes consume the SAME text: a dry run that rendered its own
+# copy of the manifests would drift from what the real run applies, which is the
+# one thing that would make it worthless.
+emit() { # context description
+    local ctx="$1" what="$2"
+    if [[ -n "$DRY_RUN" ]]; then
+        printf -- '---\n# %s\n# apply with: kubectl --context %s apply -f -\n' "$what" "$ctx"
+        cat
+        printf '\n'
+    else
+        kubectl --context "$ctx" apply -f - >/dev/null
+    fi
+}
+
+# render runs kubectl's CLIENT-side dry run, which never contacts a server. In
+# --dry-run we drop --context too, so the script works on a machine that has
+# never heard of these clusters.
+render() { # context args...
+    local ctx="$1"; shift
+    if [[ -n "$DRY_RUN" ]]; then
+        kubectl "$@" --dry-run=client -o yaml
+    else
+        kubectl --context "$ctx" "$@" --dry-run=client -o yaml
+    fi
+}
+
 # ── For each site: create RBAC and extract token ───────────────────────────
 
 declare -A SITE_TOKENS
@@ -90,13 +139,13 @@ declare -A SITE_TOKENS
 for ctx in "${CONTEXTS[@]}"; do
     log "[$ctx] Setting up RBAC in namespace $NAMESPACE..."
 
-    kubectl --context "$ctx" create namespace "$NAMESPACE" --dry-run=client -o yaml \
-        | kubectl --context "$ctx" apply -f - 2>/dev/null
+    render "$ctx" create namespace "$NAMESPACE" \
+        | emit "$ctx" "[$ctx] namespace $NAMESPACE"
 
-    kubectl --context "$ctx" -n "$NAMESPACE" create serviceaccount "$SA_NAME" \
-        --dry-run=client -o yaml | kubectl --context "$ctx" apply -f - 2>/dev/null
+    render "$ctx" -n "$NAMESPACE" create serviceaccount "$SA_NAME" \
+        | emit "$ctx" "[$ctx] ServiceAccount the peers authenticate as"
 
-    kubectl --context "$ctx" -n "$NAMESPACE" apply -f - <<EOF
+    emit "$ctx" "[$ctx] RBAC — read pods in $NAMESPACE, and nothing else" <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -124,7 +173,7 @@ EOF
 
     # Long-lived token Secret.
     token_secret="${SA_NAME}-token"
-    kubectl --context "$ctx" -n "$NAMESPACE" apply -f - <<EOF
+    emit "$ctx" "[$ctx] long-lived token for that ServiceAccount (k8s fills .data.token)" <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
@@ -134,6 +183,16 @@ metadata:
     kubernetes.io/service-account.name: ${SA_NAME}
 type: kubernetes.io/service-account-token
 EOF
+
+    if [[ -n "$DRY_RUN" ]]; then
+        # The only step with no offline equivalent: the token is minted by the
+        # API server into the Secret above. Everything downstream of here uses
+        # a placeholder, which is why the output cannot authenticate.
+        # shellcheck disable=SC2059
+        SITE_TOKENS[$ctx]=$(printf "$DUMMY_TOKEN" "$ctx")
+        log "[$ctx] Token: placeholder (dry run reads no credential)"
+        continue
+    fi
 
     log "[$ctx] Waiting for token..."
     token=""
@@ -178,15 +237,28 @@ contexts:
 current-context: ${remote_ctx}"
 
         log "[$local_ctx] Creating Secret $secret_name (kubeconfig for $remote_ctx)..."
-        kubectl --context "$local_ctx" -n "$NAMESPACE" create secret generic "$secret_name" \
+        render "$local_ctx" -n "$NAMESPACE" create secret generic "$secret_name" \
             --from-literal="kubeconfig=${kubeconfig}" \
-            --dry-run=client -o yaml \
-            | kubectl --context "$local_ctx" apply -f -
+            | emit "$local_ctx" "[$local_ctx] Secret $secret_name — how $local_ctx reaches $remote_ctx's API"
+
+        # The Secret's payload is the point of this whole script, and base64
+        # hides it. Echo it back as comments: still valid YAML, and the reader
+        # sees what the operator will actually load.
+        if [[ -n "$DRY_RUN" ]]; then
+            printf '# ...whose kubeconfig payload decodes to:\n'
+            printf '%s\n' "$kubeconfig" | sed 's/^/#     /'
+            printf '\n'
+        fi
     done
 done
 
 log ""
-log "Done. Kubeconfig Secrets created on ${#CONTEXTS[@]} sites."
+if [[ -n "$DRY_RUN" ]]; then
+    log "Dry run: nothing was created, and no cluster was contacted."
+    log "Tokens above are placeholders — the real ones are minted by each API server."
+else
+    log "Done. Kubeconfig Secrets created on ${#CONTEXTS[@]} sites."
+fi
 log ""
 log "SlapdCluster CR example:"
 log "  externalPeers:"
