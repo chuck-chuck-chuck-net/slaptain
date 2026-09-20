@@ -176,6 +176,65 @@ replication bind password is one value mesh-wide. Create it **before** the
 `SlapdDatabase`, or the operator generates a different random one per site and
 every cross-site bind fails with `err=49`.
 
+### From a naked lab to a replicating mesh
+
+Six commands, in this order. Each is re-runnable and each takes its site list
+from `lab.yaml`, so nothing is typed twice. Every script has `--dry-run`.
+
+```bash
+# 1. Describe the lab once: sites, serverIDIndex, contexts, endpoints.
+#    See lab.yaml.sample. Nothing below asks you for a site again.
+$EDITOR lab.yaml
+
+# 2. Credentials — per database, IDENTICAL at every site (ADR-008).
+./scripts/mesh-credentials.sh -f values.directory.yaml -n slaptain
+
+# 3+4. A certificate per site, then every site's CA to all the others.
+./scripts/mesh-trust.sh -n slaptain --cluster slapd
+
+# 5. RBAC + one kubeconfig Secret per ordered site pair, for peer discovery.
+./scripts/create-remote-kubeconfig.sh -n slaptain
+
+# 6. The operator, per site. The --set is the ONLY per-site argument anywhere.
+for s in site-1 site-2 site-3; do
+  helm --kube-context "$s" upgrade --install slaptain \
+    oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain \
+    -n slaptain-system --create-namespace --set "siteName=$s"
+done
+
+# 7. The mesh itself: topology generated from lab.yaml, directory hand-written.
+./scripts/mesh-topology.sh > values.topology.yaml
+for s in site-1 site-2 site-3; do
+  helm --kube-context "$s" upgrade --install ldap \
+    oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh \
+    -n slaptain --create-namespace \
+    -f values.topology.yaml -f values.directory.yaml
+done
+```
+
+Then `slctl inspect -n slaptain slapd` at each site. `MeshResolved=True` means the
+operator found its mesh and derived its wiring; `ReplicationConverged=True` means
+the databases agree.
+
+**Why the order.** Steps 2-5 are the imperative bootstrap: material the operator
+needs to already exist. Step 7 is the declarative steady state. Within the
+bootstrap, only one ordering is forced — CA distribution cannot run before every
+site has a certificate, which is why `mesh-trust.sh` does both and you do not
+run them separately.
+
+**Why credentials and certificates are separate scripts**, when both merely
+create Secrets: the rules are opposite. A replication password must be
+*identical* at every site, because the legacy `cn=replication,<suffix>` identity
+lives inside the replicated tree and only one password can match. A certificate
+must *differ* per site, because it carries that site's names. `mesh-credentials.sh`
+therefore adopts whatever the mesh already uses rather than generating per site —
+get that wrong and replication fails with `err=49`, an authentication error that
+sends you looking at TLS and firewalls.
+
+**What is not automated**, and is not an oversight: the directory values file.
+The cluster shape, the databases and the schemas are choices, not facts about the
+lab, so no script can derive them. That file is yours.
+
 `scripts/create-remote-kubeconfig.sh` provisions the RBAC and the kubeconfig
 Secrets for a set of sites. **Run it with no arguments**: it reads `lab.yaml`
 (`$E2E_CONFIG`, else the repo root, else `--from-lab FILE`) and takes each
