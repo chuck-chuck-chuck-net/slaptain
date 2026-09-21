@@ -97,9 +97,23 @@ var _ = Describe("scale and operations tunables", Label("tunables"), Ordered, Co
 				"pod %s: the TLS floor must be TLS 1.2 or better, got %q", pod, min)
 
 			// The scheme slapd uses when IT hashes a password for a client
-			// (finding 16).
-			Expect(singleConfigValue(conn, "cn=config", "olcPasswordHash")).
-				NotTo(BeEmpty(), "pod %s: olcPasswordHash is unset", pod)
+			// (finding 16) — and WHERE it is set, which slapd has an opinion
+			// about:
+			//
+			//   olcPasswordHash: value #0: setting password scheme in the
+			//   global entry is deprecated. The server may refuse to start if
+			//   it is provided by a loadable module, please move it to the
+			//   frontend database instead
+			//
+			// Harmless while the scheme is built in ({SSHA}); a startup
+			// failure the day slaptain ships pw-argon2 and someone asks for
+			// {ARGON2}. Both halves are asserted, because writing it to the
+			// frontend while leaving the old copy behind fixes nothing: the
+			// warning survives and two entries disagree about policy.
+			Expect(singleConfigValue(conn, "olcDatabase={-1}frontend,cn=config", "olcPasswordHash")).
+				NotTo(BeEmpty(), "pod %s: olcPasswordHash is unset on the frontend database", pod)
+			Expect(configValues(conn, "cn=config", "olcPasswordHash")).
+				To(BeEmpty(), "pod %s: olcPasswordHash still present in the DEPRECATED global entry", pod)
 
 			conn.Close()
 		}
@@ -212,6 +226,18 @@ func singleConfigValue(conn *ldap.Conn, dn, attr string) string {
 		return ""
 	}
 	return vals[0]
+}
+
+// configValues reads every value of an attribute, so a spec can assert that an
+// attribute is ABSENT — which singleConfigValue cannot distinguish from an
+// attribute present with an empty value.
+func configValues(conn *ldap.Conn, dn, attr string) []string {
+	res, err := conn.Search(ldap.NewSearchRequest(
+		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
+		1, 0, false, "(objectClass=*)", []string{attr}, nil))
+	Expect(err).NotTo(HaveOccurred(), "read %s on %s", attr, dn)
+	Expect(res.Entries).To(HaveLen(1))
+	return res.Entries[0].GetEqualFoldAttributeValues(attr)
 }
 
 func atoi(s string) int {

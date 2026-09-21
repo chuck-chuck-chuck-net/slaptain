@@ -1095,3 +1095,43 @@ nothing wrong anywhere — so any budget shorter than five minutes would have
 been measuring condition staleness, not cluster state. Anything else that
 gates on a `SlapdDatabase` condition from outside the operator inherits the
 same problem.
+
+---
+
+## `readReplicas: 1 → 0` leaves the read-only fleet running
+
+**What:** the three read-only reconcilers *skip* on `spec.readReplicas == 0`
+instead of removing what an earlier non-zero value created —
+`reconcileReadOnlyStatefulSet` (`operator/internal/controller/slapdcluster_controller.go:766`),
+`reconcileReadOnlyService` (`:712`) and `reconcileReadOnlyHeadlessService` (`:671`)
+each `return nil` immediately. Skipping is the right behaviour for a cluster that
+never had RO replicas; it is the wrong behaviour for one that is being scaled back
+to zero. The `<name>-readonly` StatefulSet keeps its old replica count, its pods
+keep consuming via delta-syncrepl, and both RO Services keep resolving — until the
+whole `SlapdCluster` is deleted and the owner reference finally reaps them.
+
+**Observed 2026-09-20** on a single-site lab: `slapd` at `spec.replicas: 1`,
+`spec.readReplicas: 0`, yet `slapd-readonly` reads `1/1` with `slapd-readonly-0`
+Running and `config-slapd-readonly-0` / `data-slapd-readonly-0` Bound and in use.
+Nothing in the CR says that pod should exist.
+
+**Why it matters:** the declarative contract is broken in the direction users
+least expect — an orphan replica that still holds a syncrepl consumer slot on
+every RW pod, still answers on `<name>-readonly`, and still pins its PVCs (so its
+node, ADR-018). It is also invisible from the CR: `status.readOnlyReplicas`
+reports the spec's 0 while a pod serves. Somebody reducing an RO fleet as a cost
+or blast-radius measure gets no warning that nothing happened.
+
+**Not this entry:** the stale `{config,data,accesslog}-slapd-{1,2}` PVCs left by a
+`replicas: 3 → 1` scale-down. `volumeClaimTemplates` PVCs are never garbage
+collected by the StatefulSet controller — that is upstream Kubernetes behaviour
+and matches ADR-005's Retain default. Deleting them is the user's call.
+
+**How:** on `readReplicas == 0`, delete the RO StatefulSet and both RO Services
+rather than returning early — pods first so their PVC deletion leases are released
+(ADR-018), and idempotently, since the usual case is that none of them exist. Decide
+explicitly what happens to the RO PVCs: the consistent answer is Retain (ADR-005),
+which means the scale-to-zero leaves storage behind and should say so. Red-first
+per Test Discipline: an e2e that deploys with `readReplicas: 1`, flips it to 0, and
+asserts the StatefulSet, both Services and the pod are gone — it is red against
+current code for the right reason today.

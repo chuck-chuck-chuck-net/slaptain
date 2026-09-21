@@ -325,3 +325,38 @@ the interaction to check first is the `cn=config` pause, because the operator
 converges every pod on every reconcile and therefore *will* write config while
 the value's worst case is live. The syncrepl ledger entry of the same date in
 `docs/reconcile-loop-fixes.md` carries the measurements.
+
+## Amendment, 2026-09-21: R1 says when a tunable converges, not into which entry
+
+`olcPasswordHash` was converged onto `cn=config`, the global entry, which
+OpenLDAP 2.7 deprecates — it says so on every pod start:
+
+    olcPasswordHash: value #0: setting password scheme in the global entry is
+    deprecated. The server may refuse to start if it is provided by a loadable
+    module, please move it to the frontend database instead
+
+It now goes to `olcDatabase={-1}frontend,cn=config`, which `slaptest` conversion
+already creates on every pod we bootstrap (verified live, alongside
+`olcDatabase={0}config` and the data databases).
+
+**Why it mattered despite being a warning.** With the default `{SSHA}` — built
+in — nothing can refuse to start, and nothing did. The failure this removes is
+the one the backlog contemplates: ship `pw-argon2`, let someone set `{ARGON2}`,
+and the value sits in the entry slapd says it may reject *at startup*, on a pod
+that was serving a moment earlier. A deprecation warning naming a future hard
+failure is worth acting on before the feature that triggers it, not after.
+
+**What this adds to the placement model.** R1 (converged-per-pod) answered
+*when* a tunable is written and said nothing about *where*. Three classes tell
+you whether the operator may write an attribute at all; none of them tell you
+which entry it belongs in, and for exactly one attribute slapd cares. The rule:
+placement is per attribute, expressed as data (`tunableEntryDN`) rather than as
+a literal at the call site, so the answer is testable and visible in one place.
+
+**The migration is a delete on cn=config**, which ADR-026 R2 would forbid if the
+value belonged to someone else. It does not: this operator wrote it and
+converges it, so retiring its own copy is not "destroying state it does not
+own". It runs as its own convergence step rather than as a tail on the write —
+inside the write branch it would fire only on the pass that changed the value,
+so a delete that failed once would never be retried, because the following pass
+takes the already-correct early return.

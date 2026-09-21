@@ -224,8 +224,14 @@ type SlapdLDAPConfig struct {
 	//
 	// Unset means the operator's default, "{SSHA}" (ADR-024 R5). slapd's own
 	// frontend default is also {SSHA}, so this pins rather than changes it — the
-	// point is that the policy is stated in cn=config and converged, instead of
-	// being whatever the build happened to compile in. Converged per pod.
+	// point is that the policy is stated and converged, instead of being
+	// whatever the build happened to compile in. Converged per pod.
+	//
+	// It is written to olcDatabase={-1}frontend, NOT to the cn=config global
+	// entry: slapd 2.7 deprecates the latter and warns that it "may refuse to
+	// start" when the scheme comes from a loadable module — which is precisely
+	// the {ARGON2} case below. The operator also retires a copy left in the
+	// global entry by an older version.
 	//
 	// Stronger schemes ({ARGON2} in particular) need their module present in the
 	// runtime image; slaptain's does not ship pw-argon2 today, so asking for one

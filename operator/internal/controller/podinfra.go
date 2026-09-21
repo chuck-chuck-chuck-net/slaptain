@@ -87,6 +87,33 @@ func tlsTunablesWritable(sc *ldapv1alpha1.SlapdCluster) bool {
 // which is expressed by leaving the entry out of the list entirely — the
 // distinction the TLS attributes need on a server that refuses the set AND the
 // delete for the same reason.
+// frontendDN is the entry slapd wants password policy in. slaptest conversion
+// creates it, so it is present on every pod we bootstrap — verified on a live
+// three-site lab alongside olcDatabase={0}config and the data databases.
+const frontendDN = "olcDatabase={-1}frontend,cn=config"
+
+// tunableEntryDN says WHICH cn=config entry an attribute belongs in.
+//
+// Global is the default and the common case. The exception is olcPasswordHash,
+// which slapd 2.7 warns about on every startup when it sits in the global
+// entry:
+//
+//	setting password scheme in the global entry is deprecated. The server may
+//	refuse to start if it is provided by a loadable module, please move it to
+//	the frontend database instead
+//
+// "May refuse to start" is the part that matters. A built-in scheme like the
+// default {SSHA} is fine today; a module-provided one ({ARGON2} via pw-argon2,
+// the backlog item) is the configuration slapd is warning it may reject — and
+// it would reject it at STARTUP, on a pod that was healthy a moment earlier.
+// Placing it correctly now costs nothing and removes that from the path.
+func tunableEntryDN(attr string) string {
+	if attr == "olcPasswordHash" {
+		return frontendDN
+	}
+	return "cn=config"
+}
+
 type globalTunable struct {
 	attr  string
 	value string

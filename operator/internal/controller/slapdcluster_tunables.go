@@ -204,7 +204,8 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 	steps := make([]convergenceStep, 0, len(wants))
 	for _, w := range wants {
 		steps = append(steps, convergenceStep{w.attr, func() error {
-			current, err := readConfigAttr(conn, "cn=config", w.attr)
+			dn := tunableEntryDN(w.attr)
+			current, err := readConfigAttr(conn, dn, w.attr)
 			if err != nil {
 				return err
 			}
@@ -213,10 +214,10 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 					return nil
 				}
 				log.Info("removing global tunable", "host", host, "attr", w.attr)
-				modReq := ldap.NewModifyRequest("cn=config", nil)
+				modReq := ldap.NewModifyRequest(dn, nil)
 				modReq.Delete(w.attr, nil)
 				if err := conn.Modify(modReq); err != nil {
-					return fmt.Errorf("delete %s on cn=config at %s: %w", w.attr, host, err)
+					return fmt.Errorf("delete %s on %s at %s: %w", w.attr, dn, host, err)
 				}
 				return nil
 			}
@@ -224,14 +225,45 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 				return nil
 			}
 			log.Info("aligning global tunable", "host", host, "attr", w.attr,
-				"from", current, "to", w.value)
-			modReq := ldap.NewModifyRequest("cn=config", nil)
+				"dn", dn, "from", current, "to", w.value)
+			modReq := ldap.NewModifyRequest(dn, nil)
 			modReq.Replace(w.attr, []string{w.value})
 			if err := conn.Modify(modReq); err != nil {
-				return fmt.Errorf("set %s on cn=config at %s: %w", w.attr, host, err)
+				return fmt.Errorf("set %s on %s at %s: %w", w.attr, dn, host, err)
+			}
+
+			return nil
+		}})
+	}
+	// Retiring the deprecated copy is its OWN step, not a tail on the write.
+	// Inside the write branch it would run only on the pass that changed the
+	// value — so a delete that failed once would never be retried, because the
+	// next pass takes the "already correct" early return. As a step it runs
+	// every reconcile, costs one read when there is nothing to do, and cannot
+	// stall the attribute it belongs to.
+	//
+	// Safe under ADR-026 R2: this is a value THIS operator wrote and converges,
+	// not state it found and does not own.
+	for _, w := range wants {
+		dn := tunableEntryDN(w.attr)
+		if dn == "cn=config" || !w.write {
+			continue
+		}
+		steps = append(steps, convergenceStep{w.attr + "@cn=config(retire)", func() error {
+			stale, err := readConfigAttr(conn, "cn=config", w.attr)
+			if err != nil || len(stale) == 0 {
+				return err
+			}
+			log.Info("retiring the deprecated global copy", "host", host, "attr", w.attr,
+				"movedTo", dn)
+			del := ldap.NewModifyRequest("cn=config", nil)
+			del.Delete(w.attr, nil)
+			if err := conn.Modify(del); err != nil {
+				return fmt.Errorf("delete deprecated %s on cn=config at %s: %w", w.attr, host, err)
 			}
 			return nil
 		}})
 	}
+
 	return runConvergenceSteps(steps...)
 }
