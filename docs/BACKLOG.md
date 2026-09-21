@@ -28,6 +28,44 @@ errcheck 40, lll 31, modernize 15, goconst 13, prealloc 13, gocyclo 9, unused 4,
 unparam 2, revive 1 (uncapped counts, unchanged by this change). Worth a separate
 sweep.
 
+## A reinstall over surviving PVCs produces a healthy-looking, unconfigurable cluster
+
+Deleting a `SlapdCluster` garbage-collects `<name>-config-password` (the
+operator sets `SetControllerReference` on it); the PVCs survive on purpose. A
+redeploy into the same namespace then mints a new `cn=config` password that
+every pod rejects, because `/config` still hashes the old one. Full mechanism
+and evidence in the ADR-012 amendment of 2026-09-21.
+
+What makes it backlog-worthy rather than a documentation note: **nothing
+reports it**. The operator logs `Invalid Credentials` on every pass — 358 times
+in the observed case — and sets no condition, no event, no phase change. The
+`SlapdCluster` says `Running`, pods are Ready, data replicates, and
+`slctl inspect` indicts three downstream symptoms (zero stanzas,
+`olcMultiProvider` unset, missing external stanzas) without naming the cause.
+A user reaches the right answer only by reading operator logs.
+
+Two candidate fixes, not mutually exclusive:
+
+1. **Align the lifetimes: stop owning the Secret.** `/config` outlives the CR
+   by design, and the password baked into it should too. Dropping the
+   ownerReference makes a reinstall ADOPT the existing Secret — the create-only
+   path already handles that — and the mismatch becomes unreachable. Cost: a
+   `helm uninstall` leaves a Secret behind, so "delete the namespace" becomes
+   the only complete wipe. That is already what ADR-012 recommends, and the
+   Secret goes with the namespace either way.
+
+2. **Detect and say so.** A bind that fails with err=49 against `cn=config` is
+   not a transient error and never recovers on its own: report it as a
+   condition (`ConfigCredentialMismatch`) with the repair, rather than looping
+   silently. Cheap, and it also covers a hand-edited `cnConfigCredentials`
+   Secret, which produces the same dead end by a different route.
+
+(1) removes the common cause; (2) catches every other route to the same state.
+Worth doing (2) regardless, because "the operator logged it 358 times and told
+nobody" is the part that cost the afternoon.
+
+---
+
 ## `lab.yaml`'s `vms:` is libvirt-specific, unread, and inside `sites[]`
 
 `lab.yaml` began as a description of one lab for `tests/e2e.sh` and is now the

@@ -250,3 +250,45 @@ and `seedNeeded` has a unit control pinning that it never consults it.
   postscript explaining why
 - ADR-025: seed is single-creator mesh-wide; the glue-suffix class — the
   2026-09-13 amendment above summarises it for this ADR's scope
+
+## Amendment (2026-09-21): the two deletes are one operation, and doing half is worse than doing neither
+
+"Cluster wipe is a Kubernetes resource lifecycle operation" above gives two
+commands — delete the CR, delete the PVCs — and notes in passing that the CR's
+cascade removes "the StatefulSet, Services, and Secrets via ownerReferences".
+What it does not say is what the FIRST command alone produces, and that turns
+out to be the worst of the three outcomes.
+
+`<name>-config-password` is owned by the `SlapdCluster` and is therefore
+garbage-collected with it. The PVCs are deliberately not owned — losing data on
+an accidental delete is the worse default, as the section says. So deleting only
+the CR leaves `/config` holding a `cn=admin,cn=config` password that no longer
+exists anywhere else. Redeploying generates a fresh one, and every pod rejects
+it:
+
+    cn=config bind failed: LDAP Result Code 49 "Invalid Credentials"
+
+**Observed 2026-09-21** on a hand-run mesh bootstrap: PVCs created 06:37:30,
+Secret recreated 06:45:58, 358 invalid-credential lines in the operator log, and
+`slctl inspect` reporting zero syncrepl stanzas, `olcMultiProvider` unset and
+missing external stanzas — three checks failing for one cause, none of them
+naming it.
+
+**Why it is worse than a plain failure.** The cluster presents as healthy:
+pods Running and Ready, the DIT intact and replicating from before the
+redeploy, `contextCSN`s converged, peers reporting `Synced` from the operator's
+last successful status write. Only writes to `cn=config` are dead, so the
+cluster is frozen in whatever configuration it had — it will not gain a
+database, a schema, a stanza or a tunable ever again.
+
+**And it cannot be repaired in place.** Changing the password in `cn=config`
+requires binding to `cn=config`. The only exits are to restore the old Secret
+value (gone) or to discard `/config`, which means the PVC delete that was
+skipped.
+
+So the rule is sharpened: the two deletes are one operation. Delete the
+namespace, or delete both; never just the CR. Whether the operator should stop
+this from being possible at all — by not owning the Secret, so its lifetime
+matches the PVC's, or by detecting the mismatch and saying so — is recorded in
+docs/BACKLOG.md rather than decided here, because it changes what `helm
+uninstall` leaves behind.

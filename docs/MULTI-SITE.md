@@ -159,6 +159,21 @@ from list position, because `olcServerID` is baked into every CSN a pod has
 ever written: a site whose number moves files its future writes under a
 different sid from its history.
 
+### 1b. Write the two values files
+
+`mesh-share-credentials.sh` reads the database names out of the directory values
+file, so both files exist before the bootstrap runs, not after it:
+
+```bash
+./scripts/mesh-derive-topology.sh > values.topology.yaml   # generated from lab.yaml
+$EDITOR values.directory.yaml                              # cluster, databases, schemas
+```
+
+What goes in each, and why they are two files, is [below](#4-the-two-values-files);
+`charts/slapd-mesh/examples/three-site.yaml` is a complete example to start from.
+If you would rather not keep a directory file yet, name the databases directly:
+`mesh-share-credentials.sh --database example-db --database example-db2`.
+
 ### 2. Run the bootstrap
 
 Seven steps, in this order. Each is re-runnable, each takes its site list from
@@ -192,9 +207,8 @@ yq -r '.sites[] | (.context // .name) + " " + .name' lab.yaml | while read -r ct
     -n slaptain-system --create-namespace --set "siteName=$site"
 done
 
-# 7. The mesh itself: topology generated from lab.yaml, directory hand-written.
-#    The same two files go to every site, unchanged — that is the whole point.
-./scripts/mesh-derive-topology.sh > values.topology.yaml
+# 7. The mesh itself, from the two files written in step 1b. The same two go to
+#    every site, unchanged — that is the whole point.
 yq -r '.sites[].context // .sites[].name' lab.yaml | while read -r ctx; do
   helm --kube-context "$ctx" upgrade --install ldap \
     oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh \
@@ -637,6 +651,37 @@ and the pods roll to drop the now-unused CA mount.
 
 Edit the directory values file and apply it at every site. The invariant table above
 is the checklist for what must not end up differing.
+
+### Reinstalling a site (and the trap in doing it by halves)
+
+Deleting the `SlapdCluster` garbage-collects the Secrets it owns — including
+`<name>-config-password`, which holds the `cn=config` admin password. The PVCs
+are deliberately **not** owned, so `/config` survives with the OLD password
+hashed into it. Reinstall into the same namespace and the operator generates a
+fresh password, which every pod then rejects:
+
+```
+cn=config bind failed: LDAP Result Code 49 "Invalid Credentials"
+```
+
+The cluster looks healthy while being unconfigurable. Pods run and are ready,
+the data is intact and replicating, `contextCSN`s converge, peers report
+`Synced` from the operator's last good status — but nothing can be written to
+`cn=config`, so `slctl inspect` reports zero syncrepl stanzas, `multiProvider`
+unset, and missing external stanzas. Those three are one failure wearing three
+hats.
+
+There is no repair: changing the password in `cn=config` requires binding to
+`cn=config`. Either keep both halves together, or discard both:
+
+```bash
+kubectl delete ns <namespace>            # takes the PVCs and the Secret together
+# or, keeping the namespace:
+kubectl delete slapdcluster <name> -n <ns>
+kubectl delete pvc -n <ns> -l app.kubernetes.io/instance=<name>
+```
+
+ADR-012 has the rule; this is what skipping its second line costs.
 
 ### Blast radius
 
