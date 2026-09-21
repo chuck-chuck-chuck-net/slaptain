@@ -178,33 +178,29 @@ its kube context) are easy to confuse and expensive to get wrong.
 # 5. RBAC + one kubeconfig Secret per ordered site pair, for peer discovery.
 ./scripts/mesh-authorize-peers.sh -n slaptain
 
-# Steps 6 and 7 PRINT the commands rather than running them. Three reasons: you
-# see exactly what will hit each cluster before it does; a partially copied
-# snippet prints something instead of hanging on `read` or silently looping once
-# (zsh does not word-split `$(...)`, bash does — a loop written for one misfires
-# in the other); and piping to `sh` when you have read it is one keystroke.
+# Steps 6 and 7 read their site list from lab.yaml. COPY THE WHOLE LINE
+# STARTING AT `yq` — a copy that begins at `while` loses the pipe, and `read`
+# then waits on your terminal, which looks exactly like a hang.
 #
 # 6. The operator, per site. siteName is the ONLY per-site argument anywhere —
 #    and note it is the SITE name, while --kube-context is the CONTEXT. They
 #    are different fields (context defaults to name, and in many labs differs),
 #    so read both from lab.yaml rather than assuming one is the other.
-yq -r '.sites[] |
-  "helm --kube-context " + (.context // .name) +
-  " upgrade --install slaptain oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain" +
-  " -n slaptain-system --create-namespace --set siteName=" + .name' lab.yaml
-# read what it printed, then run it:
-#   …same command… | sh
+yq -r '.sites[] | (.context // .name) + " " + .name' lab.yaml | while read -r ctx site; do
+  helm --kube-context "$ctx" upgrade --install slaptain \
+    oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain \
+    -n slaptain-system --create-namespace --set "siteName=$site"
+done
 
 # 7. The mesh itself: topology generated from lab.yaml, directory hand-written.
 #    The same two files go to every site, unchanged — that is the whole point.
 ./scripts/mesh-derive-topology.sh > values.topology.yaml
-yq -r '.sites[] |
-  "helm --kube-context " + (.context // .name) +
-  " upgrade --install ldap oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh" +
-  " -n slaptain --create-namespace" +
-  " -f values.topology.yaml -f values.directory.yaml"' lab.yaml
-# read what it printed, then run it:
-#   …same command… | sh
+yq -r '.sites[].context // .sites[].name' lab.yaml | while read -r ctx; do
+  helm --kube-context "$ctx" upgrade --install ldap \
+    oci://ghcr.io/chuck-chuck-chuck-net/charts/slapd-mesh \
+    -n slaptain --create-namespace \
+    -f values.topology.yaml -f values.directory.yaml
+done
 ```
 
 Then `slctl inspect -n slaptain slapd` at each site. `MeshResolved=True` means the
