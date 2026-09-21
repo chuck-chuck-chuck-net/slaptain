@@ -28,6 +28,74 @@ errcheck 40, lll 31, modernize 15, goconst 13, prealloc 13, gocyclo 9, unused 4,
 unparam 2, revive 1 (uncapped counts, unchanged by this change). Worth a separate
 sweep.
 
+## `lab.yaml`'s `vms:` is libvirt-specific, unread, and inside `sites[]`
+
+`lab.yaml` began as a description of one lab for `tests/e2e.sh` and is now the
+input to four user-facing bootstrap scripts. `sites[].vms` did not make that
+transition well: it names libvirt domains and `qemu+ssh://` hypervisor URIs, it
+is **read by nothing today** (`grep` finds no consumer — it is documented as
+"planned: ITS#9580 dormancy repro"), and it sits inline in `sites[]` next to the
+fields every user must fill in. A stranger reading the sample cannot tell that
+four fields are required and the fifth is an unimplemented convenience for one
+hypervisor.
+
+Verified, so the awkwardness is cosmetic rather than functional: a `lab.yaml`
+carrying only `sites[].{name,serverIDIndex,context,endpoint}` — no `vms`, no
+`nodeAccessIP`, no `slaptain:` section — works with all four `scripts/mesh-*.sh`
+and with `e2e.sh config`. Nothing requires the field.
+
+Options, in the order they appeal:
+
+1. **Drop it until the repro needs it.** It describes a test that has not been
+   written. Re-adding it costs one commit, and the format stops promising
+   something nothing reads.
+2. **Nest it under a clearly-optional, clearly-scoped key** — `disruption:` or
+   `platform: {libvirt: …}` — so the file separates "facts the bootstrap needs"
+   from "facts only outage testing needs, on one hypervisor".
+3. Leave it and document the split in the sample's comments. Cheapest, and the
+   one that leaves a reader guessing which fields matter.
+
+Whatever is chosen, the underlying rule is worth stating in the sample: this
+file has two kinds of content, and only one of them is required to stand a mesh
+up.
+
+---
+
+## The e2e fixture's founder is hardcoded `site-1`, and `e2e.sh config` claims it regardless
+
+`tests/resources/example/database{,2}.yaml` declare `seed.site: site-1`, so the
+suite requires a site literally named `site-1`. Since `lab.yaml`'s
+`sites[].name` became authoritative, a lab whose sites are named anything else —
+`site-a`, `ams`, `fra`, the names the documentation itself suggests — renders a
+mesh in which no site matches the declared founder.
+
+The chart catches it, which is the good half: `slapd-mesh` refuses at render with
+*"database … names seed.site … which is not a site in mesh.sites"*. Verified
+against a two-site `site-a`/`site-b` lab file.
+
+The bad half is that `e2e.sh config` prints the founder as a constant:
+
+    site identities:      kube-a=site-a kube-b=site-b (founder: site-1, per spec.seed.site)
+
+which names a site that does not exist in that lab, in the one command whose job
+is to show you the resolved configuration before you run anything.
+
+Two candidate fixes, and the choice is a real one:
+
+- **Validate and refuse early.** `e2e.sh` checks that every founder named by the
+  fixtures exists among the site names, and dies naming both. Honest, no hidden
+  rewriting, and it makes the constraint explicit — but it means the suite only
+  runs on labs whose sites are named `site-1..N`.
+- **Substitute when building the directory values.** The suite already
+  transforms the fixture CRs into chart values; it could map the declared
+  founder onto the first site's actual name. More flexible, at the cost of the
+  generated values differing from the committed fixture — a transformation of
+  the kind ADR-028 Phase 2b deliberately removed when `strip_seed_block` died.
+
+Either way `config` must stop printing a founder it has not verified.
+
+---
+
 ## `NeedsAccesslog` and `NeedsAccesslogVolume` have identical bodies
 
 `operator/api/v1alpha1/slapdcluster_types.go:951` and `:978` are byte-identical:
