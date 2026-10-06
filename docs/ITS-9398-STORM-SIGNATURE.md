@@ -397,6 +397,83 @@ contradiction.
 
 ---
 
+## Healing it: one targeted write, measured end to end
+
+The corrected mechanism makes a sharp prediction. If the verdict is reached on
+the provider's own `minCSN` and `contextCSN`, then nothing done to or by a
+consumer can help, and exactly one thing can: **a write carrying the absent
+serverID, landing in the broken pod's accesslog**. That is the vendor's
+documented cure for a neighbouring error; it had never been tested on this
+stack. The second sample was left running and used as the test bed.
+
+### The experiment
+
+Baseline, after ~90 minutes of continuous storm: `s1 slapd-0` at **1488m CPU**
+and **705 stale refusals/s**, the predicate firing on sid `012` (= 0x12 = 18 =
+`s2 slapd-1`, a healthy pod idle at 11m).
+
+One write, issued **on the pod that owns serverID 18** so that the change
+originates under the absent sid — an arbitrary attribute on an arbitrary entry:
+
+```bash
+slctl ldapmodify --context <site-2> -n slaptain-testing --database example-db --pod 1 --as admin <<'LDIF'
+dn: ou=People,dc=example,dc=org
+changetype: modify
+replace: description
+description: its9398-heal-probe-1
+LDIF
+```
+
+→ `entryCSN: 20261006103120.264018Z#000000#012#000000`.
+
+### The result
+
+| t | `contextCSN` has `012` | `s1 slapd-0` CPU |
+|---|---|---|
+| baseline (90 min) | no | 1488m |
+| +10 s | **yes** | 1480m |
+| +30 s | yes | 600m |
+| +40 s | yes | **6m** |
+| +60 s | yes | 4m |
+
+Afterwards, across the whole mesh: every one of the twelve slapd pods at
+**4–7m**, zero stale lines in `s1 slapd-0`'s log over a 68 s window, and the
+detector swept over **18 pod×database pairs firing zero times**.
+
+The causal link is not an inference from timing alone. The value that appeared
+in the broken accesslog's `contextCSN` is byte-identical to the probe write's
+own CSN:
+
+```
+contextCSN: 20261006103120.264018Z#000000#012#000000
+```
+
+`minCSN` is untouched — still `20261006090530.902309Z…#012`, from 09:05. It did
+not need to change: once `contextCSN` carries the sid, the `j`-walk finds it,
+`minsids[i] == sids[j]` holds, and the value comparison that was never reached
+before now evaluates `minCSN(09:05) <= consumer's CSN` and passes. **The
+contradiction was repaired from the side that actually had it.**
+
+### What this buys, and what it does not
+
+- **It is a cure, not a mitigation.** Sub-minute, no restart, no data touched
+  beyond one attribute, every consumer recovering on its own next reconnect.
+- **The write must originate on the pod holding the absent serverID.** Writing
+  the same attribute anywhere else stamps a different sid and changes nothing —
+  which also means the operator cannot perform this blindly; it has to resolve
+  sid → pod first (`serverIDBase + ordinal + 1`, ADR-028).
+- **It does not work for a retired serverID.** Nothing will ever again write
+  under an orphan like the first sample's `066`, so that half of a contradiction
+  is permanent. See *What this is not*; this is the sharpest argument yet for
+  never re-striding a live mesh.
+- **It is a repair of state slapd owns.** ADR-026 R2 bears on whether slaptain
+  may do it automatically — a single benign write is a far smaller act than
+  deleting an overlay, but it is still a write the operator invents. Detection
+  first (`slctl inspect`), then an explicit operator-initiated repair, is the
+  conservative order.
+
+---
+
 ## What this is *not*
 
 `066` is decimal **102** — site-2 pod 1's serverID under the pre-2026-10-05
@@ -433,6 +510,9 @@ written under 102 again. A live sid can heal; an orphaned one cannot.
    predated both the refresh and the pod's own restart — so the refresh is a
    plausible trigger of the refusals, but not the writer of the contradiction.
    Still unverified.
-3. **Is there a repair short of rebuilding the pod?** `minCSN` is maintained by
-   slapd, not by the operator, and ADR-026 R2 forbids the operator from
-   correcting state it does not own on evidence like this.
+3. ~~**Is there a repair short of rebuilding the pod?**~~ **Answered
+   2026-10-06, measured**: one write originating on the pod that owns the absent
+   serverID clears it in under a minute — see *Healing it*. What stays open is
+   whether slaptain should do it **automatically**. ADR-026 R2 is the question
+   to settle: the repair is a single benign write rather than a destruction, but
+   it is still state slapd owns and a write the operator invents.
