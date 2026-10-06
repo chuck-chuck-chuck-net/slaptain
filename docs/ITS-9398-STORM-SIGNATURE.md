@@ -37,7 +37,7 @@ the same mesh.
 
 ---
 
-## Why it is permanent — the two passes that disagree
+## Why it is permanent — the test the provider cannot pass
 
 `servers/slapd/overlays/syncprov.c`, OpenLDAP 2.7.1, inside
 `syncprov_op_search`:
@@ -69,24 +69,49 @@ for ( i=0, j=0; i < a->a_numvals; i++ ) {        /* a = the log DB's minCSN */
     /* else → LDAP_SYNC_REFRESH_REQUIRED, "sync cookie is stale" */
 ```
 
-This iterates the log's `minCSN` sids and demands each still be present in the
-cookie — the cookie pass 1 just pruned. `011` is in `minCSN`, was deleted by
-pass 1, the `j`-walk cannot match it, and the consumer is refused:
+Read the `&&` chain in evaluation order, because the first term is the one that
+fails. `sids[]`/`numcsns` here are **still the provider's own contextCSN**, the
+same snapshot pass 1 used — *not* the pruned cookie. The consumer's values enter
+only as `srs->sr_state.ctxcsn[j]`, indexed by the **provider's** `j`.
+
+So for a `minCSN` sid the provider's own `contextCSN` lacks, the `j`-walk stops
+at the next larger sid, `minsids[i] == sids[j]` is false, and the chain
+short-circuits: **`ber_bvcmp` is never evaluated**. Take the second sample's
+numbers — `minsids[i] = 0x12 = 18`, provider `sids[] = {1,2,3,17,19,33}`: the
+walk halts at `19`, `18 == 19` fails, refused. Nothing the consumer could have
+presented changes that, which is why every consumer is refused identically:
 
 ```
-syncprov_op_search: consumer not within recorded mincsn for DB's mincsn=20261005210850.530520Z#000000#011#000000
+syncprov_op_search: consumer not within recorded mincsn for DB's mincsn=20261006090530.902309Z#000000#012#000000
 SEARCH RESULT tag=101 err=4096 … text=sync cookie is stale
 ```
 
-**The second pass indicts a sid the first pass removed microseconds earlier.**
+**The verdict is reached on the provider's own two attributes alone. The
+consumer is named in the message and had no say in it.**
+
+What pass 1 is actually *for*, then, is index alignment — it makes
+`srs->sr_state.ctxcsn[j]` correspond to `sids[j]` so the value comparison is
+meaningful in the normal case where the sid *is* tracked. The sid at the heart
+of the storm does get pruned there, for the very same reason it fails pass 2
+(the provider lacks it), but that prune is a sibling symptom, not the cause of
+the refusal. (An earlier version of this document had it the other way round.)
+
+The code has no branch for `minCSN ⊄ contextCSN`: it treats the two attributes
+as describing one sid set, and ITS#9398 is exactly the unclean shutdown that
+makes `minCSN` the larger one — it is written on every write, `contextCSN` only
+at checkpoint or clean exit.
+
+That is also why the predicate in *The signature* is not a correlate of the bug
+but **the code's own failure condition**, restated as something you can query.
 
 Nothing converges *by this path*: the consumer full-refreshes, reconnects, sends
-the identical cookie, and both passes run identically. There is no window and no
-backoff, which is why the CPU cost is flat rather than bursty.
+a cookie, and the provider's unsatisfiable test runs identically. There is no
+window and no backoff, which is why the CPU cost is flat rather than bursty.
 
 It is not unconditionally permanent, though — see *It can clear by itself*. A
-full refresh carries the provider's whole `contextCSN`, which can restore the
-sid the consumer was missing and dissolve the contradiction. Whether that
+full refresh carries the provider's whole `contextCSN`, and a subsequent write
+under the absent sid restores it on the provider side — which is the vendor's
+documented cure, and the one a retired serverID makes impossible. Whether it
 happens appears to depend on which link is storming.
 
 ---
