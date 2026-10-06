@@ -116,7 +116,7 @@ protects, is an open question (see *Open questions*).
 
 ---
 
-## Measuring it: the live reproduction of 2026-10-06
+## Measuring it: the first live reproduction (2026-10-06, pre-0.3.0 fixture)
 
 Three-site mesh, `slaptain-testing`, after a full-gate e2e run. All 18
 `slctl inspect` checks passed throughout.
@@ -259,13 +259,127 @@ investigation disproved.
 
 ---
 
+## Second sample — the predicate used predictively (2026-10-06, post-0.3.0)
+
+The first e2e run after tagging 0.3.0 failed on the stale-cookie spec: 4075
+lines on `slapd-0` of site-1, limit 50. The mesh was left running and the
+detector was applied **before** any log was read, to all nine RW pods × both
+databases. It fired exactly once:
+
+| site | pod | db | `minCSN` sids | `contextCSN` sids | verdict |
+|---|---|---|---|---|---|
+| s1 | slapd-0 | example-db | 001,002,003,011,**012**,013,021 | 001,002,003,011,013,021 | **storm source** |
+| s1 | slapd-1 | example-db | 001,002,003,011 | ⊃ (all 7) | ok (benign direction) |
+| s1 | slapd-2 | example-db | all 7 | = | ok |
+| s2, s3 | all | example-db | all 7 (s2 pods 0/1: 6) | ⊇ | ok |
+| all | all | example-db2 | 001,002,013,021 | = | ok |
+
+The log then named the same sid, 7190 times in the ten seconds the container
+had retained:
+
+```
+syncprov_op_search: consumer not within recorded mincsn for DB's mincsn=20261006090530.902309Z#000000#012#000000
+SEARCH RESULT tag=101 err=4096 … text=sync cookie is stale
+```
+
+Every one of the 7190 refusals carried that same `mincsn=` value. **The
+predicate picked the culprit out of nine pods with no log access and no
+cross-pod comparison.**
+
+### One broken provider, five refused consumers
+
+Unlike the first sample, this instance is single-source, and the fan-out is
+exact. `s1 slapd-0` logged **817 stale refusals/s and zero refresh restarts of
+its own** — pure culprit, not also a victim. Five consumers looped, each on
+exactly one rid, and every one of those rids resolves to `s1 slapd-0`:
+
+| consumer | rid | resolves to | restarts/s |
+|---|---|---|---|
+| s1 slapd-1 | 021 | local ordinal 0 | 291 |
+| s1 slapd-2 | 021 | local ordinal 0 | 302 |
+| s1 slapd-readonly-0 | 021 | local ordinal 0 | 314 |
+| s2 slapd-0 | 029 | peer site index 0 = site-1 | 271 |
+| s3 slapd-0 | 029 | peer site index 0 = site-1 | 274 |
+
+The CPU map follows from that list and nothing else:
+
+```
+site-1  slapd-0 1538m  slapd-1 457m  slapd-2 455m  RO 400m
+site-2  slapd-0  373m  slapd-1  10m  slapd-2   9m  RO   6m
+site-3  slapd-0  369m  slapd-1   4m  slapd-2   4m  RO   6m
+```
+
+This refines the site-granularity heuristic from the first sample: the busy set
+is *the broken provider plus its consumers*, and `replicasPerPeer: 1` means each
+peer site contributes exactly one. Site-1 is busy wall-to-wall because all three
+of its local consumers (including the RO) hit the broken pod; sites 2 and 3
+contribute one pod each. The culprit is the pod at **3-4× the others**, and it
+is the one with no `starting refresh` lines of its own.
+
+### Renumber residue is not required
+
+The 0.3.0 fixture was recreated under the hex stride, so no `066` orphan exists
+anywhere in this mesh. The indicted sid `012` is **hex 0x12 = 18 = site-2
+slapd-1** — confirmed by reading `olcServerID` off that pod, which was idle at
+10m and healthy throughout. A single live sid is sufficient; the first sample's
+orphan was indeed a passenger.
+
+### The data DB stayed perfect, and every check stayed green
+
+On the storming pod, the *data* database tracked `012` normally
+(`20261006090533.923138Z…#012`), byte-identical to both peers. Only the
+accesslog DB's own `contextCSN` lacked it, three seconds earlier in wall time
+than the data DB's value for the same sid.
+
+Consequently, while `s1 slapd-0` burned 1538m and refused 817 searches/s:
+
+- `slctl inspect --short` → **18 passed, 0 warnings, 0 failed**, `csn-convergence`
+  included;
+- `SlapdCluster` status → `Running`, `Ready=True`, `PodsResponsive=True`,
+  `ReplicationConverged=True CSNsMatch`, both external peers `Synced`.
+
+### The storm destroys its own evidence
+
+Retained container log on each pod, measured at the same moment:
+
+| pod | retained window |
+|---|---|
+| s1 slapd-0 (culprit) | **3 s** |
+| s1 slapd-1 / slapd-2 / RO | 10 / 14 / 14 s |
+| s2 slapd-0, s3 slapd-0 | 25 s, 38 s |
+| every idle pod | 297 s (the full `--since=5m`) |
+
+At ~14k lines/s the pod rolls its log away in seconds. This has a direct
+consequence for the e2e: `countInSlapdLogs` counts "since `lossStartedAt`", but
+cannot see further back than retention, so the spec's **4075 is a floor imposed
+by log rotation, not a measurement**. The real figure over the ~10 minutes
+between the PVC loss and the assertion is on the order of 10⁵–10⁶. Any future
+threshold work should read this as a binary signal, not a magnitude — or better,
+assert the `minCSN ⊄ contextCSN` predicate instead.
+
+### What this sample says about the origin
+
+The PVC-loss pod was `slapd-1` (its three PVCs were recreated at 09:09:44); the
+broken accesslog is on `slapd-0`, whose PVCs date from 08:58:10 and which
+restarted at 09:06:38 with the rest of the cluster during the cleanup-policy
+spec's roll. The stale `minCSN` value itself is stamped 09:05:30, i.e. **before
+both events**.
+
+So the damage is not on the refreshed pod but on a *peer* of it, and it predates
+the refresh. That narrows open question 2 without closing it: the dataloss spec
+is in the frame as a trigger for the refusals, not as the writer of the
+contradiction.
+
+---
+
 ## What this is *not*
 
 `066` is decimal **102** — site-2 pod 1's serverID under the pre-2026-10-05
 decimal stride, frozen at 17:54:21Z. It is renumber residue (ADR-028 amendment),
 and it is a **passenger here, not the cause**: the indicted sid in the log is
 `011` (17), which is live, and every healthy pod in the table carries `066` in
-both lists while idling at single-digit CPU.
+both lists while idling at single-digit CPU. The second sample settles it — a
+mesh with no renumber residue at all stormed just as hard, on a live sid.
 
 It does make recovery strictly worse. Sid 102 is dead, so once a pod's
 `contextCSN` loses `066` while its `minCSN` retains it, that half of the
@@ -287,9 +401,13 @@ written under 102 again. A live sid can heal; an orphaned one cannot.
    behaviour, or whether arm 2 and arm 3 fail the same way for the same reason.
    Needs reading `syncprov_play_sessionlog` with the same care applied to
    `syncprov_op_search` here.
-2. **How did `s1 slapd-2` lose `011`/`066` from its accesslog `contextCSN`?**
-   The run included the dataloss-recovery spec, which deliberately destroys a
-   pod's PVCs. Unverified.
+2. **How does the broken pod's accesslog `contextCSN` lose a sid its own
+   `minCSN` still carries?** Both runs included the dataloss-recovery spec,
+   which deliberately destroys a pod's PVCs. The second sample narrows it: the
+   contradiction sat on a *peer* of the refreshed pod and its `minCSN` value
+   predated both the refresh and the pod's own restart — so the refresh is a
+   plausible trigger of the refusals, but not the writer of the contradiction.
+   Still unverified.
 3. **Is there a repair short of rebuilding the pod?** `minCSN` is maintained by
    slapd, not by the operator, and ADR-026 R2 forbids the operator from
    correcting state it does not own on evidence like this.
