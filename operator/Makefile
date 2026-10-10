@@ -129,7 +129,11 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.7.2
+# Same pin as .github/workflows/lint.yml — move them together, so `make lint`
+# and CI judge by the same rules. Must be a release whose Go is at least the
+# toolchain in go.mod, or it fails on the export-data version before any
+# linter runs (docs/BACKLOG.md, the v2.7.2-under-Go-1.27 entry).
+GOLANGCI_LINT_VERSION ?= v2.12.2
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.

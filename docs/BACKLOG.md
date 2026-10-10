@@ -406,7 +406,15 @@ is written but untested; every run so far has been `pod-routed`.
 
 ---
 
-## `make -C operator lint` cannot run under Go 1.27
+## ~~`make -C operator lint` cannot run under Go 1.27~~ — DONE (2026-10-10)
+
+Re-pinned to v2.12.2, the version `.github/workflows/lint.yml` runs too, so
+local and CI lint by one ruleset; verified against the go 1.25 toolchain in
+`operator/go.mod`. The debt itself is untouched: an uncapped run at v2.12.2
+reports 542 findings (goconst 407, errcheck 47, lll 36, modernize 28, gocyclo
+8, unparam 7, unused 5, prealloc 3, revive 1). Until the sweep, CI's gate is
+`only-new-issues` — it holds the line rather than drawing it.
+
 
 **What:** the pinned `golangci-lint` v2.7.2 cannot read Go 1.27's export data
 (`export data version 4 is greater than maximum supported version 2`). It fails
