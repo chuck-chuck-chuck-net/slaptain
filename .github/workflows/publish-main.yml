@@ -1,0 +1,47 @@
+name: Publish main
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
+  # under its own.
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  images:
+    name: Build and push images
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Every image name and tag comes from the Makefile (GIT_TAG → IMAGE_TAG,
+      # docs/VERSIONING.md), so CI reuses it instead of re-deriving the rule
+      # with docker/metadata-action. Off a version tag that is sha-<short
+      # hash> — the same spelling metadata-action's type=sha publishes for the
+      # sibling project, so `make`, tests/e2e.sh and CI agree on the name.
+      #
+      # `make push` builds the OpenLDAP 2.7.1 .deb carrier once and feeds it
+      # to both 2.7 images from local storage (it is never pushed); the
+      # Makefile drives podman for that, which ubuntu-latest ships.
+      - name: Show the tag the Makefile derived
+        run: make show-tag
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push the six images
+        run: make push

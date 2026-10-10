@@ -1,0 +1,63 @@
+version: 2
+updates:
+  # The repo root has no go.mod. The operator is one module (operator/) and
+  # the Ginkgo e2e suite is another (tests/e2e/); both are listed.
+  - package-ecosystem: gomod
+    directory: /operator
+    schedule:
+      interval: weekly
+    groups:
+      k8s:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      # The AWS SDK v2 ships its submodules in lockstep; one PR per submodule
+      # is noise and each would drag the others along by minimum-version
+      # selection anyway.
+      aws-sdk:
+        patterns:
+          - "github.com/aws/aws-sdk-go-v2*"
+
+  - package-ecosystem: gomod
+    directory: /tests/e2e
+    schedule:
+      interval: weekly
+    groups:
+      k8s:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Dependabot matches Containerfile* as well as Dockerfile*, so the plain and
+  # the .ol26 variants in one directory are both covered.
+  - package-ecosystem: docker
+    directories:
+      - /images/operator
+      - /images/slapd
+      - /images/slapd-init
+      - /images/slapd-toolkit
+      - /images/openldap-deb
+    schedule:
+      interval: weekly
+    groups:
+      golang:
+        patterns:
+          - "golang"
+    # The builder image must not drift off the Go line that operator/go.mod
+    # declares. Docker tags like `1.27rc2` carry no semver pre-release
+    # separator, so Dependabot ranks them above the stable line and proposed
+    # one; patch bumps (security fixes) stay automatic, minor/major is a
+    # deliberate change made together with the `go` directive in go.mod.
+    ignore:
+      - dependency-name: "golang"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+
+  # No helm entry: Dependabot's helm ecosystem only bumps Chart.yaml
+  # `dependencies`, and none of the four charts declares any.

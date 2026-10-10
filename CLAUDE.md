@@ -39,6 +39,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ```
 .
 ├── Makefile                        # Root build targets (see Makefile Targets below)
+├── .github/workflows/              # CI: test / lint / codeql / security on every push; publish-main (sha-<hash> images
+│                                   # on main) and publish (v* tag → images, charts, slctl binaries, CRD bundle, release)
+├── hack/verify-generated.sh        # The generated-files drift check behind `make verify-generated`
 ├── lab.yaml.sample                 # Lab config schema for tests/e2e.sh (real lab.yaml is gitignored)
 ├── CLAUDE.md
 ├── docs/
@@ -384,6 +387,8 @@ runs without readpw configuration but skips those test cases.
 | `make build-operator` | Build operator image (build context = repo root) |
 | `make push` | Build + push all six images (both slapd pairs, toolkit, operator) at `IMAGE_TAG` |
 | `make show-tag` | Print the git tag and the image/chart versions derived from it (`v0.2.1` → image `0.2.1`, chart `0.2.1`) |
+| `make helm-lint` | Lint all four published charts and render each in the shapes users install (operator with Multus/metrics/NetworkPolicy on, slapd with the persistent fixture values, the mesh from its three-site example). CI's chart gate and the release's pre-push check |
+| `make verify-generated` | Regenerate CRDs/RBAC/deepcopy and fail if any checked-in copy (incl. `charts/operator/crds/`) drifts — `hack/verify-generated.sh`. CI's generated-files gate |
 | `make build-openldap-deb` | Build the local-only OpenLDAP 2.7.1 .deb carrier image (feeds both 2.7 image builds; never pushed) |
 | `make build-ol26` / `make import-ol26` | Build / CRI-import the legacy 2.6 slapd+init pair (`:<tag>-ol26`, ADR-021) |
 | `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |

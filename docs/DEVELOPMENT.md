@@ -198,7 +198,21 @@ as the upgrade gotcha above, just committed.
 cd operator && make build        # compile
 cd operator && make test         # envtest (auto-downloads the binaries) + fmt + vet
 cd operator && make lint         # golangci-lint, pinned version, auto-installed
+make helm-lint                   # lint + render all four charts in the shapes users install
+make verify-generated            # checked-in CRDs / RBAC / deepcopy still match the Go sources
 ```
+
+CI (`.github/workflows/`) runs exactly these gates on every push and pull request:
+`test.yml` (tidy for both modules, `verify-generated`, the envtest unit tests, and a
+compile of the e2e suite), `lint.yml` (golangci-lint on **new** findings only until the
+docs/BACKLOG.md lint sweep lands, plus `helm-lint`), `codeql.yml` and `security.yml`.
+The e2e suite itself is not run in CI — it needs a lab cluster (see below).
+
+Publishing is CI's too, and goes through the Makefile so the tag rule in
+[Versioning](VERSIONING.md) stays the single source: `publish-main.yml` runs `make push`
+on every push to `main` (images at `sha-<hash>`), and `publish.yml` runs on a `v*` tag —
+`make push`, `make charts-push`, then a GitHub release carrying the `slctl` binaries and a
+`slaptain-crds.yaml` bundle for the CRD-apply step that `helm upgrade` cannot do.
 
 ---
 

@@ -1,0 +1,214 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
+  # under its own.
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  images:
+    name: Build and push images
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Every image name and tag comes from the Makefile (GIT_TAG → IMAGE_TAG,
+      # docs/VERSIONING.md): v0.3.0 is addressed as :0.3.0, the chart version
+      # and appVersion are the same string, and `image.tag | default
+      # .Chart.AppVersion` resolves by construction. CI reuses that rule rather
+      # than re-deriving it, and checks the Makefile actually saw the tag —
+      # otherwise it would silently publish the release as sha-<hash>.
+      - name: Verify the Makefile sees the release tag
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          got="$(make -s show-tag | awk '/^image:/ {print $2}')"
+          if [ "$got" != "$want" ]; then
+            echo "Makefile derived image tag '${got}', expected '${want}'. Is ${GITHUB_REF_NAME} visible in the checkout?"
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # The 2.7 slapd pair, the legacy -ol26 2.6 pair (ADR-021), the toolkit
+      # and the operator. The OpenLDAP .deb carrier is built once for the two
+      # 2.7 images and never pushed.
+      - name: Build and push the six images
+        run: make push
+
+  charts:
+    name: Push Helm charts
+    runs-on: ubuntu-latest
+    needs: images
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # `make charts-push` stamps --version/--app-version from the git tag, so
+      # the in-tree Chart.yaml is documentary — but a mismatch means the
+      # release-bump commit was never made, and a checkout would then render a
+      # different appVersion than the published chart. A pre-release tag
+      # (v0.4.0-rc1) may match on its base version (0.4.0).
+      - name: Verify the chart versions match the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          base="${version%%-*}"
+          rc=0
+          for c in operator slapd-mesh slapd slapd-toolkit; do
+            have="$(awk '/^version:/ {print $2}' "charts/${c}/Chart.yaml")"
+            if [ "${have}" != "${version}" ] && [ "${have}" != "${base}" ]; then
+              echo "ERROR: charts/${c}/Chart.yaml says version ${have}; tag ${GITHUB_REF_NAME} wants ${version}"
+              rc=1
+            fi
+          done
+          exit "${rc}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+
+      # Never push a chart that does not parse: a template-syntax error only
+      # surfaces at `helm install` time, i.e. on the user's cluster.
+      - name: Lint and render the charts
+        run: make helm-lint
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # All four published charts (operator, slapd-mesh, slapd, slapd-toolkit),
+      # versioned from the tag, appVersion = the image tag.
+      - name: Package and push the charts
+        run: make charts-push
+
+  release:
+    name: Publish release assets
+    runs-on: ubuntu-latest
+    needs: [images, charts]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - name: Build slctl
+        working-directory: operator
+        run: |
+          mkdir -p ../dist
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              out="../dist/slctl-${os}-${arch}"
+              CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags='-s -w' -o "$out" ./cmd/slctl
+            done
+          done
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' \
+            -o ../dist/slctl-windows-amd64.exe ./cmd/slctl
+
+      # Helm never updates the CRDs in a chart's crds/ directory on `helm upgrade`
+      # (they are cluster-scoped and shared between releases, so Helm declines to
+      # own them). An upgrading user therefore has to apply the CRDs themselves —
+      # and without this asset the only copy ships inside the chart tarball, i.e.
+      # in the one place they cannot reach without cloning the repo. The API
+      # server prunes unknown fields silently, so skipping the step does not
+      # fail: it drops every field the new version added, spec and status alike.
+      # Concatenation stays valid: each generated CRD begins with its own "---".
+      - name: Stage the CRDs as a release asset
+        run: cat charts/operator/crds/*.yaml > dist/slaptain-crds.yaml
+
+      # There is no CHANGELOG.md in this repo; the commit-derived notes come
+      # from generate_release_notes below and this body is prepended to them.
+      # The heredoc is quoted (the body contains backticks), so the
+      # placeholders stand in for the variables and sed fills them in.
+      - name: Build release notes
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cat > release-notes.md <<'EOF_NOTES'
+          ## Container images
+
+          Image tags carry the bare version; the `v` belongs to the git tag only
+          (`docs/VERSIONING.md`).
+
+          ```
+          ghcr.io/__OWNER__/slaptain/operator:__VERSION__
+          ghcr.io/__OWNER__/slaptain/slapd:__VERSION__              # OpenLDAP 2.7.1 (default)
+          ghcr.io/__OWNER__/slaptain/slapd-init:__VERSION__
+          ghcr.io/__OWNER__/slaptain/slapd:__VERSION__-ol26         # legacy OpenLDAP 2.6 pair (ADR-021):
+          ghcr.io/__OWNER__/slaptain/slapd-init:__VERSION__-ol26    #   pin both or neither
+          ghcr.io/__OWNER__/slaptain/slapd-toolkit:__VERSION__
+          ```
+
+          ## Helm charts
+
+          Chart versions carry no leading `v`, so `--version` takes the tag without it.
+
+          ```
+          helm upgrade --install slaptain oci://ghcr.io/__OWNER__/charts/slaptain \
+            --version __VERSION__ -n slaptain-system --create-namespace
+          ```
+
+          Published at the same version: `charts/slapd-mesh` (a whole multi-site
+          mesh, applied identically at every site), `charts/slapd` (one site's
+          SlapdCluster) and `charts/slapd-toolkit` (the debug pod).
+
+          ## Upgrading: apply the CRDs first
+
+          `helm upgrade` does **not** update CustomResourceDefinitions. Apply them
+          yourself before upgrading the operator — the API server prunes unknown
+          fields without erroring, so an upgrade against an old CRD silently drops
+          every field this version added, in both `spec` and `status`.
+
+          `--force-conflicts` is required: Helm installed the CRDs as the field manager
+          `helm`, and forcing hands the schema to `kubectl`. Helm never takes it back —
+          it skips an existing CRD on install and does not touch CRDs on upgrade.
+
+          ```
+          kubectl apply --server-side --force-conflicts -f \
+            https://github.com/__REPO__/releases/download/__TAG__/slaptain-crds.yaml
+          ```
+
+          ## slctl
+
+          The diagnostic CLI (`docs/slctl.md`) is attached for linux and darwin
+          (amd64, arm64) and windows (amd64).
+
+          EOF_NOTES
+          sed -i \
+            -e "s|__OWNER__|${OWNER}|g" \
+            -e "s|__REPO__|${REPO}|g" \
+            -e "s|__TAG__|${GITHUB_REF_NAME}|g" \
+            -e "s|__VERSION__|${version}|g" \
+            release-notes.md
+          echo "----- generated release notes -----"
+          cat release-notes.md
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          body_path: release-notes.md
+          generate_release_notes: true
+          # A tag carrying a pre-release suffix (v0.4.0-rc1) must not become the
+          # repository's headline release. Semver's own rule: a hyphen means pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}

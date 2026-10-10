@@ -1,0 +1,58 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+        with:
+          # only-new-issues below diffs against the PR base, or on a push
+          # against the previous commit — both must be in the clone.
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      # `version` is the same pin as GOLANGCI_LINT_VERSION in operator/Makefile;
+      # move them together, so `make -C operator lint` and CI judge by the same
+      # rules. (It has to be a release whose Go is at least operator/go.mod's,
+      # or it dies on the export-data version before any linter runs — the
+      # failure docs/BACKLOG.md records for v2.7.2 under Go 1.27.)
+      #
+      # The operator carries a few hundred pre-existing findings — the "lint
+      # debt" entry in docs/BACKLOG.md. Until that sweep lands, the gate is
+      # "add none", not "have none": only findings a change introduces fail it.
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: operator
+          only-new-issues: true
+
+  chart:
+    name: Helm charts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+
+      # A template-syntax error in a chart is invisible to the Go gates and
+      # only surfaces at `helm install` time on the user's cluster. All four
+      # published charts, each rendered in the shapes people actually install.
+      - name: Lint and render the charts
+        run: make helm-lint

@@ -101,9 +101,11 @@ rule, but wrong *together*, so it resolves. Verified against the registry rather
 
 **Why `sha-` on untagged builds.** In the sibling project the prefix is forced: its CI uses
 `docker/metadata-action`, whose `type=sha` publishes exactly that, so a Makefile default
-asking for `:<hash>` could never address a CI-built image. slaptain publishes by hand today
-and has no such constraint — it takes the spelling so the two projects read alike, and so the
-defaults already fit when slaptain adopts those workflows, which is planned. It also makes a
+asking for `:<hash>` could never address a CI-built image. slaptain had no such constraint when
+it took the spelling (it published by hand until 2026-10-10); its workflows now publish through
+`make push` and `make charts-push`, so CI goes through this very rule rather than re-deriving
+it (`.github/workflows/publish*.yml`, which also refuse a release whose tag the Makefile did
+not see). It also makes a
 registry listing self-describing: `0.2.0` is a release, `sha-09ecf10` is a build of a commit.
 
 The `-dirty-<state8>` half is slaptain's own and predates this (`scripts/image-tag.sh`): a

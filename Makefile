@@ -28,10 +28,10 @@ IS_VERSION_TAG := $(shell echo '$(GIT_TAG)' | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]
 #             sibling project (littlered), where it is forced: its CI's
 #             docker/metadata-action `type=sha` publishes exactly that, so a
 #             Makefile default asking for :<hash> could never address a
-#             CI-built image. slaptain publishes by hand and has no such
-#             constraint — it adopts the spelling so the two projects read the
-#             same, and so the defaults already fit if slaptain gains the same
-#             workflows. It also makes a registry listing self-describing:
+#             CI-built image. slaptain's own workflows (.github/workflows/
+#             publish*.yml) publish through `make push`, i.e. through THIS
+#             rule, so the spelling costs nothing here and makes the two
+#             projects read the same. It also makes a registry listing self-describing:
 #             `0.2.0` is a release, `sha-09ecf10` is a build of a commit.
 IMAGE_TAG := $(if $(IS_VERSION_TAG),$(GIT_TAG:v%=%),sha-$(GIT_TAG))
 
