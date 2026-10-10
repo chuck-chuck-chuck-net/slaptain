@@ -13,7 +13,7 @@ does not restate the project's conventions and discipline in full, which live in
 | Tool | Why |
 |---|---|
 | `podman` | Image builds. `CONTAINER_ENGINE=docker` switches engines; nothing in the Containerfiles is podman-specific |
-| Go 1.25.3+ | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
+| Go 1.26.9+ | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
 | Helm 3 | Every deployment path is Helm. There is no kustomize in this repo |
 | `kubectl` | Contexts for each cluster you target |
 | `yq` v4 | Only for `lab.yaml` — `tests/e2e.sh` refuses to read a config file without it |
