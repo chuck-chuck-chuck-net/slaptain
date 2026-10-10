@@ -28,14 +28,16 @@ jobs:
             operator/go.sum
             tests/e2e/go.sum
 
-      # build-mode none: the Go extractor resolves both modules (operator/,
-      # tests/e2e/) itself, so no autobuild has to guess which go.mod to build
-      # from — the repo root has none.
+      # Go has no "none" build mode ("Go does not support the none build
+      # mode", CodeQL 2.27). The Go autobuilder finds every go.mod in the tree
+      # and builds each module (operator/, tests/e2e/) — the repo root has none.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: go
-          build-mode: none
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4

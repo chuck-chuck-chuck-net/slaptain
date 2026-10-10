@@ -1,7 +1,10 @@
 name: Tests
 
+# push is limited to main: a PR branch is covered by the pull_request event,
+# and running both doubles every check.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:

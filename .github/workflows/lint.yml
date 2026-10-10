@@ -1,7 +1,12 @@
 name: Lint
 
+# push is limited to main: a PR branch is covered by the pull_request event,
+# and running both doubles every check. It also matters for only-new-issues
+# below — the first push of a new branch has no previous commit to diff
+# against, so that run reported the whole pre-existing debt as "new".
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -11,6 +16,10 @@ jobs:
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # only-new-issues reads the PR diff through the API.
+      pull-requests: read
     steps:
       - name: Clone the code
         uses: actions/checkout@v7

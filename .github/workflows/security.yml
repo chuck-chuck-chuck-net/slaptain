@@ -25,11 +25,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # go-version-input defaults to 'stable' and wins over go-version-file;
+      # blank it so the scan runs on the toolchain the module declares, which
+      # is what decides which stdlib findings apply.
       - name: Run govulncheck
         uses: golang/govulncheck-action@v1
         with:
           repo-checkout: false
+          go-version-input: ''
           go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
           work-dir: ${{ matrix.module }}
 
   trivy:
