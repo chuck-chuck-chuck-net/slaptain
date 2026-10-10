@@ -7,3 +7,6 @@ tests/image-pull-secret.yaml
 /storm-repro-iter-*.log
 .claude/worktrees/
 /.claude/local/
+
+# Local shell configurations
+.envrc
