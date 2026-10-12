@@ -92,10 +92,23 @@ SLAPD_IMAGE_OL26 = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol26
 #   make cluster-helm-install SLAPD_TAG_SUFFIX=-ol26
 SLAPD_TAG_SUFFIX ?=
 
+# Debug variants of the slapd runtime image (see docs/DEBUG-IMAGES.md). Built
+# and pushed only on demand — never part of `all` or `push`, never the default
+# in a chart. Pin per SlapdCluster with spec.images.slapd.tag=<tag>-debug;
+# spec.images.init.tag stays on the plain tag (unlike -ol26, where both move
+# together — these are the same OpenLDAP version, so the on-disk format is
+# identical and only slapd's own flags differ).
+SLAPD_IMAGE_DEBUG = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-debug
+SLAPD_IMAGE_ASAN  = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-asan
+
 # OpenLDAP 2.7.1 .deb build. Local-only image (localhost/ prefix — never pushed):
 # it carries nothing but /debs and is consumed by both the slapd and slapd-init
 # 2.7 Containerfiles, so the package build runs once per tag for both.
 OPENLDAP_DEB_IMAGE = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)
+# Separate package builds for the debug variants: the compiler flags live in
+# the .debs, so the carrier image cannot be shared with the release build.
+OPENLDAP_DEB_IMAGE_DEBUG = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-debug
+OPENLDAP_DEB_IMAGE_ASAN  = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-asan
 # Set RUN_UPSTREAM_TESTS=1 to run OpenLDAP's own test suite during the package
 # build (slow; off by default — see images/openldap-deb/README.md).
 RUN_UPSTREAM_TESTS ?= 0
@@ -170,7 +183,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated
 
 ## all: the seven pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -225,6 +238,38 @@ $(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag | $(STAMPS)
 		-t $(SLAPD_IMAGE_OL26) images/slapd/
 	@touch $@
 
+# ── Debug variants (ADR-free: a diagnostic build, not a shipped artifact) ───
+# Each needs its own package build, so each is a full ~10 min cycle. Nothing
+# else depends on these stamps, so the normal loop never pays for them.
+
+$(STAMPS)/openldap-deb-debug: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
+		--build-arg BUILD_VARIANT=debug \
+		-t $(OPENLDAP_DEB_IMAGE_DEBUG) images/openldap-deb/
+	@touch $@
+
+$(STAMPS)/slapd-debug: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-debug $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_DEBUG) \
+		--build-arg BUILD_VARIANT=debug \
+		-t $(SLAPD_IMAGE_DEBUG) images/slapd/
+	@touch $@
+
+$(STAMPS)/openldap-deb-asan: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
+		--build-arg BUILD_VARIANT=asan \
+		-t $(OPENLDAP_DEB_IMAGE_ASAN) images/openldap-deb/
+	@touch $@
+
+$(STAMPS)/slapd-asan: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-asan $(STAMPS)/tag | $(STAMPS)
+	$(CONTAINER_ENGINE) build \
+		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_ASAN) \
+		--build-arg BUILD_VARIANT=asan \
+		-t $(SLAPD_IMAGE_ASAN) images/slapd/
+	@touch $@
+
 $(STAMPS)/toolkit: $(TOOLKIT_SRCS) $(STAMPS)/tag | $(STAMPS)
 	$(CONTAINER_ENGINE) build -t $(TOOLKIT_IMAGE) images/slapd-toolkit/
 	@touch $@
@@ -247,6 +292,12 @@ build-ol26: build-init-ol26 build-slapd-ol26
 build-toolkit: $(STAMPS)/toolkit
 build-operator: $(STAMPS)/operator
 build-exporter: $(STAMPS)/exporter
+
+## Debug variants of the slapd image. Deliberately absent from `all` and `push`.
+build-openldap-deb-debug: $(STAMPS)/openldap-deb-debug
+build-slapd-debug: $(STAMPS)/slapd-debug
+build-openldap-deb-asan: $(STAMPS)/openldap-deb-asan
+build-slapd-asan: $(STAMPS)/slapd-asan
 
 build-slctl:
 	cd operator && go build -o ../bin/slctl ./cmd/slctl/
@@ -297,6 +348,21 @@ import-slapd-ol26: build-slapd-ol26
 	$(call import-if-needed,$(SLAPD_IMAGE_OL26))
 
 import-ol26: import-init-ol26 import-slapd-ol26
+
+## Debug variants: deliver the one slapd image, leave slapd-init on the plain
+## tag. Same OpenLDAP version, so the two images still agree on everything the
+## runtime contract covers.
+import-slapd-debug: build-slapd-debug
+	$(call import-if-needed,$(SLAPD_IMAGE_DEBUG))
+
+import-slapd-asan: build-slapd-asan
+	$(call import-if-needed,$(SLAPD_IMAGE_ASAN))
+
+push-slapd-debug: build-slapd-debug
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_DEBUG)
+
+push-slapd-asan: build-slapd-asan
+	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_ASAN)
 
 ## Push a single image (per-image counterparts of the aggregate `push`,
 ## so `deliver-operator` resolves under the default DELIVERY=push).

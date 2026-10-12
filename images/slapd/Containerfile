@@ -15,6 +15,16 @@
 # honest about what it needs.
 ARG OPENLDAP_DEB_IMAGE=localhost/slaptain/openldap-deb:latest
 
+# Which flavour to assemble. Must match the BUILD_VARIANT the OPENLDAP_DEB_IMAGE
+# was built with: the compiler flags live in the packages, this picks the debug
+# symbols and the environment that go with them. See docs/DEBUG-IMAGES.md.
+#   release  the image that ships
+#   debug    identical binaries + their detached debug info
+#   asan     AddressSanitizer build + the options that make its report usable
+# Never the default anywhere — `make build-slapd-debug` / `build-slapd-asan`
+# tag these :<tag>-debug / :<tag>-asan and no chart points at them.
+ARG BUILD_VARIANT=release
+
 FROM ${OPENLDAP_DEB_IMAGE} AS debs
 
 # ── Build / gather stage ────────────────────────────────────────────────────
@@ -27,13 +37,31 @@ COPY --from=debs /debs /debs
 # Install the forked 2.7.1 packages instead of Debian's 2.6 slapd. apt resolves
 # their dependencies from the archive; the .deb paths must be absolute for apt
 # to treat them as local files rather than package names.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# ASAN_OPTIONS here is for the asan variant's postinst, which runs slapadd and
+# slappasswd: those are sanitized binaries too, and ASan's default exitcode=23
+# on a leak report turns slapd's package configuration into a failed build.
+# Exit-time allocations in a one-shot tool are not what we are hunting.
+RUN ASAN_OPTIONS=detect_leaks=0 \
+    apt-get update && ASAN_OPTIONS=detect_leaks=0 \
+    apt-get install -y --no-install-recommends \
         /debs/libldap-common_*.deb \
         /debs/libldap2_*.deb \
         /debs/slapd_*.deb \
         /debs/ldap-utils_*.deb \
         dpkg-dev \
-    && rm -rf /var/lib/apt/lists/* /debs
+    && rm -rf /var/lib/apt/lists/*
+
+# Debug variants: unpack the detached debug info into /usr/lib/debug. dpkg,
+# not apt — a -dbgsym package Depends on an exact binary version that is not in
+# any archive, and `dpkg -i` is the right tool for a package with no dependency
+# question to answer.
+ARG BUILD_VARIANT
+RUN set -eux; \
+    if [ "${BUILD_VARIANT}" != "release" ]; then \
+        dpkg -i /debs/*-dbgsym_*.*deb; \
+        test -d /usr/lib/debug/.build-id; \
+    fi; \
+    rm -rf /debs
 
 # Assemble a staging root for the distroless runtime.
 # NOTE: do NOT pre-create /staging/usr/lib/ldap here — cp -r creates it
@@ -94,6 +122,30 @@ RUN set -e; arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
     # unwinding — it never appears in ldd output, so copy it explicitly.
     cp -a /usr/lib/$arch/libgcc_s.so.1 /staging/usr/lib/$arch/
 
+# Debug variants: the detached debug info, and a check that the sanitizer
+# runtime actually made it in.
+#
+# /usr/lib/debug/.build-id is where libasan's built-in symbolizer looks (it is
+# libbacktrace underneath, and follows the build-id link the same way gdb does).
+# That symbolizer runs IN PROCESS, which is what makes a symbolised report
+# possible at all here: distroless has no shell and no llvm-symbolizer, and
+# there is nowhere to install one from at runtime.
+#
+# libasan.so.8 is a DT_NEEDED of an ASan-linked slapd, so the ldd loop above
+# already staged it. Assert it rather than trust it — a missing sanitizer
+# runtime does not degrade the image, it stops the container from starting, and
+# there is no shell in there to find that out from.
+RUN set -eux; \
+    arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
+    if [ "${BUILD_VARIANT}" != "release" ]; then \
+        install -d /staging/usr/lib/debug; \
+        cp -a /usr/lib/debug/.build-id /staging/usr/lib/debug/; \
+    fi; \
+    if [ "${BUILD_VARIANT}" = "asan" ]; then \
+        ldd /usr/sbin/slapd | grep -q libasan; \
+        ls /staging/usr/lib/$arch/libasan.so.*; \
+    fi
+
 # Minimal /etc/passwd and /etc/group — distroless/base only ships root+nobody
 RUN printf \
       'root:x:0:0:root:/root:/sbin/nologin\nopenldap:x:1024:1024:OpenLDAP:/nonexistent:/sbin/nologin\n' \
@@ -101,7 +153,7 @@ RUN printf \
     printf 'root:x:0:\nopenldap:x:1024:\n' > /staging/etc/group
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
-FROM gcr.io/distroless/base-debian13
+FROM gcr.io/distroless/base-debian13 AS runtime-base
 
 COPY --from=build /staging/ /
 
@@ -114,3 +166,38 @@ EXPOSE 1024 1025
 
 # Chart overrides args; -F points to config written by the init container
 ENTRYPOINT ["/usr/sbin/slapd"]
+
+# ── Variant environments ────────────────────────────────────────────────────
+# The operator sets no env on the slapd container and there is no shell to set
+# any from, so whatever a debug run needs has to be baked in here. That is why
+# these are separate images rather than one image plus a runtime flag.
+
+FROM runtime-base AS runtime-release
+
+FROM runtime-base AS runtime-debug
+# glibc's own heap diagnostics, turned up. MALLOC_PERTURB_ fills freed memory
+# with a byte pattern, so a use-after-free reads garbage rather than plausible
+# data and fails nearer its cause; MALLOC_CHECK_=3 makes the allocator abort on
+# the first inconsistency it notices instead of carrying on; dropping the tcache
+# removes the per-thread free list that "unaligned tcache chunk" implicates, so
+# the failure moves if that path is involved and stays put if it is not.
+#
+# Note what this costs: the binaries are release-identical, but these three
+# variables are not behaviour-neutral. The image trades a faithful reproduction
+# for an earlier, louder one.
+ENV MALLOC_PERTURB_=165 \
+    MALLOC_CHECK_=3 \
+    GLIBC_TUNABLES=glibc.malloc.tcache_count=0
+
+FROM runtime-base AS runtime-asan
+# detect_leaks=0: slapd holds allocations to exit by design, and a leak report
+#   at shutdown buries the report we are here for.
+# abort_on_error=1: die on the report, so kubelet records the restart and the
+#   three stacks are in `kubectl logs --previous`.
+# malloc_context_size=30: deep enough to see which syncprov path allocated the
+#   chunk, not just the wrapper that called malloc.
+# allocator_may_return_null=1: without it an allocation ASan cannot satisfy is a
+#   hard abort, which reads like a finding and is a memory limit.
+ENV ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:print_stacktrace=1:malloc_context_size=30:allocator_may_return_null=1"
+
+FROM runtime-${BUILD_VARIANT}

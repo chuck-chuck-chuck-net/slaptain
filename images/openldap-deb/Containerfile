@@ -7,6 +7,24 @@
 #   COPY --from=${OPENLDAP_DEB_IMAGE} /debs /debs
 # so the package build runs ONCE per tag and feeds both. It is never pushed to a
 # registry — `make build-openldap-deb` tags it under localhost/.
+#
+# BUILD_VARIANT selects what comes out (see docs/DEBUG-IMAGES.md):
+#
+#   release  what ships. Only the four runtime packages are collected.
+#   debug    the SAME build — identical flags, identical binaries — but the
+#            -dbgsym packages are collected too. A crash reproduces exactly as
+#            it does in production, and the backtrace resolves.
+#   asan     AddressSanitizer: every allocation intercepted, an invalid free or
+#            use-after-free reported AT THE MOMENT IT HAPPENS with the
+#            allocation, free and access stacks. Unoptimised, ~2x slower, and
+#            therefore a different program than the one that crashed — read it
+#            for the cause, not for the reproduction.
+#
+# Debug info travels as -dbgsym packages rather than DEB_BUILD_OPTIONS=nostrip,
+# which looks like the simpler route and is a trap: dh drops dh_strip from the
+# sequence under nostrip, and this packaging creates the slapadd/slappasswd/…
+# hardlinks inside override_dh_strip. The package then builds, installs, and has
+# no slapadd — which surfaces as a postinst failure three images downstream.
 
 # ── Package build stage ─────────────────────────────────────────────────────
 FROM debian:trixie-slim AS deb-build
@@ -19,6 +37,8 @@ ARG OPENLDAP_URL=https://www.openldap.org/software/download/OpenLDAP/openldap-re
 # Upstream test suite: skipped by default (it takes tens of minutes and needs a
 # working loopback/krb5 setup). Set to 1 to run it — see README.md.
 ARG RUN_UPSTREAM_TESTS=0
+# release | debug | asan — see the header. Anything else fails the build.
+ARG BUILD_VARIANT=release
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -63,18 +83,59 @@ RUN apt-get update \
 RUN set -eux; \
     export DFSG_NONFREE=1; \
     if [ "${RUN_UPSTREAM_TESTS}" = "1" ]; then check=""; else check="nocheck"; fi; \
-    export DEB_BUILD_OPTIONS="${check} parallel=$(nproc)"; \
+    opts="${check} parallel=$(nproc)"; \
+    case "${BUILD_VARIANT}" in \
+      release|debug) ;; \
+      asan) \
+        # An optimised frame lies about who called whom, and under ASan we are
+        # reading the backtrace rather than reproducing a timing-sensitive race.
+        opts="${opts} noopt"; \
+        # debian/rules sets DEB_BUILD_MAINT_OPTIONS unconditionally (line 4), so
+        # a sanitize=+address passed through the environment there is silently
+        # discarded. The *_APPEND variables are the user-side counterparts:
+        # dpkg-buildflags reads them from the environment and debian/rules never
+        # touches them.
+        export DEB_CFLAGS_APPEND="-fsanitize=address -fno-omit-frame-pointer"; \
+        export DEB_CXXFLAGS_APPEND="-fsanitize=address -fno-omit-frame-pointer"; \
+        export DEB_LDFLAGS_APPEND="-fsanitize=address"; \
+        # _FORTIFY_SOURCE and ASan interpose the same functions; the hardening
+        # flags put -D_FORTIFY_SOURCE in CPPFLAGS, so undefine it last.
+        export DEB_CPPFLAGS_APPEND="-U_FORTIFY_SOURCE"; \
+        # The .symbols gate above guards a release ABI. A sanitized build is not
+        # a release and can legitimately differ; failing it would say nothing.
+        export DPKG_GENSYMBOLS_CHECK_LEVEL=0; \
+        ;; \
+      *) echo "BUILD_VARIANT must be release, debug or asan (got '${BUILD_VARIANT}')" >&2; exit 1 ;; \
+    esac; \
+    export DEB_BUILD_OPTIONS="${opts}"; \
     dpkg-buildpackage -us -uc -b
 
-# Collect only the packages the images install. The -dbgsym, -dev and
-# slapd-contrib packages are build by-products we do not ship — the 2.6 images
-# never carried contrib either, and 2.7's `slapd` module set is a superset of
-# what Debian's 2.6 `slapd` shipped (minus back-perl/back-sql, retired upstream).
+# Collect only the packages the images install. The -dev and slapd-contrib
+# packages are build by-products we do not ship — the 2.6 images never carried
+# contrib either, and 2.7's `slapd` module set is a superset of what Debian's
+# 2.6 `slapd` shipped (minus back-perl/back-sql, retired upstream). The -dbgsym
+# packages are dropped from a release build for the same reason and carried by a
+# debug one: that is the whole difference between the two.
 RUN set -eux; \
     install -d /debs; \
     for p in slapd ldap-utils libldap2 libldap-common; do \
         cp /build/${p}_*.deb /debs/; \
     done; \
+    if [ "${BUILD_VARIANT}" != "release" ]; then \
+        # dpkg has used both .deb and .ddeb for automatic debug packages; glob
+        # for either rather than depend on which one this dpkg chose.
+        for p in slapd libldap2; do \
+            cp /build/${p}-dbgsym_*.*deb /debs/; \
+        done; \
+    fi; \
+    # Fail here rather than in a container that will not start: an asan build
+    # whose slapd is not linked against libasan is a silently useless image.
+    # Reading it off Depends rather than the binary checks the consequence that
+    # matters — dh_shlibdeps saw libasan.so.8, so the runtime image's apt will
+    # pull libasan8 in when it installs this package.
+    if [ "${BUILD_VARIANT}" = "asan" ]; then \
+        dpkg-deb -f /debs/slapd_*.deb Depends | grep -q libasan; \
+    fi; \
     ls -la /debs
 
 # ── Artifact carrier ────────────────────────────────────────────────────────

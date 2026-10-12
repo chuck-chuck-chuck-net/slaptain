@@ -58,6 +58,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── VERSIONING.md               # Where the `v` goes: git tags only; images/charts/appVersion bare
 │   ├── TLS.md                      # Certificates: where they come from, and how clients come to trust them (ADR-029)
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024)
+│   ├── DEBUG-IMAGES.md             # slapd:<tag>-debug / -asan: diagnostic image variants for heap corruption
 │   ├── OPENLDAP-VERSIONS.md        # Dual 2.7/2.6 image pairs, tag scheme, 2.6→2.7 migration runbook (ADR-021)
 │   ├── BACKUP-PLAN.md              # ADR-014 implementation breakdown (phases)
 │   ├── MULTI-SITE.md               # USER guide: the mesh model, the invariants, a multi-site install (ADR-028)
@@ -196,6 +197,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 ### Image Details
 
 - **Build tooling:** Plain Containerfile + podman (apko dropped — only beneficial in the Wolfi ecosystem).
+- **Debug variants** (`docs/DEBUG-IMAGES.md`): `BUILD_VARIANT=release|debug|asan` on both the package build and the slapd runtime Containerfile. `-debug` ships **bit-identical** binaries plus their `-dbgsym` debug info, so it resolves offsets recorded against the release image of the same tag; `-asan` is an AddressSanitizer build that names an invalid free or use-after-free at the moment it happens. libasan's in-process symbolizer reads `/usr/lib/debug/.build-id`, which is why no external symbolizer is needed in a distroless image. `nostrip` is NOT the route — `dh` drops `dh_strip` under it and this packaging creates the `slapadd`/`slappasswd` hardlinks inside `override_dh_strip`.
 - **slapd runtime** (`images/slapd/`): OpenLDAP **2.7.1** (`2.7.1-0+slaptain1`, built from the vendored packaging fork in `images/openldap-deb/` — ADR-021) on `gcr.io/distroless/base-debian13` — glibc, libssl, ca-certs, no shell. Legacy Debian 2.6 build stays available as `slapd:<tag>-ol26` (`Containerfile.ol26`) for hot-migration interop (ADR-011). **LMDB 1.0 format break:** 2.6-written volumes cannot be opened by 2.7 — see `docs/OPENLDAP-VERSIONS.md` for the migration runbook.
 - **slapd-init** (`images/slapd-init/`): `debian:trixie-slim` + the same locally-built 2.7.1 packages (slapcat/slapadd/slaptest must match the slapd version) — ephemeral bootstrap; shell + python3. `-ol26` variant pairs with the 2.6 slapd image — always pin both or neither.
 - **operator** (`images/operator/`): `gcr.io/distroless/static-debian13:nonroot`, statically-linked Go binary (`/manager` only), UID 65532. Builder stage uses `golang:1.26`.
@@ -417,6 +419,7 @@ runs without readpw configuration but skips those test cases.
 | `make helm-lint` | Lint all four published charts and render each in the shapes users install (operator with Multus/metrics/NetworkPolicy on, slapd with the persistent fixture values, the mesh from its three-site example). CI's chart gate and the release's pre-push check |
 | `make verify-generated` | Regenerate CRDs/RBAC/deepcopy and fail if any checked-in copy (incl. `charts/operator/crds/`) drifts — `hack/verify-generated.sh`. CI's generated-files gate |
 | `make build-openldap-deb` | Build the local-only OpenLDAP 2.7.1 .deb carrier image (feeds both 2.7 image builds; never pushed) |
+| `make build-slapd-debug` / `build-slapd-asan` | Build a diagnostic slapd variant (`:<tag>-debug` = release-identical binaries + detached debug info + glibc heap checking; `:<tag>-asan` = AddressSanitizer). Each needs its own package build. Deliver with `import-slapd-debug`/`push-slapd-debug` (or `-asan`); deploy by pinning `spec.images.slapd.tag` ALONE — unlike `-ol26`, the init image stays on the plain tag. Never in `all`/`push`, never in a chart. See `docs/DEBUG-IMAGES.md` |
 | `make build-ol26` / `make import-ol26` | Build / CRI-import the legacy 2.6 slapd+init pair (`:<tag>-ol26`, ADR-021) |
 | `make operator-generate` | Run `make generate` in `operator/` (regenerates deepcopy) |
 | `make operator-manifests` | Run `make manifests` in `operator/`, then sync CRD to `charts/operator/crds/` |
