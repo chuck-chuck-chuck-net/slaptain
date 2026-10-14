@@ -269,6 +269,16 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("reconcileDatabaseDirsConfigMap: %w", err)
 	}
 
+	// 4b. Publish the startup-only cn=config table the init container's offline
+	//     converger applies (ADR-034 R1). Same shape and same reason as 4a — a
+	//     ConfigMap referenced by name, so a spec edit does not roll the fleet —
+	//     and likewise before the StatefulSet, so a pod this pass creates
+	//     already reads the current table. The operator's involvement ends
+	//     here: it never writes one of these attributes to a running slapd.
+	if err := r.reconcileStartupConfigMap(ctx, sc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcileStartupConfigMap: %w", err)
+	}
+
 	// 5. Reconcile StatefulSet — unless the certificate gate is holding it.
 	if !tlsReady {
 		log.Info("TLS material not available; withholding the StatefulSet",
@@ -1074,6 +1084,26 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 				},
 			},
 		},
+		{
+			// The startup-only cn=config table (ADR-034 R1). Referenced by
+			// NAME for the same reason as the directory lists: its content
+			// moves with a database's spec, and an inline projection would put
+			// that into the pod template's hash — rolling the fleet to deliver
+			// a value that only takes effect at the NEXT pod start anyway.
+			Name: startupConfigVolume,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: startupConfigMapName(sc.Name),
+					},
+					// Tolerate its absence: a cluster whose operator has not
+					// written the ConfigMap yet must still start pods, and an
+					// absent file is exactly what tells the converger it has
+					// nothing to manage.
+					Optional: ptr.To(true),
+				},
+			},
+		},
 	}
 
 	// PVC size/access-mode fallbacks. The CRD's +kubebuilder:default="1Gi" on
@@ -1162,6 +1192,10 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		// files under DATABASE_DIRS_PATH, off the pod template (ADR-013
 		// amendment of 2026-09-28). Re-adding it here re-adds the fleet roll.
 		{Name: "DATABASE_DIRS_PATH", Value: databaseDirsMountPath},
+		// Where the offline converger finds the startup-only table (ADR-034).
+		// A constant path, like DATABASE_DIRS_PATH: the VALUES live in the
+		// ConfigMap, and nothing about them may reach the pod template.
+		{Name: "STARTUP_CONFIG_PATH", Value: startupConfigMountPath},
 	}
 
 	// back-mdb BACKEND configuration (olcBackend={0}mdb) — bootstrap-time by
@@ -1241,6 +1275,9 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		// anyway, the whole-directory mount keeps the file honest for anything
 		// that looks at it later.
 		{Name: databaseDirsVolume, MountPath: databaseDirsMountPath, ReadOnly: true},
+		// The startup-only table (ADR-034). Read-only and not subPath-mounted,
+		// for the same reasons as the lists above.
+		{Name: startupConfigVolume, MountPath: startupConfigMountPath, ReadOnly: true},
 	}
 	// Unconditional on every RW pod: see the gate rationale above. The volume
 	// is always provisioned, so there is nothing to be absent.
