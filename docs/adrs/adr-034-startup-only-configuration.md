@@ -191,3 +191,44 @@ already causes when it re-defaults the data-plane image tags.
   carries none of its own.
 - ADR-023 — where an operator-driven rolling restart belongs.
 - ADR-024 — the three placement classes this one extends.
+
+---
+
+## Amendment, 2026-10-14: the table's wire format
+
+R1 says the table is declared; it did not say in what. The operator and the
+converger are separate programs in separate images, so the format between them
+is a contract and belongs in the record.
+
+A ConfigMap `<cluster>-startup-config`, one key `startup-config`, mounted
+read-only at `/etc/slaptain/startup-config` on the init container, whose path
+also arrives as `STARTUP_CONFIG_PATH`. One record per line, three tab-separated
+fields:
+
+```
+<attribute>\t<database-suffix>\t<value>
+```
+
+A tab separates them because a DN carries spaces freely and neither an
+attribute name nor a DN can carry a tab. The database is named by its
+`olcSuffix`, matched case-insensitively, never by a `cn=config` DN — an
+`olcDatabase={N}` prefix is positional and assigned by slapd (ADR-026 R1).
+**Which entry carries the attribute is a property of the attribute**, compiled
+into the converger: `olcSpSessionlogSource` lives on the syncprov overlay child
+of the named database. The file states what, where and with which value, and
+nothing about the shape of `cn=config`.
+
+Two states that look alike and are not, which is the whole reason this is
+written down:
+
+- **File absent** — unmanaged. The converger does nothing at all. This is what
+  a pre-ADR-034 operator leaves behind, and what the `Optional: true` volume
+  projects when the ConfigMap has not been written yet. Treating it as "nothing
+  is wanted" would strip a working configuration on an operator upgrade.
+- **File present and empty** — managed, nothing wanted. Every managed attribute
+  is removed. This is how the last database to drop `Accesslog` gets the
+  attribute off the disk.
+
+So an operator that understands the table **always writes the key, even
+empty**. Omitting it as a shortcut for "nothing to do" is the one rendering
+that silently breaks removal.
