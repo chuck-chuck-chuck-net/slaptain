@@ -510,6 +510,48 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                  syncprovSessionlogSource:
+                    description: |-
+                      syncprovSessionlogSource chooses WHERE the data DB's syncprov session log
+                      lives. Two values:
+
+                        - InMemory (the default; also what an unset field means) — the
+                          in-memory log sized by syncprovSessionlog above. A second copy of the
+                          recent history in RAM, empty again after a restart.
+                        - Accesslog — no in-memory log at all. olcSpSessionlogSource on the data
+                          DB's syncprov overlay names this database's own accesslog DB
+                          (cn=accesslog-<name of this SlapdDatabase>, ADR-019 R1), so syncprov
+                          answers a reconnecting consumer from the change journal that already
+                          exists on disk and survives a restart. Requires replication.enabled
+                          and deltaSync — with no accesslog database there is nothing to source
+                          from — and excludes syncprovSessionlog, which must be unset or 0 (both
+                          at once is the combination slapd itself calls wasteful).
+
+                      NOT the same thing as a session log ON the accesslog database, which
+                      ADR-022 still forbids: that one would displace the minCSN guard and turn a
+                      loud REFRESH_REQUIRED into silent under-replication. This is the DATA DB's
+                      session log being READ FROM the journal — a different attribute on a
+                      different database.
+
+                      STARTUP-ONLY (ADR-034 R2). Writing olcSpSessionlogSource to a running
+                      slapd is a double free in every released version — 2.5.20 through 2.7.1
+                      and master carry byte-identical code, so there is nothing to upgrade to —
+                      and it has already killed two live providers. The operator therefore NEVER
+                      writes this attribute over LDAP, neither as a Modify nor inside the Add of
+                      the overlay entry (slapd takes the online path for both). It reaches
+                      cn=config only through the init container's offline convergence at pod
+                      start, when nothing holds the configuration open (ADR-034 R1).
+
+                      The consequence for you: editing this field changes nothing on a running
+                      pod. The operator reports the divergence as ConfigRestartRequired, naming
+                      the pods, and leaves the restart to you (ADR-034 R3) — restarting a
+                      provider fleet is a topology event at every peer, and a tunable edit must
+                      not trigger one behind your back. A cluster's first generation of pods
+                      likewise does not carry the attribute; one restart later it is in place.
+                    enum:
+                    - InMemory
+                    - Accesslog
+                    type: string
                 type: object
               rootDN:
                 description: |-
@@ -626,6 +668,18 @@ spec:
             - message: 'spec.seed and spec.bootstrapFrom are mutually exclusive: a
                 restore replaces seeding. Set at most one.'
               rule: '!(has(self.seed) && has(self.bootstrapFrom))'
+            - message: 'spec.replication.syncprovSessionlogSource=Accesslog excludes
+                an in-memory session log: clear spec.replication.syncprovSessionlog
+                or set it to 0.'
+              rule: '!has(self.replication.syncprovSessionlogSource) || self.replication.syncprovSessionlogSource
+                != ''Accesslog'' || !has(self.replication.syncprovSessionlog) || self.replication.syncprovSessionlog
+                == 0'
+            - message: 'spec.replication.syncprovSessionlogSource=Accesslog requires
+                replication.enabled and deltaSync: with no accesslog database there
+                is nothing to source the session log from.'
+              rule: '!has(self.replication.syncprovSessionlogSource) || self.replication.syncprovSessionlogSource
+                != ''Accesslog'' || (self.replication.enabled && (!has(self.replication.deltaSync)
+                || self.replication.deltaSync))'
           status:
             description: status defines the observed state of the database.
             properties:

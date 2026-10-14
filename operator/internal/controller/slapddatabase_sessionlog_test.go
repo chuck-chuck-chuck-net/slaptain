@@ -143,3 +143,123 @@ func TestPlanSessionlog(t *testing.T) {
 		})
 	}
 }
+
+// ADR-034: the session log also has a PLACE. syncprovSessionlogSource=Accesslog
+// moves it out of RAM and onto the database's own change journal
+// (olcSpSessionlogSource → cn=accesslog-<name>), and asking for it IMPLIES the
+// in-memory log is absent — the two together are the combination slapd calls
+// wasteful. One pure function answers all three outcomes; the LDAP half and the
+// init container's offline converger are both executors of its verdict.
+
+func sdWithSessionlogSource(name, source string, v *int32) *ldapv1alpha1.SlapdDatabase {
+	sd := sdWithSessionlog(v)
+	sd.Name = name
+	sd.Spec.Replication.SyncprovSessionlogSource = source
+	return sd
+}
+
+func TestDesiredSessionlog(t *testing.T) {
+	i := func(v int32) *int32 { return &v }
+
+	cases := []struct {
+		name     string
+		dbName   string
+		source   string
+		field    *int32
+		wantKind sessionlogKind
+		wantOps  int32
+		wantDN   string
+	}{
+		{
+			name:     "both unset: the in-memory log at the operator default",
+			dbName:   "default",
+			source:   "",
+			field:    nil,
+			wantKind: sessionlogKindInMemory,
+			wantOps:  defaultSyncprovSessionlogOps,
+		},
+		{
+			name:     "explicit InMemory is the same as unset",
+			dbName:   "default",
+			source:   ldapv1alpha1.SyncprovSessionlogSourceInMemory,
+			field:    i(42),
+			wantKind: sessionlogKindInMemory,
+			wantOps:  42,
+		},
+		{
+			name:     "zero ops with no source: no session log at all",
+			dbName:   "default",
+			source:   "",
+			field:    i(0),
+			wantKind: sessionlogKindNone,
+		},
+		{
+			name:     "Accesslog sources it from this database's own journal",
+			dbName:   "default",
+			source:   ldapv1alpha1.SyncprovSessionlogSourceAccesslog,
+			field:    nil,
+			wantKind: sessionlogKindAccesslog,
+			wantDN:   "cn=accesslog-default",
+		},
+		{
+			name:     "Accesslog names the journal of THIS database, not a fixed DN",
+			dbName:   "people",
+			source:   ldapv1alpha1.SyncprovSessionlogSourceAccesslog,
+			field:    nil,
+			wantKind: sessionlogKindAccesslog,
+			wantDN:   "cn=accesslog-people",
+		},
+		{
+			name:     "Accesslog with an explicit 0 is still Accesslog",
+			dbName:   "default",
+			source:   ldapv1alpha1.SyncprovSessionlogSourceAccesslog,
+			field:    i(0),
+			wantKind: sessionlogKindAccesslog,
+			wantDN:   "cn=accesslog-default",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := desiredSessionlog(sdWithSessionlogSource(tc.dbName, tc.source, tc.field))
+			if got.Kind != tc.wantKind {
+				t.Fatalf("kind = %v, want %v", got.Kind, tc.wantKind)
+			}
+			if tc.wantKind == sessionlogKindInMemory && got.Ops != tc.wantOps {
+				t.Fatalf("ops = %d, want %d", got.Ops, tc.wantOps)
+			}
+			if got.SourceDN != tc.wantDN {
+				t.Fatalf("sourceDN = %q, want %q", got.SourceDN, tc.wantDN)
+			}
+			if tc.wantKind != sessionlogKindInMemory && got.Ops != 0 {
+				t.Fatalf("ops = %d, want 0 when the in-memory log is not wanted", got.Ops)
+			}
+		})
+	}
+}
+
+// The DN must come from the one definition of the accesslog suffix (ADR-019
+// R1), never from a second string literal that can drift from it.
+func TestDesiredSessionlog_SourceDNIsTheAccesslogSuffix(t *testing.T) {
+	got := desiredSessionlog(sdWithSessionlogSource("payroll",
+		ldapv1alpha1.SyncprovSessionlogSourceAccesslog, nil))
+	if want := ldapv1alpha1.AccesslogSuffix("payroll"); got.SourceDN != want {
+		t.Fatalf("sourceDN = %q, want %q (AccesslogSuffix)", got.SourceDN, want)
+	}
+}
+
+// Asking for the accesslog source must take the in-memory log away, not merely
+// recommend against it: the live-LDAP half reads this adapter, and a leftover
+// olcSpSessionlog is then removed by planSessionlog's sessionlogRemove — a safe
+// live write, unlike the source attribute itself (ADR-034 R2).
+func TestDesiredSessionlogOps_AccesslogExcludesTheInMemoryLog(t *testing.T) {
+	i := func(v int32) *int32 { return &v }
+
+	for _, field := range []*int32{nil, i(0), i(5000)} {
+		sd := sdWithSessionlogSource("default",
+			ldapv1alpha1.SyncprovSessionlogSourceAccesslog, field)
+		if _, enabled := desiredSessionlogOps(sd); enabled {
+			t.Fatalf("syncprovSessionlog=%v with source=Accesslog: enabled = true, want false", field)
+		}
+	}
+}

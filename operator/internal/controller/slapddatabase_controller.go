@@ -1385,22 +1385,79 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovTunables(
 // entryUUID and an op tag, so 5000 of them stay well under a megabyte resident.
 const defaultSyncprovSessionlogOps int32 = 5000
 
-// desiredSessionlogOps resolves spec.replication.syncprovSessionlog into an
-// operation count and whether the sessionlog is wanted at all (ADR-022):
-// unset → the operator default, 0 → disabled, >0 → that count verbatim.
+// sessionlogKind is WHERE this database wants its data DB's syncprov session
+// log, which ADR-034 made a question of its own: the log is no longer only a
+// size.
+type sessionlogKind int
+
+const (
+	// sessionlogKindNone — no session log at all (syncprovSessionlog: 0).
+	// OpenLDAP's own out-of-the-box behaviour.
+	sessionlogKindNone sessionlogKind = iota
+	// sessionlogKindInMemory — olcSpSessionlog at Ops operations, the ADR-022
+	// default. A live-writable attribute.
+	sessionlogKindInMemory
+	// sessionlogKindAccesslog — olcSpSessionlogSource pointed at SourceDN, this
+	// database's own change journal, and NO olcSpSessionlog. Startup-only: the
+	// attribute reaches cn=config through the init container's offline
+	// convergence, never over LDAP (ADR-034 R1/R2).
+	sessionlogKindAccesslog
+)
+
+// sessionlogDecision is the resolved answer for one database. Ops is meaningful
+// for sessionlogKindInMemory only, SourceDN for sessionlogKindAccesslog only;
+// both are zero otherwise, so a consumer that reads the wrong one gets nothing
+// rather than a stale number.
+type sessionlogDecision struct {
+	Kind     sessionlogKind
+	Ops      int32
+	SourceDN string
+}
+
+// desiredSessionlog resolves spec.replication.syncprovSessionlogSource and
+// spec.replication.syncprovSessionlog into the one session log this database
+// wants (ADR-022 for the size, ADR-034 for the place):
 //
-// Applies to the DATA database's syncprov overlay only. An accesslog DB's
-// syncprov must never carry a sessionlog — see ADR-022 for why a successful
-// replay there would displace the minCSN guard.
-func desiredSessionlogOps(sd *ldapv1alpha1.SlapdDatabase) (int32, bool) {
-	if sd.Spec.Replication.SyncprovSessionlog == nil {
-		return defaultSyncprovSessionlogOps, true
+//   - source Accesslog → sourced from cn=accesslog-<CR name> (ADR-019 R1), and
+//     the in-memory log is ABSENT. Asking for the source implies the other is
+//     gone, rather than recommending it: slapd calls both at once wasteful, and
+//     an admission rule already refuses the combination, so this is what a spec
+//     that predates the rule resolves to as well.
+//   - syncprovSessionlog 0 → no session log at all.
+//   - otherwise → the in-memory log, at the field's value or the operator
+//     default when unset.
+//
+// Pure. Applies to the DATA database's syncprov overlay only — an accesslog
+// DB's syncprov must never carry a session log of its own (ADR-022), which is a
+// different thing from being the SOURCE of the data DB's one.
+func desiredSessionlog(sd *ldapv1alpha1.SlapdDatabase) sessionlogDecision {
+	if sd.Spec.Replication.SyncprovSessionlogSource == ldapv1alpha1.SyncprovSessionlogSourceAccesslog {
+		return sessionlogDecision{
+			Kind:     sessionlogKindAccesslog,
+			SourceDN: ldapv1alpha1.AccesslogSuffix(sd.Name),
+		}
 	}
-	ops := *sd.Spec.Replication.SyncprovSessionlog
+	ops := defaultSyncprovSessionlogOps
+	if sd.Spec.Replication.SyncprovSessionlog != nil {
+		ops = *sd.Spec.Replication.SyncprovSessionlog
+	}
 	if ops <= 0 {
-		return 0, false
+		return sessionlogDecision{Kind: sessionlogKindNone}
 	}
-	return ops, true
+	return sessionlogDecision{Kind: sessionlogKindInMemory, Ops: ops}
+}
+
+// desiredSessionlogOps is the live-LDAP half's view of that decision: the
+// in-memory operation count, and whether olcSpSessionlog is wanted at all.
+//
+// Both non-InMemory outcomes report false here, for the same reason but by
+// different routes — sessionlogKindNone never had a log, sessionlogKindAccesslog
+// has one somewhere the operator may not write. planSessionlog then removes a
+// leftover olcSpSessionlog, which is a safe live write; olcSpSessionlogSource
+// itself is never written over the wire (ADR-034 R2).
+func desiredSessionlogOps(sd *ldapv1alpha1.SlapdDatabase) (int32, bool) {
+	d := desiredSessionlog(sd)
+	return d.Ops, d.Kind == sessionlogKindInMemory
 }
 
 // sessionlogAction is what planSessionlog decided to do with olcSpSessionlog.
