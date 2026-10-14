@@ -403,6 +403,95 @@ the shipped config noticed the inventory did not match. No ADR change is needed 
 decision 2 is right about where these belong; the config simply never caught up.
 
 ---
+## A database cannot ask for its sessionlog to come from the accesslog
+
+A data DB should not carry an **in-memory** sessionlog where an accesslog
+already exists for that suffix: syncprov can read its session log from there
+instead — `syncprov-sessionlog-source` / `olcSpSessionlogSource`, pointed at
+the accesslog DN. One copy of the history, on disk, surviving a restart,
+instead of a second one in RAM that does not.
+
+Note what this is NOT: it is not a sessionlog on the accesslog DB. ADR-022
+still holds — the accesslog DB carries none, and a successful sessionlog replay
+there would displace the minCSN guard. This is the **data** DB's sessionlog
+being *sourced from* the accesslog, which is a different attribute on a
+different database.
+
+Today the operator cannot express it. `spec.syncprovSessionlog` sizes the
+in-memory log and `0` disables it, but there is no way to say "and read it from
+the accesslog instead", so turning the in-memory one off just leaves the
+provider without a session log at all.
+
+### The constraint that shapes the whole feature
+
+**`olcSpSessionlogSource` must be written when `cn=config` is CONSTRUCTED, and
+never modified on a running `slapd`.** Setting it at runtime is a double free:
+
+```c
+case SP_LOGDB:
+    if ( CONFIG_ONLINE_ADD( c ) ) {          /* true ONLY for a runtime set */
+        if ( !select_backend( &c->value_ndn, 0 ) ) { ...; break; }
+        ch_free( c->value_ndn.bv_val );      /* syncprov.c:3905 — frees it */
+    }
+    si->si_logbase = c->value_ndn;           /* 3907 — stores the freed pointer */
+```
+
+`si_logbase.bv_val` is dangling from assignment; the delete path frees it again
+at `syncprov.c:3814`. Reproduced 60/60 under ASan, both frees in `sp_cf_gen`.
+`CONFIG_ONLINE_ADD` is false when the directive is read from the configuration
+at startup, and that path is clean — 0 reports over 200 writes plus a runtime
+delete. Full investigation, stacks and reproduction: `slapload/docs/FINDINGS.md`,
+"A double free in syncprov, reproduced and located".
+
+It is not a known ITS and it is **not fixed in any version**: the code is
+byte-identical in 2.5.20, 2.6.0, 2.6.10, 2.6.15, 2.7.1 and master. There is no
+release to upgrade to, so the operator has to avoid the path rather than wait
+for a fix.
+
+This already cost two providers. The attribute was set and removed by hand on
+a live 2+2 cluster and both pods died — one of them while completely idle —
+leaving an ITS#9398 precondition behind on one accesslog.
+
+### What that means for the implementation
+
+- A spec field on `SlapdDatabase` — `syncprovSessionlogSource`, or a mode on
+  the existing sessionlog knob, since the two are mutually exclusive (`slapd`
+  itself warns that configuring both "results in wasteful operation"). Asking
+  for the source should imply the in-memory log is absent, not merely
+  recommend it.
+- It must be emitted by whatever builds a pod's `cn=config` **before slapd
+  starts**, alongside the other syncprov settings a fresh database gets.
+- `ensureSyncprovTunables` must NOT converge it. It currently read-compare-
+  writes `olcSpSessionlog` and `olcSpCheckpoint` on the data DB's syncprov
+  overlay on every reconcile; adding the source attribute to that loop turns
+  the operator into a crash loop that fires on the next reconcile after
+  anyone changes the field. A reconcile that finds the attribute wrong should
+  report a condition, not an `ldapmodify`.
+- Changing it on an existing database is therefore a **rolling restart with a
+  rebuilt config**, not an online convergence — the same shape as any other
+  startup-only setting. Worth deciding explicitly whether the operator does
+  that automatically or refuses and says so.
+- A guard is cheap and worth having regardless of this feature: refuse to
+  `Replace`/`Add` `olcSpSessionlogSource` against a live pod anywhere in the
+  codebase, so no later change reintroduces the path by accident.
+
+### Unrelated, but found while doing this
+
+The CRD deployed on the measurement cluster predates
+`spec.syncprovSessionlog` and `spec.syncprovCheckpoint` in the operator source
+here. A `kubectl patch` naming either is **accepted and silently pruned** —
+the field never reaches the object, and the only evidence is the attribute
+still being present when you read `cn=config` back. Worth a thought about how
+a CRD/operator version skew gets noticed, since the failure mode is a config
+change that reports success and does nothing.
+
+### Why it matters now
+
+It blocks a measurement: the cost of sourcing the sessionlog from the
+accesslog, against a baseline, under the usual gate (errors zero, p99 under
+threshold, replication lag stationary). That experiment needs the setting
+applied from startup on both providers, which is exactly what the operator
+cannot currently do.
 
 ## `ensureServerIDs` will renumber a live pod if the derivation ever moves again
 
