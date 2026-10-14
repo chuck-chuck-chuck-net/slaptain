@@ -145,8 +145,10 @@ STAMPS := .stamps
 # directory, so list their Containerfiles explicitly instead of globbing — a
 # change to one variant must not rebuild the other.
 OPENLDAP_DEB_SRCS := $(shell find images/openldap-deb -type f)
-INIT_SRCS        := images/slapd-init/Containerfile images/slapd-init/bootstrap.sh
-INIT_OL26_SRCS   := images/slapd-init/Containerfile.ol26 images/slapd-init/bootstrap.sh
+INIT_SRCS        := images/slapd-init/Containerfile images/slapd-init/bootstrap.sh \
+                    images/slapd-init/startup_config.py
+INIT_OL26_SRCS   := images/slapd-init/Containerfile.ol26 images/slapd-init/bootstrap.sh \
+                    images/slapd-init/startup_config.py
 SLAPD_SRCS       := images/slapd/Containerfile
 SLAPD_OL26_SRCS  := images/slapd/Containerfile.ol26
 TOOLKIT_SRCS := $(shell find images/slapd-toolkit -type f)
@@ -183,7 +185,7 @@ define import-if-needed
 	fi
 endef
 
-.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated
+.PHONY: all build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated test-init
 
 ## all: the seven pushable images plus slctl. build-ol26 is included so a
 ## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
@@ -791,6 +793,12 @@ monitoring-grafana: ## Port-forward Grafana to http://localhost:3000 (admin, gen
 monitoring-prometheus: ## Port-forward Prometheus to http://localhost:9090
 	@echo "Prometheus → http://localhost:9090"
 	$(KUBECTL) --namespace $(MONITORING_NS) port-forward svc/$(MONITORING_STACK_RELEASE)-kube-prometheus-prometheus 9090:9090
+
+## test-init: the init container's own unit tests — the offline startup-only
+## cn=config converger (ADR-034). Standard library only and no container, so it
+## runs anywhere python3 does; the fixtures are real `slapcat -n 0` output.
+test-init:
+	cd images/slapd-init && python3 -m unittest discover -s . -p 'test_*.py' -v
 
 show-tag: ## Print the git tags and the image/chart tags derived from them
 	@echo "git:    $(GIT_TAG)"

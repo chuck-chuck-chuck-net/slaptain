@@ -232,3 +232,36 @@ written down:
 So an operator that understands the table **always writes the key, even
 empty**. Omitting it as a shortcut for "nothing to do" is the one rendering
 that silently breaks removal.
+
+---
+
+## Amendment, 2026-10-15: the unbootable pod is latent, and the converger can refuse to start one
+
+Two corrections from building the converger, both narrowing what the Context
+claimed and widening what R4 is for.
+
+**`syncprov_db_open` reaches its `select_backend` check only on a NON-EMPTY
+database.** An empty one takes an earlier exit and never looks at
+`si_logbase` (`syncprov.c` ~4105-4130). Measured both ways in a container: with
+the data database empty, a dangling `olcSpSessionlogSource` starts fine; with a
+single entry in it, slapd refuses to start. So fact 2 above is right about the
+outcome and wrong about the timing — a bad value is **latent**. A cluster can
+carry one across restarts, look healthy, and die the first time a pod restarts
+after the database has data, which is every production pod and almost no test
+one. That makes R4's "prove the backend resolves before writing" more important
+than it read when it was written, not less: the window between writing a bad
+value and discovering it is unbounded.
+
+**The converger can now stop a pod from starting.** It exits non-zero when
+`slapmodify` fails or the read-back does not show what was asked for, and
+`bootstrap.sh` runs under `set -e`, so the init container fails and the pod does
+not come up. That is the intended trade — a pod that does not start now beats
+one that does not start at the next restart for a reason nobody will connect to
+this — but it is a new failure mode on a path every pod of every cluster takes,
+including a bug in the converger itself. Refusals are deliberately on the other
+side of that line: a refusal is loud, leaves the existing configuration alone,
+and exits 0.
+
+The bound that makes the trade acceptable: with no table file the converger
+reads nothing, writes nothing and returns immediately, so a cluster that does
+not use the feature cannot be stopped by it.

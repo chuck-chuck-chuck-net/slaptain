@@ -16,6 +16,7 @@ RUN groupmod -g 1024 openldap && \
     usermod -u 1024 -g 1024 openldap
 
 COPY bootstrap.sh /usr/local/bin/bootstrap.sh
+COPY startup_config.py /usr/local/bin/startup_config.py
 
 USER 1024:1024
 ENTRYPOINT ["/usr/local/bin/bootstrap.sh"]

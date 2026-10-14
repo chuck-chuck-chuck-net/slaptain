@@ -31,6 +31,12 @@ LDAP_READONLY_REPLICA="${LDAP_READONLY_REPLICA:-false}"
 DATABASE_DIRS_PATH="${DATABASE_DIRS_PATH:-/etc/slaptain/database-dirs}"
 DATABASE_DIRS="${DATABASE_DIRS:-}"
 
+# The declared table of startup-only cn=config attributes (ADR-034), rendered by
+# the operator into the <cluster>-startup-config ConfigMap and mounted read-only.
+# One TAB-separated record per line: <attribute> <database-suffix> <value>.
+# Absent file = nothing is managed; see startup_config.py for the semantics.
+STARTUP_CONFIG_PATH="${STARTUP_CONFIG_PATH:-/etc/slaptain/startup-config/startup-config}"
+
 # read_dir_list <file> — emit one directory name per line, ignoring blanks.
 read_dir_list() {
     [[ -r "$1" ]] || return 0
@@ -252,6 +258,26 @@ EOF
     slaptest -f "$TMP_CONF" -F "$CONFIG_DIR/slapd.d"
     rm -f "$TMP_CONF"
 fi
+
+# ── Converge the startup-only cn=config attributes (ADR-034) ──────────────────
+# Runs on EVERY pod start, fresh config or not. A handful of slapd settings
+# cannot be written to a running server — olcSpSessionlogSource is a double free
+# that no release fixes — and this is the only moment the configuration is on
+# disk with nothing holding it open. slapcat reads it, slapmodify writes it;
+# neither runs the configuration parser, so the online path is never taken.
+#
+# This retires the invariant that the init container never touches an existing
+# configuration. It is retired deliberately and narrowly: the blast radius is
+# exactly the table compiled into startup_config.py, which is why the table is
+# declared rather than inferred. The converger refuses on doubt and verifies by
+# reading back, because the error it must never produce is a pod that will not
+# start.
+#
+# It runs AFTER the generation block above, so a configuration written moments
+# ago is converged in the same pass if the table already applies to it.
+echo "Converging startup-only configuration (table: $STARTUP_CONFIG_PATH)"
+STARTUP_CONFIG_PATH="$STARTUP_CONFIG_PATH" \
+    python3 /usr/local/bin/startup_config.py "$CONFIG_DIR/slapd.d"
 
 echo "Bootstrap complete."
 ls -R "$CONFIG_DIR/slapd.d"

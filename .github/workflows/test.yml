@@ -55,6 +55,12 @@ jobs:
       - name: Vet and test the exporter
         run: cd exporter && go vet ./... && go test ./...
 
+      # The init container's converger (ADR-034) decides offline, before slapd
+      # runs, whether to rewrite a pod's cn=config — so its decision table is
+      # unit-tested from real `slapcat -n 0` fixtures. Standard library only.
+      - name: Run slapd-init unit tests
+        run: make test-init
+
       # The e2e suite only runs against a lab cluster with NodePort access
       # (tests/README.md), which CI does not have — but CI can refuse a suite
       # that no longer compiles against the API types it exercises.
