@@ -34,8 +34,16 @@ DATABASE_DIRS="${DATABASE_DIRS:-}"
 # The declared table of startup-only cn=config attributes (ADR-034), rendered by
 # the operator into the <cluster>-startup-config ConfigMap and mounted read-only.
 # One TAB-separated record per line: <attribute> <database-suffix> <value>.
-# Absent file = nothing is managed; see startup_config.py for the semantics.
-STARTUP_CONFIG_PATH="${STARTUP_CONFIG_PATH:-/etc/slaptain/startup-config/startup-config}"
+#
+# The DIRECTORY the ConfigMap is mounted at, exactly like DATABASE_DIRS_PATH
+# above — the key inside it is the file name, and resolving it is the reading
+# side's job. Pointing this at the file instead cost every pod of every cluster
+# an Init:CrashLoopBackOff on 2026-10-15: a ConfigMap volume projects a
+# directory, and the converger opened it.
+#
+# Absent mount = nothing is managed; a mount that cannot be read is reported and
+# skipped, never fatal. See startup_config.py for the semantics.
+STARTUP_CONFIG_PATH="${STARTUP_CONFIG_PATH:-/etc/slaptain/startup-config}"
 
 # read_dir_list <file> — emit one directory name per line, ignoring blanks.
 read_dir_list() {

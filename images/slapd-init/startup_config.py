@@ -10,8 +10,10 @@ declared table below is converged with `slapcat -n 0` to read and
 runs the configuration parser, which is what makes the write safe and also what
 keeps the `# CRC32` header each entry file carries correct.
 
-The desired values arrive as a mounted ConfigMap, one TAB-separated record per
-line:
+The desired values arrive as a mounted ConfigMap. `STARTUP_CONFIG_PATH` names
+the mount DIRECTORY and the ConfigMap key is the file inside it — the
+`DATABASE_DIRS_PATH` convention — so resolving the two is this side's job. One
+TAB-separated record per line:
 
     <attribute>\t<database-suffix>\t<value>
 
@@ -20,10 +22,13 @@ compiled-in table below — which `cn=config` entry carries it is a property of
 the attribute, not of the file. The suffix selects an mdb database by its
 `olcSuffix`, case-insensitively.
 
-Absence of the file means UNMANAGED: nothing is read, nothing is written,
+Absence of the mount means UNMANAGED: nothing is read, nothing is written,
 nothing is removed. It is what an old operator, a pod without the volume, and
 the window before the ConfigMap exists all look like, and reading it as "delete
-everything" would strip a working configuration on an operator upgrade.
+everything" would strip a working configuration on an operator upgrade. A mount
+that is there but yields no readable table is reported and skipped for the same
+reason, one step louder — nothing about this feature may keep a pod from
+starting, used or not.
 
 A present file is the whole truth: for every managed attribute and every mdb
 database, the desired state is the value stated there, or absent when no line
@@ -219,16 +224,53 @@ class Record:
         self.value = value
 
 
-def read_table(path):
-    """The desired table as text, or None when the file is not there.
+# The ConfigMap key, and therefore the file name under the mount directory.
+# Mirrors startupConfigKey in operator/internal/controller/startup_config.go.
+TABLE_FILE_NAME = "startup-config"
 
-    None is UNMANAGED and is not an error — see the module docstring.
+
+class TableUnreadable(Exception):
+    """The table is there in some form and cannot be read as one.
+
+    Distinct from absence, which is UNMANAGED. This one is reported loudly and
+    changes nothing — see read_table.
     """
+
+
+def resolve_table_path(path):
+    """STARTUP_CONFIG_PATH names the mount DIRECTORY; resolve the key inside it.
+
+    Mirrors DATABASE_DIRS_PATH, which is the convention the operator follows:
+    the env var is the mount point and the ConfigMap key is the file name under
+    it. A path that is not a directory is used as given, so a hand-run against a
+    single file keeps working.
+    """
+    if os.path.isdir(path):
+        return os.path.join(path, TABLE_FILE_NAME)
+    return path
+
+
+def read_table(path):
+    """The desired table as text, or None when nothing is mounted at all.
+
+    None is UNMANAGED and is not an error — see the module docstring. Anything
+    else that stops the table being read (a mount with no key file in it, a
+    permission error, a path that is neither) raises TableUnreadable, which the
+    caller reports and survives: a pod that starts with the configuration it
+    already had beats a fleet that cannot start because a projection surprised
+    us.
+    """
+    target = resolve_table_path(path)
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(target, "r", encoding="utf-8") as fh:
             return fh.read()
     except FileNotFoundError:
+        if target != path:
+            raise TableUnreadable(
+                "%s is a directory with no %s in it" % (path, TABLE_FILE_NAME))
         return None
+    except OSError as exc:
+        raise TableUnreadable("%s: %s" % (target, exc))
 
 
 def parse_table(text):
@@ -392,7 +434,7 @@ def plan_for_table(config_text, table_text):
 
 # ── The IO around it ──────────────────────────────────────────────────────────
 
-DEFAULT_TABLE_PATH = "/etc/slaptain/startup-config/startup-config"
+DEFAULT_TABLE_PATH = "/etc/slaptain/startup-config"
 
 
 def slapcat_config(config_dir):
@@ -418,7 +460,14 @@ def main(argv):
         "CONFIG_DIR", "/config") + "/slapd.d"
     table_path = os.environ.get("STARTUP_CONFIG_PATH") or DEFAULT_TABLE_PATH
 
-    table_text = read_table(table_path)
+    try:
+        table_text = read_table(table_path)
+    except TableUnreadable as exc:
+        # Never fatal. The table is the operator's to publish and the mount is
+        # Kubernetes's to project; neither is a reason to refuse to boot.
+        print("REFUSED: startup-only config table unreadable: %s — nothing is "
+              "managed this pass" % exc)
+        return 0
     if table_text is None:
         print("Startup-only config: no table at %s — nothing is managed" % table_path)
         return 0

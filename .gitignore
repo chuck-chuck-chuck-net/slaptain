@@ -8,6 +8,11 @@ tests/image-pull-secret.yaml
 .claude/worktrees/
 /.claude/local/
 
+# Python bytecode from the slapd-init converger's unit tests (make test-init).
+# Two of these were committed by accident; nothing here is ever a build input.
+__pycache__/
+*.pyc
+
 # Local shell configurations
 .envrc
 

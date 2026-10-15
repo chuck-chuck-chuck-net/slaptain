@@ -11,6 +11,7 @@ Run with: make test-init
 
 import base64
 import os
+import subprocess
 import tempfile
 import unittest
 
@@ -339,6 +340,82 @@ class RenderTest(unittest.TestCase):
         self.assertIn("olcSpSessionlogSource:: " +
                       base64.b64encode(UNI_SUFFIX.encode("utf-8")).decode("ascii"), ldif)
 
+
+
+# ── Where the table actually is (ADR-034; the Init:CrashLoopBackOff of 2026-10-15)
+#
+# STARTUP_CONFIG_PATH names the mount DIRECTORY, the way DATABASE_DIRS_PATH does;
+# the ConfigMap key is the file name inside it. Nothing used to test main()'s
+# path resolution, so the converger opened the directory, raised
+# IsADirectoryError, and took every pod of every cluster down with it — feature
+# used or not. An unreadable table is a loud refusal and exit 0: a pod that
+# starts with the configuration it already had beats a fleet that cannot start.
+
+class TablePathTest(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+
+    def write_key(self, text=TABLE):
+        path = os.path.join(self.dir, "startup-config")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def test_the_mount_directory_resolves_to_the_key_file(self):
+        self.write_key()
+        self.assertEqual(sc.read_table(self.dir), TABLE)
+
+    def test_a_plain_file_path_is_read_as_is(self):
+        path = self.write_key()
+        self.assertEqual(sc.read_table(path), TABLE)
+
+    def test_a_missing_path_is_unmanaged(self):
+        self.assertIsNone(sc.read_table(os.path.join(self.dir, "not-mounted")))
+
+    def test_a_directory_without_the_key_file_is_refused_not_unmanaged(self):
+        with self.assertRaises(sc.TableUnreadable) as caught:
+            sc.read_table(self.dir)
+        self.assertIn("startup-config", str(caught.exception))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads through mode 0000")
+    def test_an_unreadable_file_is_refused(self):
+        self.write_key()
+        os.chmod(os.path.join(self.dir, "startup-config"), 0o000)
+        with self.assertRaises(sc.TableUnreadable):
+            sc.read_table(self.dir)
+
+
+class MainExitCodeTest(unittest.TestCase):
+    """main() must never let a table problem fail the init container."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+        self.addCleanup(os.environ.pop, "STARTUP_CONFIG_PATH", None)
+        os.environ["STARTUP_CONFIG_PATH"] = self.dir
+
+    def test_the_mount_directory_alone_does_not_fail_the_pod(self):
+        # The defect verbatim: the env var is the mount directory and the key
+        # file is not there yet. slapcat is never reached, so this needs no
+        # slapd — which is exactly why nothing caught it.
+        self.assertEqual(sc.main(["startup_config.py", "/nonexistent/slapd.d"]), 0)
+
+    def test_a_missing_mount_does_not_fail_the_pod(self):
+        os.environ["STARTUP_CONFIG_PATH"] = os.path.join(self.dir, "absent")
+        self.assertEqual(sc.main(["startup_config.py", "/nonexistent/slapd.d"]), 0)
+
+    def test_the_mounted_table_is_still_read_through_the_directory(self):
+        with open(os.path.join(self.dir, "startup-config"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(TABLE)
+        # Reaches slapcat, which does not exist here — so this asserts only
+        # that the path resolved and the run got that far.
+        with self.assertRaises((FileNotFoundError, subprocess.CalledProcessError)):
+            sc.main(["startup_config.py", "/nonexistent/slapd.d"])
 
 if __name__ == "__main__":
     unittest.main()
