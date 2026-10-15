@@ -265,3 +265,21 @@ and exits 0.
 The bound that makes the trade acceptable: with no table file the converger
 reads nothing, writes nothing and returns immediately, so a cluster that does
 not use the feature cannot be stopped by it.
+
+---
+
+## Amendment, 2026-10-15: the condition is named positively
+
+R3 called the condition `ConfigRestartRequired`. Every condition this project
+publishes states the good case as True — `TunablesConverged`, `DataPresent`,
+`PodsResponsive`, `ReplicationConverged`, `TLSReady` — and a reader who has
+learned that reads a True as "fine" without checking which way this one points.
+
+So: **`StartupConfigConverged`**, True when every pod this database reaches
+carries the table's values, False with reason `RestartRequired` and a message
+naming the pods that do not. R3 is otherwise unchanged, including the part that
+matters: the operator reports and does not restart anything itself.
+
+A pod that could not be read is not evidence of divergence and never makes the
+condition False, following ADR-025's rule for the suffix probe — unreadable
+evidence never counts toward a verdict.
