@@ -283,3 +283,47 @@ matters: the operator reports and does not restart anything itself.
 A pod that could not be read is not evidence of divergence and never makes the
 condition False, following ADR-025's rule for the suffix probe — unreadable
 evidence never counts toward a verdict.
+
+---
+
+## Amendment, 2026-10-15: the session log is handed over, never dropped
+
+Found on the first live cluster, and it is a consequence this ADR did not
+think through. The two halves of the change land at different moments:
+`olcSpSessionlog` is live-writable, `olcSpSessionlogSource` is not and cannot
+arrive before the pod's next start. Deciding from the spec alone, the operator
+removed the in-memory log the instant the field was set — leaving the database
+with **no session log of any kind** until a restart a human schedules and may
+never take. Every consumer that falls behind in that window pays a full
+present-phase refresh: the storm class ADR-022 exists to avoid, for an
+unbounded time, caused by the change meant to improve it.
+
+**The rule: the database always has exactly one session log.** The operator
+never constructs the state where it has none, and never the state where it has
+two. That is decidable only from the pod's live configuration, not from the
+spec, so the in-memory log converges against what the pod actually runs:
+
+| declared | source live on the pod | the in-memory log |
+|---|---|---|
+| `Accesslog` | no | left exactly as it is — it is the only log there is |
+| `Accesslog` | yes | removed; the handover completed here |
+| `InMemory` / none | yes | left alone; the sourced log is still serving |
+| `InMemory` / none | no | converged as ADR-022 always did |
+
+The swap itself happens offline, in **one** `slapmodify` record: the converger
+deletes the attribute the new one replaces in the same write, because
+back-ldif rewrites an entry file per record and two records would put a
+configuration carrying both on disk between them. So slapd never reads the
+pair, and the "wasteful operation" warning its own parser emits for that
+combination never fires — measured as absent across a full flip-and-return
+cycle on a three-pod cluster.
+
+Two smaller consequences of the same rule. A syncprov overlay created on a
+**fresh** pod for a database already declaring `Accesslog` is given the
+in-memory default, rather than nothing: a log now, swapped at the restart.
+And "already correct" became a property of the pair — a right source value
+with a leftover in-memory log beside it is rewritten, because no other pass
+looks at that entry offline.
+
+The field's documentation follows: asking for the source does not imply the
+in-memory log is absent, it **replaces** it, at the restart.
