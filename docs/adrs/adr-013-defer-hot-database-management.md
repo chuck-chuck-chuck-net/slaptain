@@ -526,3 +526,19 @@ What makes such a field compliant, and what its tests must pin:
 
 `spec.monitoring.enabled` is the first field added under this statement; `logLevel` was
 compliant before it was written down.
+---
+
+## Amendment, 2026-10-15: this ADR does not win a conflict by default
+
+ADR-035 states the rule for what happens when this decision collides with
+another, and clarifies the scope of this one: its subject is the
+**SlapdCluster's life** — a database added, a replica count moved, a value the
+operator derived while the cluster runs. An **operator upgrade** is not one of
+those. A new operator version may change the pod template once; it may still
+never roll a fleet as a side effect of something a user did to another
+resource, which is what this ADR was written about and what stands unchanged.
+
+The first case decided this way: ADR-034 carries its startup-only table in a
+ConfigMap named for what it holds and accepts the single roll at the upgrade
+that introduces it, rather than hiding the table inside this ADR's own
+`database-dirs` ConfigMap to avoid the restart.
