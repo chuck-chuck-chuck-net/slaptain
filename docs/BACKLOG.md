@@ -738,6 +738,27 @@ threshold, replication lag stationary). That experiment needs the setting
 applied from startup on both providers, which is exactly what the operator
 cannot currently do.
 
+## `tests/e2e.sh setup` never re-applies CRDs, so a new API field is silently dropped
+
+`e2e.sh setup` installs the operator chart with Helm, and Helm applies a
+chart's `crds/` **only on the first `install`, never on an `upgrade`** — the
+trap CLAUDE.md already documents for `make operator-helm-install`, which is why
+that target depends on `operator-crd-apply`. `e2e.sh` has no such dependency.
+
+So a lab cluster that has ever had the operator installed keeps the CRD it was
+first given. A newly added spec field is then **pruned by the API server**: the
+`kubectl apply` succeeds, prints `Warning: unknown field`, and the object lands
+without it. Every downstream assertion reads as "the feature does nothing"
+rather than "the field never arrived", which is a long way from the cause.
+
+Found while landing ADR-034 (2026-10-15): the `syncprovSessionlogSource` field
+did not reach t3e through `e2e.sh setup`, and the run only moved after a manual
+`make operator-crd-apply CONTEXT=t3e`.
+
+Fix: `e2e.sh setup` applies the CRDs the way the Makefile does, server-side,
+before the chart. Cheap, and it removes a failure mode whose symptom points
+nowhere near its cause.
+
 ## `ensureServerIDs` will renumber a live pod if the derivation ever moves again
 
 `ensureServerIDs` converges `olcServerID` per pod: it compares the derived value
