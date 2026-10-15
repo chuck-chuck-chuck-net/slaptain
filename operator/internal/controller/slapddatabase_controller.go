@@ -254,8 +254,9 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Apply to every RW and RO pod. healthyPods are the pods whose per-pod
 	// reconcile completed: reconcileReplication writes syncrepl stanzas only
-	// to these — see the comment on its healthyPods parameter.
-	appliedPods, failedPods, healthyPods := r.applyToPods(ctx, sc, sd, configPW, rootPW)
+	// to these — see the comment on its healthyPods parameter. startupObs
+	// carries one startup-only observation per READ-WRITE pod (ADR-034 R3).
+	appliedPods, failedPods, healthyPods, startupObs := r.applyToPods(ctx, sc, sd, configPW, rootPW)
 
 	// Track whether any step was incomplete — forces requeue even if database
 	// creation succeeded on all pods. Without this, the operator would stop
@@ -367,6 +368,14 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		sd.Status.DataObserved = true
 	}
 
+	// 10b. Publish StartupConfigConverged from what step 7 observed (ADR-034
+	//      R3). Observation only, like DataPresent: the change path is a pod
+	//      restart and the operator does not take it — restarting a provider
+	//      fleet is a topology event at every peer (ADR-016). The verdict is
+	//      recomputed wholly from this pass, so a restarted fleet clears it with
+	//      no special case (ADR-001).
+	setCondition(&sd.Status.Conditions, startupConfigConvergedFor(sd, startupObs))
+
 	// 11. Update status. The precedence lives in databasePhase, which is pure
 	//      and therefore assertable — inline here it was dead in every test,
 	//      because the envtest fixtures have no pods at all.
@@ -396,13 +405,18 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 // applyToPods runs reconcilePodDatabase against every RW pod, then every RO
 // pod, and sorts them into applied and failed. healthyPods holds the applied
-// ones by name.
+// ones by name. startupObs carries one startup-only observation per READ-WRITE
+// pod (ADR-034 R3): allocated before the pod's reconcile and kept whatever that
+// reconcile returns, so a pod that could not be dialled leaves its observation
+// unassessed — which is how "we did not look" stays distinct from "we looked
+// and it differs". RO pods get none; they carry no syncprov overlay (ADR-019
+// R3), so there is nothing on them to compare.
 func (r *SlapdDatabaseReconciler) applyToPods(
 	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	configPW, rootPW string,
-) (appliedPods, failedPods []string, healthyPods map[string]bool) {
+) (appliedPods, failedPods []string, healthyPods map[string]bool, startupObs []startupConfigObservation) {
 	log := logf.FromContext(ctx)
 	replicas := sc.Spec.Replicas
 	if replicas == 0 {
@@ -410,13 +424,17 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 	}
 	headlessSvc := sc.Name + "-headless"
 	healthyPods = map[string]bool{}
+	startupObs = make([]startupConfigObservation, 0, replicas)
 
 	// RW pods.
 	for i := int32(0); i < replicas; i++ {
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
 		host := fmt.Sprintf("%s.%s.%s.svc.%s",
 			podName, headlessSvc, sc.Namespace, r.ClusterDomain)
-		if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false, i); err != nil {
+		obs := startupConfigObservation{pod: podName}
+		err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false, i, &obs)
+		startupObs = append(startupObs, obs)
+		if err != nil {
 			log.Info("database reconcile skipped for pod (will retry)",
 				"pod", podName, "err", err)
 			failedPods = append(failedPods, podName)
@@ -435,7 +453,7 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 				podName, roHeadless, sc.Namespace, r.ClusterDomain)
 			// ordinal is unused for RO pods (serverID is RW-only), but the
 			// signature requires it.
-			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true, i); err != nil {
+			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true, i, nil); err != nil {
 				log.Info("database reconcile skipped for read-only pod (will retry)",
 					"pod", podName, "err", err)
 				failedPods = append(failedPods, podName)
@@ -445,7 +463,7 @@ func (r *SlapdDatabaseReconciler) applyToPods(
 			}
 		}
 	}
-	return appliedPods, failedPods, healthyPods
+	return appliedPods, failedPods, healthyPods, startupObs
 }
 
 // reconcileSeed is step 8 for a database that still needs its seed. It
@@ -683,6 +701,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	sc *ldapv1alpha1.SlapdCluster,
 	readOnly bool,
 	ordinal int32,
+	startupObs *startupConfigObservation,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -849,7 +868,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 
 	if !readOnly {
 		if dataDN, err = r.convergeProviderInfra(ctx, conn, host, dataDN, ensureDirs, sd, sc,
-			ordinal, wantsSyncProv, wantsAccesslog); err != nil {
+			ordinal, wantsSyncProv, wantsAccesslog, startupObs); err != nil {
 			return err
 		}
 	}
@@ -943,6 +962,7 @@ func (r *SlapdDatabaseReconciler) convergeProviderInfra(
 	sc *ldapv1alpha1.SlapdCluster,
 	ordinal int32,
 	wantsSyncProv, wantsAccesslog bool,
+	startupObs *startupConfigObservation,
 ) (string, error) {
 	// Ensure the dynamic modules backing the overlays are loaded BEFORE
 	// any ensure call below. Fresh bootstraps load them via slapd.conf
@@ -998,7 +1018,7 @@ func (r *SlapdDatabaseReconciler) convergeProviderInfra(
 		}
 	}
 	if wantsSyncProv {
-		if err := r.ensureSyncProvOverlay(ctx, conn, host, dataDN, sd); err != nil {
+		if err := r.ensureSyncProvOverlay(ctx, conn, host, dataDN, sd, startupObs); err != nil {
 			return dataDN, fmt.Errorf("ensure syncprov overlay at %s: %w", host, err)
 		}
 	}
@@ -1054,7 +1074,7 @@ func (r *SlapdDatabaseReconciler) ensureReadOnly(
 	log.Info("aligning olcReadOnly", "host", host, "from", current, "to", desiredStr)
 	modReq := ldap.NewModifyRequest(dataDN, nil)
 	modReq.Replace("olcReadOnly", []string{desiredStr})
-	return conn.Modify(modReq)
+	return guardedModify(conn, modReq)
 }
 
 // createDatabase adds a new olcDatabase={N}mdb entry to cn=config.
@@ -1142,7 +1162,7 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 		addReq.Attribute("olcReadOnly", []string{olcTrue})
 	}
 
-	if err := conn.Add(addReq); err != nil {
+	if err := guardedAdd(conn, addReq); err != nil {
 		return "", err
 	}
 
@@ -1192,7 +1212,7 @@ func (r *SlapdDatabaseReconciler) applyACLs(
 	log.Info("replacing ACL rules", "host", host, "rules", len(acls))
 	modReq := ldap.NewModifyRequest(dataDN, nil)
 	modReq.Replace("olcAccess", acls)
-	return conn.Modify(modReq)
+	return guardedModify(conn, modReq)
 }
 
 // aclsMatch returns true when the stored olcAccess values (with {N} prefixes)
@@ -1251,7 +1271,7 @@ func (r *SlapdDatabaseReconciler) applyIndices(
 	log.Info("adding indices", "host", host, "count", len(missing))
 	modReq := ldap.NewModifyRequest(dataDN, nil)
 	modReq.Add("olcDbIndex", missing)
-	return conn.Modify(modReq)
+	return guardedModify(conn, modReq)
 }
 
 // ── Seed Data ────────────────────────────────────────────────────────────────
@@ -1303,6 +1323,7 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 	conn *ldap.Conn,
 	host, dataDN string,
 	sd *ldapv1alpha1.SlapdDatabase,
+	startupObs *startupConfigObservation,
 ) error {
 	log := logf.FromContext(ctx)
 
@@ -1311,7 +1332,8 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 		return err
 	}
 
-	ops, sessionlog := desiredSessionlogOps(sd)
+	decision := desiredSessionlog(sd)
+	ops, sessionlog := decision.inMemoryOps()
 
 	if !hasSyncprov {
 		log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
@@ -1325,15 +1347,15 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 		if sessionlog {
 			addReq.Attribute("olcSpSessionlog", []string{strconv.Itoa(int(ops))})
 		}
-		if err := conn.Add(addReq); err != nil {
+		if err := guardedAdd(conn, addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add syncprov overlay: %w", err)
 			}
 		}
 	}
 
-	return r.ensureSyncprovTunables(ctx, conn, host, dataDN, ops, sessionlog,
-		desiredSyncprovCheckpoint(sd))
+	return r.ensureSyncprovTunables(ctx, conn, host, dataDN,
+		desiredSyncprovCheckpoint(sd), decision, startupObs)
 }
 
 // ensureSyncprovTunables converges the two tunables the operator owns on the
@@ -1354,14 +1376,14 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovTunables(
 	ctx context.Context,
 	conn *ldap.Conn,
 	host, dataDN string,
-	ops int32,
-	sessionlogEnabled bool,
 	checkpoint string,
+	decision sessionlogDecision,
+	startupObs *startupConfigObservation,
 ) error {
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
 		0, 0, false, "(objectClass=olcSyncProvConfig)",
-		[]string{"olcSpSessionlog", "olcSpCheckpoint"}, nil,
+		[]string{"olcSpSessionlog", "olcSpCheckpoint", startupAttrSessionlogSource}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("search syncprov overlay under %s: %w", dataDN, err)
@@ -1371,6 +1393,14 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovTunables(
 	}
 	overlayDN := sr.Entries[0].DN
 
+	// The startup-only half of this overlay, OBSERVED off the search that was
+	// already happening — no second pass, no second connection (ADR-034 R3).
+	// Nothing below may act on it: olcSpSessionlogSource is a double free on
+	// every online path, and the guard would refuse the write anyway.
+	observeStartupConfig(startupObs, decision,
+		sr.Entries[0].GetEqualFoldAttributeValues(startupAttrSessionlogSource))
+
+	ops, sessionlogEnabled := decision.inMemoryOps()
 	if err := r.ensureSyncprovSessionlog(ctx, conn, host, overlayDN,
 		sr.Entries[0].GetEqualFoldAttributeValues("olcSpSessionlog"), ops, sessionlogEnabled); err != nil {
 		return err
@@ -1456,7 +1486,14 @@ func desiredSessionlog(sd *ldapv1alpha1.SlapdDatabase) sessionlogDecision {
 // leftover olcSpSessionlog, which is a safe live write; olcSpSessionlogSource
 // itself is never written over the wire (ADR-034 R2).
 func desiredSessionlogOps(sd *ldapv1alpha1.SlapdDatabase) (int32, bool) {
-	d := desiredSessionlog(sd)
+	return desiredSessionlog(sd).inMemoryOps()
+}
+
+// inMemoryOps is that view, taken off a decision already in hand. The one
+// derivation: a caller holding a sessionlogDecision must never recompute these
+// two scalars beside it, or a signature carrying all three could disagree with
+// itself about whether olcSpSessionlog is wanted.
+func (d sessionlogDecision) inMemoryOps() (int32, bool) {
 	return d.Ops, d.Kind == sessionlogKindInMemory
 }
 
@@ -1526,7 +1563,7 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovSessionlog(
 	case sessionlogNoop:
 		return nil
 	}
-	if err := conn.Modify(modReq); err != nil {
+	if err := guardedModify(conn, modReq); err != nil {
 		if action == sessionlogRemove && ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchAttribute) {
 			return nil
 		}
@@ -1571,7 +1608,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		if purge != "" {
 			addReq.Attribute("olcAccessLogPurge", []string{purge})
 		}
-		if err := conn.Add(addReq); err != nil {
+		if err := guardedAdd(conn, addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add accesslog overlay: %w", err)
 			}
@@ -1703,7 +1740,7 @@ func (r *SlapdDatabaseReconciler) ensureModulesLoaded(
 		"dn", entry.DN, "modules", missing)
 	modReq := ldap.NewModifyRequest(entry.DN, nil)
 	modReq.Add("olcModuleLoad", missing)
-	if err := conn.Modify(modReq); err != nil {
+	if err := guardedModify(conn, modReq); err != nil {
 		if !ldap.IsErrorWithCode(err, ldap.LDAPResultAttributeOrValueExists) {
 			return fmt.Errorf("add olcModuleLoad %v: %w", missing, err)
 		}
@@ -1803,7 +1840,7 @@ func (r *SlapdDatabaseReconciler) ensureServerIDs(
 		"current", current, "desired", desired)
 	modReq := ldap.NewModifyRequest("cn=config", nil)
 	modReq.Replace("olcServerID", desired)
-	if err := conn.Modify(modReq); err != nil {
+	if err := guardedModify(conn, modReq); err != nil {
 		return fmt.Errorf("replace olcServerID: %w", err)
 	}
 	return nil
@@ -1910,7 +1947,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 			addReq.Attribute("olcDbNoSync", []string{olcTrue})
 		}
 		addReq.Attribute("olcDbCheckpoint", []string{defaultAccesslogCheckpoint})
-		if err := conn.Add(addReq); err != nil {
+		if err := guardedAdd(conn, addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add accesslog DB %s: %w", logSuffix, err)
 			}
@@ -2007,7 +2044,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		addReq.Attribute("olcOverlay", []string{overlaySyncprov})
 		addReq.Attribute("olcSpNoPresent", []string{olcTrue})
 		addReq.Attribute("olcSpReloadHint", []string{olcTrue})
-		if err := conn.Add(addReq); err != nil {
+		if err := guardedAdd(conn, addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add syncprov overlay to accesslog DB: %w", err)
 			}
@@ -2075,7 +2112,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogIndices(
 	log.Info("adding missing accesslog indices", "host", host, "dn", dbDN, "add", missing)
 	modReq := ldap.NewModifyRequest(dbDN, nil)
 	modReq.Add("olcDbIndex", missing)
-	return conn.Modify(modReq)
+	return guardedModify(conn, modReq)
 }
 
 // accesslogACL, and every other spelling of a replication identity, lives in
@@ -2109,7 +2146,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogACL(
 	log.Info("setting accesslog DB ACL", "host", host, "dn", dbDN)
 	modReq := ldap.NewModifyRequest(dbDN, nil)
 	modReq.Replace("olcAccess", desired)
-	if err := conn.Modify(modReq); err != nil {
+	if err := guardedModify(conn, modReq); err != nil {
 		return fmt.Errorf("set olcAccess on %s: %w", dbDN, err)
 	}
 	return nil
@@ -3416,7 +3453,7 @@ func (r *SlapdDatabaseReconciler) applySyncreplToPod(
 	if mmChanged {
 		modReq.Replace("olcMultiProvider", []string{mirrorMode})
 	}
-	return conn.Modify(modReq)
+	return guardedModify(conn, modReq)
 }
 
 // syncreplMatch compares current and desired syncrepl stanzas (RID-based, order-insensitive).
@@ -3945,7 +3982,7 @@ func ensureOverlayAttr(
 		return nil
 	}
 
-	if err := conn.Modify(modReq); err != nil {
+	if err := guardedModify(conn, modReq); err != nil {
 		if action == overlayAttrRemove && ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchAttribute) {
 			return nil
 		}

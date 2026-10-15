@@ -226,7 +226,7 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 				log.Info("removing global tunable", "host", host, "attr", w.attr)
 				modReq := ldap.NewModifyRequest(dn, nil)
 				modReq.Delete(w.attr, nil)
-				if err := conn.Modify(modReq); err != nil {
+				if err := guardedModify(conn, modReq); err != nil {
 					return fmt.Errorf("delete %s on %s at %s: %w", w.attr, dn, host, err)
 				}
 				return nil
@@ -238,7 +238,7 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 				"dn", dn, "from", current, "to", w.value)
 			modReq := ldap.NewModifyRequest(dn, nil)
 			modReq.Replace(w.attr, []string{w.value})
-			if err := conn.Modify(modReq); err != nil {
+			if err := guardedModify(conn, modReq); err != nil {
 				return fmt.Errorf("set %s on %s at %s: %w", w.attr, dn, host, err)
 			}
 
@@ -268,7 +268,7 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 				"movedTo", dn)
 			del := ldap.NewModifyRequest("cn=config", nil)
 			del.Delete(w.attr, nil)
-			if err := conn.Modify(del); err != nil {
+			if err := guardedModify(conn, del); err != nil {
 				return fmt.Errorf("delete deprecated %s on cn=config at %s: %w", w.attr, host, err)
 			}
 			return nil

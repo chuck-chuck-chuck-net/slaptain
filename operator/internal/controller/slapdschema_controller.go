@@ -223,7 +223,7 @@ func (r *SlapdSchemaReconciler) applySchemaToPod(
 	if len(ss.Spec.ObjectClasses) > 0 {
 		addReq.Attribute("olcObjectClasses", ss.Spec.ObjectClasses)
 	}
-	if err := conn.Add(addReq); err != nil {
+	if err := guardedAdd(conn, addReq); err != nil {
 		// Defence in depth: handle "already exists" in case of a race.
 		if ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 			log.V(1).Info("schema sub-entry already exists (ADD returned 68)", "host", host, "cn", schemaCN)

@@ -384,7 +384,7 @@ func (r *SlapdDatabaseReconciler) ensureLimits(
 	} else {
 		modReq.Replace("olcLimits", desired)
 	}
-	return conn.Modify(modReq)
+	return guardedModify(conn, modReq)
 }
 
 // ensureSearchLimits converges olcSizeLimit and olcTimeLimit on a data DB.
@@ -425,7 +425,7 @@ func (r *SlapdDatabaseReconciler) ensureSearchLimits(
 			"from", current, "to", spec.value)
 		modReq := ldap.NewModifyRequest(dataDN, nil)
 		modReq.Replace(spec.attr, []string{spec.value})
-		if err := conn.Modify(modReq); err != nil {
+		if err := guardedModify(conn, modReq); err != nil {
 			return fmt.Errorf("set %s on %s: %w", spec.attr, dataDN, err)
 		}
 	}
@@ -575,7 +575,7 @@ func (r *SlapdDatabaseReconciler) ensureBackendTunables(
 			log.Info("removing tunable", "host", host, "dn", dbDN, "attr", w.attr)
 			modReq := ldap.NewModifyRequest(dbDN, nil)
 			modReq.Delete(w.attr, nil)
-			if err := conn.Modify(modReq); err != nil {
+			if err := guardedModify(conn, modReq); err != nil {
 				return fmt.Errorf("delete %s on %s: %w", w.attr, dbDN, err)
 			}
 			continue
@@ -587,7 +587,7 @@ func (r *SlapdDatabaseReconciler) ensureBackendTunables(
 			"from", current, "to", w.value)
 		modReq := ldap.NewModifyRequest(dbDN, nil)
 		modReq.Replace(w.attr, []string{w.value})
-		if err := conn.Modify(modReq); err != nil {
+		if err := guardedModify(conn, modReq); err != nil {
 			return fmt.Errorf("set %s on %s: %w", w.attr, dbDN, err)
 		}
 	}
@@ -679,7 +679,7 @@ func (r *SlapdDatabaseReconciler) ensureDataBaselineIndices(
 	log.Info("adding missing baseline indices", "host", host, "dn", dataDN, "add", missing)
 	modReq := ldap.NewModifyRequest(dataDN, nil)
 	modReq.Add("olcDbIndex", missing)
-	return conn.Modify(modReq)
+	return guardedModify(conn, modReq)
 }
 
 // tunablesConvergedCondition reports whether every operator-managed tunable on

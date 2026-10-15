@@ -103,7 +103,7 @@ func (r *SlapdClusterReconciler) ensureAuthDB(
 		// unconditionally at pod start (ADR-027 decision 3).
 		addReq.Attribute("olcDbDirectory", []string{ldapv1alpha1.AuthDir})
 		addReq.Attribute("olcAccess", authDBACLs())
-		if err := conn.Add(addReq); err != nil {
+		if err := guardedAdd(conn, addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add auth DB %s at %s: %w", ldapv1alpha1.AuthSuffix, host, err)
 			}
@@ -157,7 +157,7 @@ func (r *SlapdClusterReconciler) ensureAuthDBACLs(
 	log.Info("setting auth DB ACLs", "host", host, "dn", dbDN)
 	modReq := ldap.NewModifyRequest(dbDN, nil)
 	modReq.Replace("olcAccess", desired)
-	if err := conn.Modify(modReq); err != nil {
+	if err := guardedModify(conn, modReq); err != nil {
 		return fmt.Errorf("set olcAccess on %s at %s: %w", dbDN, host, err)
 	}
 	return nil

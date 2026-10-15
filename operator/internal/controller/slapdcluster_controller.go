@@ -1100,7 +1100,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 					// written the ConfigMap yet must still start pods, and an
 					// absent file is exactly what tells the converger it has
 					// nothing to manage.
-					Optional: ptr.To(true),
+					Optional: new(true),
 				},
 			},
 		},
