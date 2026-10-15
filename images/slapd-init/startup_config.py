@@ -60,12 +60,21 @@ class ManagedAttribute:
     is a DN resolved against the configured backends at startup — the class of
     value that can make a pod unbootable, and therefore the class that must be
     proven resolvable before it is written.
+
+    `exclusive_with` names the attributes that may not stand beside this one on
+    the same entry. It is DATA for the same reason the other two are: where an
+    attribute lives and what its value means are properties of the attribute,
+    and so is what it displaces. The converger removes them in the SAME
+    `slapmodify` run that writes this one, because the only two readings slapd
+    may ever get of that file are "before" and "after" — never a configuration
+    carrying both, which it rejects as a wasteful operation.
     """
 
-    def __init__(self, name, locator, value_names_database):
+    def __init__(self, name, locator, value_names_database, exclusive_with=()):
         self.name = name
         self.locator = locator
         self.value_names_database = value_names_database
+        self.exclusive_with = tuple(exclusive_with)
 
 
 def _syncprov_overlay_of(db_entry, entries):
@@ -93,6 +102,12 @@ MANAGED_ATTRIBUTES = {
         name="olcSpSessionlogSource",
         locator=_syncprov_overlay_of,
         value_names_database=True,
+        # The in-memory session log this one replaces (ADR-022, ADR-034). The
+        # operator puts it there and keeps it there until the source is live,
+        # so the database is never without a session log; this is the other end
+        # of that handover, and it is the only moment at which the two can be
+        # exchanged without the database having none or two.
+        exclusive_with=("olcSpSessionlog",),
     ),
 }
 
@@ -211,6 +226,13 @@ def render_modify_ldif(mods):
             out.append("replace: %s" % mod.attribute)
             out.append(_ldif_line(mod.attribute, mod.value))
         out.append("-")
+        # Inside the SAME record. back-ldif rewrites the whole entry file per
+        # record, so a second record would put a file carrying both attributes
+        # on disk between the two — briefly, but durably if the process dies
+        # there, and slapd calls that pair a wasteful operation.
+        for attribute in mod.delete_also:
+            out.append("delete: %s" % attribute)
+            out.append("-")
         out.append("")
     return "\n".join(out) + "\n" if out else ""
 
@@ -304,15 +326,28 @@ def parse_table(text):
 # ── The decision (pure) ───────────────────────────────────────────────────────
 
 class Modification:
-    """Set `attribute` on `dn` to `value`, or delete it when value is None."""
+    """Set `attribute` on `dn` to `value`, or delete it when value is None.
 
-    def __init__(self, dn, attribute, value):
+    `delete_also` names further attributes removed from the same entry in the
+    same record — the exclusive-with set, narrowed to the ones actually present
+    in the dump. Narrowed because `slapmodify` fails outright on a delete of an
+    attribute that is not set, and a converger that refuses to run is worse than
+    the state it was asked to fix.
+
+    One record, not two, so there is no moment at which the file on disk carries
+    the new attribute and the one it replaces.
+    """
+
+    def __init__(self, dn, attribute, value, delete_also=()):
         self.dn = dn
         self.attribute = attribute
         self.value = value
+        self.delete_also = tuple(delete_also)
 
     def __repr__(self):
         verb = "delete" if self.value is None else "replace with %r" % self.value
+        if self.delete_also:
+            verb += " (and delete %s)" % ", ".join(self.delete_also)
         return "<%s %s: %s>" % (self.dn, self.attribute, verb)
 
 
@@ -413,11 +448,26 @@ def plan(entries, records):
                         "would leave a pod that does not start"
                         % (managed.name, rec.value))
                     continue
+            # The attributes this one replaces, narrowed to those actually on
+            # the entry: slapmodify fails outright on a delete of an attribute
+            # that is not set.
+            delete_also = tuple(
+                name for name in managed.exclusive_with
+                if carriers[0].first(name) is not None)
+
             current = carriers[0].first(managed.name)
-            if current is not None and normalize_dn(current) == normalize_dn(rec.value):
+            if (current is not None
+                    and normalize_dn(current) == normalize_dn(rec.value)
+                    and not delete_also):
                 continue
+            # "Already correct" is a property of the PAIR. A right value with a
+            # leftover exclusive beside it is the wasteful combination, and
+            # nothing else ever looks at this entry offline — so it is rewritten
+            # here, identical value and all, rather than left for a pass that
+            # does not exist.
             modifications.append(
-                Modification(carriers[0].dn, managed.name, rec.value))
+                Modification(carriers[0].dn, managed.name, rec.value,
+                             delete_also=delete_also))
 
     return Plan(modifications, refusals)
 

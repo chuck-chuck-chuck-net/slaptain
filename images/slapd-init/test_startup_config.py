@@ -118,6 +118,22 @@ CONFIG_WITH_SOURCE = CONFIG.replace(
     "olcSpSessionlogSource: cn=accesslog-default\n",
 )
 
+# The same configuration carrying the IN-MEMORY session log the operator puts
+# there and keeps there until the source is live — what the converger actually
+# reads on the first pod start after the field is set. The handover happens
+# against this, not against a bare overlay.
+CONFIG_WITH_IN_MEMORY = CONFIG.replace(
+    "dn: olcOverlay={0}syncprov,olcDatabase={1}mdb,cn=config\n"
+    "objectClass: olcOverlayConfig\n"
+    "objectClass: olcSyncProvConfig\n"
+    "olcOverlay: {0}syncprov\n",
+    "dn: olcOverlay={0}syncprov,olcDatabase={1}mdb,cn=config\n"
+    "objectClass: olcOverlayConfig\n"
+    "objectClass: olcSyncProvConfig\n"
+    "olcOverlay: {0}syncprov\n"
+    "olcSpSessionlog: 5000\n",
+)
+
 TABLE = "olcSpSessionlogSource\tdc=example,dc=com\tcn=accesslog-default\n"
 
 
@@ -137,6 +153,12 @@ class FixtureSanityTest(unittest.TestCase):
         self.assertNotIn("olcSpSessionlogSource", CONFIG)
         self.assertIn("olcSpSessionlogSource: cn=accesslog-default",
                       CONFIG_WITH_SOURCE)
+
+    def test_the_in_memory_fixture_really_differs(self):
+        self.assertNotEqual(CONFIG, CONFIG_WITH_IN_MEMORY)
+        self.assertNotIn("olcSpSessionlog:", CONFIG)
+        self.assertIn("olcSpSessionlog: 5000", CONFIG_WITH_IN_MEMORY)
+        self.assertNotIn("olcSpSessionlogSource", CONFIG_WITH_IN_MEMORY)
 
 
 # ── The parser ────────────────────────────────────────────────────────────────
@@ -288,6 +310,102 @@ class PlanTest(unittest.TestCase):
         plan = sc.plan(sc.parse_ldif(CONFIG), table)
         self.assertEqual([m.dn for m in plan.modifications], [SYNCPROV_1])
         self.assertTrue(plan.refusals)
+
+
+# ── The handover: one session log at a time, never none and never two ─────────
+#
+# The operator keeps the in-memory session log in place until the sourced one is
+# actually live on the pod, so the database is never without one. This side is
+# the other end of that: the exchange itself, which happens here or nowhere —
+# the init container is the only moment at which the configuration is on disk
+# and nothing holds it open.
+#
+# It must be ONE slapmodify record. Two records for the same DN would have
+# back-ldif write the entry file twice, and the intermediate file carries both
+# attributes — the combination slapd rejects as a wasteful operation, and the
+# one shape this whole design exists to keep off the disk.
+
+class HandoverTest(unittest.TestCase):
+
+    def test_writing_the_source_deletes_the_in_memory_log_in_the_same_record(self):
+        plan = sc.plan(sc.parse_ldif(CONFIG_WITH_IN_MEMORY), sc.parse_table(TABLE)[0])
+        self.assertEqual(plan.refusals, [])
+        self.assertEqual(len(plan.modifications), 1,
+                         "one record, so the file is never written carrying both")
+        mod = plan.modifications[0]
+        self.assertEqual(mod.dn, SYNCPROV_1)
+        self.assertEqual(mod.value, "cn=accesslog-default")
+        self.assertEqual(mod.delete_also, ("olcSpSessionlog",))
+
+    def test_no_in_memory_log_means_no_deletion(self):
+        # slapmodify fails outright on a delete of an attribute that is not
+        # set, so the deletion is driven by the dump, never by the table.
+        plan = sc.plan(sc.parse_ldif(CONFIG), sc.parse_table(TABLE)[0])
+        self.assertEqual(len(plan.modifications), 1)
+        self.assertEqual(plan.modifications[0].delete_also, ())
+
+    def test_a_leftover_in_memory_log_is_removed_even_when_the_source_is_right(self):
+        # The pod already has the source and somehow also the in-memory log.
+        # "Already correct" is about the pair, not about one attribute: leaving
+        # it would keep the wasteful combination on disk forever, because
+        # nothing else ever looks at this entry offline.
+        config = CONFIG_WITH_SOURCE.replace(
+            "olcSpSessionlogSource: cn=accesslog-default\n",
+            "olcSpSessionlogSource: cn=accesslog-default\nolcSpSessionlog: 5000\n")
+        self.assertIn("olcSpSessionlog: 5000", config, "the fixture must differ")
+        plan = sc.plan(sc.parse_ldif(config), sc.parse_table(TABLE)[0])
+        self.assertEqual(len(plan.modifications), 1)
+        self.assertEqual(plan.modifications[0].delete_also, ("olcSpSessionlog",))
+
+    def test_deleting_the_source_adds_no_in_memory_log(self):
+        # The reverse direction is NOT symmetric and must not be made so. The
+        # operator writes the in-memory log live, on its next pass, once it
+        # sees the source gone; doing it here too would be a second authority
+        # over the same attribute, and the two would race on every pod start.
+        plan = sc.plan(sc.parse_ldif(CONFIG_WITH_SOURCE), [])
+        self.assertEqual(len(plan.modifications), 1)
+        mod = plan.modifications[0]
+        self.assertIsNone(mod.value)
+        self.assertEqual(mod.attribute, "olcSpSessionlogSource")
+        self.assertEqual(mod.delete_also, ())
+
+    def test_a_refused_write_deletes_nothing(self):
+        # Doubt leaves the configuration alone — including the in-memory log,
+        # which is the only session log the database has while the source is
+        # not written.
+        table, _ = sc.parse_table(
+            "olcSpSessionlogSource\tdc=example,dc=com\tcn=accesslog-gone\n")
+        plan = sc.plan(sc.parse_ldif(CONFIG_WITH_IN_MEMORY), table)
+        self.assertEqual(plan.modifications, [])
+        self.assertTrue(plan.refusals)
+
+    def test_the_run_converges_in_one_pass(self):
+        # The read-back after a write must find nothing left to do, or main()
+        # treats the configuration as not what was asked for and fails the pod.
+        first = sc.plan(sc.parse_ldif(CONFIG_WITH_IN_MEMORY), sc.parse_table(TABLE)[0])
+        self.assertTrue(first.modifications)
+        after = sc.plan(sc.parse_ldif(CONFIG_WITH_SOURCE), sc.parse_table(TABLE)[0])
+        self.assertEqual(after.modifications, [])
+
+
+class HandoverRenderTest(unittest.TestCase):
+
+    def test_the_paired_delete_rides_the_same_record(self):
+        ldif = sc.render_modify_ldif([
+            sc.Modification(SYNCPROV_1, "olcSpSessionlogSource",
+                            "cn=accesslog-default",
+                            delete_also=("olcSpSessionlog",))])
+        self.assertEqual(ldif,
+                         "dn: " + SYNCPROV_1 + "\n"
+                         "changetype: modify\n"
+                         "replace: olcSpSessionlogSource\n"
+                         "olcSpSessionlogSource: cn=accesslog-default\n"
+                         "-\n"
+                         "delete: olcSpSessionlog\n"
+                         "-\n\n")
+        self.assertEqual(ldif.count("dn: "), 1,
+                         "two records would write the entry file twice, and the "
+                         "file in between carries both attributes")
 
 
 # ── Absence means unmanaged ───────────────────────────────────────────────────

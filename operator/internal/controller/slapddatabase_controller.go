@@ -1333,7 +1333,7 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 	}
 
 	decision := desiredSessionlog(sd)
-	ops, sessionlog := decision.inMemoryOps()
+	ops, sessionlog := decision.overlayCreationSessionlog()
 
 	if !hasSyncprov {
 		log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
@@ -1397,12 +1397,12 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovTunables(
 	// already happening — no second pass, no second connection (ADR-034 R3).
 	// Nothing below may act on it: olcSpSessionlogSource is a double free on
 	// every online path, and the guard would refuse the write anyway.
-	observeStartupConfig(startupObs, decision,
-		sr.Entries[0].GetEqualFoldAttributeValues(startupAttrSessionlogSource))
+	liveSource := sr.Entries[0].GetEqualFoldAttributeValues(startupAttrSessionlogSource)
+	observeStartupConfig(startupObs, decision, liveSource)
 
-	ops, sessionlogEnabled := decision.inMemoryOps()
 	if err := r.ensureSyncprovSessionlog(ctx, conn, host, overlayDN,
-		sr.Entries[0].GetEqualFoldAttributeValues("olcSpSessionlog"), ops, sessionlogEnabled); err != nil {
+		sr.Entries[0].GetEqualFoldAttributeValues("olcSpSessionlog"),
+		decision, anyNonBlank(liveSource)); err != nil {
 		return err
 	}
 
@@ -1448,11 +1448,12 @@ type sessionlogDecision struct {
 // spec.replication.syncprovSessionlog into the one session log this database
 // wants (ADR-022 for the size, ADR-034 for the place):
 //
-//   - source Accesslog → sourced from cn=accesslog-<CR name> (ADR-019 R1), and
-//     the in-memory log is ABSENT. Asking for the source implies the other is
-//     gone, rather than recommending it: slapd calls both at once wasteful, and
-//     an admission rule already refuses the combination, so this is what a spec
-//     that predates the rule resolves to as well.
+//   - source Accesslog → sourced from cn=accesslog-<CR name> (ADR-019 R1). The
+//     source REPLACES the in-memory log rather than merely outranking it: slapd
+//     calls both at once wasteful and an admission rule refuses the
+//     combination. Replaces, though, is not the same as "is already gone" — the
+//     swap happens at the pod's restart, and planSessionlog is what keeps the
+//     in-memory log in place until the replacement has actually arrived.
 //   - syncprovSessionlog 0 → no session log at all.
 //   - otherwise → the in-memory log, at the field's value or the operator
 //     default when unset.
@@ -1477,24 +1478,53 @@ func desiredSessionlog(sd *ldapv1alpha1.SlapdDatabase) sessionlogDecision {
 	return sessionlogDecision{Kind: sessionlogKindInMemory, Ops: ops}
 }
 
-// desiredSessionlogOps is the live-LDAP half's view of that decision: the
-// in-memory operation count, and whether olcSpSessionlog is wanted at all.
+// inMemoryOps is the in-memory half of a decision already in hand: the
+// operation count, and whether olcSpSessionlog is what this database wants.
 //
-// Both non-InMemory outcomes report false here, for the same reason but by
-// different routes — sessionlogKindNone never had a log, sessionlogKindAccesslog
-// has one somewhere the operator may not write. planSessionlog then removes a
-// leftover olcSpSessionlog, which is a safe live write; olcSpSessionlogSource
-// itself is never written over the wire (ADR-034 R2).
-func desiredSessionlogOps(sd *ldapv1alpha1.SlapdDatabase) (int32, bool) {
-	return desiredSessionlog(sd).inMemoryOps()
-}
-
-// inMemoryOps is that view, taken off a decision already in hand. The one
-// derivation: a caller holding a sessionlogDecision must never recompute these
-// two scalars beside it, or a signature carrying all three could disagree with
-// itself about whether olcSpSessionlog is wanted.
+// Both non-InMemory outcomes report false, for the same reason by different
+// routes — sessionlogKindNone never had a log, sessionlogKindAccesslog has one
+// somewhere the operator may not write. What this does NOT say is when the
+// in-memory log may actually be taken away: that depends on whether the
+// replacement has reached the pod yet, which only planSessionlog knows.
+//
+// The one derivation: a caller holding a sessionlogDecision must never
+// recompute these two scalars beside it, or a signature carrying all three
+// could disagree with itself about whether olcSpSessionlog is wanted.
 func (d sessionlogDecision) inMemoryOps() (int32, bool) {
 	return d.Ops, d.Kind == sessionlogKindInMemory
+}
+
+// overlayCreationSessionlog is the in-memory log a FRESHLY created syncprov
+// overlay must carry — a different question from inMemoryOps, and the reason it
+// is a second method rather than the same one.
+//
+// A database that declares the accesslog source cannot have it at creation:
+// every online path through sp_cf_gen is the double free, the Add of the
+// overlay entry included (ADR-034 context, fact 1), and guardedAdd refuses the
+// attribute for exactly that reason. The attribute arrives at the pod's next
+// start, from the init container's offline converger.
+//
+// So the overlay is created with the in-memory DEFAULT standing in, and the
+// converger swaps the two offline. The alternative — create it with no session
+// log at all — leaves a brand-new pod serving every reconnect from the
+// present-phase path until somebody restarts it, which is the gap this
+// milestone exists to close.
+func (d sessionlogDecision) overlayCreationSessionlog() (int32, bool) {
+	if d.Kind == sessionlogKindAccesslog {
+		return defaultSyncprovSessionlogOps, true
+	}
+	return d.inMemoryOps()
+}
+
+// anyNonBlank reports whether a live cn=config attribute has a value at all,
+// ignoring values that are only whitespace.
+func anyNonBlank(values []string) bool {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionlogAction is what planSessionlog decided to do with olcSpSessionlog.
@@ -1504,16 +1534,64 @@ const (
 	sessionlogNoop sessionlogAction = iota
 	sessionlogSet
 	sessionlogRemove
+	// sessionlogLeave — do not touch olcSpSessionlog, because removing or
+	// setting it right now would leave the database with the wrong NUMBER of
+	// session logs rather than the wrong size of one.
+	sessionlogLeave
 )
 
 // planSessionlog compares the live olcSpSessionlog values against desired and
 // returns the single write needed, if any. Pure — the LDAP half only executes
 // the verdict.
 //
+// It is given the POD'S live state, not the spec alone, because the two halves
+// of a handover land at different moments. olcSpSessionlog is live-writable;
+// olcSpSessionlogSource is not and cannot arrive before the pod's next start
+// (ADR-034). Deciding from the spec alone therefore removes the in-memory log
+// the instant the field is set and leaves the database with NO session log of
+// any kind until a restart a human schedules and may never take — every
+// consumer that falls behind in that window paying a full present-phase
+// refresh, the storm class ADR-022 exists to avoid.
+//
+// So the rule is a handover, never a drop: the database always has exactly one
+// session log, and this function never returns the write that would give it
+// none or two. sourceLive is what makes that decidable —
+//
+//	declared    source live   verdict
+//	Accesslog   no            leave: the in-memory log is the only one there is
+//	Accesslog   yes           remove: the handover completed on this pod
+//	InMemory    yes           leave: the sourced log is still serving
+//	InMemory    no            converge it, exactly as ADR-022 always did
+//
 // A live value that does not parse as an integer is treated as differing, not
 // as an error: cn=config holds whatever was last written there, and converging
 // it is the point.
-func planSessionlog(current []string, ops int32, enabled bool) (sessionlogAction, string) {
+func planSessionlog(
+	current []string, decision sessionlogDecision, sourceLive bool,
+) (sessionlogAction, string) {
+	if decision.Kind == sessionlogKindAccesslog {
+		// The sourced log is what this database wants. Until the pod carries
+		// it, the in-memory one stays whatever it is — including absent, which
+		// is a gap only a restart can close either way.
+		if !sourceLive {
+			return sessionlogLeave, ""
+		}
+		if len(current) == 0 {
+			return sessionlogNoop, ""
+		}
+		return sessionlogRemove, ""
+	}
+
+	// The spec wants the in-memory log (or none), but this pod still runs the
+	// sourced one: the reverse handover, equally unfinished. Writing an
+	// in-memory log now would make two, and removing one would be acting on a
+	// database whose session log is not the attribute we are looking at. Both
+	// resolve themselves when the source goes, at the restart.
+	if sourceLive {
+		return sessionlogLeave, ""
+	}
+
+	ops, enabled := decision.inMemoryOps()
 	if !enabled {
 		if len(current) == 0 {
 			return sessionlogNoop, ""
@@ -1540,13 +1618,13 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovSessionlog(
 	conn *ldap.Conn,
 	host, overlayDN string,
 	current []string,
-	ops int32,
-	enabled bool,
+	decision sessionlogDecision,
+	sourceLive bool,
 ) error {
 	log := logf.FromContext(ctx)
 
-	action, value := planSessionlog(current, ops, enabled)
-	if action == sessionlogNoop {
+	action, value := planSessionlog(current, decision, sourceLive)
+	if action == sessionlogNoop || action == sessionlogLeave {
 		return nil
 	}
 
@@ -1560,7 +1638,7 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovSessionlog(
 		log.Info("removing syncprov sessionlog from data database",
 			"host", host, "dn", overlayDN)
 		modReq.Delete("olcSpSessionlog", nil)
-	case sessionlogNoop:
+	case sessionlogNoop, sessionlogLeave:
 		return nil
 	}
 	if err := guardedModify(conn, modReq); err != nil {

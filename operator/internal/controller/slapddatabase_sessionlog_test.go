@@ -21,7 +21,7 @@ const wantDefaultSessionlog = "5000"
 
 // ADR-022: the data DB's syncprov overlay carries an in-memory sessionlog,
 // enabled by default. The decision lives in two pure functions — the value
-// (desiredSessionlogOps) and the convergence step (planSessionlog) — so the
+// (desiredSessionlog) and the convergence step (planSessionlog) — so the
 // live-LDAP half stays a thin executor.
 
 func sdWithSessionlog(v *int32) *ldapv1alpha1.SlapdDatabase {
@@ -34,7 +34,7 @@ func sdWithSessionlog(v *int32) *ldapv1alpha1.SlapdDatabase {
 	}
 }
 
-func TestDesiredSessionlogOps(t *testing.T) {
+func TestDesiredSessionlogInMemoryOps(t *testing.T) {
 	i := func(v int32) *int32 { return &v }
 
 	cases := []struct {
@@ -51,7 +51,7 @@ func TestDesiredSessionlogOps(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ops, enabled := desiredSessionlogOps(sdWithSessionlog(tc.field))
+			ops, enabled := desiredSessionlog(sdWithSessionlog(tc.field)).inMemoryOps()
 			if enabled != tc.wantEnabled {
 				t.Fatalf("enabled = %v, want %v", enabled, tc.wantEnabled)
 			}
@@ -62,7 +62,7 @@ func TestDesiredSessionlogOps(t *testing.T) {
 	}
 }
 
-func TestDesiredSessionlogOps_DefaultIsNonZero(t *testing.T) {
+func TestDefaultSyncprovSessionlogOps_IsNonZero(t *testing.T) {
 	// The default is the whole point of ADR-022 (best config by default); a
 	// zero here would silently mean "disabled everywhere".
 	if defaultSyncprovSessionlogOps <= 0 {
@@ -133,7 +133,9 @@ func TestPlanSessionlog(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			action, value := planSessionlog(tc.current, tc.ops, tc.enabled)
+			// No olcSpSessionlogSource live on the pod: the pre-ADR-034
+			// situation, where the in-memory log is the only one there is.
+			action, value := planSessionlog(tc.current, inMemoryDecision(tc.ops, tc.enabled), false)
 			if action != tc.wantAction {
 				t.Fatalf("action = %v, want %v", action, tc.wantAction)
 			}
@@ -146,10 +148,12 @@ func TestPlanSessionlog(t *testing.T) {
 
 // ADR-034: the session log also has a PLACE. syncprovSessionlogSource=Accesslog
 // moves it out of RAM and onto the database's own change journal
-// (olcSpSessionlogSource → cn=accesslog-<name>), and asking for it IMPLIES the
-// in-memory log is absent — the two together are the combination slapd calls
-// wasteful. One pure function answers all three outcomes; the LDAP half and the
-// init container's offline converger are both executors of its verdict.
+// (olcSpSessionlogSource → cn=accesslog-<name>), and asking for it REPLACES the
+// in-memory log — the two together are the combination slapd calls wasteful.
+// One pure function answers all three outcomes; the LDAP half and the init
+// container's offline converger are both executors of its verdict. WHEN the
+// replacement happens is a second question, answered in
+// slapddatabase_sessionlog_handover_test.go.
 
 func sdWithSessionlogSource(name, source string, v *int32) *ldapv1alpha1.SlapdDatabase {
 	sd := sdWithSessionlog(v)
@@ -248,17 +252,18 @@ func TestDesiredSessionlog_SourceDNIsTheAccesslogSuffix(t *testing.T) {
 	}
 }
 
-// Asking for the accesslog source must take the in-memory log away, not merely
-// recommend against it: the live-LDAP half reads this adapter, and a leftover
-// olcSpSessionlog is then removed by planSessionlog's sessionlogRemove — a safe
-// live write, unlike the source attribute itself (ADR-034 R2).
-func TestDesiredSessionlogOps_AccesslogExcludesTheInMemoryLog(t *testing.T) {
+// Asking for the accesslog source must take the in-memory log away eventually,
+// not merely recommend against it: the two together are what slapd calls
+// wasteful. WHEN it goes is planSessionlog's call and not this one's — the
+// removal waits until the sourced log is actually live on the pod, which is the
+// pod's next start (see slapddatabase_sessionlog_handover_test.go).
+func TestDesiredSessionlog_AccesslogExcludesTheInMemoryLog(t *testing.T) {
 	i := func(v int32) *int32 { return &v }
 
 	for _, field := range []*int32{nil, i(0), i(5000)} {
 		sd := sdWithSessionlogSource("default",
 			ldapv1alpha1.SyncprovSessionlogSourceAccesslog, field)
-		if _, enabled := desiredSessionlogOps(sd); enabled {
+		if _, enabled := desiredSessionlog(sd).inMemoryOps(); enabled {
 			t.Fatalf("syncprovSessionlog=%v with source=Accesslog: enabled = true, want false", field)
 		}
 	}

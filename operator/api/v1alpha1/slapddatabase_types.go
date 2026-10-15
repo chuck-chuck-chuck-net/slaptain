@@ -179,14 +179,23 @@ type DatabaseReplicationConfig struct {
 	//   - InMemory (the default; also what an unset field means) — the
 	//     in-memory log sized by syncprovSessionlog above. A second copy of the
 	//     recent history in RAM, empty again after a restart.
-	//   - Accesslog — no in-memory log at all. olcSpSessionlogSource on the data
-	//     DB's syncprov overlay names this database's own accesslog DB
-	//     (cn=accesslog-<name of this SlapdDatabase>, ADR-019 R1), so syncprov
-	//     answers a reconnecting consumer from the change journal that already
-	//     exists on disk and survives a restart. Requires replication.enabled
-	//     and deltaSync — with no accesslog database there is nothing to source
-	//     from — and excludes syncprovSessionlog, which must be unset or 0 (both
-	//     at once is the combination slapd itself calls wasteful).
+	//   - Accesslog — the log REPLACES the in-memory one.
+	//     olcSpSessionlogSource on the data DB's syncprov overlay names this
+	//     database's own accesslog DB (cn=accesslog-<name of this
+	//     SlapdDatabase>, ADR-019 R1), so syncprov answers a reconnecting
+	//     consumer from the change journal that already exists on disk and
+	//     survives a restart. Requires replication.enabled and deltaSync — with
+	//     no accesslog database there is nothing to source from — and excludes
+	//     syncprovSessionlog, which must be unset or 0 (both at once is the
+	//     combination slapd itself calls wasteful).
+	//
+	// Replaces, and the two are exchanged at the pod's restart, in one offline
+	// write: the database is never left without a session log. Until the
+	// replacement is actually on the pod the in-memory log stays exactly where
+	// it is, because dropping it at the moment you edit this field would leave
+	// every reconnecting consumer taking a full refresh for as long as the
+	// restart is outstanding — which may be forever, since nothing restarts the
+	// pod for you.
 	//
 	// NOT the same thing as a session log ON the accesslog database, which
 	// ADR-022 still forbids: that one would displace the minCSN guard and turn a
@@ -204,11 +213,13 @@ type DatabaseReplicationConfig struct {
 	// start, when nothing holds the configuration open (ADR-034 R1).
 	//
 	// The consequence for you: editing this field changes nothing on a running
-	// pod. The operator reports the divergence as ConfigRestartRequired, naming
-	// the pods, and leaves the restart to you (ADR-034 R3) — restarting a
-	// provider fleet is a topology event at every peer, and a tunable edit must
-	// not trigger one behind your back. A cluster's first generation of pods
-	// likewise does not carry the attribute; one restart later it is in place.
+	// pod. The operator reports the divergence as
+	// StartupConfigConverged=False/RestartRequired, naming the pods, and leaves
+	// the restart to you (ADR-034 R3) — restarting a provider fleet is a
+	// topology event at every peer, and a tunable edit must not trigger one
+	// behind your back. A cluster's first generation of pods likewise does not
+	// carry the attribute; it runs the in-memory log until then, and one
+	// restart later the two are swapped.
 	// +kubebuilder:validation:Enum=InMemory;Accesslog
 	// +optional
 	SyncprovSessionlogSource string `json:"syncprovSessionlogSource,omitempty"`
