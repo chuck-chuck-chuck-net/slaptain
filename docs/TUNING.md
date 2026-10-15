@@ -3,9 +3,9 @@
 An unset field means slaptain's opinion, not slapd's: where upstream's default is
 sized for a demo directory and we have a defensible value, we write ours
 ([ADR-024](adrs/adr-024-tunable-placement.md) R5). Every tunable has a placement
-class that decides whether changing it converges on a running cluster or needs the
-database rebuilt — and a handful of them can only be *reported*, because slapd
-crashes when the operator tries to write them live. The way back to bare OpenLDAP
+class that decides whether changing it converges on a running cluster, waits for the
+pod's next restart, or needs the database rebuilt — and a handful of them can only
+be *reported*, because slapd crashes when the operator tries to write them live. The way back to bare OpenLDAP
 behaviour is asking for it (`0`, `""`, an explicit number), never leaving the field
 unset.
 
@@ -42,7 +42,7 @@ editing it on a live `SlapdDatabase` used to be a silent no-op and now converges
 
 ### Placement classes
 
-Every field below is one of three ([ADR-024](adrs/adr-024-tunable-placement.md)):
+Every field below is one of four ([ADR-024](adrs/adr-024-tunable-placement.md)):
 
 - **converged** — read, compared and written on every pod on every reconcile.
   Edit the CR and it applies. This is the default class.
@@ -50,10 +50,15 @@ Every field below is one of three ([ADR-024](adrs/adr-024-tunable-placement.md))
   volume is first bootstrapped, and never again. Editing the field changes nothing
   on existing pods, and a pod bootstrapped later picks up the new value while its
   peers keep the old one.
+- **startup-only** — written into a pod's config by the init container at *every*
+  pod start, offline, while nothing holds the configuration open. Editing the field
+  changes nothing until a pod restarts; the fleet converges one restart at a time,
+  and the operator reports which pods are still waiting
+  ([ADR-034](adrs/adr-034-startup-only-configuration.md)).
 - **recreate-required** — written when the database is created, compared
   afterwards, and a divergence is *reported*, never applied.
 
-The third class exists because slapd dies on the live write. An `ldapmodify` of
+The last class exists because slapd dies on the live write. An `ldapmodify` of
 `olcDbMaxSize` against a running back-mdb database segfaults the process (OpenLDAP
 2.7.1, exit 139, captured mid-MOD); LMDB's `mdb_env_set_mapsize` may not run with
 transactions active, and a live slapd always has some. `olcDbEnvFlags` fails the
@@ -62,6 +67,12 @@ same way once `writemap` enters the list. Editing either field sets
 the current value, the desired value and the change path in the message. The change
 path is always the same: back up, delete the database, restore into a fresh one
 ([ADR-014](adrs/adr-014-s3-backup-restore.md)).
+
+Bootstrap-time and startup-only read alike from the CR — in both, an edit does
+nothing right now — and cost very differently. A bootstrap-time value is written
+once, into a config volume being created for the first time, so two pods on either
+side of an edit disagree forever and the way back is a recreate. A startup-only
+value is rewritten at every pod start, so the way back is a restart.
 
 ### Per database — `SlapdDatabase`
 
@@ -77,6 +88,7 @@ path is always the same: back up, delete the database, restore into a fresh one
 | `spec.rtxnSize` | 10000 | converged |
 | `spec.indices` | none beyond the operator's baseline | converged, **additive only** |
 | `spec.replication.syncprovSessionlog` | 5000 | converged |
+| `spec.replication.syncprovSessionlogSource` | `InMemory` | **startup-only** |
 | `spec.replication.syncprovCheckpoint` | none | converged |
 | `spec.replication.accesslogPurge` | `7+00:00 1+00:00` | converged |
 
@@ -89,6 +101,45 @@ attribute. Both were verified live-modifiable on a running slapd before being
 converged at all — replace and delete, no crash, no hang — which is the precondition
 ADR-024 now puts on this class. (They used to be written only at overlay creation,
 so edits were silently ignored; that debt is paid.)
+
+`spec.replication.syncprovSessionlogSource` chooses *where* the data database's
+syncprov session log lives. `InMemory` (the default, and what an unset field means)
+is the in-memory log sized by `syncprovSessionlog`. `Accesslog` points syncprov at
+this database's own change journal instead — one copy of the recent history, on
+disk, surviving a restart, where the in-memory one starts empty after every restart.
+The two are exclusive: `Accesslog` requires `syncprovSessionlog` unset or `0`, and
+needs `replication.enabled` with `deltaSync`, since without a journal there is
+nothing to read. It does **not** put a session log on the accesslog database —
+ADR-022 still forbids that, and it is a different attribute on a different database.
+
+Sourcing the log changes the replay window's *units*. In memory the window is an
+operation count — the last 5000 writes, however long that takes. From the journal it
+is the journal's retention, i.e. `spec.replication.accesslogPurge`, seven days by
+default. Which is larger depends entirely on your write rate; size the purge window
+on purpose before relying on it (see *Journal sizing* below).
+
+This field is **startup-only**, and that has consequences worth reading twice.
+`olcSpSessionlogSource` cannot be written to a running slapd at all — doing so is a
+double free in every released OpenLDAP, 2.5.20 through 2.7.1 and master, and it has
+already killed live providers — so the operator never writes it over the wire. It
+reaches `cn=config` only through the init container, which converges it offline at
+pod start. Editing the field therefore changes nothing until each pod restarts.
+`kubectl get slapddatabase <name> -o yaml` shows `StartupConfigConverged`: `False`
+with reason `RestartRequired` names the pods still running the old configuration,
+`True` means every pod that could be read carries the declared one. The operator
+does **not** restart them for you: restarting a provider fleet is a topology event
+at every peer — 130–268 s of address rediscovery each, measured
+([ADR-016](adrs/adr-016-pod-routed-cross-cluster-replication.md)) — far too much to
+happen behind your back because you edited a tunable. Delete the pods, one at a
+time, when it suits you.
+
+Through all of that the database keeps exactly one session log. Until a pod actually
+carries the source, its in-memory log is left alone, and the two are exchanged in a
+single offline write at the restart — never dropped first and replaced later. A
+cluster's first generation of pods is the same story from the other end: the operator
+creates the database and its overlays on a running server, where the attribute cannot
+go, so a brand-new pod runs the in-memory default and picks the source up one restart
+later.
 
 `spec.indices` is additive: the operator adds index definitions the database is
 missing and never removes one, because back-mdb rejects a second definition for an
@@ -255,6 +306,10 @@ the **data** database's write path — so the moment the journal cannot take a w
 neither can the data. That is a slow-motion outage rather than a tuning wart, which is
 why the field is defaulted rather than left to be remembered.
 
+With `syncprovSessionlogSource: Accesslog` the same window is also the session log's
+replay window, so the purge policy stops being only a sizing decision and becomes
+how far behind a reconnecting consumer may be and still be answered from a delta.
+
 Seven days is chosen to cover a weekend-plus consumer outage. The window is precisely
 how long a consumer may stay away and still resume from a delta: one whose cookie
 predates the purge falls back to a full refresh. Lengthen it if your worst realistic
@@ -358,14 +413,20 @@ project.
   `--short` for CI; it exits non-zero on a failed check.
 - `kubectl get slapddatabase <name> -o yaml` for the `TunablesConverged` condition.
   `False` with reason `RecreateRequired` means a value you edited cannot be applied to
-  a live database, and the message carries current, desired and the change path.
+  a live database, and the message carries current, desired and the change path. The
+  same command's `StartupConfigConverged` condition answers the startup-only
+  question: `False` / `RestartRequired` names the pods whose running configuration is
+  not the declared one, and a pod that could not be read is reported as not assessed
+  rather than counted as diverged.
 
 ## Related
 
-- [ADR-024](adrs/adr-024-tunable-placement.md) — the placement doctrine and both
-  amendments (the segfault and the hang).
+- [ADR-024](adrs/adr-024-tunable-placement.md) — the placement doctrine and its
+  amendments (the segfault, the hang, and the fourth class).
 - [ADR-022](adrs/adr-022-syncprov-sessionlog.md) — the sessionlog's placement and its
-  cost model.
+  cost model, amended with the accesslog-sourced variant.
+- [ADR-034](adrs/adr-034-startup-only-configuration.md) — the startup-only class:
+  why the init container converges it offline, and why the restart is yours to take.
 - [ADR-020](adrs/adr-020-accesslog-access-control.md) — accesslog access control and
   the limits amendment.
 - [ADR-019](adrs/adr-019-per-database-accesslog.md) — one journal per database.

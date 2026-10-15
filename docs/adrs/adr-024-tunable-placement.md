@@ -362,3 +362,47 @@ own". It runs as its own convergence step rather than as a tail on the write —
 inside the write branch it would fire only on the pass that changed the value,
 so a delete that failed once would never be retried, because the following pass
 takes the already-correct early return.
+
+## Amendment, 2026-10-15: a fourth class — startup-only, converged offline at pod start
+
+The Decision names three classes and the whole doctrine leans on there being no
+fourth. ADR-034 adds one, because the three had no home for an attribute slapd
+takes happily from its configuration file and dies on over the wire.
+
+**Startup-only: the init container converges the attribute offline at every pod
+start, and the change path is a restart.** Membership criterion, inherited from
+the two amendments above: slapd rejects, crashes or hangs on the live write
+(`olcSpSessionlogSource` is a double free — ADR-034 Context), *and* the value is
+read fresh from `slapd.d` at every start, so a new configuration file plus a
+restart is enough. The operator never writes such an attribute to a running
+server — a guard refuses the request before it reaches the wire — and reports
+divergence as `StartupConfigConverged=False`, reason `RestartRequired`, naming
+the pods. It does not take the restart: restarting a provider fleet is an
+ADR-016 topology event at every peer.
+
+**It is not R2, and R2 is the one it will be confused with.** Bootstrap-time is
+written *once*, into a `/config` volume being bootstrapped for the first time,
+and never looked at again; its change path is a recreate, and two pods
+bootstrapped on either side of an edit disagree forever with nothing able to
+repair them. Startup-only is **re-converged at every pod start**, so an edit
+reaches every pod that restarts and the fleet converges one restart at a time.
+Same "editing the field changes nothing right now", opposite cost: a recreate
+versus a restart.
+
+Membership today, per ADR-034 R5 (one customer per change):
+
+- `olcSpSessionlogSource` — the first and so far only member.
+- `olcDbMaxSize` and `olcDbEnvFlags` are **candidates, deliberately not moved**.
+  Both are R2/recreate-required here on the evidence of a segfault, and both
+  look like restart-scale operations on paper — LMDB fixes `mapsize` and the
+  `MDB_WRITEMAP` flag at environment open, which a restart performs. That claim
+  is reasoned, not measured, and a wrong guess about either costs a database
+  rather than a reconcile. Moving one is its own decision with its own live
+  evidence; until then `docs/TUNING.md` keeps documenting the recreate.
+- `olcIdleTimeout` and `olcWriteTimeout` are the other candidates: the
+  2026-09-13 amendment already routes them to "bootstrap-time via the init
+  container", and what it actually described — a value that is fine from the
+  boot config and hangs slapd when written live — is this class, not R2.
+
+R4 is unchanged and this class satisfies it the same way R2 does: the field is
+answered by a condition, never silently dropped.

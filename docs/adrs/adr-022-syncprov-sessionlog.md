@@ -163,3 +163,59 @@ accesslog database ever gets one.**
   <https://bugs.openldap.org/show_bug.cgi?id=6503>
 - RFC 4533 — the LDAP Content Synchronization Operation; present and delete
   phases: <https://www.rfc-editor.org/rfc/rfc4533>
+
+---
+
+## Amendment, 2026-10-15: the session log may come from the accesslog — opt-in, startup-only
+
+The Options rejected `syncprov-sessionlog-source` "for now", on the grounds that
+the journal it reads is the artifact that is purged or contaminated in exactly
+the scenarios a persistent log would pay for. That reservation stands as a
+reason not to default it; it is no longer a reason to make it unreachable.
+ADR-034 ships it as `spec.replication.syncprovSessionlogSource: Accesslog` on
+`SlapdDatabase`.
+
+**What does not change.** R1 is untouched: no accesslog database ever gets a
+session log of its own, and the e2e still asserts the attribute's absence
+there. Being the *source* of the data database's log is a different attribute
+(`olcSpSessionlogSource`, not `olcSpSessionlog`) on a different database (the
+data DB's syncprov overlay, not the journal's) — a configuration that makes
+syncprov read the journal, not one that gives the journal a log. A session log
+on the journal would still displace the minCSN guard for the journal's own
+delta-sync consumers, which is what R1 forbids and why these two readings must
+not be allowed to blur.
+
+**What is new.**
+
+- The data database's session log has two possible homes, and they are
+  **exclusive**: `Accesslog` requires `syncprovSessionlog` unset or `0`, refused
+  by a CRD validation rule. slapd calls the combination "wasteful operation" in
+  its own parser, and the operator never constructs it — the converger exchanges
+  the two in a single offline write (ADR-034's handover amendment), so no pod
+  ever reads a configuration carrying both.
+- The default is unchanged. Unset still means the in-memory log at 5000
+  operations (R2, R4); the source is asked for, never inherited.
+- It is **startup-only**. `olcSpSessionlogSource` cannot be written to a running
+  slapd at all — the double free in ADR-034's Context — so R3's
+  "converged on every reconcile" does not extend to it. The init container
+  converges it offline at pod start, the operator reports divergence as
+  `StartupConfigConverged`, and an edit takes effect at the pod's next restart.
+  Between the edit and that restart the in-memory log stays exactly where it is:
+  the database always has exactly one session log, never none.
+
+**The consequence a user has to understand: the replay window changes units.**
+The in-memory log's window is an operation count — the last 5000 writes,
+whatever span of time that happens to be. A sourced log's window is the
+journal's retention, i.e. `spec.replication.accesslogPurge`, seven days by
+default. Which of the two is larger is a property of the write rate and nothing
+else: a quiet database gains enormously, a busy one may find seven days of
+journal covering fewer operations than 5000 — or vastly more. Size the purge
+window deliberately before relying on it, and read `docs/TUNING.md`'s journal
+arithmetic as sizing the replay window too, not only the volume.
+
+This also retires, for a database that opts in, the Consequence above that the
+log "buys nothing after a provider restart": the journal is on disk and a
+restarted pod can replay from it immediately. That is the whole reason the
+feature was wanted — and the reason the original reservation survives as a
+reservation rather than a prohibition: the journal is still purged, and a
+consumer whose cookie predates the purge still takes a full refresh.

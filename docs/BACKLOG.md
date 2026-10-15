@@ -648,7 +648,20 @@ scale-down retiring two sids) failed to provoke a single `sync cookie is stale`
 line on a single site, with and without the ADR-034 session-log source and
 accesslog checkpointing. The storm stayed away; this came out instead.
 
-## A database cannot ask for its sessionlog to come from the accesslog
+## ~~A database cannot ask for its sessionlog to come from the accesslog~~ — DONE (2026-10-15, ADR-034)
+
+`spec.replication.syncprovSessionlogSource: Accesslog` on `SlapdDatabase` asks
+for it. The attribute is never written to a running slapd — a guard refuses it
+before the wire — and the init container converges it offline at every pod
+start; the operator reports the gap as `StartupConfigConverged=False` /
+`RestartRequired` and leaves the restart to a human. The in-memory log is handed
+over rather than dropped, so the database always has exactly one session log.
+Decision, the double free and all four amendments:
+[ADR-034](adrs/adr-034-startup-only-configuration.md); the placement class is
+ADR-024's fourth, the user-facing field is in `docs/TUNING.md`.
+
+The analysis below is kept as the evidence for why the design is shaped this
+way, and reads as of the time it was written.
 
 A data DB should not carry an **in-memory** sessionlog where an accesslog
 already exists for that suffix: syncprov can read its session log from there
@@ -720,16 +733,6 @@ leaving an ITS#9398 precondition behind on one accesslog.
   `Replace`/`Add` `olcSpSessionlogSource` against a live pod anywhere in the
   codebase, so no later change reintroduces the path by accident.
 
-### Unrelated, but found while doing this
-
-The CRD deployed on the measurement cluster predates
-`spec.syncprovSessionlog` and `spec.syncprovCheckpoint` in the operator source
-here. A `kubectl patch` naming either is **accepted and silently pruned** —
-the field never reaches the object, and the only evidence is the attribute
-still being present when you read `cn=config` back. Worth a thought about how
-a CRD/operator version skew gets noticed, since the failure mode is a config
-change that reports success and does nothing.
-
 ### Why it matters now
 
 It blocks a measurement: the cost of sourcing the sessionlog from the
@@ -737,6 +740,35 @@ accesslog, against a baseline, under the usual gate (errors zero, p99 under
 threshold, replication lag stationary). That experiment needs the setting
 applied from startup on both providers, which is exactly what the operator
 cannot currently do.
+
+*(It can now. The measurement itself is still outstanding — ADR-034 ships the
+mechanism, not the number.)*
+
+## A stale CRD prunes a new spec field silently, and nothing notices
+
+A cluster whose CRD predates a field accepts a `kubectl apply`/`patch` naming
+it and **drops the field on the way in**: the API server prunes what the schema
+does not know, the write reports success, and the only evidence is the
+behaviour never changing. Every downstream reading says "the feature does
+nothing" rather than "the field never arrived", which is a long way from the
+cause.
+
+Seen twice, on two clusters, a month apart:
+
+- 2026-09, the measurement cluster: its CRD predated
+  `spec.syncprovSessionlog` and `spec.syncprovCheckpoint`, and a `kubectl patch`
+  naming either was accepted and pruned — found only by reading `cn=config`
+  back and seeing the old attribute still there.
+- 2026-10-15, t3e: `spec.replication.syncprovSessionlogSource` did not reach
+  the cluster through `e2e.sh setup`, for the reason in the entry below.
+
+The entry below is one *instance* of this — Helm not re-applying `crds/` on an
+upgrade — and fixing it fixes nothing on a cluster upgraded by any other route.
+What is missing here is the general answer: how a CRD/operator version skew
+gets *noticed*. Candidates, none decided: the operator comparing the served CRD
+schema against the version it was built with and reporting the gap; the charts
+refusing to install an operator newer than the CRD; `slctl inspect` carrying the
+check, since it is the thing people run when a feature appears to do nothing.
 
 ## `tests/e2e.sh setup` never re-applies CRDs, so a new API field is silently dropped
 
@@ -757,7 +789,8 @@ did not reach t3e through `e2e.sh setup`, and the run only moved after a manual
 
 Fix: `e2e.sh setup` applies the CRDs the way the Makefile does, server-side,
 before the chart. Cheap, and it removes a failure mode whose symptom points
-nowhere near its cause.
+nowhere near its cause. It closes this install path only — the detection
+question is the entry above.
 
 ## `ensureServerIDs` will renumber a live pod if the derivation ever moves again
 
@@ -1643,11 +1676,15 @@ every reconcile alongside `olcSpSessionlog`, off a single search of the syncprov
 overlay; the `planSessionlog` seam did generalize, as `planOverlayAttr`. See the
 R4-debt entry above.
 
-Still open: `syncprov-sessionlog-source` (the persistent, accesslog-backed
-sessionlog) was rejected in ADR-022 because it reads the change journal — the
-artifact that is contaminated or purged in exactly the scenarios where a
-persistent log would pay off. Revisit once the journal's trustworthiness across
-refresh/purge transitions is settled (upstream ITS#9580 work, ADR-021).
+**The source half is DONE (2026-10-15, ADR-034)** —
+`spec.replication.syncprovSessionlogSource: Accesslog`, opt-in and startup-only.
+ADR-022's reservation (it reads the journal, the one artifact purged or
+contaminated in exactly the scenarios a persistent log would pay for) is why it
+is opt-in rather than defaulted, and it still stands as a reservation: a
+consumer whose cookie predates the purge still takes a full refresh.
+
+Still open from this entry: the measurement — what sourcing the log actually
+costs against an in-memory baseline, under the usual gate.
 
 ---
 
