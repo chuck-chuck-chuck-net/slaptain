@@ -189,6 +189,24 @@ of 5000), and that no accesslog DB's syncprov carries one — the placement rule
 is the load-bearing half of ADR-022. Observed red against a pre-ADR-022
 operator (2026-09-11), green since.
 
+**Startup-only configuration (ADR-034).** `tests/e2e/startup_config_test.go`
+(standard suite, label `startup-config`) drives the one attribute that cannot be
+written to a running slapd at all. It flips the fixture database to
+`replication.syncprovSessionlogSource: Accesslog`, asserts the operator
+publishes the declared table into the `slapd-startup-config` ConfigMap, asserts
+the running pods do **not** carry `olcSpSessionlogSource` and that
+`StartupConfigConverged` reads `False/RestartRequired` naming them, then
+restarts the read-write fleet one pod at a time and asserts the init container's
+offline converger put the attribute on every pod's data DB — with no
+`olcSpSessionlog` beside it and still none on the accesslog DB's own syncprov
+(ADR-022). Finally it drops the field, asserts the ConfigMap key stays present
+and goes *empty* (an absent key means "unmanaged" and would strip nothing), and
+asserts one more restart takes the attribute off the disk. The spec restores the
+fixture database's declaration and leaves the fleet converged, so it is safe
+anywhere in the order; run it alone with `E2E_LABEL_FILTER=startup-config`.
+Observed red (2026-10-15) against an init image built before the converger
+landed: the attribute never appeared after the restart.
+
 **ITS#9580 no-storm assertion (ADR-021).** `dataloss_recovery_test.go` also
 asserts that fewer than 50 `sync cookie is stale` lines follow the PVC-loss
 recovery across all RW pods (needs the `stats` log bit, 256 — the fixture's
@@ -216,7 +234,7 @@ three-site run went 104/0 with one pod storming the whole time.
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
 | `E2E_CONFIG` | `<repo-root>/lab.yaml` if present | Lab config file (site inventory, registry, network mode). Env vars win over file values. Schema: `lab.yaml.sample` |
 | `SLAPD_TAG_SUFFIX` | *(empty — OpenLDAP 2.7.1)* | Appended to the slapd/slapd-init image tags only (operator/toolkit untouched). `-ol26` deploys the legacy OpenLDAP 2.6 pair (ADR-011 interop / ADR-021). |
-| `E2E_LABEL_FILTER` | *(unset — full suite)* | Ginkgo label filter to run a subset, e.g. `accesslog`, `sessionlog`, `resilience` (the dataloss container), `external-replication`. |
+| `E2E_LABEL_FILTER` | *(unset — full suite)* | Ginkgo label filter to run a subset, e.g. `accesslog`, `sessionlog`, `startup-config`, `resilience` (the dataloss container), `external-replication`. |
 | `E2E_NODE_ACCESS_IP` | *(node `InternalIP`)* | Single-site override for the address the runner uses to reach NodePorts (+ cert SAN). Set when the `InternalIP` isn't reachable from the runner. |
 | `E2E_NODE_ACCESS_IPS` | *(node `InternalIP`)* | Multi-site map, e.g. `"<ctx1>=<ip1> <ctx2>=<ip2>"`. Per-context form of `E2E_NODE_ACCESS_IP`. |
 | `LDAP_ADDR` | *(set by script)* | `<node-access-ip>:<nodeport>` — required when invoking `go test` directly |
