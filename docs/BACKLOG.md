@@ -436,23 +436,38 @@ Meanwhile:
 So the cluster is healthy by every signal it publishes, and permanently short
 of data on one pod.
 
-### Mechanism — what is measured, and what is reasoned
+### Mechanism — confirmed by an A/B rebuild (2026-10-16)
 
-Measured: the rebuilt pod logs **zero** `do_syncrep2: … CSN too old, ignoring`
-lines (`syncrepl.c:1282`, at the sync log level this fixture runs). The missing
-entries are therefore not offered and refused — **they are never sent**.
+The rebuilt pod logs **zero** `do_syncrep2: … CSN too old, ignoring` lines
+(`syncrepl.c:1282`, at this fixture's sync log level), so the entries are not
+offered and refused — they are never sent. Two rebuilds of the same pod, alike
+in every respect except one write, say why:
 
-Reasoned from that, and not yet proven in the code: a syncrepl cookie is a
-per-sid watermark. After the rebuild the pod resumes its own serverID, and its
-watermark for that sid is whatever it last wrote. The load wrote to it
-immediately on return, so within seconds its own-sid watermark stood *later*
-than every entry the previous incarnation had authored — and a provider has
-nothing to send for a sid the consumer claims to be current on. The pod cannot
-ask for them, and no peer volunteers them.
+| | rebuild kept **write-free** until resynced | rebuild **written to** the instant it answered |
+|---|---|---|
+| own-sid entries recovered | **50 of 50** | **0 of 50** |
+| its `contextCSN` for its own sid | came back at the **pre-crash** value | stands at the **trigger write** |
 
-If that reading is right, the window is brutal: **one local write after the
-rebuild is enough** to strand everything that pod wrote before it died, and any
-client or probe touching the fresh pod supplies it.
+In the second run the trigger write landed 40 s after the last entry it was
+meant to recover, under the same serverID:
+
+```
+uid=caseB-50     entryCSN 20261016165209.962239Z#000000#003#000000   (lost)
+uid=trigger-write entryCSN 20261016165249.621216Z#000000#003#000000   (the one local write)
+```
+
+**So the cookie's per-sid watermark is the whole mechanism.** A pod that comes
+back empty and writes nothing asks its peers for everything, its own prior
+authorship included, and gets it. One local write stamps its own serverID with a
+CSN *later* than everything its predecessor wrote — and a provider has nothing
+to send for a sid the consumer claims to be current on. The window is not a
+race measured in milliseconds: it stays open until the pod is caught up, and it
+closes permanently the moment anything writes.
+
+That second rebuild left the pod **1260 entries short** of its peers (4391 vs
+5651) — its entire authorship history, not merely the markers — while
+`ReplicationConverged` read `True/CSNsMatch` and `slctl inspect` reported
+15 passed, 0 failed.
 
 ### Why it matters beyond this experiment
 
@@ -472,10 +487,17 @@ client or probe touching the fresh pod supplies it.
 1. **Detect it.** A per-pod entry count, or an entryUUID-set comparison, in
    `slctl inspect` — something that compares *contents* rather than
    watermarks. Cheap, and it would have caught this in seconds.
-2. **Test the hypothesis.** Rebuild a pod and keep it write-free (and out of
-   any Service) until it has fully resynced, then compare. If the entries come
-   back, the own-sid watermark is confirmed as the mechanism and "do not write
-   to a rebuilding pod" becomes a documented rule with teeth.
+2. ~~**Test the hypothesis.**~~ **Done, 2026-10-16** — see the A/B table
+   above. Which promotes the rule to a design question slaptain can actually
+   answer: **a pod that lost its data must stay out of the client Service until
+   it has converged.** Readiness is exactly that lever, and ADR-030 deliberately
+   left it alone — it chose "Ready means slapd answers LDAP" and deferred
+   data-convergence readiness where ADR-013 had already parked it. This is the
+   argument for picking it up: a NotReady pod leaves the ClusterIP Service and
+   takes no client write, while headless DNS still publishes it (ADR-030
+   already made that true), so replication keeps feeding it. The cost is the
+   one ADR-013 named — defining "converged" — and the benefit is no longer
+   hypothetical.
 3. **Give a rebuilt pod a fresh serverID.** Then its peers' entries are foreign
    to it and arrive normally. This collides with ADR-017/ADR-028, where the
    serverID is derived from the ordinal — so it is a real design question, not
