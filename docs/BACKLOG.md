@@ -403,6 +403,96 @@ the shipped config noticed the inventory did not match. No ADR change is needed 
 decision 2 is right about where these belong; the config simply never caught up.
 
 ---
+## A pod that loses its disk never gets back the entries IT wrote, and every health signal says it did
+
+ADR-012 case 2 says a pod that loses its data is restored by replication. It is
+restored **except for the entries that pod itself authored**, and the gap is
+invisible to every check slaptain has.
+
+### Measured (t3e, 2026-10-16, single site, 3 RW pods, OpenLDAP 2.7.1)
+
+Under a ~10 writes/s load driven to all three pods, `slapd-0`'s three PVCs were
+deleted and the pod force-replaced. It resynced, went Ready, and settled
+**313 entries short** of its peers — stably, over the following fifteen minutes:
+
+```
+slapd-0: 5236      slapd-1: 5549      slapd-2: 5549
+```
+
+Every one of the 40 sampled missing entries carries `entryCSN …#001#` — the
+**rebuilt pod's own serverID** — and was written by the previous incarnation of
+that pod shortly before its disk was destroyed. The peers hold all of them.
+Nothing is missing in the other direction.
+
+Meanwhile:
+
+- `ReplicationConverged = True/CSNsMatch`, and every pod reports an **identical
+  contextCSN** for the database;
+- `slctl inspect --short`: **15 passed, 0 warnings, 0 failed**, including
+  `csn-convergence`, `suffix-visibility` and `suffix-uuid-agreement`;
+- new writes replicate to the rebuilt pod normally — probed explicitly, a fresh
+  entry written on `slapd-1` appeared on `slapd-0` within ten seconds.
+
+So the cluster is healthy by every signal it publishes, and permanently short
+of data on one pod.
+
+### Mechanism — what is measured, and what is reasoned
+
+Measured: the rebuilt pod logs **zero** `do_syncrep2: … CSN too old, ignoring`
+lines (`syncrepl.c:1282`, at the sync log level this fixture runs). The missing
+entries are therefore not offered and refused — **they are never sent**.
+
+Reasoned from that, and not yet proven in the code: a syncrepl cookie is a
+per-sid watermark. After the rebuild the pod resumes its own serverID, and its
+watermark for that sid is whatever it last wrote. The load wrote to it
+immediately on return, so within seconds its own-sid watermark stood *later*
+than every entry the previous incarnation had authored — and a provider has
+nothing to send for a sid the consumer claims to be current on. The pod cannot
+ask for them, and no peer volunteers them.
+
+If that reading is right, the window is brutal: **one local write after the
+rebuild is enough** to strand everything that pod wrote before it died, and any
+client or probe touching the fresh pod supplies it.
+
+### Why it matters beyond this experiment
+
+- **ADR-012 case 2 is overstated as written.** "Lose one pod's data, syncrepl
+  recovers" holds for everything except that pod's own authorship — which, on a
+  multi-provider cluster taking writes on every pod, is a share of the data
+  proportional to that pod's traffic.
+- **ADR-023 rolling replacement rebuilds pods one ordinal at a time.** If a
+  replaced pod returns with the same serverID and takes a write before it is
+  fully caught up, this is the same situation, deliberately, once per pod.
+- **It is the ADR-025 lesson again**: CSN health reads clean while the data
+  diverges. Our strongest convergence signal compares a watermark, and a
+  watermark cannot see entries nobody will ever send.
+
+### Directions, none of them taken yet
+
+1. **Detect it.** A per-pod entry count, or an entryUUID-set comparison, in
+   `slctl inspect` — something that compares *contents* rather than
+   watermarks. Cheap, and it would have caught this in seconds.
+2. **Test the hypothesis.** Rebuild a pod and keep it write-free (and out of
+   any Service) until it has fully resynced, then compare. If the entries come
+   back, the own-sid watermark is confirmed as the mechanism and "do not write
+   to a rebuilding pod" becomes a documented rule with teeth.
+3. **Give a rebuilt pod a fresh serverID.** Then its peers' entries are foreign
+   to it and arrive normally. This collides with ADR-017/ADR-028, where the
+   serverID is derived from the ordinal — so it is a real design question, not
+   a switch.
+4. **Rebuild from data, not from replication.** ADR-014's restore path
+   (`slapcat` a peer, `slapadd` the new pod) does not consult cookies and has
+   no own-sid blind spot. That may be the honest answer for a pod that lost its
+   disk, with syncrepl only catching up the tail.
+
+### What this is not
+
+It is not ITS#9398. That hunt is what produced this: six rounds of torture
+(unclean kills, PVC loss, a new serverID killed before checkpoint, a
+scale-down retiring two sids) failed to provoke a single `sync cookie is stale`
+line on a single site, with and without the ADR-034 session-log source and
+accesslog checkpointing. The storm stayed away; this came out instead.
+
 ## A database cannot ask for its sessionlog to come from the accesslog
 
 A data DB should not carry an **in-memory** sessionlog where an accesslog
