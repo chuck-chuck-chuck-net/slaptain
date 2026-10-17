@@ -95,6 +95,91 @@ tests, so the atomic `Replace` remains guarded by prose.
 
 ---
 
+## The accesslog purge stalls the pod that runs it, and we pin writes to one pod
+
+**What:** `accesslog_purge()` collects every expired entry with one uncapped
+search and deletes them in an unpaced loop, each delete its own transaction.
+Those deletes take the accesslog environment's single LMDB writer, and every
+client write appends its own log entry to that same environment — so a
+provider's purge blocks that provider's **writes**. Reads keep flowing at ~75 %.
+
+Measured on a 2+2 cluster at 100k ops/s (0.3 % writes), one hour per arm,
+`cn=config` set asymmetrically with reconciliation suspended:
+
+| | purge on the write target | purge on the peer only |
+|---|---|---|
+| write stall per cycle | 30 s | **0 s** |
+| iterations dropped per cycle | 969,786 | **0** |
+| peak p99 | 3,384 ms | **1.3 ms** |
+| peak replication lag | 40.8 s | 34.8 s |
+
+Purging the write target reproduces the ordinary symmetric deployment. Purging
+only the peer makes the event invisible to clients: the write rate holds
+295–305/s through every cycle where the symmetric case collapses to ~5/s.
+
+**Consequence:** the disturbance is not inherent to purging, it is inherent to
+purging *where the writes are*. Today both providers purge simultaneously —
+they restart together, and the runqueue task is scheduled from startup — so
+every deployment runs the worst case: the write path stalling at the same
+instant the peer's replay does.
+
+**The idea:** rotate the write endpoint between providers, and purge only the
+one not currently taking writes. Client-visible write latency is then never
+behind a delete loop. The cost moves to the inactive provider's replication
+lag, which it works off before becoming the write target again.
+
+A second benefit falls out. A provider's own sid in `contextCSN` is restored
+only by a **local** write, so pinning writes to one provider leaves the other's
+sid stale — which is part of why an unclean death needs a write under the
+absent sid to recover. Rotation keeps both sids advancing on their own.
+
+**What is proven and what is not.** Proven: the mechanism (the table above, one
+clean run per arm, plus a symmetric control that matches the write-target arm);
+and that purge *phase* is choosable — `logpurge` has no time-of-day setting,
+changing the policy on a live task only edits `re->interval.tv_sec` and does
+not move the next fire time, but removing the attribute deletes the task and
+setting it again inserts a fresh one that fires promptly (under 11 s against a
+one-minute cycle). So "`none`, then set, at T" places a pod's purge at T.
+
+Not proven: the rotation itself. We never moved the write target — both runs
+pinned writes to the same pod and varied only which pod purged. Unanswered:
+how long the inactive provider needs to catch up before it may take writes;
+what happens to in-flight writes at the switch; and whether a rotation interval
+exists that keeps both logs bounded without ever purging the active node.
+
+**What the operator would need:**
+
+1. **Per-pod purge policy.** `olcAccessLogPurge` is reconciled from the CR to
+   every pod, so an asymmetry survives only under `spec.suspend` today.
+2. **Phase re-established after every restart** — a restart resets the task to
+   the restart instant, so an offset is standing operator work, not a value.
+3. **Write-endpoint rotation** coordinated with (1), plus a readiness condition
+   that refuses to promote a provider still working off its purge backlog.
+
+**Why it may not be needed at your write rate.** The stall is entries-deleted ÷
+delete-rate, and the delete rate is ~1,000/s under load, ~2,800/s idle. At
+10k ops/s (30 writes/s) a cycle deletes ~9,850 entries: zero iterations
+dropped, replication lag peaking at 3.3 s, no stall resolvable at 10 s
+granularity (two runs, agreeing to 0.1 s). At single-digit writes/s it is
+sub-second. The feature earns its place on write-heavy deployments, not on
+ordinary ones — and the cheaper intervention for those is simply to **stagger**
+the two providers' purges, which needs (1) and (2) but not (3).
+
+Those 10k figures were measured on the **`both` arm** — accesslog checkpoint
+plus accesslog-sourced session log — not on `sessionlog` as first written here.
+A sequence killed mid-arm had left the checkpoint on the server and the runs
+inherited it. It makes the bound *conservative* rather than wrong: `both` is
+the more expensive arm at every load where the two separate (+19 % peak
+replication lag at 190k, +12.9 % at 100k), so the harmlessness at 10k is
+measured on the worse configuration. There is no clean `sessionlog`
+measurement at 10k; the 50k figures above are `sessionlog` and unaffected.
+
+**One hazard found while measuring this:** an oversized purge takes a provider
+out of service. Draining ~250,000 entries at a one-minute cycle restarted both
+providers — no crash captured, matching the accesslog hang where slapd stops
+answering and readiness fails. The same oversized cycle produced 255 s of
+replication lag. Whatever schedules purges must not let one get large.
+
 ## The operator writes and checks `{SSHA}` verifiers — move them to a KDF
 
 Three places hash or verify a password as `{SSHA}` (salted SHA-1), and CodeQL
