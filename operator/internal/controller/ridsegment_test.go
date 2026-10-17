@@ -37,9 +37,11 @@ const (
 	testRIDNS      = "slaptain-testing"
 )
 
-func i32(v int32) *int32 { return &v }
+//go:fix inline
+func i32(v int32) *int32 { return new(v) }
 
-func boolp(v bool) *bool { return &v }
+//go:fix inline
+func boolp(v bool) *bool { return new(v) }
 
 // ridDB builds a SlapdDatabase declaring `segment` (nil for "not declared")
 // against cluster `clusterRef`, with replication enabled.
@@ -49,7 +51,7 @@ func ridDB(name, clusterRef string, segment *int32) ldapv1alpha1.SlapdDatabase {
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			ClusterRef: clusterRef,
 			Replication: ldapv1alpha1.DatabaseReplicationConfig{
-				Enabled:    boolp(true),
+				Enabled:    new(true),
 				RIDSegment: segment,
 			},
 		},
@@ -62,7 +64,7 @@ func ridDB(name, clusterRef string, segment *int32) ldapv1alpha1.SlapdDatabase {
 // still owns its segment.
 func ridDBNotReplicated(name, clusterRef string, segment *int32) ldapv1alpha1.SlapdDatabase {
 	db := ridDB(name, clusterRef, segment)
-	db.Spec.Replication.Enabled = boolp(false)
+	db.Spec.Replication.Enabled = new(false)
 	return db
 }
 
@@ -314,7 +316,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 func TestJudgeRIDSegmentCeilingTracksTheLayout(t *testing.T) {
 	for _, layout := range []ridcoord.Layout{ridcoord.DefaultLayout(), wideLayout(), {PodsPerSite: 4, MaxSites: 6}} {
 		c := layout.MaxSegments()
-		db := ridDB("a", testRIDCluster, i32(c)) // exactly one past the top
+		db := ridDB("a", testRIDCluster, new(c)) // exactly one past the top
 		v := judgeRIDSegment(&db, nil, layout)
 
 		if v.OK || v.Reason != reasonRIDSegmentOutOfRange {

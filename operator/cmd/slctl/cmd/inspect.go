@@ -297,10 +297,7 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 		if ep.Discovery != nil {
 			n := int32(len(epi.DiscoveredProviders))
 			if n > 0 && rpp > 1 {
-				selected := rpp
-				if selected > n {
-					selected = n
-				}
+				selected := min(rpp, n)
 				fanout = fmt.Sprintf(", rpp=%d/%d", selected, n)
 			}
 			if n > 0 {
@@ -312,10 +309,7 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 		} else if len(ep.PodAddresses) > 0 {
 			n := int32(len(ep.PodAddresses))
 			if rpp > 1 {
-				selected := rpp
-				if selected > n {
-					selected = n
-				}
+				selected := min(rpp, n)
 				fanout = fmt.Sprintf(", rpp=%d/%d", selected, n)
 			}
 			epi.URI = fmt.Sprintf("%d pod(s) via Multus%s", len(ep.PodAddresses), fanout)

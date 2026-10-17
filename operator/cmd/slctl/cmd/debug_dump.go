@@ -235,7 +235,7 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 			return "", err
 		}
 		var filtered []string
-		for _, line := range strings.Split(logs, "\n") {
+		for line := range strings.SplitSeq(logs, "\n") {
 			if strings.Contains(line, name) || strings.Contains(line, "Reconcil") {
 				filtered = append(filtered, line)
 			}

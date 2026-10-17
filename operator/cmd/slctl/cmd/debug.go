@@ -357,8 +357,8 @@ func splitImageRef(imageRef string) (string, string) {
 	if imageRef == "" {
 		return "", ""
 	}
-	if i := strings.Index(imageRef, "@"); i >= 0 {
-		return imageRef[:i], ""
+	if before, _, ok := strings.Cut(imageRef, "@"); ok {
+		return before, ""
 	}
 	slash := strings.LastIndex(imageRef, "/")
 	if colon := strings.LastIndex(imageRef, ":"); colon > slash {
@@ -367,7 +367,8 @@ func splitImageRef(imageRef string) (string, string) {
 	return imageRef, ""
 }
 
-func ptrI64(v int64) *int64 { return &v }
+//go:fix inline
+func ptrI64(v int64) *int64 { return new(v) }
 
 type debugCapabilities struct {
 	Add  []string `json:"add,omitempty"`

@@ -184,10 +184,7 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster, peers peerResolution) {
 						rpp = *ep.ReplicasPerPeer
 					}
 					if rpp > 1 {
-						sel := rpp
-						if sel > int32(n) {
-							sel = int32(n)
-						}
+						sel := min(rpp, int32(n))
 						modeStr = fmt.Sprintf("discovery (pods %s, rpp=%d/%d)",
 							providerOrdinalList(eps.DiscoveredProviders), sel, n)
 					} else {
@@ -285,7 +282,7 @@ func printMeshProvenance(peers peerResolution) {
 func wrapNote(note string, width int) []string {
 	var lines []string
 	var cur string
-	for _, w := range strings.Fields(note) {
+	for w := range strings.FieldsSeq(note) {
 		switch {
 		case cur == "":
 			cur = w

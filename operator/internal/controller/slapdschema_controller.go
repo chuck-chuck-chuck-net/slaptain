@@ -264,8 +264,8 @@ func listSchemaCNs(conn *ldap.Conn) (map[string]bool, error) {
 // e.g. "{4}ox" → "ox", "{0}core" → "core", "plain" → "plain".
 func stripOrderingPrefix(cn string) string {
 	if len(cn) > 0 && cn[0] == '{' {
-		if idx := strings.IndexByte(cn, '}'); idx >= 0 {
-			return cn[idx+1:]
+		if _, after, ok := strings.Cut(cn, "}"); ok {
+			return after
 		}
 	}
 	return cn

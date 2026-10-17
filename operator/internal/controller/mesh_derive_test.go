@@ -28,7 +28,9 @@ import (
 // set" stays distinguishable from index 0 in Go — the API server enforces
 // presence, but a Go caller writing a MeshSite literal would otherwise get
 // index 0 by accident, and index 0 is a real site's stride slot.
-func si(i int32) *int32 { return &i }
+//
+//go:fix inline
+func si(i int32) *int32 { return new(i) }
 
 // threeSiteMesh is the golden topology: the shape a three-site lab runs today,
 // with the site names the e2e fixture assigns (site-1..site-N, deliberately
@@ -256,7 +258,7 @@ func TestValidateSelfSite(t *testing.T) {
 func peer(name string, siteIndex int32, caSecret, kubeconfigSecret string) ldapv1alpha1.ExternalPeer {
 	return ldapv1alpha1.ExternalPeer{
 		Name:          name,
-		SiteIndex:     si(siteIndex),
+		SiteIndex:     new(siteIndex),
 		Port:          1025,
 		TLSSecretName: caSecret,
 		Discovery: &ldapv1alpha1.ExternalPeerDiscovery{

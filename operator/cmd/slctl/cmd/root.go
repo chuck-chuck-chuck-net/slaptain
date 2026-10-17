@@ -140,7 +140,7 @@ func printSeparator() {
 // podNames returns the RW pod names for a SlapdCluster.
 func podNames(name string, replicas int32) []string {
 	names := make([]string, replicas)
-	for i := int32(0); i < replicas; i++ {
+	for i := range replicas {
 		names[i] = fmt.Sprintf("%s-%d", name, i)
 	}
 	return names
@@ -149,7 +149,7 @@ func podNames(name string, replicas int32) []string {
 // roPodNames returns the read-only pod names for a SlapdCluster.
 func roPodNames(name string, roReplicas int32) []string {
 	names := make([]string, roReplicas)
-	for i := int32(0); i < roReplicas; i++ {
+	for i := range roReplicas {
 		names[i] = fmt.Sprintf("%s-readonly-%d", name, i)
 	}
 	return names

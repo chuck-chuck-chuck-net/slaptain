@@ -38,7 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -954,7 +953,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 					// Tolerate its absence: a pod must still start when the
 					// cluster has no databases yet and the ConfigMap has not
 					// been written, exactly as an empty DATABASE_DIRS did.
-					Optional: ptr.To(true),
+					Optional: new(true),
 				},
 			},
 		},
@@ -1699,11 +1698,11 @@ func isPodReady(pod *corev1.Pod) bool {
 func testExternalPeerConnectivity(uri string) error {
 	addr := uri
 	useTLS := false
-	if strings.HasPrefix(uri, "ldaps://") {
-		addr = strings.TrimPrefix(uri, "ldaps://")
+	if after, ok := strings.CutPrefix(uri, "ldaps://"); ok {
+		addr = after
 		useTLS = true
-	} else if strings.HasPrefix(uri, "ldap://") {
-		addr = strings.TrimPrefix(uri, "ldap://")
+	} else if after, ok := strings.CutPrefix(uri, "ldap://"); ok {
+		addr = after
 	}
 	addr = strings.TrimRight(addr, "/")
 

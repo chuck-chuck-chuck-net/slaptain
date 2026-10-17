@@ -7,8 +7,11 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
-func ptrBool(b bool) *bool  { return &b }
-func ptrI32(i int32) *int32 { return &i }
+//go:fix inline
+func ptrBool(b bool) *bool { return new(b) }
+
+//go:fix inline
+func ptrI32(i int32) *int32 { return new(i) }
 
 func clusterFor() *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{}
@@ -24,10 +27,10 @@ func TestDesiredNoSync(t *testing.T) {
 		want    bool
 	}{
 		{"both unset is fsync-on", nil, nil, false},
-		{"cluster posture inherited", ptrBool(true), nil, true},
-		{"database overrides cluster off", ptrBool(false), ptrBool(true), true},
-		{"database overrides cluster on", ptrBool(true), ptrBool(false), false},
-		{"explicit false on both", ptrBool(false), ptrBool(false), false},
+		{"cluster posture inherited", new(true), nil, true},
+		{"database overrides cluster off", new(false), new(true), true},
+		{"database overrides cluster on", new(true), new(false), false},
+		{"explicit false on both", new(false), new(false), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,8 +53,8 @@ func TestDesiredCheckpoint(t *testing.T) {
 		wantWrite bool
 	}{
 		{"unset takes the operator default", nil, defaultDataCheckpoint, true},
-		{"explicit value is honoured", ptrStr("4096 15"), "4096 15", true},
-		{"empty string means write nothing", ptrStr(""), "", false},
+		{"explicit value is honoured", new("4096 15"), "4096 15", true},
+		{"empty string means write nothing", new(""), "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,10 +80,10 @@ func TestValidateDurability(t *testing.T) {
 		wantErr bool
 	}{
 		{"defaults are safe", nil, nil, false},
-		{"noSync with the default checkpoint is safe", ptrBool(true), nil, false},
-		{"noSync with an explicit checkpoint is safe", ptrBool(true), ptrStr("2048 10"), false},
-		{"checkpoint disabled while fsync is on is fine", nil, ptrStr(""), false},
-		{"noSync with checkpoint disabled is rejected", ptrBool(true), ptrStr(""), true},
+		{"noSync with the default checkpoint is safe", new(true), nil, false},
+		{"noSync with an explicit checkpoint is safe", new(true), new("2048 10"), false},
+		{"checkpoint disabled while fsync is on is fine", nil, new(""), false},
+		{"noSync with checkpoint disabled is rejected", new(true), new(""), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,9 +106,9 @@ func TestValidateDurability(t *testing.T) {
 // noSync on cluster-wide silently bypasses the check a per-database noSync hits.
 func TestValidateDurabilityInheritsClusterPosture(t *testing.T) {
 	sc := clusterFor()
-	sc.Spec.Tuning.NoSync = ptrBool(true)
+	sc.Spec.Tuning.NoSync = new(true)
 	sd := &ldapv1alpha1.SlapdDatabase{}
-	sd.Spec.Checkpoint = ptrStr("")
+	sd.Spec.Checkpoint = new("")
 	if err := validateDurability(sd, sc); err == nil {
 		t.Fatal("cluster-wide noSync + checkpoint disabled must be rejected")
 	}
@@ -181,11 +184,11 @@ func TestDesiredTLSPosture(t *testing.T) {
 	if _, write := desiredTLSCipherSuite(sc); write {
 		t.Error("cipherSuite must not be written when unset — OpenSSL's list is better maintained")
 	}
-	sc.Spec.LDAP.TLS.ProtocolMin = ptrStr("3.4")
+	sc.Spec.LDAP.TLS.ProtocolMin = new("3.4")
 	if got := desiredTLSProtocolMin(sc); got != "3.4" {
 		t.Errorf("explicit protocolMin = %q, want 3.4", got)
 	}
-	sc.Spec.LDAP.TLS.CipherSuite = ptrStr("HIGH:!aNULL")
+	sc.Spec.LDAP.TLS.CipherSuite = new("HIGH:!aNULL")
 	v, write := desiredTLSCipherSuite(sc)
 	if !write || v != "HIGH:!aNULL" {
 		t.Errorf("explicit cipherSuite = (%q, %v)", v, write)
@@ -199,7 +202,7 @@ func TestDesiredPasswordHash(t *testing.T) {
 	if got := desiredPasswordHash(sc); got != defaultPasswordHash {
 		t.Errorf("passwordHash = %q, want %q", got, defaultPasswordHash)
 	}
-	sc.Spec.LDAP.PasswordHash = ptrStr("{CRYPT}")
+	sc.Spec.LDAP.PasswordHash = new("{CRYPT}")
 	if got := desiredPasswordHash(sc); got != "{CRYPT}" {
 		t.Errorf("explicit passwordHash = %q", got)
 	}

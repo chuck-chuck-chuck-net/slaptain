@@ -44,7 +44,7 @@ func TestInClusterStanzaRIDsAreTheLocalCoordinateOfEachProvider(t *testing.T) {
 		t.Fatalf("inClusterStanzaRIDs: unexpected refusal: %v", err)
 	}
 
-	for ordinal := int32(0); ordinal < replicas; ordinal++ {
+	for ordinal := range replicas {
 		if ordinal == self {
 			continue
 		}
@@ -69,8 +69,8 @@ func TestInClusterStanzaRIDsSkipSelfWithoutReclaimingTheSlot(t *testing.T) {
 	layout := ridcoord.DefaultLayout()
 	const segment, replicas = int32(0), int32(3)
 
-	for self := int32(0); self < replicas; self++ {
-		got, err := inClusterStanzaRIDs(layout, segment, replicas, i32(self))
+	for self := range replicas {
+		got, err := inClusterStanzaRIDs(layout, segment, replicas, new(self))
 		if err != nil {
 			t.Fatalf("self=%d: unexpected refusal: %v", self, err)
 		}
@@ -116,7 +116,7 @@ func TestInClusterStanzaRIDsReadNilSelfAsNotAProvider(t *testing.T) {
 		t.Errorf("nil selfOrdinal: %d stanzas, want one per provider (%d): %v",
 			len(notAProvider), replicas, notAProvider)
 	}
-	for ordinal := int32(0); ordinal < replicas; ordinal++ {
+	for ordinal := range replicas {
 		if _, present := notAProvider[ordinal]; !present {
 			t.Errorf("nil selfOrdinal: provider %d is missing — a caller that is not itself a "+
 				"provider replicates from all of them", ordinal)
@@ -304,7 +304,7 @@ func TestExternalStanzaRIDRefusesAPeerSitePastTheRemoteBlock(t *testing.T) {
 // builder breaks.
 func TestLocalAndRemoteStanzaRIDsOfOneDatabaseNeverCollide(t *testing.T) {
 	for _, layout := range []ridcoord.Layout{ridcoord.DefaultLayout(), tightLayout()} {
-		for segment := int32(0); segment < 3; segment++ {
+		for segment := range int32(3) {
 			seen := map[int32]string{}
 
 			local, err := inClusterStanzaRIDs(layout, segment, layout.PodsPerSite, nil)

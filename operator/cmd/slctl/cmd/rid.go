@@ -146,7 +146,9 @@ type ridDecodeResult struct {
 
 // ptrI32 is the int32 counterpart of ptrI64, for the optional terms of a
 // decoded coordinate.
-func ptrI32(v int32) *int32 { return &v }
+//
+//go:fix inline
+func ptrI32(v int32) *int32 { return new(v) }
 
 // decodeRID is the whole decision, pure.
 //
@@ -210,7 +212,7 @@ func decodeRID(rid int32, res ridResolution) ridDecodeResult {
 	}
 
 	r.Status = ridDecodeOK
-	r.Segment = ptrI32(coord.Segment)
+	r.Segment = new(coord.Segment)
 	r.Kind = coord.Kind
 
 	segmentPart, segNotes := resolveRIDSegment(coord.Segment, res)
@@ -218,7 +220,7 @@ func decodeRID(rid int32, res ridResolution) ridDecodeResult {
 	r.Notes = append(r.Notes, segNotes.notes...)
 
 	if coord.Kind == ridcoord.KindLocal {
-		r.Ordinal = ptrI32(coord.Ordinal)
+		r.Ordinal = new(coord.Ordinal)
 		providerPart, pod, notes := resolveRIDLocal(coord.Ordinal, res)
 		r.Pod = pod
 		r.Notes = append(r.Notes, notes...)
@@ -226,7 +228,7 @@ func decodeRID(rid int32, res ridResolution) ridDecodeResult {
 		return r
 	}
 
-	r.SiteIndex = ptrI32(coord.SiteIndex)
+	r.SiteIndex = new(coord.SiteIndex)
 	providerPart, site, notes := resolveRIDRemote(coord.SiteIndex, res)
 	r.Site = site
 	r.Notes = append(r.Notes, notes...)
