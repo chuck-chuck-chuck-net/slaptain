@@ -374,42 +374,7 @@ func splitAWSArgs(raw []string, f *awsFlags) []string {
 		"--redact-password": &f.redactPassword,
 	}
 
-	var passthrough []string
-	for i := 0; i < len(raw); i++ {
-		tok := raw[i]
-		if tok == "--" {
-			passthrough = append(passthrough, raw[i+1:]...)
-			break
-		}
-		if eq := strings.IndexByte(tok, '='); eq > 2 && strings.HasPrefix(tok, "--") {
-			name := tok[:eq]
-			if dst, ok := stringFlags[name]; ok {
-				*dst = tok[eq+1:]
-				continue
-			}
-			if dst, ok := boolFlags[name]; ok {
-				*dst = tok[eq+1:] == "true"
-				continue
-			}
-			passthrough = append(passthrough, tok)
-			continue
-		}
-		if dst, ok := stringFlags[tok]; ok {
-			if i+1 >= len(raw) {
-				passthrough = append(passthrough, tok)
-				continue
-			}
-			*dst = raw[i+1]
-			i++
-			continue
-		}
-		if dst, ok := boolFlags[tok]; ok {
-			*dst = true
-			continue
-		}
-		passthrough = append(passthrough, tok)
-	}
-	return passthrough
+	return splitOwnFlags(raw, stringFlags, boolFlags)
 }
 
 func runAWS(raw []string) error {
