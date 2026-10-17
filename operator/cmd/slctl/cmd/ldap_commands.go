@@ -50,6 +50,15 @@ func splitLDAPArgs(raw []string, f *ldapTargetFlags) []string {
 		"--redact-password": &f.redactPassword, // retained; now the default
 	}
 
+	return splitOwnFlags(raw, stringFlags, boolFlags)
+}
+
+// splitOwnFlags pulls the flags named in stringFlags/boolFlags out of raw,
+// stores their values, and returns everything else in order for the wrapped
+// tool. It accepts both --name=value and --name value, and stops at "--",
+// passing the rest through verbatim. A string flag with no value left is
+// passed through for the wrapped tool to complain about.
+func splitOwnFlags(raw []string, stringFlags map[string]*string, boolFlags map[string]*bool) []string {
 	var passthrough []string
 	for i := 0; i < len(raw); i++ {
 		tok := raw[i]
@@ -77,7 +86,7 @@ func splitLDAPArgs(raw []string, f *ldapTargetFlags) []string {
 		// --name value form
 		if dst, ok := stringFlags[tok]; ok {
 			if i+1 >= len(raw) {
-				// missing value — let ldap-utils complain, just pass through
+				// missing value — let the wrapped tool complain, just pass through
 				passthrough = append(passthrough, tok)
 				continue
 			}
