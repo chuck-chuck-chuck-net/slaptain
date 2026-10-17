@@ -326,9 +326,6 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 	})
 })
 
-//go:fix inline
-func ptrInt32(v int32) *int32 { return new(v) }
-
 // readyStatus is for failure messages: the point of R2 is that a stale refusal
 // sits NEXT TO a healthy Ready, which is what makes it unreadable.
 func readyStatus(sd *ldapv1alpha1.SlapdDatabase) string {

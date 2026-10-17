@@ -3453,17 +3453,6 @@ func findDataDBDNOptional(conn *ldap.Conn, suffix string) (string, error) {
 	return sr.Entries[0].DN, nil
 }
 
-// sanitizeSuffix converts an LDAP suffix into a filesystem-safe directory name.
-// e.g. "o=myapp" → "myapp", "dc=example,dc=org" → "example".
-func sanitizeSuffix(suffix string) string {
-	parts := strings.SplitN(suffix, ",", 2)
-	kv := strings.SplitN(parts[0], "=", 2)
-	if len(kv) == 2 {
-		return kv[1]
-	}
-	return suffix
-}
-
 // generateSSHAHash returns an OpenLDAP-compatible {SSHA} password hash.
 func generateSSHAHash(password string) (string, error) {
 	salt := make([]byte, 8)

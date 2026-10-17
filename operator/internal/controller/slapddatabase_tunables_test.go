@@ -16,9 +16,6 @@ import (
 // Red-first: written against a stub file that returns zero values for all of
 // them, observed failing, then implemented.
 
-//go:fix inline
-func ptrStr(s string) *string { return new(s) }
-
 func dbWith(f func(*ldapv1alpha1.SlapdDatabaseSpec)) *ldapv1alpha1.SlapdDatabase {
 	sd := &ldapv1alpha1.SlapdDatabase{}
 	sd.Name = "exdb"

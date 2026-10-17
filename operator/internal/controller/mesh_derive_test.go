@@ -24,14 +24,6 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
-// si spells an explicit serverIDIndex. The field is a pointer so that "not
-// set" stays distinguishable from index 0 in Go — the API server enforces
-// presence, but a Go caller writing a MeshSite literal would otherwise get
-// index 0 by accident, and index 0 is a real site's stride slot.
-//
-//go:fix inline
-func si(i int32) *int32 { return new(i) }
-
 // threeSiteMesh is the golden topology: the shape a three-site lab runs today,
 // with the site names the e2e fixture assigns (site-1..site-N, deliberately
 // independent of any lab's context names — MESH-PLAN Phase 2b) and the indices

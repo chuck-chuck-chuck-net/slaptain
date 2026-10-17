@@ -1683,16 +1683,6 @@ func generatePassword(n int) (string, error) {
 	return base64.URLEncoding.EncodeToString(b), nil
 }
 
-// isPodReady returns true when all containers in the pod report Ready.
-func isPodReady(pod *corev1.Pod) bool {
-	for _, cond := range pod.Status.Conditions {
-		if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
-}
-
 // testExternalPeerConnectivity attempts a TLS/TCP connection to the external peer URI
 // to check basic network reachability. Returns nil on success.
 func testExternalPeerConnectivity(uri string) error {

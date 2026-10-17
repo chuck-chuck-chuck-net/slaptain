@@ -32,18 +32,6 @@ func extractRIDs(stanzas []string) []string {
 	return out
 }
 
-// extractProviderURIs returns the provider= URIs in stanza order.
-func extractProviderURIs(stanzas []string) []string {
-	re := regexp.MustCompile(`provider=(\S+)`)
-	out := make([]string, 0, len(stanzas))
-	for _, s := range stanzas {
-		if m := re.FindStringSubmatch(s); m != nil {
-			out = append(out, m[1])
-		}
-	}
-	return out
-}
-
 // filterExternal returns stanzas whose RID >= ridBase+50+1 (external peer range).
 // In-cluster stanzas use peerHost = "<cluster>-N..."; external stanzas use the
 // provider URIs we synthesised, so we filter on those.
