@@ -36,7 +36,7 @@ func TestAuthIdentityDN(t *testing.T) {
 		want   string
 	}{
 		{"example-db", "cn=repl-example-db,cn=slaptain-auth"},
-		{"default", "cn=repl-default,cn=slaptain-auth"},
+		{testDBName, "cn=repl-default,cn=slaptain-auth"},
 		{"example-db2", "cn=repl-example-db2,cn=slaptain-auth"},
 	}
 	for _, c := range cases {

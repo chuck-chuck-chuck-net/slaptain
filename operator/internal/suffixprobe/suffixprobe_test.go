@@ -39,6 +39,7 @@ func entry(attrs map[string][]string) *ldap.Entry {
 // top+glue in place) and syncrepl_add_glue_ancestors (a bare entry with no RDN
 // attribute at all).
 func TestClassify(t *testing.T) {
+	const top = "top"
 	tests := []struct {
 		name     string
 		e        *ldap.Entry
@@ -49,9 +50,9 @@ func TestClassify(t *testing.T) {
 		// glue, no dc — and a locally minted entryUUID the healthy pods did
 		// not carry.
 		{"captured glue entry", entry(map[string][]string{
-			"objectClass":           {"top", "glue"},
-			"structuralObjectClass": {"glue"},
-			"entryUUID":             {"1a914f3a-43f0-1041-9ed3-896165d17446"},
+			attrObjectClass:           {top, objectClassGlue},
+			attrStructuralObjectClass: {objectClassGlue},
+			attrEntryUUID:             {"1a914f3a-43f0-1041-9ed3-896165d17446"},
 		}), OutcomeGlue, "1a914f3a-43f0-1041-9ed3-896165d17446"},
 
 		// slapd returns attribute names in their canonical case; the repo has
@@ -62,24 +63,24 @@ func TestClassify(t *testing.T) {
 		}), OutcomeGlue, "u-glue"},
 
 		{"glue via structuralObjectClass only", entry(map[string][]string{
-			"objectClass":           {"top"},
-			"structuralObjectClass": {"glue"},
+			attrObjectClass:           {top},
+			attrStructuralObjectClass: {objectClassGlue},
 		}), OutcomeGlue, ""},
 
 		// Revealed by the control but hidden without it, and not glue: a
 		// referral or subentry. The probe's job is the glue class — it says
 		// "cannot assess" rather than inventing a verdict.
 		{"hidden but not glue is not a verdict", entry(map[string][]string{
-			"objectClass":           {"top", "referral", "extensibleObject"},
-			"structuralObjectClass": {"referral"},
+			attrObjectClass:           {top, "referral", "extensibleObject"},
+			attrStructuralObjectClass: {"referral"},
 		}), OutcomeError, ""},
 
 		// A real suffix entry reached through the control (it would normally
 		// have been visible without it) is still not glue.
 		{"real entry is not glue", entry(map[string][]string{
-			"objectClass":           {"top", "dcObject", "organization"},
-			"structuralObjectClass": {"organization"},
-			"entryUUID":             {"1b03268c-0000-0000-0000-000000000000"},
+			attrObjectClass:           {top, "dcObject", "organization"},
+			attrStructuralObjectClass: {"organization"},
+			attrEntryUUID:             {"1b03268c-0000-0000-0000-000000000000"},
 		}), OutcomeError, "1b03268c-0000-0000-0000-000000000000"},
 	}
 	for _, tc := range tests {

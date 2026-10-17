@@ -101,6 +101,9 @@ func newClient(ctx context.Context, cfg S3Config) (*s3.Client, error) {
 // (ADR-014 amendment). Empty/absent when the source had no cn=replication.
 const MetaReplHashKey = "replication-pw-hash"
 
+// attrUserPassword is the attribute the replication entry's verifier is read from.
+const attrUserPassword = "userPassword"
+
 // Upload streams localPath to s3://<bucket>/<key>, using multipart upload for
 // large objects, attaching the given user-metadata. Returns the uploaded size.
 func Upload(ctx context.Context, cfg S3Config, key, localPath string, metadata map[string]string) (int64, error) {
@@ -378,7 +381,7 @@ func ReplicationHashFromLDIF(path string) (string, error) {
 		logical = append(logical, raw)
 	}
 	for _, line := range logical {
-		if v, ok := ldifValue(line, "userPassword"); ok {
+		if v, ok := ldifValue(line, attrUserPassword); ok {
 			return strings.TrimSpace(v), nil
 		}
 	}

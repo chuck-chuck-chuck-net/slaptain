@@ -19,6 +19,7 @@ package v1alpha1
 import "testing"
 
 func TestNetworkMode(t *testing.T) {
+	const nad = "infra/repl-net"
 	cases := []struct {
 		name    string
 		network *ReplicationNetworkConfig
@@ -26,10 +27,10 @@ func TestNetworkMode(t *testing.T) {
 	}{
 		{name: "no network configured", network: nil, want: ""},
 		{name: "unset mode, no multusNetwork -> pod-routed default", network: &ReplicationNetworkConfig{}, want: NetworkModePodRouted},
-		{name: "unset mode, multusNetwork set -> infers multus", network: &ReplicationNetworkConfig{MultusNetwork: "infra/repl-net"}, want: NetworkModeMultus},
-		{name: "explicit multus", network: &ReplicationNetworkConfig{Mode: NetworkModeMultus, MultusNetwork: "infra/repl-net"}, want: NetworkModeMultus},
+		{name: "unset mode, multusNetwork set -> infers multus", network: &ReplicationNetworkConfig{MultusNetwork: nad}, want: NetworkModeMultus},
+		{name: "explicit multus", network: &ReplicationNetworkConfig{Mode: NetworkModeMultus, MultusNetwork: nad}, want: NetworkModeMultus},
 		{name: "explicit pod-routed", network: &ReplicationNetworkConfig{Mode: NetworkModePodRouted}, want: NetworkModePodRouted},
-		{name: "explicit pod-routed wins over multusNetwork", network: &ReplicationNetworkConfig{Mode: NetworkModePodRouted, MultusNetwork: "infra/repl-net"}, want: NetworkModePodRouted},
+		{name: "explicit pod-routed wins over multusNetwork", network: &ReplicationNetworkConfig{Mode: NetworkModePodRouted, MultusNetwork: nad}, want: NetworkModePodRouted},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -23,6 +23,9 @@ import (
 	"testing"
 )
 
+// sshaPlaintext is the password sshaSecret was generated from.
+const sshaPlaintext = "s3cr3t"
+
 // sshaSecret is an independent {SSHA} vector: SHA-1("s3cr3t" + "abcd1234")
 // base64-encoded with the salt appended. Generated outside this code so the test
 // verifies the implementation rather than round-tripping it against itself.
@@ -35,18 +38,18 @@ func TestSSHAMatches(t *testing.T) {
 		password string
 		want     bool
 	}{
-		{"correct password", sshaSecret, "s3cr3t", true},
+		{"correct password", sshaSecret, sshaPlaintext, true},
 		{"wrong password", sshaSecret, "wrong", false},
 		{"empty password", sshaSecret, "", false},
 		// Default-deny: anything that is not a verifiable {SSHA} must return false
 		// so the caller fails the restore unless explicitly overridden.
-		{"plaintext scheme", "{CLEARTEXT}s3cr3t", "s3cr3t", false},
-		{"crypt scheme", "{CRYPT}abcdef", "s3cr3t", false},
-		{"argon2 scheme", "{ARGON2}$argon2id$v=19$x", "s3cr3t", false},
-		{"bare hash no scheme", "deadbeef", "s3cr3t", false},
-		{"empty stored", "", "s3cr3t", false},
-		{"invalid base64", "{SSHA}not-base64!!", "s3cr3t", false},
-		{"too short to hold salt", "{SSHA}YWJj", "s3cr3t", false}, // decodes to "abc", < sha1.Size
+		{"plaintext scheme", "{CLEARTEXT}" + sshaPlaintext, sshaPlaintext, false},
+		{"crypt scheme", "{CRYPT}abcdef", sshaPlaintext, false},
+		{"argon2 scheme", "{ARGON2}$argon2id$v=19$x", sshaPlaintext, false},
+		{"bare hash no scheme", "deadbeef", sshaPlaintext, false},
+		{"empty stored", "", sshaPlaintext, false},
+		{"invalid base64", "{SSHA}not-base64!!", sshaPlaintext, false},
+		{"too short to hold salt", "{SSHA}YWJj", sshaPlaintext, false}, // decodes to "abc", < sha1.Size
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,6 +61,7 @@ func TestSSHAMatches(t *testing.T) {
 }
 
 func TestLDIFValue(t *testing.T) {
+	const verifier = "{SSHA}abc"
 	tests := []struct {
 		name      string
 		line      string
@@ -65,12 +69,12 @@ func TestLDIFValue(t *testing.T) {
 		wantVal   string
 		wantFound bool
 	}{
-		{"plain value", "userPassword: {SSHA}abc", "userPassword", "{SSHA}abc", true},
-		{"base64 value", "userPassword:: e1NTSEF9YWJj", "userPassword", "{SSHA}abc", true}, // base64("{SSHA}abc")
-		{"different attr", "cn: replication", "userPassword", "", false},
-		{"attr is prefix of another", "userPasswordPolicy: x", "userPassword", "", false},
-		{"invalid base64", "userPassword:: not-base64!!!", "userPassword", "", false},
-		{"no space after colon", "userPassword:x", "userPassword", "", false},
+		{"plain value", "userPassword: " + verifier, attrUserPassword, verifier, true},
+		{"base64 value", "userPassword:: e1NTSEF9YWJj", attrUserPassword, verifier, true}, // base64("{SSHA}abc")
+		{"different attr", "cn: replication", attrUserPassword, "", false},
+		{"attr is prefix of another", "userPasswordPolicy: x", attrUserPassword, "", false},
+		{"invalid base64", "userPassword:: not-base64!!!", attrUserPassword, "", false},
+		{"no space after colon", "userPassword:x", attrUserPassword, "", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,16 +171,17 @@ func TestValidateSuffixEntry(t *testing.T) {
 		"structuralObjectClass: glue\n" +
 		"\n"
 
+	const glueVerdict = "glue"
 	tests := []struct {
 		name    string
 		ldif    string
 		wantErr string // "" = must pass; otherwise substring of the error
 	}{
 		{"healthy suffix entry passes", healthy, ""},
-		{"glue suffix entry rejected", glue, "glue"},
+		{"glue suffix entry rejected", glue, glueVerdict},
 		{"missing RDN attribute rejected", noRDNAttr, "dc"},
-		{"structuralObjectClass glue rejected", structuralGlue, "glue"},
-		{"folded glue objectClass rejected", foldedGlue, "glue"},
+		{"structuralObjectClass glue rejected", structuralGlue, glueVerdict},
+		{"folded glue objectClass rejected", foldedGlue, glueVerdict},
 		{"suffix entry absent rejected", "dn: dc=other,dc=org\nobjectClass: top\n\n", "does not contain suffix entry"},
 		{"empty stream rejected", "", "does not contain suffix entry"},
 	}
