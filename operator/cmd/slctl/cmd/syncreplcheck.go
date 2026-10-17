@@ -110,7 +110,8 @@ func checkSyncreplSkipSelf(readings []syncreplPodReading, headlessSvc string) ch
 	if len(issues) > 0 {
 		return checkResult{Name: "syncrepl-skip-self", Status: "fail", Detail: strings.Join(issues, "; ")}
 	}
-	return checkResult{Name: "syncrepl-skip-self", Status: "pass", Detail: "no RW pod replicates from itself on any database"}
+	return checkResult{Name: "syncrepl-skip-self", Status: "pass",
+		Detail: "no RW pod replicates from itself on any database"}
 }
 
 var ridPattern = regexp.MustCompile(`rid=(\d+)`)
@@ -152,7 +153,8 @@ func checkRIDUniqueness(readings []syncreplPodReading) checkResult {
 	if len(issues) > 0 {
 		return checkResult{Name: "rid-uniqueness", Status: "fail", Detail: strings.Join(issues, "; ")}
 	}
-	return checkResult{Name: "rid-uniqueness", Status: "pass", Detail: "all RIDs unique within each pod, across its databases"}
+	return checkResult{Name: "rid-uniqueness", Status: "pass",
+		Detail: "all RIDs unique within each pod, across its databases"}
 }
 
 // checkMultiProviderPerDB verifies olcMultiProvider is TRUE on every
@@ -183,7 +185,8 @@ func checkMultiProviderPerDB(dbs []dbIdentity, readings []syncreplPodReading) ch
 	if len(issues) > 0 {
 		return checkResult{Name: "multi-provider", Status: "fail", Detail: strings.Join(issues, "; ")}
 	}
-	return checkResult{Name: "multi-provider", Status: "pass", Detail: "TRUE on every replicated database of every RW pod, absent on RO"}
+	return checkResult{Name: "multi-provider", Status: "pass",
+		Detail: "TRUE on every replicated database of every RW pod, absent on RO"}
 }
 
 func replicatedDBs(dbs []dbIdentity) []dbIdentity {

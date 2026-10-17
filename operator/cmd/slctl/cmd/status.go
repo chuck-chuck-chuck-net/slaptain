@@ -51,9 +51,10 @@ type conditionJSON struct {
 }
 
 var statusCmd = &cobra.Command{
-	Use:               "status [name]",
-	Short:             "Show SlapdCluster status",
-	Long:              "Display status overview of one or all SlapdCluster resources: phase, replicas, replication, conditions.",
+	Use:   "status [name]",
+	Short: "Show SlapdCluster status",
+	Long: "Display status overview of one or all SlapdCluster resources: " +
+		"phase, replicas, replication, conditions.",
 	Args:              cobra.MaximumNArgs(1),
 	RunE:              runStatus,
 	ValidArgsFunction: completeSlapdClusterNames,

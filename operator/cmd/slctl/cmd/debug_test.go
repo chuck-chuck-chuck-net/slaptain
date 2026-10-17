@@ -6,6 +6,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const (
+	slapdRepo   = "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd"
+	toolkitRepo = "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit"
+)
+
 func TestSplitImageRef(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -13,11 +18,11 @@ func TestSplitImageRef(t *testing.T) {
 		wantRepo string
 		wantTag  string
 	}{
-		{"repo:tag", "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd:v0.0.1", "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd", "v0.0.1"},
-		{"no tag", "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd", "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd", ""},
+		{"repo:tag", slapdRepo + ":v0.0.1", slapdRepo, "v0.0.1"},
+		{"no tag", slapdRepo, slapdRepo, ""},
 		{"registry port preserved", "registry.example:5000/slaptain/slapd:v1", "registry.example:5000/slaptain/slapd", "v1"},
 		{"registry port, no tag", "registry.example:5000/slaptain/slapd", "registry.example:5000/slaptain/slapd", ""},
-		{"digest yields no tag", "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd@sha256:abc", "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd", ""},
+		{"digest yields no tag", slapdRepo + "@sha256:abc", slapdRepo, ""},
 		{"empty", "", "", ""},
 	}
 	for _, tc := range cases {
@@ -42,15 +47,16 @@ func TestToolkitImageFor(t *testing.T) {
 	}{
 		{
 			name:      "derives from running slapd image, keeps tag",
-			pod:       podWith(corev1.Container{Name: "slapd", Image: "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd:v0.0.1"}),
+			pod:       podWith(corev1.Container{Name: "slapd", Image: slapdRepo + ":v0.0.1"}),
 			container: "slapd",
-			want:      "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit:v0.0.1",
+			want:      toolkitRepo + ":v0.0.1",
 		},
 		{
-			name:      "operator-defaulted image (real tag, not :latest)",
-			pod:       podWith(corev1.Container{Name: "init", Image: "x"}, corev1.Container{Name: "slapd", Image: "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd:2026-07-14"}),
+			name: "operator-defaulted image (real tag, not :latest)",
+			pod: podWith(corev1.Container{Name: "init", Image: "x"},
+				corev1.Container{Name: "slapd", Image: slapdRepo + ":2026-07-14"}),
 			container: "slapd",
-			want:      "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit:2026-07-14",
+			want:      toolkitRepo + ":2026-07-14",
 		},
 		{
 			name:      "private mirror follows the pod image",
@@ -60,21 +66,21 @@ func TestToolkitImageFor(t *testing.T) {
 		},
 		{
 			name:      "untagged pod image falls back to latest tag",
-			pod:       podWith(corev1.Container{Name: "slapd", Image: "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd"}),
+			pod:       podWith(corev1.Container{Name: "slapd", Image: slapdRepo}),
 			container: "slapd",
-			want:      "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit:latest",
+			want:      toolkitRepo + ":latest",
 		},
 		{
 			name:      "non-conventional repo falls back to canonical toolkit",
 			pod:       podWith(corev1.Container{Name: "slapd", Image: "example.com/weird/openldap:v1"}),
 			container: "slapd",
-			want:      "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit:v1",
+			want:      toolkitRepo + ":v1",
 		},
 		{
 			name:      "container not found falls back to first container",
-			pod:       podWith(corev1.Container{Name: "slapd", Image: "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd:v3"}),
+			pod:       podWith(corev1.Container{Name: "slapd", Image: slapdRepo + ":v3"}),
 			container: "does-not-exist",
-			want:      "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit:v3",
+			want:      toolkitRepo + ":v3",
 		},
 	}
 	for _, tc := range cases {

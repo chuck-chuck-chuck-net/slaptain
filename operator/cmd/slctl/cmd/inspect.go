@@ -55,11 +55,13 @@ type externalPeerInfo struct {
 	// identity (ADR-031).
 	DiscoveredProviders []ldapv1alpha1.DiscoveredProvider `json:"discoveredProviders,omitempty"`
 	ReplicasPerPeer     int32                             `json:"replicasPerPeer,omitempty"`
-	Connected           *bool                             `json:"connected,omitempty"` // nil = not tested (Multus/discovery)
-	LastError           string                            `json:"lastError,omitempty"`
-	Multus              bool                              `json:"multus,omitempty"` // true = podAddresses or discovery peer
-	ReplicationState    string                            `json:"replicationState,omitempty"`
-	LagSeconds          string                            `json:"lagSeconds,omitempty"`
+	// Connected is nil when not tested (Multus/discovery).
+	Connected *bool  `json:"connected,omitempty"`
+	LastError string `json:"lastError,omitempty"`
+	// Multus is true for a podAddresses or discovery peer.
+	Multus           bool   `json:"multus,omitempty"`
+	ReplicationState string `json:"replicationState,omitempty"`
+	LagSeconds       string `json:"lagSeconds,omitempty"`
 }
 
 type podJSON struct {
@@ -237,7 +239,10 @@ func runInspect(cmd *cobra.Command, args []string) error {
 
 // ── Core logic ────────────────────────────────────────────────────────────────
 
-func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, configPW string, peers peerResolution) inspectJSON {
+func inspectAndVerify(
+	ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster,
+	dbs []dbIdentity, configPW string, peers peerResolution,
+) inspectJSON {
 	result := inspectJSON{
 		Name:      sc.Name,
 		Namespace: sc.Namespace,
@@ -359,7 +364,10 @@ const perPodTimeout = 15 * time.Second
 // gatherPodStateWithTimeout wraps gatherPodState with a hard timeout.
 // The SPDY port-forward dialer doesn't respect context cancellation,
 // so we run the gather in a goroutine and abandon it if it takes too long.
-func gatherPodStateWithTimeout(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, podName, configPW string) podState {
+func gatherPodStateWithTimeout(
+	ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, podName,
+	configPW string,
+) podState {
 	// Quick check: if the pod isn't ready, skip without starting a goroutine
 	pod, err := coreClient.CoreV1().Pods(sc.Namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
@@ -396,7 +404,10 @@ func closeLDAP(conn *ldap.Conn, what string) {
 	}
 }
 
-func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, podName, configPW string) podState {
+func gatherPodState(
+	ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, podName,
+	configPW string,
+) podState {
 	ps := podState{name: podName}
 
 	pod, err := coreClient.CoreV1().Pods(sc.Namespace).Get(ctx, podName, metav1.GetOptions{})
@@ -571,7 +582,8 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 				fmt.Sprintf("%d/%d ready", sc.Status.ReadOnlyReadyReplicas, sc.Spec.ReadReplicas))
 		} else {
 			check("ro-replica-count", "fail",
-				fmt.Sprintf("%d/%d ready (want %d)", sc.Status.ReadOnlyReadyReplicas, sc.Status.ReadOnlyReplicas, sc.Spec.ReadReplicas))
+				fmt.Sprintf("%d/%d ready (want %d)",
+					sc.Status.ReadOnlyReadyReplicas, sc.Status.ReadOnlyReplicas, sc.Spec.ReadReplicas))
 		}
 	}
 
@@ -1148,7 +1160,9 @@ func formatDuration(d time.Duration) string {
 // the cluster needs an accesslog at all (NeedsAccesslog — false for a
 // single-pod cluster with no external peers, and for a consumer-only one) and
 // this database uses delta-syncrepl.
-func clusterDatabases(ctx context.Context, k8sClient client.Client, sc *ldapv1alpha1.SlapdCluster) ([]dbIdentity, error) {
+func clusterDatabases(
+	ctx context.Context, k8sClient client.Client, sc *ldapv1alpha1.SlapdCluster,
+) ([]dbIdentity, error) {
 	list := &ldapv1alpha1.SlapdDatabaseList{}
 	if err := k8sClient.List(ctx, list, client.InNamespace(sc.Namespace)); err != nil {
 		return nil, fmt.Errorf("list SlapdDatabases in %s: %w", sc.Namespace, err)

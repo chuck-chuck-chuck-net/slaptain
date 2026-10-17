@@ -405,7 +405,9 @@ func parseRIDLayoutFlag(s string) (ridcoord.Layout, error) {
 // dbs are filtered to those naming sc, and only those declaring a ridSegment.
 // They are ignored entirely when sc is nil, since clusterRef cannot be matched
 // against anything.
-func buildRIDResolution(sc *ldapv1alpha1.SlapdCluster, mesh *ldapv1alpha1.SlapdMesh, dbs []ldapv1alpha1.SlapdDatabase) ridResolution {
+func buildRIDResolution(
+	sc *ldapv1alpha1.SlapdCluster, mesh *ldapv1alpha1.SlapdMesh, dbs []ldapv1alpha1.SlapdDatabase,
+) ridResolution {
 	res := ridResolution{
 		Layout:        ridcoord.DefaultLayout(),
 		LayoutSource:  "the compiled-in default",
@@ -592,7 +594,8 @@ var (
 var ridCmd = &cobra.Command{
 	Use:   "rid",
 	Short: "Work with syncrepl replica IDs",
-	Long:  "Commands for reading and checking syncrepl replica IDs (RIDs), which ADR-031 makes coordinates in a (database, provider) matrix.",
+	Long: "Commands for reading and checking syncrepl replica IDs (RIDs), " +
+		"which ADR-031 makes coordinates in a (database, provider) matrix.",
 }
 
 var ridDecodeCmd = &cobra.Command{

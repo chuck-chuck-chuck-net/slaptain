@@ -185,7 +185,9 @@ func pickCluster(ctx context.Context, k8sClient client.Client, ns, name string) 
 	}
 }
 
-func pickDatabase(ctx context.Context, k8sClient client.Client, ns, clusterName, name string) (*ldapv1alpha1.SlapdDatabase, error) {
+func pickDatabase(
+	ctx context.Context, k8sClient client.Client, ns, clusterName, name string,
+) (*ldapv1alpha1.SlapdDatabase, error) {
 	list := &ldapv1alpha1.SlapdDatabaseList{}
 	if err := k8sClient.List(ctx, list, client.InNamespace(ns)); err != nil {
 		return nil, fmt.Errorf("list SlapdDatabases in %s: %w", ns, err)

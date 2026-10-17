@@ -37,7 +37,9 @@ func withMeshRef(sc *ldapv1alpha1.SlapdCluster) *ldapv1alpha1.SlapdCluster {
 	return sc
 }
 
-func withMeshCondition(sc *ldapv1alpha1.SlapdCluster, status metav1.ConditionStatus, reason, msg string) *ldapv1alpha1.SlapdCluster {
+func withMeshCondition(
+	sc *ldapv1alpha1.SlapdCluster, status metav1.ConditionStatus, reason, msg string,
+) *ldapv1alpha1.SlapdCluster {
 	sc.Status.Conditions = append(sc.Status.Conditions, metav1.Condition{
 		Type:    "MeshResolved",
 		Status:  status,
@@ -243,7 +245,8 @@ func TestApplyResolvedPeersLeavesNonMeshClustersAlone(t *testing.T) {
 	if res.Source != peerSourceSpec {
 		t.Errorf("Source = %q, want %q", res.Source, peerSourceSpec)
 	}
-	if len(sc.Spec.Replication.ExternalPeers) != 1 || sc.Spec.Replication.ExternalPeers[0].URI != "ldaps://b.example:1025" {
+	peers := sc.Spec.Replication.ExternalPeers
+	if len(peers) != 1 || peers[0].URI != "ldaps://b.example:1025" {
 		t.Errorf("spec peers were rewritten: %+v", sc.Spec.Replication.ExternalPeers)
 	}
 }

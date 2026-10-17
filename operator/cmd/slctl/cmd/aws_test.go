@@ -129,7 +129,8 @@ func TestPlanEndpoint(t *testing.T) {
 // history when the user copies the --verbose line.
 func TestAWSEnv(t *testing.T) {
 	st := ldapv1alpha1.S3StorageSpec{Bucket: "slaptain-backups", Region: "us-east-1"}
-	env := awsEnv([]string{"PATH=/usr/bin", "AWS_ENDPOINT_URL=http://stale"}, st, "AKIA", "s3cret", "http://localhost:34567")
+	inherited := []string{"PATH=/usr/bin", "AWS_ENDPOINT_URL=http://stale"}
+	env := awsEnv(inherited, st, "AKIA", "s3cret", "http://localhost:34567")
 
 	want := map[string]string{
 		"AWS_ACCESS_KEY_ID":     "AKIA",

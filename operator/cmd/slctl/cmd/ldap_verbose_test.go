@@ -17,8 +17,10 @@ func TestFormatInvocation(t *testing.T) {
 		{
 			name: "bind invocation, password shown and single-quoted",
 			tool: "ldapsearch",
-			args: []string{"-H", "ldap://localhost:34287", "-x", "-D", "cn=admin,dc=demo,dc=example", "-w", "s3cr3t", "-b", "dc=demo,dc=example", "-s", "one", "dn"},
-			want: "ldapsearch -H ldap://localhost:34287 -x -D cn=admin,dc=demo,dc=example -w 's3cr3t' -b dc=demo,dc=example -s one dn",
+			args: []string{"-H", "ldap://localhost:34287", "-x", "-D", "cn=admin,dc=demo,dc=example", "-w", "s3cr3t",
+				"-b", "dc=demo,dc=example", "-s", "one", "dn"},
+			want: "ldapsearch -H ldap://localhost:34287 -x -D cn=admin,dc=demo,dc=example -w 's3cr3t' " +
+				"-b dc=demo,dc=example -s one dn",
 		},
 		{
 			name:   "redacted password",
