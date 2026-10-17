@@ -202,8 +202,8 @@ func TestShowPasswordFlagIsParsed(t *testing.T) {
 // --verbose=no (not a boolean at all) leaves it off.
 func TestBoolFlagValueSpellings(t *testing.T) {
 	for in, want := range map[string]bool{
-		"true": true, "1": true, "TRUE": true, "t": true,
-		"false": false, "0": false, "no": false, "": false,
+		"True": true, "1": true, "TRUE": true, "t": true,
+		"False": false, "0": false, "no": false, "": false,
 	} {
 		var f ldapTargetFlags
 		splitLDAPArgs([]string{flagVerbose + "=" + in}, &f)
