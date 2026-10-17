@@ -167,7 +167,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodAuthIdentity(
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
-	defer conn.Close()
+	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind("cn=admin,cn=config", configPW); err != nil {

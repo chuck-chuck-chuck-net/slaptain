@@ -18,6 +18,7 @@ package controller
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"os"
 	"strings"
@@ -47,10 +48,9 @@ func ResolveClusterDomain() string {
 	if v := strings.TrimSpace(os.Getenv("CLUSTER_DOMAIN")); v != "" {
 		return v
 	}
-	f, err := os.Open(resolvConfPath)
-	if err == nil {
-		defer f.Close()
-		if d := parseClusterDomainFromResolvConf(f); d != "" {
+	// resolv.conf is a few lines; reading it whole leaves no handle to close.
+	if data, err := os.ReadFile(resolvConfPath); err == nil {
+		if d := parseClusterDomainFromResolvConf(bytes.NewReader(data)); d != "" {
 			return d
 		}
 	}
