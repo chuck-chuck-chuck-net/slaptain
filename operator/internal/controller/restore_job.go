@@ -28,6 +28,13 @@ import (
 
 const restoreLDIFFile = "/staging/restore.ldif.gz"
 
+const (
+	// restoreContainerName is the restore Job's slapadd container.
+	restoreContainerName = "restore"
+	// restoreComponent is the restore Job's app.kubernetes.io/component.
+	restoreComponent = "restore"
+)
+
 // databaseDataDir returns the /data subdirectory name for a database, matching
 // the SlapdDatabase controller: spec.dataDirectory, or the CR name when unset.
 func databaseDataDir(sd *ldapv1alpha1.SlapdDatabase) string {
@@ -59,7 +66,7 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 	noEsc := false
 	secCtx := &corev1.SecurityContext{
 		AllowPrivilegeEscalation: &noEsc,
-		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
 	}
 	wipe := `rm -f "/data/$DATADIR/data.mdb" "/data/$DATADIR/lock.mdb"`
 	// Under replication the pod has an accesslog DB of its own (ADR-019:
@@ -96,7 +103,7 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 		// RW pod: download the artifact, wipe the target DB files, slapadd offline.
 		volumes = append(volumes,
 			pvcVolume("config", t.configPVC),
-			corev1.Volume{Name: "staging", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			corev1.Volume{Name: volumeStaging, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		)
 		downloadArgs := []string{"restore-download", "--bucket", st.Bucket, "--key", objectKey, "--out", restoreLDIFFile}
 		if st.Endpoint != "" {
@@ -123,7 +130,7 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 				{Name: "AWS_ACCESS_KEY_ID", ValueFrom: secretRef("access-key-id")},
 				{Name: "AWS_SECRET_ACCESS_KEY", ValueFrom: secretRef("secret-access-key")},
 			},
-			VolumeMounts:    []corev1.VolumeMount{{Name: "staging", MountPath: backupStagingPath}},
+			VolumeMounts:    []corev1.VolumeMount{{Name: volumeStaging, MountPath: backupStagingPath}},
 			SecurityContext: secCtx,
 		}}
 
@@ -131,16 +138,16 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 		// olcDbDirectory must exist or it aborts at config-load. Mount it when
 		// this (RW) pod has one.
 		mounts := []corev1.VolumeMount{
-			{Name: "config", MountPath: "/config", ReadOnly: true},
-			{Name: "data", MountPath: "/data"},
-			{Name: "staging", MountPath: backupStagingPath, ReadOnly: true},
+			{Name: volumeConfig, MountPath: configMountPath, ReadOnly: true},
+			{Name: volumeData, MountPath: dataMountPath},
+			{Name: volumeStaging, MountPath: backupStagingPath, ReadOnly: true},
 		}
 		if t.accesslogPVC != "" {
 			volumes = append(volumes, pvcVolume("accesslog", t.accesslogPVC))
-			mounts = append(mounts, corev1.VolumeMount{Name: "accesslog", MountPath: ldapv1alpha1.AccesslogRoot})
+			mounts = append(mounts, corev1.VolumeMount{Name: volumeAccesslog, MountPath: ldapv1alpha1.AccesslogRoot})
 		}
 		containers = []corev1.Container{{
-			Name:            "restore",
+			Name:            restoreContainerName,
 			Image:           initImage,
 			ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
 			// slapadd -q is bulk-load mode: it skips the per-entry schema and
@@ -163,7 +170,7 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 			// The thread count slapadd uses for index building comes from
 			// olcToolThreads in the cn=config this reads with -F; the operator
 			// converges it from SlapdCluster.spec.tuning.toolThreads.
-			Command: []string{"bash", "-c", "set -eo pipefail\n" + wipe + "\ngunzip -c " + restoreLDIFFile + ` | slapadd -q -F /config/slapd.d -b "$SUFFIX"`},
+			Command: []string{jobShell, "-c", "set -eo pipefail\n" + wipe + "\ngunzip -c " + restoreLDIFFile + ` | slapadd -q -F /config/slapd.d -b "$SUFFIX"`},
 			Env: []corev1.EnvVar{
 				{Name: "SUFFIX", Value: sd.Spec.Suffix},
 				{Name: "DATADIR", Value: dataDir},
@@ -179,9 +186,9 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 			Name:            "wipe",
 			Image:           initImage,
 			ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
-			Command:         []string{"bash", "-c", "set -eo pipefail\n" + wipe},
+			Command:         []string{jobShell, "-c", "set -eo pipefail\n" + wipe},
 			Env:             []corev1.EnvVar{{Name: "DATADIR", Value: dataDir}},
-			VolumeMounts:    []corev1.VolumeMount{{Name: "data", MountPath: "/data"}},
+			VolumeMounts:    []corev1.VolumeMount{{Name: volumeData, MountPath: dataMountPath}},
 			SecurityContext: secCtx,
 		}}
 	}
@@ -198,9 +205,9 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 			Name:      t.jobName,
 			Namespace: sc.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":              "slapd",
-				"app.kubernetes.io/instance":          sc.Name,
-				"app.kubernetes.io/component":         "restore",
+				labelName:                             appName,
+				labelInstance:                         sc.Name,
+				labelComponent:                        restoreComponent,
 				"ldap.chuck-chuck-chuck.net/database": sd.Name,
 				restoreIDLabel:                        sc.Status.Restore.ID,
 			},

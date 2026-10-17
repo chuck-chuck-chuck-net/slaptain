@@ -46,7 +46,7 @@ func TestJobFailureSummary(t *testing.T) {
 		{
 			name: "condition and container exit code are both reported",
 			job:  failedJob("BackoffLimitExceeded", "Job has reached the specified backoff limit", corev1.ConditionTrue),
-			pods: []corev1.Pod{podWithExit("restore", 1, "Error", true)},
+			pods: []corev1.Pod{podWithExit(restoreContainerName, 1, "Error", true)},
 			want: []string{"BackoffLimitExceeded", "backoff limit", `container "restore" exited 1`, "Error"},
 		},
 		{
@@ -77,9 +77,9 @@ func TestJobFailureSummary(t *testing.T) {
 		{
 			name:    "a zero exit code is not a failure",
 			job:     &batchv1.Job{},
-			pods:    []corev1.Pod{podWithExit("restore", 0, "Completed", true)},
+			pods:    []corev1.Pod{podWithExit(restoreContainerName, 0, "Completed", true)},
 			want:    []string{"no condition or container status recorded"},
-			wantNot: []string{"restore"},
+			wantNot: []string{restoreContainerName},
 		},
 	}
 
@@ -108,7 +108,7 @@ func TestJobFailureSummary(t *testing.T) {
 func TestJobFailureSummaryPrefersInitContainer(t *testing.T) {
 	p := podWithExit("download", 3, "Error", true)
 	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name:  "restore",
+		Name:  restoreContainerName,
 		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 9}},
 	}}
 	got := jobFailureSummary(&batchv1.Job{}, []corev1.Pod{p})

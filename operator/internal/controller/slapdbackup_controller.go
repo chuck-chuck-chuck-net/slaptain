@@ -345,10 +345,10 @@ func (r *SlapdBackupReconciler) probeSourceSuffix(ctx context.Context, ns string
 		return suffixProbeError, err.Error()
 	}
 
-	scheme := "ldap"
+	scheme := schemeLDAP
 	dialOpts := []ldap.DialOpt{ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second})}
 	if tlsEnabled {
-		scheme = "ldaps"
+		scheme = schemeLDAPS
 		dialOpts = append(dialOpts, ldap.DialWithTLSConfig(&tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // per-pod headless DNS, CA trust only (ADR-007 §7)
 		}))
@@ -409,7 +409,7 @@ func (r *SlapdBackupReconciler) replicationPassword(ctx context.Context, ns stri
 	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, secret); err != nil {
 		return "", fmt.Errorf("read %s: %w", secretName, err)
 	}
-	pw := string(secret.Data["replication-password"])
+	pw := string(secret.Data[secretKeyReplicationPassword])
 	if pw == "" {
 		return "", fmt.Errorf("secret %s has no replication-password", secretName)
 	}
@@ -455,7 +455,7 @@ func (r *SlapdBackupReconciler) patchStatus(ctx context.Context, sb *ldapv1alpha
 
 	statusPatch := &ldapv1alpha1.SlapdBackup{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
+			APIVersion: ldapv1alpha1.GroupVersion.String(),
 			Kind:       "SlapdBackup",
 		},
 		ObjectMeta: metav1.ObjectMeta{

@@ -37,7 +37,7 @@ func TestUnwantedLogDBChildren(t *testing.T) {
 		{
 			name: "healthy log DB: syncprov only, nothing to reap",
 			children: []observedConfigEntry{
-				{DN: "olcOverlay={0}syncprov," + logDN, Classes: []string{"olcOverlayConfig", "olcSyncProvConfig"}},
+				{DN: "olcOverlay={0}syncprov," + logDN, Classes: []string{ocOverlayConfig, ocSyncProvConfig}},
 			},
 			want: nil,
 		},
@@ -49,8 +49,8 @@ func TestUnwantedLogDBChildren(t *testing.T) {
 		{
 			name: "mis-attached accesslog overlay is reaped",
 			children: []observedConfigEntry{
-				{DN: "olcOverlay={0}syncprov," + logDN, Classes: []string{"olcOverlayConfig", "olcSyncProvConfig"}},
-				{DN: "olcOverlay={1}accesslog," + logDN, Classes: []string{"olcOverlayConfig", "olcAccessLogConfig"}},
+				{DN: "olcOverlay={0}syncprov," + logDN, Classes: []string{ocOverlayConfig, ocSyncProvConfig}},
+				{DN: "olcOverlay={1}accesslog," + logDN, Classes: []string{ocOverlayConfig, ocAccessLogConfig}},
 			},
 			want: []string{"olcOverlay={1}accesslog," + logDN},
 		},
@@ -64,15 +64,15 @@ func TestUnwantedLogDBChildren(t *testing.T) {
 		{
 			name: "an unrecognised child is left alone, not reaped",
 			children: []observedConfigEntry{
-				{DN: "olcOverlay={1}memberof," + logDN, Classes: []string{"olcOverlayConfig", "olcMemberOf"}},
+				{DN: "olcOverlay={1}memberof," + logDN, Classes: []string{ocOverlayConfig, "olcMemberOf"}},
 			},
 			want: nil,
 		},
 		{
 			name: "several mis-attached overlays are all reaped, in order",
 			children: []observedConfigEntry{
-				{DN: "olcOverlay={1}accesslog," + logDN, Classes: []string{"olcAccessLogConfig"}},
-				{DN: "olcOverlay={2}accesslog," + logDN, Classes: []string{"olcAccessLogConfig"}},
+				{DN: "olcOverlay={1}accesslog," + logDN, Classes: []string{ocAccessLogConfig}},
+				{DN: "olcOverlay={2}accesslog," + logDN, Classes: []string{ocAccessLogConfig}},
 			},
 			want: []string{
 				"olcOverlay={1}accesslog," + logDN,

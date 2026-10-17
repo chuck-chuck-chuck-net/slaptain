@@ -32,9 +32,9 @@ import (
 func TestRecordedSourceConvergedConditionCaveatsLateRecording(t *testing.T) {
 	now := metav1.Now()
 	sc := replicatedCluster(metav1.Condition{
-		Type:    "ReplicationConverged",
+		Type:    replicationConvergedCondition,
 		Status:  metav1.ConditionTrue,
-		Reason:  "CSNsMatch",
+		Reason:  reasonCSNsMatch,
 		Message: "all local pods report identical contextCSN",
 	})
 

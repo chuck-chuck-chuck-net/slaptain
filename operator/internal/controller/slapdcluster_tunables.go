@@ -182,7 +182,7 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 	// is not offered).
 	wants := []globalTunable{
 		{"olcToolThreads", strconv.FormatInt(int64(desiredToolThreads(sc)), 10), true},
-		{"olcPasswordHash", desiredPasswordHash(sc), true},
+		{attrOlcPasswordHash, desiredPasswordHash(sc), true},
 	}
 	// TLS attributes are appended only where slapd will accept them. With TLS
 	// disabled it answers err=53 to every one of these on every reconcile,
@@ -246,7 +246,7 @@ func (r *SlapdClusterReconciler) ensureGlobalTunables(
 	// not state it found and does not own.
 	for _, w := range wants {
 		dn := tunableEntryDN(w.attr)
-		if dn == "cn=config" || !w.write {
+		if dn == configDN || !w.write {
 			continue
 		}
 		steps = append(steps, convergenceStep{w.attr + "@cn=config(retire)", func() error {

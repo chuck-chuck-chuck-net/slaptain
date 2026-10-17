@@ -75,7 +75,7 @@ import (
 func (f *ridFixture) withExternalPeer(ctx context.Context, peerName, secretName string) {
 	sc := &ldapv1alpha1.SlapdCluster{}
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: f.cluster, Namespace: f.ns}, sc)).To(Succeed())
-	sc.Spec.Replication.Mode = "consumer-only"
+	sc.Spec.Replication.Mode = replicationModeConsumerOnly
 	sc.Spec.Replication.ExternalPeers = []ldapv1alpha1.ExternalPeer{{
 		Name:                   peerName,
 		SiteIndex:              new(int32(1)),

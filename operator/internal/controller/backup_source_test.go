@@ -54,9 +54,9 @@ func TestSourceConvergedCondition(t *testing.T) {
 		{
 			name: "cluster reports converged",
 			cluster: replicatedCluster(metav1.Condition{
-				Type:    "ReplicationConverged",
+				Type:    replicationConvergedCondition,
 				Status:  metav1.ConditionTrue,
-				Reason:  "CSNsMatch",
+				Reason:  reasonCSNsMatch,
 				Message: "all local pods report identical contextCSN",
 			}),
 			wantStatus: metav1.ConditionTrue,
@@ -68,9 +68,9 @@ func TestSourceConvergedCondition(t *testing.T) {
 			// ACKed on another pod. The backup still runs, but says so.
 			name: "cluster reports divergence",
 			cluster: replicatedCluster(metav1.Condition{
-				Type:    "ReplicationConverged",
+				Type:    replicationConvergedCondition,
 				Status:  metav1.ConditionFalse,
-				Reason:  "CSNsDiverged",
+				Reason:  reasonCSNsDiverged,
 				Message: "local CSN divergence: 3.0s lag across 3 pods",
 			}),
 			wantStatus: metav1.ConditionFalse,
@@ -80,7 +80,7 @@ func TestSourceConvergedCondition(t *testing.T) {
 		{
 			name: "cluster reports unknown",
 			cluster: replicatedCluster(metav1.Condition{
-				Type:    "ReplicationConverged",
+				Type:    replicationConvergedCondition,
 				Status:  metav1.ConditionUnknown,
 				Reason:  "Whatever",
 				Message: "no idea",
@@ -96,8 +96,8 @@ func TestSourceConvergedCondition(t *testing.T) {
 			name:       "replicated cluster without the condition",
 			cluster:    replicatedCluster(),
 			wantStatus: metav1.ConditionUnknown,
-			wantReason: "NoConvergenceSignal",
-			wantMsgHas: "ReplicationConverged",
+			wantReason: reasonNoConvergenceSignal,
+			wantMsgHas: replicationConvergedCondition,
 		},
 		{
 			// Nothing to converge WITH: pod-0 is the only writable copy, so the
@@ -108,7 +108,7 @@ func TestSourceConvergedCondition(t *testing.T) {
 				Spec:       ldapv1alpha1.SlapdClusterSpec{Replicas: 1},
 			},
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "NotReplicated",
+			wantReason: reasonNotReplicated,
 			wantMsgHas: "not replicated",
 		},
 		{
@@ -121,7 +121,7 @@ func TestSourceConvergedCondition(t *testing.T) {
 				},
 			},
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "NotReplicated",
+			wantReason: reasonNotReplicated,
 			wantMsgHas: "not replicated",
 		},
 		{
@@ -139,8 +139,8 @@ func TestSourceConvergedCondition(t *testing.T) {
 				},
 			},
 			wantStatus: metav1.ConditionUnknown,
-			wantReason: "NoConvergenceSignal",
-			wantMsgHas: "ReplicationConverged",
+			wantReason: reasonNoConvergenceSignal,
+			wantMsgHas: replicationConvergedCondition,
 		},
 	}
 
@@ -188,8 +188,8 @@ func TestSourceSuffixHealthyCondition(t *testing.T) {
 	}{
 		{"visible entry is healthy", suffixProbeVisible, "", metav1.ConditionTrue, "SuffixEntryVisible", ""},
 		{"glue suffix recorded", suffixProbeGlue, "entryUUID 1a914f3a-43f0-1041-9ed3-896165d17446",
-			metav1.ConditionFalse, "GlueSuffix", "1a914f3a"},
-		{"glue message warns about restore", suffixProbeGlue, "", metav1.ConditionFalse, "GlueSuffix", "preflight"},
+			metav1.ConditionFalse, reasonGlueSuffix, "1a914f3a"},
+		{"glue message warns about restore", suffixProbeGlue, "", metav1.ConditionFalse, reasonGlueSuffix, "preflight"},
 		{"missing suffix recorded", suffixProbeMissing, "", metav1.ConditionFalse, "SuffixMissing", ""},
 		{"probe failure is unknown", suffixProbeError, "dial tcp: timeout",
 			metav1.ConditionUnknown, "CheckFailed", "timeout"},

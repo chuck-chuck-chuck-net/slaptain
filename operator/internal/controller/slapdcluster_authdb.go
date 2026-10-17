@@ -90,8 +90,8 @@ func (r *SlapdClusterReconciler) ensureAuthDB(
 	if dbDN == "" {
 		log.Info("creating node-local auth DB", "host", host, "suffix", ldapv1alpha1.AuthSuffix)
 		addReq := ldap.NewAddRequest("olcDatabase=mdb,cn=config", nil)
-		addReq.Attribute("objectClass", []string{"olcDatabaseConfig", "olcMdbConfig"})
-		addReq.Attribute("olcDatabase", []string{"mdb"})
+		addReq.Attribute("objectClass", []string{ocDatabaseConfig, ocMdbConfig})
+		addReq.Attribute("olcDatabase", []string{backendMDB})
 		addReq.Attribute("olcSuffix", []string{ldapv1alpha1.AuthSuffix})
 		// cn=admin,cn=config as rootDN, the pattern ADR-020 already established
 		// for accesslog databases: it lets the operator write this database with
@@ -142,7 +142,7 @@ func (r *SlapdClusterReconciler) ensureAuthDBACLs(
 
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dbDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-		1, 0, false, "(objectClass=*)", []string{"olcAccess"}, nil,
+		1, 0, false, "(objectClass=*)", []string{attrOlcAccess}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("read olcAccess on %s at %s: %w", dbDN, host, err)
@@ -191,7 +191,7 @@ func (r *SlapdClusterReconciler) ensureAuthSuffixEntry(
 
 	log.Info("creating auth DB suffix entry", "host", host, "dn", ldapv1alpha1.AuthSuffix)
 	addReq := ldap.NewAddRequest(ldapv1alpha1.AuthSuffix, nil)
-	addReq.Attribute("objectClass", []string{"organizationalRole"})
+	addReq.Attribute("objectClass", []string{ocOrganizationalRole})
 	addReq.Attribute("cn", []string{"slaptain-auth"})
 	addReq.Attribute("description", []string{
 		"Node-local replication identities — never replicated (ADR-027)",

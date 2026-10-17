@@ -291,7 +291,7 @@ func TestDesiredSearchLimits(t *testing.T) {
 // ── 4. Data-DB syncrepl baseline indices (ADR-024 R7) ───────────────────────
 
 func TestDataBaselineIndexAttrs(t *testing.T) {
-	want := map[string]bool{"objectClass": true, "entryCSN": true, "entryUUID": true}
+	want := map[string]bool{attrObjectClass: true, attrEntryCSN: true, "entryUUID": true}
 	if len(dataBaselineIndexAttrs) != len(want) {
 		t.Fatalf("dataBaselineIndexAttrs = %v, want exactly %v", dataBaselineIndexAttrs, want)
 	}

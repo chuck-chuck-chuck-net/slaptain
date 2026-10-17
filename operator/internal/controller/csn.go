@@ -34,9 +34,9 @@ import (
 // uses an anonymous connection.
 // Returns the raw CSN strings (one per serverID that has written to this replica).
 func queryContextCSN(host string, port int32, tlsEnabled bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
-	scheme := "ldap"
+	scheme := schemeLDAP
 	if tlsEnabled {
-		scheme = "ldaps"
+		scheme = schemeLDAPS
 	}
 	uri := fmt.Sprintf("%s://%s:%d", scheme, host, port)
 	return doCSNQuery(uri, tlsEnabled, suffix, bindDNs, bindPW)
@@ -130,11 +130,11 @@ func parseCSNTime(csn string) (time.Time, error) {
 	return time.Parse("20060102150405.000000", ts)
 }
 
-// newestCSN finds the CSN with the latest timestamp from a list of CSN strings.
-// Returns the parsed time and the raw CSN string. Returns zero time if the list is empty.
-func newestCSN(csns []string) (time.Time, string, error) {
+// newestCSN finds the latest timestamp among a list of CSN strings.
+// Returns zero time if the list is empty.
+func newestCSN(csns []string) (time.Time, error) {
 	var newest time.Time
-	var newestRaw string
+	found := false
 	for _, csn := range csns {
 		t, err := parseCSNTime(csn)
 		if err != nil {
@@ -142,13 +142,13 @@ func newestCSN(csns []string) (time.Time, string, error) {
 		}
 		if t.After(newest) {
 			newest = t
-			newestRaw = csn
+			found = true
 		}
 	}
-	if newestRaw == "" && len(csns) > 0 {
-		return time.Time{}, "", fmt.Errorf("no parseable CSN in %v", csns)
+	if !found && len(csns) > 0 {
+		return time.Time{}, fmt.Errorf("no parseable CSN in %v", csns)
 	}
-	return newest, newestRaw, nil
+	return newest, nil
 }
 
 // csnConverged checks if all CSN sets are identical (same CSN vectors).

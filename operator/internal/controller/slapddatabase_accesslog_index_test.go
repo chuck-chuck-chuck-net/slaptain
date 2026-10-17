@@ -25,7 +25,7 @@ import (
 // operator. The LDAP half only executes the verdict.
 
 func TestAccesslogIndexAttrs_UpstreamSet(t *testing.T) {
-	want := []string{"entryCSN", "objectClass", "reqEnd", "reqResult", "reqStart", "reqDN"}
+	want := []string{attrEntryCSN, attrObjectClass, "reqEnd", "reqResult", "reqStart", "reqDN"}
 	if len(accesslogIndexAttrs) != len(want) {
 		t.Fatalf("accesslogIndexAttrs = %v, want %v", accesslogIndexAttrs, want)
 	}
@@ -84,7 +84,7 @@ func TestPlanAccesslogIndices(t *testing.T) {
 		},
 		{
 			name:    "a bare attribute with no explicit type still counts as configured",
-			current: []string{"entryCSN", "objectClass,reqEnd,reqResult,reqStart,reqDN eq"},
+			current: []string{attrEntryCSN, "objectClass,reqEnd,reqResult,reqStart,reqDN eq"},
 			want:    nil,
 		},
 		{

@@ -25,6 +25,17 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// Reasons of the DataPresent condition (ADR-025).
+const (
+	reasonGlueSuffix                = "GlueSuffix"
+	reasonNoReachablePod            = "NoReachablePod"
+	reasonRootEntryVisible          = "RootEntryVisible"
+	reasonDataMissingOnReadOnlyPods = "DataMissingOnReadOnlyPods"
+	reasonNoDataYet                 = "NoDataYet"
+	reasonDataMissing               = "DataMissing"
+	reasonDataMissingOnPods         = "DataMissingOnPods"
+)
+
 // podPresence is one pod's answer to "is the suffix's root entry visible to an
 // ordinary base search?". present and glued are only meaningful when assessed
 // is true.
@@ -189,43 +200,43 @@ func aggregateDataPresent(suffix string, results []podPresence, knownPopulated b
 
 	switch {
 	case len(glued) > 0:
-		return metav1.ConditionFalse, "GlueSuffix",
+		return metav1.ConditionFalse, reasonGlueSuffix,
 			fmt.Sprintf("root entry %s is a hidden GLUE entry on pod(s) %s "+
 				"(ManageDsaIT-confirmed; ADR-025 multi-site seed race) — base searches against "+
 				"those pods return nothing and backups taken from them are unrestorable; "+
 				"heal per the ADR-025 runbook. Informational only (ADR-012)%s",
 				suffix, strings.Join(glued, ", "), uncheckedNote)
 	case len(present) == 0 && len(missing) == 0:
-		return metav1.ConditionUnknown, "NoReachablePod",
+		return metav1.ConditionUnknown, reasonNoReachablePod,
 			fmt.Sprintf("could not reach any %s to verify data presence", scope)
 	case len(missing) == 0 && len(presentRO) == 0:
-		return metav1.ConditionTrue, "RootEntryVisible",
+		return metav1.ConditionTrue, reasonRootEntryVisible,
 			fmt.Sprintf("root entry %s visible on all %d reached RW pod(s)%s",
 				suffix, len(present), uncheckedNote)
 	case len(missing) == 0:
-		return metav1.ConditionTrue, "RootEntryVisible",
+		return metav1.ConditionTrue, reasonRootEntryVisible,
 			fmt.Sprintf("root entry %s visible on all %d reached RW pod(s) and %d read-only pod(s)%s",
 				suffix, len(present)-len(presentRO), len(presentRO), uncheckedNote)
 	case len(missingRW) == 0 && len(present) > 0:
-		return metav1.ConditionFalse, "DataMissingOnReadOnlyPods",
+		return metav1.ConditionFalse, reasonDataMissingOnReadOnlyPods,
 			fmt.Sprintf("root entry %s absent on read-only pod(s) %s while visible on every reached "+
 				"writable pod (%s) — expected transiently while a read-only replica performs its "+
 				"initial sync; if it persists, that replica is broken or its syncrepl stanzas are "+
 				"not converging. Writable pods are unaffected; informational only (ADR-012)%s",
 				suffix, strings.Join(missingRO, ", "), strings.Join(present, ", "), uncheckedNote)
 	case len(present) == 0 && !knownPopulated:
-		return metav1.ConditionUnknown, "NoDataYet",
+		return metav1.ConditionUnknown, reasonNoDataYet,
 			fmt.Sprintf("root entry %s is not present on any reached %s, and this database has "+
 				"never been seeded, restored or observed holding data — it is waiting for its first "+
 				"data (replication from a founder site or a legacy provider). Not an alert: nothing "+
 				"is known to have been lost%s", suffix, scope, uncheckedNote)
 	case len(present) == 0:
-		return metav1.ConditionFalse, "DataMissing",
+		return metav1.ConditionFalse, reasonDataMissing,
 			fmt.Sprintf("root entry %s not visible on any reachable %s — possible data loss; "+
 				"this condition is informational and does not trigger operator action (see ADR-012)%s",
 				suffix, scope, uncheckedNote)
 	default:
-		return metav1.ConditionFalse, "DataMissingOnPods",
+		return metav1.ConditionFalse, reasonDataMissingOnPods,
 			fmt.Sprintf("root entry %s hidden or absent on pod(s) %s while visible on %s — "+
 				"likely a hidden glue suffix entry from a multi-site seed race (ADR-025); "+
 				"verify with a ManageDSAIT base search; informational only (ADR-012)%s",

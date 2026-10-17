@@ -108,10 +108,10 @@ const frontendDN = "olcDatabase={-1}frontend,cn=config"
 // it would reject it at STARTUP, on a pod that was healthy a moment earlier.
 // Placing it correctly now costs nothing and removes that from the path.
 func tunableEntryDN(attr string) string {
-	if attr == "olcPasswordHash" {
+	if attr == attrOlcPasswordHash {
 		return frontendDN
 	}
-	return "cn=config"
+	return configDN
 }
 
 type globalTunable struct {

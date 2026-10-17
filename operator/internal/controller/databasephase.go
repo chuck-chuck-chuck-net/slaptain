@@ -16,6 +16,14 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// Reasons a SlapdDatabase's phase carries; Applied and PartiallyApplied are
+// shared with the SlapdSchema controller, whose condition says the same thing.
+const (
+	reasonNoPodsReachable  = "NoPodsReachable"
+	reasonPartiallyApplied = "PartiallyApplied"
+	reasonApplied          = "Applied"
+)
+
 // databasePhase selects the phase, reason and message a SlapdDatabase reconcile
 // publishes, from what that pass achieved.
 //
@@ -45,17 +53,17 @@ func databasePhase(
 	ridRefusal *ridSegmentVerdict,
 ) (ldapv1alpha1.SlapdDatabasePhase, string, string) {
 	if len(appliedPods) == 0 {
-		return ldapv1alpha1.DatabasePhaseError, "NoPodsReachable",
+		return ldapv1alpha1.DatabasePhaseError, reasonNoPodsReachable,
 			"Could not apply database to any pod"
 	}
 	if ridRefusal != nil {
 		return ldapv1alpha1.DatabasePhaseDegraded, ridRefusal.Reason, ridRefusal.Message
 	}
 	if pendingWork {
-		return ldapv1alpha1.DatabasePhaseDegraded, "PartiallyApplied",
+		return ldapv1alpha1.DatabasePhaseDegraded, reasonPartiallyApplied,
 			fmt.Sprintf("Database applied to %d pods, %d failed or pending",
 				len(appliedPods), len(failedPods))
 	}
-	return ldapv1alpha1.DatabasePhaseRunning, "Applied",
+	return ldapv1alpha1.DatabasePhaseRunning, reasonApplied,
 		fmt.Sprintf("Database applied to %d pods", len(appliedPods))
 }

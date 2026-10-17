@@ -41,7 +41,7 @@ func TestSlapdContainerProbes(t *testing.T) {
 
 		var slapd *corev1.Container
 		for i := range tmpl.Spec.Containers {
-			if tmpl.Spec.Containers[i].Name == "slapd" {
+			if tmpl.Spec.Containers[i].Name == slapdContainerName {
 				slapd = &tmpl.Spec.Containers[i]
 			}
 		}

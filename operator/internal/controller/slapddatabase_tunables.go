@@ -217,7 +217,13 @@ func compareMaxSize(current string, desired int64) (maxSizeVerdict, string) {
 // answer with a result code most client libraries do not surface. The way back
 // to bare OpenLDAP behaviour is asking for it (`sizeLimit: "500"`), never
 // silence (ADR-024 R5).
-const slaptainDefaultSearchLimit = "unlimited"
+const slaptainDefaultSearchLimit = slapdLimitUnlimited
+
+// slapd's spellings of "no limit" in olcSizeLimit/olcTimeLimit, besides -1.
+const (
+	slapdLimitUnlimited = "unlimited"
+	slapdLimitNone      = "none"
+)
 
 // desiredSizeLimit resolves spec.sizeLimit into the olcSizeLimit value to write
 // and whether to write one at all.
@@ -255,7 +261,7 @@ func resolveSearchLimit(v *string) (string, bool) {
 //
 // Operator-set and not removable through the API (ADR-024 R7): these implement
 // replication, which the operator owns end to end.
-var dataBaselineIndexAttrs = []string{"objectClass", "entryCSN", "entryUUID"}
+var dataBaselineIndexAttrs = []string{attrObjectClass, attrEntryCSN, "entryUUID"}
 
 // planDataBaselineIndices returns the olcDbIndex values to ADD so a data DB
 // covers dataBaselineIndexAttrs. Same seam, same rules as the accesslog
@@ -432,8 +438,8 @@ func (r *SlapdDatabaseReconciler) ensureSearchLimits(
 func searchLimitEqual(a, b string) bool {
 	norm := func(s string) string {
 		s = strings.ToLower(strings.TrimSpace(s))
-		if s == "none" || s == "-1" {
-			return "unlimited"
+		if s == slapdLimitNone || s == "-1" {
+			return slapdLimitUnlimited
 		}
 		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return strconv.FormatInt(n, 10)
@@ -532,9 +538,9 @@ func (r *SlapdDatabaseReconciler) ensureBackendTunables(
 ) error {
 	log := logf.FromContext(ctx)
 
-	noSync := "FALSE"
+	noSync := olcFalse
 	if desiredNoSync(sd, sc) {
-		noSync = "TRUE"
+		noSync = olcTrue
 	}
 
 	checkpoint, writeCheckpoint := desiredCheckpoint(sd)
@@ -588,6 +594,9 @@ func (r *SlapdDatabaseReconciler) ensureBackendTunables(
 	return nil
 }
 
+// noEnvFlagsShown is how checkEnvFlags names an empty olcDbEnvFlags set.
+const noEnvFlagsShown = "none"
+
 // checkEnvFlags reports — and never fixes — a divergence between spec.envFlags
 // and what a live database carries. The twin of checkMaxSize, for the same
 // reason: writing it can kill the process.
@@ -619,11 +628,11 @@ func (r *SlapdDatabaseReconciler) checkEnvFlags(
 		return nil
 	}
 
-	shown := "none"
+	shown := noEnvFlagsShown
 	if len(current) > 0 {
 		shown = strings.Join(current, ",")
 	}
-	wanted := "none"
+	wanted := noEnvFlagsShown
 	if len(desired) > 0 {
 		wanted = strings.Join(desired, ",")
 	}

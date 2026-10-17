@@ -145,7 +145,7 @@ func TestSourceConvergedOnSingleReplicaMeshMember(t *testing.T) {
 		t.Errorf("Status = %s, want %s — a mesh member's convergence is unknown, not proven",
 			cond.Status, metav1.ConditionUnknown)
 	}
-	if cond.Reason != "NoConvergenceSignal" {
+	if cond.Reason != reasonNoConvergenceSignal {
 		t.Errorf("Reason = %q, want %q", cond.Reason, "NoConvergenceSignal")
 	}
 	if strings.Contains(cond.Message, "not replicated") {
