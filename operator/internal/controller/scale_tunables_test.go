@@ -7,12 +7,6 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
-//go:fix inline
-func ptrBool(b bool) *bool { return new(b) }
-
-//go:fix inline
-func ptrI32(i int32) *int32 { return new(i) }
-
 func clusterFor() *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{}
 }

@@ -37,12 +37,6 @@ const (
 	testRIDNS      = "slaptain-testing"
 )
 
-//go:fix inline
-func i32(v int32) *int32 { return new(v) }
-
-//go:fix inline
-func boolp(v bool) *bool { return new(v) }
-
 // ridDB builds a SlapdDatabase declaring `segment` (nil for "not declared")
 // against cluster `clusterRef`, with replication enabled.
 func ridDB(name, clusterRef string, segment *int32) ldapv1alpha1.SlapdDatabase {
