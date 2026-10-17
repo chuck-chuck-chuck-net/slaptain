@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Run CI's Go lint gate before the commits leave the machine.
+#
+# Why pre-push and not pre-commit: the unit CI judges is a pushed branch, not a
+# commit, and a lint finding is not something you want to block a work-in-
+# progress commit on. Warm, this costs well under a second per module; the
+# first run of the day pays for the linter's own build cache.
+#
+# Why here and not in the hook directory core.hooksPath points at: that
+# directory is shared between repositories, and which linters this repository
+# runs is this repository's business — a standalone clone gets it by wiring
+# core.hooksPath at hack/git-hooks (see docs/DEVELOPMENT.md).
+#
+# SKIP_LINT=1 git push   to bypass. A failure here is not a reason to bypass
+# it; it is the finding CI would have reported twenty minutes later.
+set -euo pipefail
+
+if [[ ${SKIP_LINT:-0} == 1 ]]; then
+  echo "pre-push: SKIP_LINT=1, not linting" >&2
+  exit 0
+fi
+
+repo=$(git rev-parse --show-toplevel)
+cd "$repo"
+zero=0000000000000000000000000000000000000000
+remote=${1:-origin}
+
+# Every module that carries its own linter configuration, so adding a third one
+# needs no edit here. Agent worktrees under .claude/ are copies, not sources.
+mapfile -t modules < <(
+  find . -name .golangci.yml -not -path './.claude/*' -printf '%h\n' | sed 's|^\./||' | sort
+)
+[[ ${#modules[@]} -gt 0 ]] || exit 0
+
+# The files this push would publish, across every ref being pushed.
+changed=""
+while read -r _localref localsha _remoteref remotesha; do
+  if [[ -z $localsha || $localsha == "$zero" ]]; then
+    continue # nothing to push, or a branch deletion
+  fi
+  if [[ $remotesha == "$zero" ]]; then
+    # A new branch: everything not already on this remote.
+    range=("$localsha" --not --remotes="$remote")
+  else
+    range=("$remotesha..$localsha")
+  fi
+  changed+=$(git log --name-only --format= "${range[@]}")$'\n'
+done
+
+# The pinned linter, and the toolchain pin that makes it runnable — both read
+# from operator/Makefile, so there is one place to move them.
+golangci="$repo/operator/bin/golangci-lint"
+toolchain=$(sed -n 's/^LINT_GOTOOLCHAIN ?= //p' operator/Makefile)
+
+status=0
+for module in "${modules[@]}"; do
+  grep -q "^$module/" <<<"$changed" || continue
+
+  if [[ ! -x $golangci ]]; then
+    echo "pre-push: installing the pinned golangci-lint (first run)" >&2
+    make -C operator golangci-lint >&2
+  fi
+
+  echo "pre-push: linting $module" >&2
+  if ! (cd "$module" && GOTOOLCHAIN="$toolchain" "$golangci" run); then
+    status=1
+  fi
+done
+
+if [[ $status -ne 0 ]]; then
+  cat >&2 <<'MSG'
+
+pre-push: the lint gate CI runs is red here. Fix the findings (many have an
+automatic fix: golangci-lint run --fix), or push with SKIP_LINT=1 if you have
+decided this is CI's problem.
+MSG
+fi
+exit $status

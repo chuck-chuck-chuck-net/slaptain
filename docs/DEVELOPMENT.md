@@ -204,9 +204,30 @@ make verify-generated            # checked-in CRDs / RBAC / deepcopy still match
 
 CI (`.github/workflows/`) runs exactly these gates on every push and pull request:
 `test.yml` (tidy for both modules, `verify-generated`, the envtest unit tests, and a
-compile of the e2e suite), `lint.yml` (golangci-lint on **new** findings only until the
-docs/BACKLOG.md lint sweep lands, plus `helm-lint`), `codeql.yml` and `security.yml`.
+compile of the e2e suite), `lint.yml` (golangci-lint over **every** finding in each
+module — both are at zero — plus `helm-lint`), `codeql.yml` and `security.yml`.
 The e2e suite itself is not run in CI — it needs a lab cluster (see below).
+
+#### Running the lint gate before the push
+
+`hack/git-hooks/pre-push` runs the same linter, at the same pinned version and
+against the same `.golangci.yml`, over every module this push would touch — so a
+finding costs a second here instead of a round trip through CI. Wire it once:
+
+```bash
+git config core.hooksPath hack/git-hooks
+```
+
+Warm, it adds well under a second to a push; the first run builds the linter's
+cache. `SKIP_LINT=1 git push` bypasses it. The modules are discovered by their
+`.golangci.yml`, so a third one needs no edit to the hook.
+
+The linter runs under a pinned Go toolchain (`LINT_GOTOOLCHAIN` in
+`operator/Makefile`, which the hook reads), because golangci-lint's bundled
+`x/tools` cannot read the export data a newer stdlib writes. **That pin has to
+stay at or above the `go` line in `go.mod`** — below it, every lint run dies on
+`go.mod requires go >= …` before a single linter starts, and the gate silently
+stops being a gate on every machine that runs it.
 
 Publishing is CI's too, and goes through the Makefile so the tag rule in
 [Versioning](VERSIONING.md) stays the single source: `publish-main.yml` runs `make push`
