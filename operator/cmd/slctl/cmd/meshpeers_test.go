@@ -21,7 +21,7 @@ import (
 
 func peerCluster(peers ...ldapv1alpha1.ExternalPeer) *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			Replicas: 3,
 			Replication: ldapv1alpha1.SlapdReplicationConfig{
@@ -31,6 +31,9 @@ func peerCluster(peers ...ldapv1alpha1.ExternalPeer) *ldapv1alpha1.SlapdCluster 
 		},
 	}
 }
+
+// peerBURI is a hand-written peer's URI, as a user would spell it.
+const peerBURI = "ldaps://b.example:1025"
 
 func withMeshRef(sc *ldapv1alpha1.SlapdCluster) *ldapv1alpha1.SlapdCluster {
 	sc.Spec.MeshRef = testMeshName
@@ -64,8 +67,8 @@ func withPeerStatuses(sc *ldapv1alpha1.SlapdCluster, names ...string) *ldapv1alp
 
 func TestResolveExternalPeersForDisplay(t *testing.T) {
 	handWritten := []ldapv1alpha1.ExternalPeer{
-		{Name: "site-b", URI: "ldaps://b.example:1025"},
-		{Name: "site-c", PodAddresses: []string{"192.0.2.7"}},
+		{Name: siteB, URI: peerBURI},
+		{Name: siteC, PodAddresses: []string{"192.0.2.7"}},
 	}
 
 	tests := []struct {
@@ -93,7 +96,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			name:         "no meshRef, hand-written peers",
 			sc:           peerCluster(handWritten...),
 			wantSource:   peerSourceSpec,
-			wantPeers:    []string{"site-b", "site-c"},
+			wantPeers:    []string{siteB, siteC},
 			wantNoteNone: true,
 		},
 		{
@@ -103,10 +106,10 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			sc: withPeerStatuses(
 				withMeshCondition(withMeshRef(peerCluster()),
 					metav1.ConditionTrue, "Derived", "cross-site wiring derived from SlapdMesh \"lab\""),
-				"site-b", "site-c"),
+				siteB, siteC),
 			wantSource:  peerSourceMesh,
-			wantPeers:   []string{"site-b", "site-c"},
-			wantNoteHas: []string{"lab", "derived"},
+			wantPeers:   []string{siteB, siteC},
+			wantNoteHas: []string{testMeshName, "derived"},
 		},
 		{
 			// A single-site mesh genuinely has no peers. That is a real answer
@@ -117,7 +120,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 				metav1.ConditionTrue, "Derived", "derived"),
 			wantSource:  peerSourceMesh,
 			wantPeers:   nil,
-			wantNoteHas: []string{"lab", "0"},
+			wantNoteHas: []string{testMeshName, "0"},
 		},
 		{
 			// The operator refused to derive. slctl must repeat the operator's
@@ -137,9 +140,9 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			sc: withPeerStatuses(
 				withMeshCondition(withMeshRef(peerCluster()),
 					metav1.ConditionFalse, "MeshUnreadable", "cannot read SlapdMesh"),
-				"site-b"),
+				siteB),
 			wantSource:  peerSourceUnknown,
-			wantPeers:   []string{"site-b"},
+			wantPeers:   []string{siteB},
 			wantNoteHas: []string{"MeshUnreadable", "LAST KNOWN"},
 		},
 		{
@@ -149,7 +152,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			sc:          withMeshRef(peerCluster()),
 			wantSource:  peerSourceUnknown,
 			wantPeers:   nil,
-			wantNoteHas: []string{"lab", "no MeshResolved"},
+			wantNoteHas: []string{testMeshName, "no MeshResolved"},
 		},
 		{
 			// Condition present but Unknown — same treatment as False. An
@@ -212,7 +215,7 @@ func TestResolvedMeshPeersPresentAsDiscovery(t *testing.T) {
 	sc := withPeerStatuses(
 		withMeshCondition(withMeshRef(peerCluster()),
 			metav1.ConditionTrue, "Derived", "derived"),
-		"site-b")
+		siteB)
 
 	got := resolveExternalPeersForDisplay(sc)
 	if len(got.Peers) != 1 {
@@ -237,7 +240,7 @@ func TestResolvedMeshPeersPresentAsDiscovery(t *testing.T) {
 // meshRef must come out of it untouched, since every documented slctl example
 // is a non-mesh cluster.
 func TestApplyResolvedPeersLeavesNonMeshClustersAlone(t *testing.T) {
-	handWritten := []ldapv1alpha1.ExternalPeer{{Name: "site-b", URI: "ldaps://b.example:1025"}}
+	handWritten := []ldapv1alpha1.ExternalPeer{{Name: siteB, URI: peerBURI}}
 	sc := peerCluster(handWritten...)
 
 	res := applyResolvedPeers(sc)
@@ -246,7 +249,7 @@ func TestApplyResolvedPeersLeavesNonMeshClustersAlone(t *testing.T) {
 		t.Errorf("Source = %q, want %q", res.Source, peerSourceSpec)
 	}
 	peers := sc.Spec.Replication.ExternalPeers
-	if len(peers) != 1 || peers[0].URI != "ldaps://b.example:1025" {
+	if len(peers) != 1 || peers[0].URI != peerBURI {
 		t.Errorf("spec peers were rewritten: %+v", sc.Spec.Replication.ExternalPeers)
 	}
 }
@@ -255,7 +258,7 @@ func TestApplyResolvedPeersFillsMeshClusterSpec(t *testing.T) {
 	sc := withPeerStatuses(
 		withMeshCondition(withMeshRef(peerCluster()),
 			metav1.ConditionTrue, "Derived", "derived"),
-		"site-b", "site-c")
+		siteB, siteC)
 
 	res := applyResolvedPeers(sc)
 

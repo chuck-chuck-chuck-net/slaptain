@@ -64,66 +64,66 @@ func TestCheckSuffixVisibility(t *testing.T) {
 		wantInMsg  string
 	}{
 		{"all pods visible", []podState{
-			suffixPod("slapd-0", obs(true, false, "u1")),
-			suffixPod("slapd-1", obs(true, false, "u1")),
+			suffixPod(testPod0, obs(true, false, "u1")),
+			suffixPod(testPod1, obs(true, false, "u1")),
 		}, checkPass, ""},
 
 		// The live incident: slapd-0 hides a glue while peers show the entry.
 		{"glue on one pod fails", []podState{
-			suffixPod("slapd-0", obs(false, true, "u-glue")),
-			suffixPod("slapd-1", obs(true, false, "u1")),
-		}, checkFail, "slapd-0"},
+			suffixPod(testPod0, obs(false, true, "u-glue")),
+			suffixPod(testPod1, obs(true, false, "u1")),
+		}, checkFail, testPod0},
 
 		{"glue verdict names glue", []podState{
-			suffixPod("slapd-0", obs(false, true, "u-glue")),
-			suffixPod("slapd-1", obs(true, false, "u1")),
-		}, checkFail, "glue"},
+			suffixPod(testPod0, obs(false, true, "u-glue")),
+			suffixPod(testPod1, obs(true, false, "u1")),
+		}, checkFail, glueMarker},
 
 		// Hidden without a glue verdict (ManageDSAIT also empty or denied) on
 		// one pod while another shows it: still a divergence — fail.
 		{"hidden on one pod fails", []podState{
-			suffixPod("slapd-0", obs(false, false, "")),
-			suffixPod("slapd-1", obs(true, false, "u1")),
-		}, checkFail, "slapd-0"},
+			suffixPod(testPod0, obs(false, false, "")),
+			suffixPod(testPod1, obs(true, false, "u1")),
+		}, checkFail, testPod0},
 
 		// RO pods count: a consumer that initial-synced from a glued provider
 		// replicates the glue (measured live 2026-09-13).
 		{"glue on RO pod fails", []podState{
-			suffixPod("slapd-0", obs(true, false, "u1")),
-			suffixPod("slapd-readonly-0", obs(false, true, "u-glue")),
-		}, checkFail, "slapd-readonly-0"},
+			suffixPod(testPod0, obs(true, false, "u1")),
+			suffixPod(testROPod0, obs(false, true, "u-glue")),
+		}, checkFail, testROPod0},
 
 		// Uniform invisibility is not the divergence signature — anonymous
 		// ACLs can hide the entry from this probe on every pod equally.
 		{"hidden everywhere warns", []podState{
-			suffixPod("slapd-0", obs(false, false, "")),
-			suffixPod("slapd-1", obs(false, false, "")),
+			suffixPod(testPod0, obs(false, false, "")),
+			suffixPod(testPod1, obs(false, false, "")),
 		}, checkWarn, ""},
 
 		// A glue is absolute evidence even when every pod hides the entry.
 		{"glue everywhere fails", []podState{
-			suffixPod("slapd-0", obs(false, true, "u-glue")),
-			suffixPod("slapd-1", obs(false, true, "u-glue")),
-		}, checkFail, "glue"},
+			suffixPod(testPod0, obs(false, true, "u-glue")),
+			suffixPod(testPod1, obs(false, true, "u-glue")),
+		}, checkFail, glueMarker},
 
 		// A pod whose probe FAILED (denied read, search error) is not "hidden":
 		// treating it as hidden turned a failed read into a per-pod divergence
 		// FAIL. Evidence that degrades to empty on a read failure is the class
 		// this repo has been bitten by; it now reads as not-assessed.
 		{"unassessable pod does not manufacture divergence", []podState{
-			suffixPod("slapd-0", obsUnassessable()),
-			suffixPod("slapd-1", obs(true, false, "u1")),
+			suffixPod(testPod0, obsUnassessable()),
+			suffixPod(testPod1, obs(true, false, "u1")),
 		}, checkPass, ""},
 
 		{"unassessable everywhere warns", []podState{
-			suffixPod("slapd-0", obsUnassessable()),
-			suffixPod("slapd-1", obsUnassessable()),
+			suffixPod(testPod0, obsUnassessable()),
+			suffixPod(testPod1, obsUnassessable()),
 		}, checkWarn, ""},
 
 		// Unqueryable pods are pod-readiness's problem, not this check's.
 		{"skipped pod ignored", []podState{
-			suffixPod("slapd-0", obs(true, false, "u1")),
-			{name: "slapd-1", err: "port-forward: connection refused"},
+			suffixPod(testPod0, obs(true, false, "u1")),
+			{name: testPod1, err: "port-forward: connection refused"},
 		}, checkPass, ""},
 	}
 	for _, tc := range tests {
@@ -154,30 +154,30 @@ func TestCheckSuffixUUIDAgreement(t *testing.T) {
 		wantInMsg  string
 	}{
 		{"all agree", []podState{
-			suffixPod("slapd-0", obs(true, false, "1b03268c")),
-			suffixPod("slapd-1", obs(true, false, "1b03268c")),
+			suffixPod(testPod0, obs(true, false, "1b03268c")),
+			suffixPod(testPod1, obs(true, false, "1b03268c")),
 		}, checkPass, ""},
 
 		// The live incident: the glue's locally minted UUID vs the real one.
 		{"disagreement fails naming pods", []podState{
-			suffixPod("slapd-0", obs(false, true, "1a914f3a")),
-			suffixPod("slapd-1", obs(true, false, "1b03268c")),
-		}, checkFail, "slapd-0"},
+			suffixPod(testPod0, obs(false, true, "1a914f3a")),
+			suffixPod(testPod1, obs(true, false, "1b03268c")),
+		}, checkFail, testPod0},
 
 		{"disagreement lists both uuids", []podState{
-			suffixPod("slapd-0", obs(false, true, "1a914f3a")),
-			suffixPod("slapd-1", obs(true, false, "1b03268c")),
+			suffixPod(testPod0, obs(false, true, "1a914f3a")),
+			suffixPod(testPod1, obs(true, false, "1b03268c")),
 		}, checkFail, "1a914f3a"},
 
 		// No UUID readable anywhere: cannot assess — warn, don't guess.
 		{"no uuids warns", []podState{
-			suffixPod("slapd-0", obs(false, false, "")),
-			suffixPod("slapd-1", obs(false, false, "")),
+			suffixPod(testPod0, obs(false, false, "")),
+			suffixPod(testPod1, obs(false, false, "")),
 		}, checkWarn, ""},
 
 		{"single reader passes", []podState{
-			suffixPod("slapd-0", obs(true, false, "1b03268c")),
-			suffixPod("slapd-1", obs(false, false, "")),
+			suffixPod(testPod0, obs(true, false, "1b03268c")),
+			suffixPod(testPod1, obs(false, false, "")),
 		}, checkPass, ""},
 	}
 	for _, tc := range tests {

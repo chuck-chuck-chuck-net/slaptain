@@ -22,12 +22,12 @@ func TestBindNeedsDatabase(t *testing.T) {
 		want bool
 	}{
 		{"default (admin)", ldapTargetFlags{}, true},
-		{"admin", ldapTargetFlags{as: "admin"}, true},
-		{"replication", ldapTargetFlags{as: "replication"}, true},
-		{"config", ldapTargetFlags{as: "config"}, false},
+		{identAdmin, ldapTargetFlags{as: identAdmin}, true},
+		{identReplication, ldapTargetFlags{as: identReplication}, true},
+		{identConfig, ldapTargetFlags{as: identConfig}, false},
 		{"anonymous", ldapTargetFlags{anonymous: true}, false},
-		{"anonymous wins over admin", ldapTargetFlags{as: "admin", anonymous: true}, false},
-		{"literal full DN", ldapTargetFlags{as: "cn=admin,cn=config"}, false},
+		{"anonymous wins over admin", ldapTargetFlags{as: identAdmin, anonymous: true}, false},
+		{"literal full DN", ldapTargetFlags{as: configAdminDN}, false},
 		{"literal DN with trailing comma", ldapTargetFlags{as: "cn=someone,ou=People,"}, true},
 		{"literal short form", ldapTargetFlags{as: "someone"}, true},
 	}
@@ -44,23 +44,25 @@ func TestBindNeedsDatabase(t *testing.T) {
 // one — that is the whole point of making the lookup conditional.
 func TestResolveBindWithoutDatabase(t *testing.T) {
 	coreClient := fake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "slapd-config-password", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "slapd-config-password", Namespace: testNamespace},
 		Data:       map[string][]byte{"root-password": []byte("s3cret")},
 	})
-	sc := &ldapv1alpha1.SlapdCluster{ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "default"}}
+	sc := &ldapv1alpha1.SlapdCluster{ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace}}
 
-	t.Run("config", func(t *testing.T) {
-		dn, pw, err := resolveBind(context.Background(), coreClient, "default", sc, nil, &ldapTargetFlags{as: "config"})
+	t.Run(identConfig, func(t *testing.T) {
+		dn, pw, err := resolveBind(context.Background(), coreClient, testNamespace, sc, nil,
+			&ldapTargetFlags{as: identConfig})
 		if err != nil {
 			t.Fatalf("resolveBind: %v", err)
 		}
-		if dn != "cn=admin,cn=config" || pw != "s3cret" {
+		if dn != configAdminDN || pw != "s3cret" {
 			t.Fatalf("got (%q, %q), want (cn=admin,cn=config, s3cret)", dn, pw)
 		}
 	})
 
 	t.Run("anonymous", func(t *testing.T) {
-		dn, pw, err := resolveBind(context.Background(), coreClient, "default", sc, nil, &ldapTargetFlags{anonymous: true})
+		dn, pw, err := resolveBind(context.Background(), coreClient, testNamespace, sc, nil,
+			&ldapTargetFlags{anonymous: true})
 		if err != nil {
 			t.Fatalf("resolveBind: %v", err)
 		}
@@ -70,7 +72,7 @@ func TestResolveBindWithoutDatabase(t *testing.T) {
 	})
 
 	t.Run("literal full DN", func(t *testing.T) {
-		dn, _, err := resolveBind(context.Background(), coreClient, "default", sc, nil,
+		dn, _, err := resolveBind(context.Background(), coreClient, testNamespace, sc, nil,
 			&ldapTargetFlags{as: "cn=monitor,cn=config", password: "pw"})
 		if err != nil {
 			t.Fatalf("resolveBind: %v", err)

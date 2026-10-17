@@ -27,6 +27,23 @@ import (
 // the layout, and a number that is individually plausible and only becomes
 // wrong once a particular layout is applied.
 
+// Two databases that can share a RID segment.
+const (
+	dbCustomers = "customers"
+	dbStaging   = "staging"
+)
+
+// labMeshSource is the provenance of a layout read from the "lab" mesh.
+const labMeshSource = `SlapdMesh "lab"`
+
+// layoutWord is what a summary or note must mention when the layout is at
+// fault, or was not the one in force.
+const layoutWord = "layout"
+
+// offlineLayoutSource is the provenance the fixtures give a decode that
+// consulted nothing.
+const offlineLayoutSource = "default"
+
 const (
 	// The default layout, spelled out so a reader need not recompute it:
 	// P=8, S=12 → M=20, C=49, and the largest RID it can produce is C·M = 980.
@@ -39,7 +56,7 @@ const (
 func offlineRes() ridResolution {
 	return ridResolution{
 		Layout:        ridcoord.DefaultLayout(),
-		LayoutSource:  "default",
+		LayoutSource:  offlineLayoutSource,
 		LayoutTrusted: true,
 	}
 }
@@ -210,7 +227,7 @@ func TestDecodeRID(t *testing.T) {
 			rid:            317,
 			res:            withRIDLayout(offlineRes(), 0, 0),
 			wantStatus:     ridDecodeLayoutUnusable,
-			wantSummaryHas: []string{"layout"},
+			wantSummaryHas: []string{layoutWord},
 		},
 		{
 			// Both axes individually inside the band, their sum above it, so
@@ -220,7 +237,7 @@ func TestDecodeRID(t *testing.T) {
 			rid:            317,
 			res:            withRIDLayout(offlineRes(), 600, 600),
 			wantStatus:     ridDecodeLayoutUnusable,
-			wantSummaryHas: []string{"layout"},
+			wantSummaryHas: []string{layoutWord},
 		},
 		{
 			// ADR-031 decision 5: P=1, S=1 is a configuration and not a typo —
@@ -243,20 +260,20 @@ func TestDecodeRID(t *testing.T) {
 			rid:  317,
 			res: ridResolution{
 				Layout:        ridcoord.DefaultLayout(),
-				LayoutSource:  `SlapdMesh "lab"`,
+				LayoutSource:  labMeshSource,
 				LayoutTrusted: true,
-				ClusterName:   "slapd",
+				ClusterName:   testClusterName,
 				Replicas:      3,
-				MeshName:      "lab",
-				Databases:     map[int32][]string{15: {"customers"}},
-				Sites:         map[int32]string{8: "site-i"},
+				MeshName:      testMeshName,
+				Databases:     map[int32][]string{15: {dbCustomers}},
+				Sites:         map[int32]string{8: siteI},
 			},
 			wantStatus:    ridDecodeOK,
 			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
 			wantSiteIndex: new(int32(8)),
-			wantDatabases: []string{"customers"},
-			wantSite:      "site-i",
+			wantDatabases: []string{dbCustomers},
+			wantSite:      siteI,
 			wantNoNotes:   true,
 		},
 		{
@@ -267,16 +284,16 @@ func TestDecodeRID(t *testing.T) {
 			rid:  317,
 			res: ridResolution{
 				Layout:        ridcoord.DefaultLayout(),
-				LayoutSource:  "default",
+				LayoutSource:  offlineLayoutSource,
 				LayoutTrusted: true,
-				ClusterName:   "slapd",
-				Databases:     map[int32][]string{0: {"default"}},
+				ClusterName:   testClusterName,
+				Databases:     map[int32][]string{0: {testDBName}},
 			},
 			wantStatus:    ridDecodeOK,
 			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
 			wantSiteIndex: new(int32(8)),
-			wantNotesHave: []string{"15", "slapd", "no slapddatabase"},
+			wantNotesHave: []string{"15", testClusterName, "no slapddatabase"},
 		},
 		{
 			// Offline is a different sentence from "looked and found nothing",
@@ -298,17 +315,17 @@ func TestDecodeRID(t *testing.T) {
 			rid:  317,
 			res: ridResolution{
 				Layout:        ridcoord.DefaultLayout(),
-				LayoutSource:  "default",
+				LayoutSource:  offlineLayoutSource,
 				LayoutTrusted: true,
-				ClusterName:   "slapd",
-				Databases:     map[int32][]string{15: {"customers", "staging"}},
+				ClusterName:   testClusterName,
+				Databases:     map[int32][]string{15: {dbCustomers, dbStaging}},
 			},
 			wantStatus:    ridDecodeOK,
 			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
 			wantSiteIndex: new(int32(8)),
-			wantDatabases: []string{"customers", "staging"},
-			wantNotesHave: []string{"customers", "staging", "15"},
+			wantDatabases: []string{dbCustomers, dbStaging},
+			wantNotesHave: []string{dbCustomers, dbStaging, "15"},
 		},
 		{
 			// A mesh WAS consulted and declares no site on that index: a real
@@ -318,20 +335,20 @@ func TestDecodeRID(t *testing.T) {
 			rid:  317,
 			res: ridResolution{
 				Layout:        ridcoord.DefaultLayout(),
-				LayoutSource:  `SlapdMesh "lab"`,
+				LayoutSource:  labMeshSource,
 				LayoutTrusted: true,
-				ClusterName:   "slapd",
-				MeshName:      "lab",
-				Databases:     map[int32][]string{15: {"customers"}},
-				Sites:         map[int32]string{0: "site-a"},
+				ClusterName:   testClusterName,
+				MeshName:      testMeshName,
+				Databases:     map[int32][]string{15: {dbCustomers}},
+				Sites:         map[int32]string{0: siteA},
 			},
 			wantStatus:    ridDecodeOK,
 			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
 			wantSiteIndex: new(int32(8)),
-			wantDatabases: []string{"customers"},
+			wantDatabases: []string{dbCustomers},
 			wantSite:      "",
-			wantNotesHave: []string{"8", "lab", "serveridindex"},
+			wantNotesHave: []string{"8", testMeshName, "serveridindex"},
 		},
 		{
 			// A local coordinate names a pod of the reader's own site, and the
@@ -340,17 +357,17 @@ func TestDecodeRID(t *testing.T) {
 			rid:  3,
 			res: ridResolution{
 				Layout:        ridcoord.DefaultLayout(),
-				LayoutSource:  "default",
+				LayoutSource:  offlineLayoutSource,
 				LayoutTrusted: true,
-				ClusterName:   "slapd",
+				ClusterName:   testClusterName,
 				Replicas:      3,
-				Databases:     map[int32][]string{0: {"default"}},
+				Databases:     map[int32][]string{0: {testDBName}},
 			},
 			wantStatus:    ridDecodeOK,
 			wantSegment:   new(int32(0)),
 			wantKind:      ridcoord.KindLocal,
 			wantOrdinal:   new(int32(2)),
-			wantDatabases: []string{"default"},
+			wantDatabases: []string{testDBName},
 			wantPod:       "slapd-2",
 			wantNoNotes:   true,
 		},
@@ -364,19 +381,19 @@ func TestDecodeRID(t *testing.T) {
 			rid:  5,
 			res: ridResolution{
 				Layout:        ridcoord.DefaultLayout(),
-				LayoutSource:  "default",
+				LayoutSource:  offlineLayoutSource,
 				LayoutTrusted: true,
-				ClusterName:   "slapd",
+				ClusterName:   testClusterName,
 				Replicas:      3,
-				Databases:     map[int32][]string{0: {"default"}},
+				Databases:     map[int32][]string{0: {testDBName}},
 			},
 			wantStatus:    ridDecodeOK,
 			wantSegment:   new(int32(0)),
 			wantKind:      ridcoord.KindLocal,
 			wantOrdinal:   new(int32(4)),
-			wantDatabases: []string{"default"},
+			wantDatabases: []string{testDBName},
 			wantPod:       "slapd-4",
-			wantNotesHave: []string{"3", "slapd"},
+			wantNotesHave: []string{"3", testClusterName},
 		},
 		{
 			// An untrusted layout must be loud: every term downstream of it is
@@ -388,18 +405,18 @@ func TestDecodeRID(t *testing.T) {
 				Layout:        ridcoord.DefaultLayout(),
 				LayoutSource:  `SlapdMesh "lab" (unreadable; showing the defaults)`,
 				LayoutTrusted: false,
-				ClusterName:   "slapd",
-				MeshName:      "lab",
-				Databases:     map[int32][]string{15: {"customers"}},
-				Sites:         map[int32]string{8: "site-i"},
+				ClusterName:   testClusterName,
+				MeshName:      testMeshName,
+				Databases:     map[int32][]string{15: {dbCustomers}},
+				Sites:         map[int32]string{8: siteI},
 			},
 			wantStatus:    ridDecodeOK,
 			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
 			wantSiteIndex: new(int32(8)),
-			wantDatabases: []string{"customers"},
-			wantSite:      "site-i",
-			wantNotesHave: []string{"lab", "layout"},
+			wantDatabases: []string{dbCustomers},
+			wantSite:      siteI,
+			wantNotesHave: []string{testMeshName, layoutWord},
 		},
 	}
 
@@ -640,8 +657,8 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	t.Run("no meshRef uses the default layout and resolves databases", func(t *testing.T) {
 		sc := ridCluster("")
 		dbs := []ldapv1alpha1.SlapdDatabase{
-			ridDatabase("default", "slapd", new(int32(0))),
-			ridDatabase("customers", "slapd", new(int32(15))),
+			ridDatabase(testDBName, testClusterName, new(int32(0))),
+			ridDatabase(dbCustomers, testClusterName, new(int32(15))),
 		}
 
 		res := buildRIDResolution(sc, nil, dbs)
@@ -652,11 +669,11 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 		if !res.LayoutTrusted {
 			t.Errorf("LayoutTrusted = false; a cluster outside a mesh has nothing unread")
 		}
-		if res.ClusterName != "slapd" || res.Replicas != 3 {
+		if res.ClusterName != testClusterName || res.Replicas != 3 {
 			t.Errorf("ClusterName=%q Replicas=%d, want slapd/3", res.ClusterName, res.Replicas)
 		}
-		assertStrings(t, "Databases[0]", res.Databases[0], []string{"default"})
-		assertStrings(t, "Databases[15]", res.Databases[15], []string{"customers"})
+		assertStrings(t, "Databases[0]", res.Databases[0], []string{testDBName})
+		assertStrings(t, "Databases[15]", res.Databases[15], []string{dbCustomers})
 		if res.Databases == nil {
 			t.Errorf("Databases is nil although a cluster was consulted")
 		}
@@ -671,9 +688,9 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	t.Run("databases are filtered by clusterRef and by a declared segment", func(t *testing.T) {
 		sc := ridCluster("")
 		dbs := []ldapv1alpha1.SlapdDatabase{
-			ridDatabase("mine", "slapd", new(int32(1))),
+			ridDatabase("mine", testClusterName, new(int32(1))),
 			ridDatabase("theirs", "other", new(int32(1))),
-			ridDatabase("unnumbered", "slapd", nil),
+			ridDatabase("unnumbered", testClusterName, nil),
 		}
 
 		res := buildRIDResolution(sc, nil, dbs)
@@ -689,13 +706,13 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	t.Run("two databases on one segment are both recorded", func(t *testing.T) {
 		sc := ridCluster("")
 		dbs := []ldapv1alpha1.SlapdDatabase{
-			ridDatabase("staging", "slapd", new(int32(7))),
-			ridDatabase("customers", "slapd", new(int32(7))),
+			ridDatabase(dbStaging, testClusterName, new(int32(7))),
+			ridDatabase(dbCustomers, testClusterName, new(int32(7))),
 		}
 
 		res := buildRIDResolution(sc, nil, dbs)
 
-		assertStrings(t, "Databases[7]", res.Databases[7], []string{"customers", "staging"})
+		assertStrings(t, "Databases[7]", res.Databases[7], []string{dbCustomers, dbStaging})
 	})
 }
 
@@ -711,7 +728,7 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 		if !res.LayoutTrusted {
 			t.Errorf("LayoutTrusted = false; the mesh was read and declares the defaults")
 		}
-		if res.MeshName != "lab" {
+		if res.MeshName != testMeshName {
 			t.Errorf("MeshName = %q, want lab", res.MeshName)
 		}
 	})
@@ -751,14 +768,14 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	t.Run("sites are indexed by serverIDIndex, not list position", func(t *testing.T) {
 		sc := ridCluster(testMeshName)
 		mesh := ridMesh(nil,
-			ldapv1alpha1.MeshSite{Name: "site-c", ServerIDIndex: new(int32(5))},
-			ldapv1alpha1.MeshSite{Name: "site-a", ServerIDIndex: new(int32(0))},
-			ldapv1alpha1.MeshSite{Name: "site-b", ServerIDIndex: new(int32(2))},
+			ldapv1alpha1.MeshSite{Name: siteC, ServerIDIndex: new(int32(5))},
+			ldapv1alpha1.MeshSite{Name: siteA, ServerIDIndex: new(int32(0))},
+			ldapv1alpha1.MeshSite{Name: siteB, ServerIDIndex: new(int32(2))},
 		)
 
 		res := buildRIDResolution(sc, mesh, nil)
 
-		for idx, want := range map[int32]string{0: "site-a", 2: "site-b", 5: "site-c"} {
+		for idx, want := range map[int32]string{0: siteA, 2: siteB, 5: siteC} {
 			if res.Sites[idx] != want {
 				t.Errorf("Sites[%d] = %q, want %q", idx, res.Sites[idx], want)
 			}
@@ -771,13 +788,13 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	t.Run("a site with no serverIDIndex claims no slot", func(t *testing.T) {
 		sc := ridCluster(testMeshName)
 		mesh := ridMesh(nil,
-			ldapv1alpha1.MeshSite{Name: "site-a", ServerIDIndex: new(int32(0))},
+			ldapv1alpha1.MeshSite{Name: siteA, ServerIDIndex: new(int32(0))},
 			ldapv1alpha1.MeshSite{Name: "nameless"},
 		)
 
 		res := buildRIDResolution(sc, mesh, nil)
 
-		if len(res.Sites) != 1 || res.Sites[0] != "site-a" {
+		if len(res.Sites) != 1 || res.Sites[0] != siteA {
 			t.Errorf("Sites = %v, want only site-a at 0", res.Sites)
 		}
 	})
@@ -798,7 +815,7 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 			t.Errorf("LayoutTrusted = true, but the declared layout was never read; "+
 				"every term downstream of M is conditional on it (source=%q)", res.LayoutSource)
 		}
-		if !strings.Contains(res.LayoutSource, "lab") {
+		if !strings.Contains(res.LayoutSource, testMeshName) {
 			t.Errorf("LayoutSource = %q, want it to name the unreadable mesh", res.LayoutSource)
 		}
 		if res.Sites != nil {
@@ -814,17 +831,17 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 func TestRenderRIDDecodeText(t *testing.T) {
 	r := decodeRID(317, ridResolution{
 		Layout:        ridcoord.DefaultLayout(),
-		LayoutSource:  `SlapdMesh "lab"`,
+		LayoutSource:  labMeshSource,
 		LayoutTrusted: true,
-		ClusterName:   "slapd",
+		ClusterName:   testClusterName,
 		Replicas:      3,
-		MeshName:      "lab",
-		Databases:     map[int32][]string{15: {"customers"}},
-		Sites:         map[int32]string{8: "site-i"},
+		MeshName:      testMeshName,
+		Databases:     map[int32][]string{15: {dbCustomers}},
+		Sites:         map[int32]string{8: siteI},
 	})
 	out := renderRIDDecodeText(r)
 
-	for _, want := range []string{"317", "15", "customers", "site-i", "8"} {
+	for _, want := range []string{"317", "15", dbCustomers, siteI, "8"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered text is missing %q:\n%s", want, out)
 		}
@@ -837,12 +854,12 @@ func TestRenderRIDDecodeText(t *testing.T) {
 func TestRenderRIDDecodeTextCarriesEveryNote(t *testing.T) {
 	r := decodeRID(317, ridResolution{
 		Layout:        ridcoord.DefaultLayout(),
-		LayoutSource:  "default",
+		LayoutSource:  offlineLayoutSource,
 		LayoutTrusted: true,
-		ClusterName:   "slapd",
-		Databases:     map[int32][]string{0: {"default"}},
-		Sites:         map[int32]string{0: "site-a"},
-		MeshName:      "lab",
+		ClusterName:   testClusterName,
+		Databases:     map[int32][]string{0: {testDBName}},
+		Sites:         map[int32]string{0: siteA},
+		MeshName:      testMeshName,
 	})
 	out := renderRIDDecodeText(r)
 
@@ -874,13 +891,13 @@ func TestRenderRIDDecodeTextExplainsAPreRenumberRID(t *testing.T) {
 func TestBuildRIDDecodeJSON(t *testing.T) {
 	r := decodeRID(317, ridResolution{
 		Layout:        ridcoord.DefaultLayout(),
-		LayoutSource:  `SlapdMesh "lab"`,
+		LayoutSource:  labMeshSource,
 		LayoutTrusted: true,
-		ClusterName:   "slapd",
+		ClusterName:   testClusterName,
 		Replicas:      3,
-		MeshName:      "lab",
-		Databases:     map[int32][]string{15: {"customers"}},
-		Sites:         map[int32]string{8: "site-i"},
+		MeshName:      testMeshName,
+		Databases:     map[int32][]string{15: {dbCustomers}},
+		Sites:         map[int32]string{8: siteI},
 	})
 	j := buildRIDDecodeJSON(r, true)
 
@@ -908,8 +925,8 @@ func TestBuildRIDDecodeJSON(t *testing.T) {
 	if j.Ordinal != nil {
 		t.Errorf("ordinal = %v, want nil for a remote coordinate", j.Ordinal)
 	}
-	assertStrings(t, "databases", j.Databases, []string{"customers"})
-	if j.Site != "site-i" {
+	assertStrings(t, "databases", j.Databases, []string{dbCustomers})
+	if j.Site != siteI {
 		t.Errorf("site = %q, want site-i", j.Site)
 	}
 	if j.Summary == "" {

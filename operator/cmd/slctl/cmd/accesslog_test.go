@@ -13,23 +13,23 @@ import (
 // legacy suffix it needs are derived from the one API helper. These guard that
 // derivation against a change to AccesslogSuffix's shape.
 func TestAccesslogDerivationDriftGuard(t *testing.T) {
-	if got, want := accesslogSuffixPrefix+"default", ldapv1alpha1.AccesslogSuffix("default"); got != want {
+	if got, want := accesslogSuffixPrefix+testDBName, ldapv1alpha1.AccesslogSuffix(testDBName); got != want {
 		t.Errorf("accesslogSuffixPrefix+db = %q, want %q", got, want)
 	}
 	if got, want := legacySharedAccesslogSuffix+"-", accesslogSuffixPrefix; got != want {
 		t.Errorf("legacySharedAccesslogSuffix+\"-\" = %q, want %q", got, want)
 	}
-	if !isAccesslogSuffix(ldapv1alpha1.AccesslogSuffix("default")) {
-		t.Errorf("isAccesslogSuffix(%q) = false, want true", ldapv1alpha1.AccesslogSuffix("default"))
+	if !isAccesslogSuffix(ldapv1alpha1.AccesslogSuffix(testDBName)) {
+		t.Errorf("isAccesslogSuffix(%q) = false, want true", ldapv1alpha1.AccesslogSuffix(testDBName))
 	}
 	if isAccesslogSuffix("dc=example,dc=org") {
 		t.Error("isAccesslogSuffix(data suffix) = true, want false")
 	}
 	// The per-database log of a database called "default" must never be
 	// mistaken for the pre-ADR-019 cluster-shared log.
-	if isLegacySharedAccesslog(ldapv1alpha1.AccesslogSuffix("default")) {
+	if isLegacySharedAccesslog(ldapv1alpha1.AccesslogSuffix(testDBName)) {
 		t.Errorf("isLegacySharedAccesslog(%q) = true, want false",
-			ldapv1alpha1.AccesslogSuffix("default"))
+			ldapv1alpha1.AccesslogSuffix(testDBName))
 	}
 	if !isLegacySharedAccesslog(legacySharedAccesslogSuffix) {
 		t.Errorf("isLegacySharedAccesslog(%q) = false, want true", legacySharedAccesslogSuffix)
@@ -39,21 +39,25 @@ func TestAccesslogDerivationDriftGuard(t *testing.T) {
 // ── Fixture helpers ───────────────────────────────────────────────────────────
 
 const (
-	sufA = "dc=a,dc=example"
-	sufB = "dc=b,dc=example"
+	dbA = "dbA"
+	dbB = "dbB"
+	// peerLogBase is a logbase a remote peer may use that is not ours.
+	peerLogBase = "cn=log"
+	sufA        = "dc=a,dc=example"
+	sufB        = "dc=b,dc=example"
 )
 
 var (
-	logA = ldapv1alpha1.AccesslogSuffix("dbA")
-	logB = ldapv1alpha1.AccesslogSuffix("dbB")
+	logA = ldapv1alpha1.AccesslogSuffix(dbA)
+	logB = ldapv1alpha1.AccesslogSuffix(dbB)
 )
 
 func idA() dbIdentity {
-	return dbIdentity{Name: "dbA", Suffix: sufA, WantLog: true, ExternalLogBase: logA}
+	return dbIdentity{Name: dbA, Suffix: sufA, WantLog: true, ExternalLogBase: logA}
 }
 
 func idB() dbIdentity {
-	return dbIdentity{Name: "dbB", Suffix: sufB, WantLog: true, ExternalLogBase: logB}
+	return dbIdentity{Name: dbB, Suffix: sufB, WantLog: true, ExternalLogBase: logB}
 }
 
 // dataDB builds the observed olcMdbConfig entry of a data database with one
@@ -97,7 +101,7 @@ func TestCheckNamingContexts(t *testing.T) {
 			name: "one replicated database: its log is recognised",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name:           "slapd-0",
+				Name:           testPod0,
 				NamingContexts: []string{sufA, logA},
 			}},
 			wantStatus: checkPass,
@@ -106,7 +110,7 @@ func TestCheckNamingContexts(t *testing.T) {
 			name: "two replicated databases: two logs, no failure",
 			dbs:  []dbIdentity{idA(), idB()},
 			pods: []podAccesslogState{{
-				Name:           "slapd-0",
+				Name:           testPod0,
 				NamingContexts: []string{sufA, sufB, logA, logB},
 			}},
 			wantStatus: checkPass,
@@ -115,17 +119,17 @@ func TestCheckNamingContexts(t *testing.T) {
 			name: "a replicated database with no log of its own fails",
 			dbs:  []dbIdentity{idA(), idB()},
 			pods: []podAccesslogState{{
-				Name:           "slapd-0",
+				Name:           testPod0,
 				NamingContexts: []string{sufA, sufB, logA},
 			}},
 			wantStatus: checkFail,
-			wantDetail: []string{"slapd-0", "dbB", logB},
+			wantDetail: []string{testPod0, dbB, logB},
 		},
 		{
 			name: "no data naming context at all fails",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name:           "slapd-0",
+				Name:           testPod0,
 				NamingContexts: []string{logA},
 			}},
 			wantStatus: checkFail,
@@ -135,27 +139,27 @@ func TestCheckNamingContexts(t *testing.T) {
 			name: "RO pod carrying any log naming context fails",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{
-				{Name: "slapd-0", NamingContexts: []string{sufA, logA}},
-				{Name: "slapd-readonly-0", RO: true, NamingContexts: []string{sufA, logB}},
+				{Name: testPod0, NamingContexts: []string{sufA, logA}},
+				{Name: testROPod0, RO: true, NamingContexts: []string{sufA, logB}},
 			},
 			wantStatus: checkFail,
-			wantDetail: []string{"slapd-readonly-0", logB},
+			wantDetail: []string{testROPod0, logB},
 		},
 		{
 			name: "RO pod carrying the legacy shared log fails too",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{
-				{Name: "slapd-0", NamingContexts: []string{sufA, logA}},
-				{Name: "slapd-readonly-0", RO: true, NamingContexts: []string{sufA, legacySharedAccesslogSuffix}},
+				{Name: testPod0, NamingContexts: []string{sufA, logA}},
+				{Name: testROPod0, RO: true, NamingContexts: []string{sufA, legacySharedAccesslogSuffix}},
 			},
 			wantStatus: checkFail,
-			wantDetail: []string{"slapd-readonly-0", legacySharedAccesslogSuffix},
+			wantDetail: []string{testROPod0, legacySharedAccesslogSuffix},
 		},
 		{
 			name: "legacy shared log mid-migration is reported as legacy, not as a failure",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name:           "slapd-0",
+				Name:           testPod0,
 				NamingContexts: []string{sufA, legacySharedAccesslogSuffix, logA},
 			}},
 			wantStatus: checkWarn,
@@ -165,7 +169,7 @@ func TestCheckNamingContexts(t *testing.T) {
 			name: "a log with no database CR is reported as orphaned, not as a data suffix",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name:           "slapd-0",
+				Name:           testPod0,
 				NamingContexts: []string{sufA, logA, logB},
 			}},
 			wantStatus: checkWarn,
@@ -175,8 +179,8 @@ func TestCheckNamingContexts(t *testing.T) {
 			name: "unreachable pods are skipped",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{
-				{Name: "slapd-0", NamingContexts: []string{sufA, logA}},
-				{Name: "slapd-1", Skip: true},
+				{Name: testPod0, NamingContexts: []string{sufA, logA}},
+				{Name: testPod1, Skip: true},
 			},
 			wantStatus: checkPass,
 		},
@@ -184,10 +188,10 @@ func TestCheckNamingContexts(t *testing.T) {
 			name: "a database excluded from delta-sync is not expected to have a log",
 			dbs: []dbIdentity{
 				idA(),
-				{Name: "dbB", Suffix: sufB, WantLog: false},
+				{Name: dbB, Suffix: sufB, WantLog: false},
 			},
 			pods: []podAccesslogState{{
-				Name:           "slapd-0",
+				Name:           testPod0,
 				NamingContexts: []string{sufA, sufB, logA},
 			}},
 			wantStatus: checkPass,
@@ -237,10 +241,10 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			name: "one replicated database: logbase, olcAccessLogDB and olcSuffix agree",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, logA, logA),
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 				},
 			}},
 			wantStatus: checkPass,
@@ -249,12 +253,12 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			name: "two replicated databases, one log each",
 			dbs:  []dbIdentity{idA(), idB()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, logA, logA),
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 					dataDB(3, sufB, logB, logB),
-					logDB(4, logB, ldapv1alpha1.AccesslogDir("dbB")),
+					logDB(4, logB, ldapv1alpha1.AccesslogDir(dbB)),
 				},
 			}},
 			wantStatus: checkPass,
@@ -263,37 +267,37 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			name: "two databases sharing one log fails (the ADR-019 condition)",
 			dbs:  []dbIdentity{idA(), idB()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, logA, logA),
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 					dataDB(3, sufB, logA, logA),
 				},
 			}},
 			wantStatus: checkFail,
-			wantDetail: []string{"share", logA, "dbA", "dbB"},
+			wantDetail: []string{"share", logA, dbA, dbB},
 		},
 		{
 			name: "logbase disagreeing with olcAccessLogDB fails",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, logA, logB),
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 				},
 			}},
 			wantStatus: checkFail,
-			wantDetail: []string{"slapd-0", "logbase", logB},
+			wantDetail: []string{testPod0, "logbase", logB},
 		},
 		{
 			name: "olcAccessLogDB naming another database's log fails",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, logB, logB),
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 				},
 			}},
 			wantStatus: checkFail,
@@ -303,20 +307,20 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			name: "a log database that is absent from cn=config fails",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs:  []observedDB{dataDB(1, sufA, logA, logA)},
 			}},
 			wantStatus: checkFail,
-			wantDetail: []string{"slapd-0", logA, "absent"},
+			wantDetail: []string{testPod0, logA, "absent"},
 		},
 		{
 			name: "a data database with no accesslog overlay fails",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, "", logA),
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 				},
 			}},
 			wantStatus: checkFail,
@@ -325,29 +329,29 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 		{
 			name: "an external-peer logbase that differs is informational, not a failure",
 			dbs: []dbIdentity{
-				{Name: "dbA", Suffix: sufA, WantLog: true, ExternalLogBase: "cn=log"},
+				{Name: dbA, Suffix: sufA, WantLog: true, ExternalLogBase: peerLogBase},
 			},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					{
 						DN:          dbDN(1),
 						Suffix:      sufA,
 						AccessLogDB: logA,
 						SyncRepl: append(dataDB(1, sufA, logA, logA).SyncRepl,
-							externalStanza(sufA, "cn=log")),
+							externalStanza(sufA, peerLogBase)),
 					},
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 				},
 			}},
 			wantStatus: checkPass,
-			wantDetail: []string{"cn=log", "peer"},
+			wantDetail: []string{peerLogBase, "peer"},
 		},
 		{
 			name: "a plain-syncrepl external peer carries no logbase and is silent",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					{
 						DN:          dbDN(1),
@@ -356,7 +360,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 						SyncRepl: append(dataDB(1, sufA, logA, logA).SyncRepl,
 							externalStanza(sufA, "")),
 					},
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 				},
 			}},
 			wantStatus: checkPass,
@@ -365,18 +369,18 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			name: "an RO pod's stanza logbase must name the provider's log",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-readonly-0",
+				Name: testROPod0,
 				RO:   true,
 				DBs:  []observedDB{dataDB(1, sufA, "", logB)},
 			}},
 			wantStatus: checkFail,
-			wantDetail: []string{"slapd-readonly-0", "logbase", logB},
+			wantDetail: []string{testROPod0, "logbase", logB},
 		},
 		{
 			name: "an RO pod with a correct stanza logbase and no log of its own passes",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-readonly-0",
+				Name: testROPod0,
 				RO:   true,
 				DBs:  []observedDB{dataDB(1, sufA, "", logA)},
 			}},
@@ -386,7 +390,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			name: "a single database still on the legacy shared log is reported as legacy",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, legacySharedAccesslogSuffix, legacySharedAccesslogSuffix),
 					logDB(2, legacySharedAccesslogSuffix, ldapv1alpha1.AccesslogRoot),
@@ -405,20 +409,20 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			name: "an olcAccessLogDB naming a database absent from the pod fails",
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, legacySharedAccesslogSuffix, logA),
-					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+					logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 				},
 			}},
 			wantStatus: checkFail,
-			wantDetail: []string{"slapd-0", legacySharedAccesslogSuffix, "not a database"},
+			wantDetail: []string{testPod0, legacySharedAccesslogSuffix, "not a database"},
 		},
 		{
 			name: "two databases still sharing the legacy log is the forbidden condition and fails",
 			dbs:  []dbIdentity{idA(), idB()},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA, legacySharedAccesslogSuffix, legacySharedAccesslogSuffix),
 					dataDB(3, sufB, legacySharedAccesslogSuffix, legacySharedAccesslogSuffix),
@@ -426,22 +430,22 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 				},
 			}},
 			wantStatus: checkFail,
-			wantDetail: []string{"share", "dbA", "dbB"},
+			wantDetail: []string{"share", dbA, dbB},
 		},
 		{
 			name: "a database named default is not treated as the legacy shared log",
 			dbs: []dbIdentity{{
-				Name: "default", Suffix: sufA, WantLog: true,
-				ExternalLogBase: ldapv1alpha1.AccesslogSuffix("default"),
+				Name: testDBName, Suffix: sufA, WantLog: true,
+				ExternalLogBase: ldapv1alpha1.AccesslogSuffix(testDBName),
 			}},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs: []observedDB{
 					dataDB(1, sufA,
-						ldapv1alpha1.AccesslogSuffix("default"),
-						ldapv1alpha1.AccesslogSuffix("default")),
-					logDB(2, ldapv1alpha1.AccesslogSuffix("default"),
-						ldapv1alpha1.AccesslogDir("default")),
+						ldapv1alpha1.AccesslogSuffix(testDBName),
+						ldapv1alpha1.AccesslogSuffix(testDBName)),
+					logDB(2, ldapv1alpha1.AccesslogSuffix(testDBName),
+						ldapv1alpha1.AccesslogDir(testDBName)),
 				},
 			}},
 			wantStatus: checkPass,
@@ -451,23 +455,23 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 			dbs:  []dbIdentity{idA()},
 			pods: []podAccesslogState{
 				{
-					Name: "slapd-0",
+					Name: testPod0,
 					DBs: []observedDB{
 						dataDB(1, sufA, logA, logA),
-						logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
+						logDB(2, logA, ldapv1alpha1.AccesslogDir(dbA)),
 					},
 				},
-				{Name: "slapd-1", Skip: true},
+				{Name: testPod1, Skip: true},
 			},
 			wantStatus: checkPass,
 		},
 		{
 			name: "a database excluded from delta-sync is not checked",
 			dbs: []dbIdentity{
-				{Name: "dbB", Suffix: sufB, WantLog: false},
+				{Name: dbB, Suffix: sufB, WantLog: false},
 			},
 			pods: []podAccesslogState{{
-				Name: "slapd-0",
+				Name: testPod0,
 				DBs:  []observedDB{{DN: dbDN(1), Suffix: sufB}},
 			}},
 			wantStatus: checkPass,
@@ -501,7 +505,7 @@ func TestStanzaLogbase(t *testing.T) {
 		want string
 	}{
 		{"quoted", `rid=101 logbase="` + logA + `" logfilter="(x=y)"`, logA},
-		{"unquoted", `rid=101 logbase=cn=log type=refreshAndPersist`, "cn=log"},
+		{"unquoted", `rid=101 logbase=cn=log type=refreshAndPersist`, peerLogBase},
 		{"absent", `rid=101 provider="ldap://x" type=refreshOnly`, ""},
 		{"empty", ``, ""},
 	}
