@@ -35,35 +35,43 @@ func TestParseDirectMode(t *testing.T) {
 	}
 }
 
+// A pod IP on the lab's natively routed pod network, and that network.
+const (
+	labPodIP  = "198.18.192.53"
+	labPodNet = "198.18.192.0/24"
+)
+
 // Fixtures mimic `ip -j route show` output (iproute2 JSON, main table).
 const (
 	fibDefaultOnly = `[
-  {"dst":"default","gateway":"192.168.1.1","dev":"wlan0","protocol":"dhcp","prefsrc":"192.168.1.23","metric":600,"flags":[]},
-  {"dst":"192.168.1.0/24","dev":"wlan0","protocol":"kernel","scope":"link","prefsrc":"192.168.1.23","metric":600,"flags":[]}
+  {"dst":"default","gateway":"192.0.2.1","dev":"wlan0","protocol":"dhcp",
+   "prefsrc":"192.0.2.23","metric":600,"flags":[]},
+  {"dst":"192.0.2.0/24","dev":"wlan0","protocol":"kernel","scope":"link",
+   "prefsrc":"192.0.2.23","metric":600,"flags":[]}
 ]`
 	fibRoutedLab = `[
-  {"dst":"default","gateway":"192.168.1.1","dev":"wlan0","protocol":"dhcp","flags":[]},
-  {"dst":"10.233.192.0/24","gateway":"172.16.0.1","dev":"eth1","protocol":"static","flags":[]},
-  {"dst":"192.168.1.0/24","dev":"wlan0","protocol":"kernel","scope":"link","flags":[]}
+  {"dst":"default","gateway":"192.0.2.1","dev":"wlan0","protocol":"dhcp","flags":[]},
+  {"dst":"198.18.192.0/24","gateway":"203.0.113.1","dev":"eth1","protocol":"static","flags":[]},
+  {"dst":"192.0.2.0/24","dev":"wlan0","protocol":"kernel","scope":"link","flags":[]}
 ]`
 	fibOnNode = `[
-  {"dst":"default","gateway":"192.168.1.1","dev":"eth0","flags":[]},
-  {"dst":"10.233.192.242","dev":"cali7a3f10e2c41","scope":"link","flags":[]},
-  {"dst":"10.233.192.0/26","dev":"vxlan.calico","onlink":true,"gateway":"10.233.192.192","flags":[]}
+  {"dst":"default","gateway":"192.0.2.1","dev":"eth0","flags":[]},
+  {"dst":"198.18.192.242","dev":"cali7a3f10e2c41","scope":"link","flags":[]},
+  {"dst":"198.18.192.0/26","dev":"vxlan.calico","onlink":true,"gateway":"198.18.192.192","flags":[]}
 ]`
 	fibBlackhole = `[
-  {"dst":"default","gateway":"192.168.1.1","dev":"eth0","flags":[]},
-  {"type":"blackhole","dst":"10.233.0.0/16","flags":[]}
+  {"dst":"default","gateway":"192.0.2.1","dev":"eth0","flags":[]},
+  {"type":"blackhole","dst":"198.18.0.0/16","flags":[]}
 ]`
 	// LPM: the /16 would allow it, but a more specific blackhole /24 wins.
 	fibBlackholeMoreSpecific = `[
-  {"dst":"10.233.0.0/16","gateway":"172.16.0.1","dev":"eth1","flags":[]},
-  {"type":"blackhole","dst":"10.233.192.0/24","flags":[]}
+  {"dst":"198.18.0.0/16","gateway":"203.0.113.1","dev":"eth1","flags":[]},
+  {"type":"blackhole","dst":"198.18.192.0/24","flags":[]}
 ]`
 	// LPM the other way round: broad blackhole, specific unicast carve-out.
 	fibUnicastMoreSpecific = `[
-  {"type":"blackhole","dst":"10.233.0.0/16","flags":[]},
-  {"dst":"10.233.192.0/24","gateway":"172.16.0.1","dev":"eth1","flags":[]}
+  {"type":"blackhole","dst":"198.18.0.0/16","flags":[]},
+  {"dst":"198.18.192.0/24","gateway":"203.0.113.1","dev":"eth1","flags":[]}
 ]`
 	fibV6 = `[
   {"dst":"fd00:10:233::/64","gateway":"fe80::1","dev":"eth1","protocol":"static","flags":[]},
@@ -80,15 +88,17 @@ func TestRouteCovers(t *testing.T) {
 		wantVia string // expected covering dst ("" when want=false)
 		wantErr bool
 	}{
-		{name: "default route only", routes: fibDefaultOnly, ip: "10.233.192.53", want: false},
-		{name: "specific static route covers", routes: fibRoutedLab, ip: "10.233.192.53", want: true, wantVia: "10.233.192.0/24"},
-		{name: "specific route does not cover other subnet", routes: fibRoutedLab, ip: "10.234.0.5", want: false},
-		{name: "on-node host route covers exactly", routes: fibOnNode, ip: "10.233.192.242", want: true, wantVia: "10.233.192.242"},
-		{name: "blackhole is not coverage", routes: fibBlackhole, ip: "10.233.192.53", want: false},
-		{name: "more specific blackhole beats broad unicast", routes: fibBlackholeMoreSpecific, ip: "10.233.192.53", want: false},
-		{name: "more specific unicast beats broad blackhole", routes: fibUnicastMoreSpecific, ip: "10.233.192.53", want: true, wantVia: "10.233.192.0/24"},
+		{name: "default route only", routes: fibDefaultOnly, ip: labPodIP, want: false},
+		{name: "specific static route covers", routes: fibRoutedLab, ip: labPodIP, want: true, wantVia: labPodNet},
+		{name: "specific route does not cover other subnet", routes: fibRoutedLab, ip: "198.19.0.5", want: false},
+		{name: "on-node host route covers exactly", routes: fibOnNode, ip: "198.18.192.242", want: true,
+			wantVia: "198.18.192.242"},
+		{name: "blackhole is not coverage", routes: fibBlackhole, ip: labPodIP, want: false},
+		{name: "more specific blackhole beats broad unicast", routes: fibBlackholeMoreSpecific, ip: labPodIP, want: false},
+		{name: "more specific unicast beats broad blackhole", routes: fibUnicastMoreSpecific, ip: labPodIP, want: true,
+			wantVia: labPodNet},
 		{name: "v6 route covers v6 pod IP", routes: fibV6, ip: "fd00:10:233::53", want: true, wantVia: "fd00:10:233::/64"},
-		{name: "invalid JSON errors", routes: "not json", ip: "10.0.0.1", wantErr: true},
+		{name: "invalid JSON errors", routes: "not json", ip: "198.51.100.1", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,37 +144,37 @@ func TestDirectProberProbe(t *testing.T) {
 		{
 			name: "never: nothing consulted", mode: directNever,
 			listRoutes: routesBoom, dial: dialBoom,
-			ip: "10.233.192.53", want: false, wantReason: "disabled",
+			ip: labPodIP, want: false, wantReason: "disabled",
 		},
 		{
 			name: "auto: covered and dial ok", mode: directAuto,
 			listRoutes: routesLab, dial: dialOK,
-			ip: "10.233.192.53", want: true, wantReason: "10.233.192.0/24",
+			ip: labPodIP, want: true, wantReason: labPodNet,
 		},
 		{
 			name: "auto: covered but dial fails", mode: directAuto,
 			listRoutes: routesLab, dial: dialFail,
-			ip: "10.233.192.53", want: false, wantReason: "connection refused",
+			ip: labPodIP, want: false, wantReason: "connection refused",
 		},
 		{
 			name: "auto: not covered, dial never attempted", mode: directAuto,
 			listRoutes: routesDefault, dial: dialBoom,
-			ip: "10.233.192.53", want: false, wantReason: "no specific route",
+			ip: labPodIP, want: false, wantReason: "no specific route",
 		},
 		{
 			name: "auto: route listing fails, dial never attempted", mode: directAuto,
 			listRoutes: routesErr, dial: dialBoom,
-			ip: "10.233.192.53", want: false, wantReason: "ip: not found",
+			ip: labPodIP, want: false, wantReason: "ip: not found",
 		},
 		{
 			name: "always: route table not consulted, dial ok", mode: directAlways,
 			listRoutes: routesBoom, dial: dialOK,
-			ip: "10.233.192.53", want: true, wantReason: "forced",
+			ip: labPodIP, want: true, wantReason: "forced",
 		},
 		{
 			name: "always: dial fails", mode: directAlways,
 			listRoutes: routesBoom, dial: dialFail,
-			ip: "10.233.192.53", want: false, wantReason: "connection refused",
+			ip: labPodIP, want: false, wantReason: "connection refused",
 		},
 		{
 			name: "invalid pod IP", mode: directAuto,
