@@ -38,6 +38,14 @@ import (
 // operator-driven roll belongs to ADR-023.
 const startupConfigConvergedCondition = "StartupConfigConverged"
 
+// The reasons StartupConfigConverged publishes. reasonConverged (names.go) and
+// reasonNoReachablePod (data_present.go) are shared with the conditions that
+// already ask the same question of other evidence.
+const (
+	reasonRestartRequired         = "RestartRequired"
+	reasonNoStartupOnlyAttributes = "NoStartupOnlyAttributes"
+)
+
 // startupAttrDivergence is one attribute on one pod whose live cn=config value
 // is not the declared one. Want "" means the attribute must be absent — the
 // state the converger produces for a database that dropped the field, and a
@@ -151,7 +159,7 @@ func aggregateStartupConfigConverged(
 
 	switch {
 	case len(details) > 0:
-		return metav1.ConditionFalse, "RestartRequired",
+		return metav1.ConditionFalse, reasonRestartRequired,
 			fmt.Sprintf("the running cn=config differs from the declared startup-only table on "+
 				"%s. These attributes cannot be written to a running slapd; the init container "+
 				"converges them offline at pod start, so the change lands when the pod(s) "+
@@ -160,22 +168,22 @@ func aggregateStartupConfigConverged(
 				strings.Join(details, ", "), unreadNote)
 
 	case !declared && len(assessed) == 0:
-		return metav1.ConditionTrue, "NoStartupOnlyAttributes",
+		return metav1.ConditionTrue, reasonNoStartupOnlyAttributes,
 			"this database declares no startup-only configuration (ADR-034), so there is " +
 				"nothing a pod restart would change"
 
 	case !declared:
-		return metav1.ConditionTrue, "NoStartupOnlyAttributes",
+		return metav1.ConditionTrue, reasonNoStartupOnlyAttributes,
 			fmt.Sprintf("this database declares no startup-only configuration (ADR-034), and "+
 				"none is present on the %d pod(s) read%s", len(assessed), unreadNote)
 
 	case len(assessed) == 0:
-		return metav1.ConditionUnknown, "NoReachablePod",
+		return metav1.ConditionUnknown, reasonNoReachablePod,
 			fmt.Sprintf("could not read the syncprov overlay on any pod, so the declared "+
 				"startup-only configuration could not be verified%s", unreadNote)
 
 	default:
-		return metav1.ConditionTrue, "Converged",
+		return metav1.ConditionTrue, reasonConverged,
 			fmt.Sprintf("the declared startup-only configuration is in place on all %d pod(s) "+
 				"read%s", len(assessed), unreadNote)
 	}

@@ -55,29 +55,29 @@ func TestAggregateStartupConfigConverged(t *testing.T) {
 		{
 			name:       "every pod carries the declared value",
 			declared:   true,
-			results:    []startupConfigObservation{ok("slapd-0"), ok("slapd-1"), ok("slapd-2")},
+			results:    []startupConfigObservation{ok(testPod0), ok(testPod1), ok(testPod2)},
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "Converged",
+			wantReason: reasonConverged,
 			wantInMsg:  []string{"3"},
 		},
 		{
 			name:       "one pod diverges and is named",
 			declared:   true,
-			results:    []startupConfigObservation{ok("slapd-0"), bad("slapd-1", ""), ok("slapd-2")},
+			results:    []startupConfigObservation{ok(testPod0), bad(testPod1, ""), ok(testPod2)},
 			wantStatus: metav1.ConditionFalse,
-			wantReason: "RestartRequired",
-			wantInMsg:  []string{"slapd-1", startupAttrSessionlogSource, want},
-			wantNotMsg: []string{"slapd-0", "slapd-2"},
+			wantReason: reasonRestartRequired,
+			wantInMsg:  []string{testPod1, startupAttrSessionlogSource, want},
+			wantNotMsg: []string{testPod0, testPod2},
 		},
 		{
 			name:     "two pods diverge and both are named",
 			declared: true,
 			results: []startupConfigObservation{
-				ok("slapd-0"), bad("slapd-1", ""), bad("slapd-2", "cn=accesslog-stale,dc=example,dc=org"),
+				ok(testPod0), bad(testPod1, ""), bad(testPod2, "cn=accesslog-stale,dc=example,dc=org"),
 			},
 			wantStatus: metav1.ConditionFalse,
-			wantReason: "RestartRequired",
-			wantInMsg:  []string{"slapd-1", "slapd-2", "cn=accesslog-stale,dc=example,dc=org"},
+			wantReason: reasonRestartRequired,
+			wantInMsg:  []string{testPod1, testPod2, "cn=accesslog-stale,dc=example,dc=org"},
 		},
 		{
 			// ADR-025's rule, applied here: unreadable evidence never counts
@@ -85,18 +85,18 @@ func TestAggregateStartupConfigConverged(t *testing.T) {
 			// True — the pod that was not read is noted, not indicted.
 			name:       "one pod unreachable while the rest match is True, not False",
 			declared:   true,
-			results:    []startupConfigObservation{ok("slapd-0"), unread("slapd-1"), ok("slapd-2")},
+			results:    []startupConfigObservation{ok(testPod0), unread(testPod1), ok(testPod2)},
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "Converged",
-			wantInMsg:  []string{"slapd-1"},
+			wantReason: reasonConverged,
+			wantInMsg:  []string{testPod1},
 		},
 		{
 			name:       "every pod unreachable is Unknown",
 			declared:   true,
-			results:    []startupConfigObservation{unread("slapd-0"), unread("slapd-1")},
+			results:    []startupConfigObservation{unread(testPod0), unread(testPod1)},
 			wantStatus: metav1.ConditionUnknown,
 			wantReason: "NoReachablePod",
-			wantInMsg:  []string{"slapd-0", "slapd-1"},
+			wantInMsg:  []string{testPod0, testPod1},
 		},
 		{
 			// A database asking for no startup-only attribute is converged by
@@ -104,16 +104,16 @@ func TestAggregateStartupConfigConverged(t *testing.T) {
 			// evidence it does not need.
 			name:       "database declares nothing",
 			declared:   false,
-			results:    []startupConfigObservation{ok("slapd-0"), ok("slapd-1")},
+			results:    []startupConfigObservation{ok(testPod0), ok(testPod1)},
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "NoStartupOnlyAttributes",
+			wantReason: reasonNoStartupOnlyAttributes,
 		},
 		{
 			name:       "database declares nothing and no pod was read",
 			declared:   false,
-			results:    []startupConfigObservation{unread("slapd-0")},
+			results:    []startupConfigObservation{unread(testPod0)},
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "NoStartupOnlyAttributes",
+			wantReason: reasonNoStartupOnlyAttributes,
 		},
 		{
 			// A leftover value on disk after the field was dropped is still a
@@ -121,14 +121,14 @@ func TestAggregateStartupConfigConverged(t *testing.T) {
 			// until then the live configuration is not the declared one.
 			name:     "database declares nothing but a pod still carries the attribute",
 			declared: false,
-			results: []startupConfigObservation{ok("slapd-0"), {
-				pod: "slapd-1", assessed: true, diverged: []startupAttrDivergence{
+			results: []startupConfigObservation{ok(testPod0), {
+				pod: testPod1, assessed: true, diverged: []startupAttrDivergence{
 					{Attribute: startupAttrSessionlogSource, Want: "", Got: want},
 				},
 			}},
 			wantStatus: metav1.ConditionFalse,
-			wantReason: "RestartRequired",
-			wantInMsg:  []string{"slapd-1", startupAttrSessionlogSource},
+			wantReason: reasonRestartRequired,
+			wantInMsg:  []string{testPod1, startupAttrSessionlogSource},
 		},
 		{
 			// Read-only consumer pods carry no syncprov overlay, so they
@@ -138,7 +138,7 @@ func TestAggregateStartupConfigConverged(t *testing.T) {
 			declared:   false,
 			results:    nil,
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "NoStartupOnlyAttributes",
+			wantReason: reasonNoStartupOnlyAttributes,
 		},
 	}
 
@@ -178,11 +178,11 @@ func TestCompareStartupSessionlogSource(t *testing.T) {
 	}{
 		{"both absent", "", nil, false},
 		{"both absent, empty slice", "", []string{}, false},
-		{"match", "cn=accesslog-default,dc=x", []string{"cn=accesslog-default,dc=x"}, false},
-		{"DN comparison is case-insensitive", "CN=Accesslog-Default,DC=x", []string{"cn=accesslog-default,dc=x"}, false},
-		{"whitespace is trimmed", "cn=accesslog-default,dc=x", []string{" cn=accesslog-default,dc=x "}, false},
-		{"wanted but absent", "cn=accesslog-default,dc=x", nil, true},
-		{"present but not wanted", "", []string{"cn=accesslog-default,dc=x"}, true},
+		{"match", testAccesslogDN, []string{testAccesslogDN}, false},
+		{"DN comparison is case-insensitive", "CN=Accesslog-Default,DC=x", []string{testAccesslogDN}, false},
+		{"whitespace is trimmed", testAccesslogDN, []string{" cn=accesslog-default,dc=x "}, false},
+		{"wanted but absent", testAccesslogDN, nil, true},
+		{"present but not wanted", "", []string{testAccesslogDN}, true},
 		{"different value", "cn=accesslog-a,dc=x", []string{"cn=accesslog-b,dc=x"}, true},
 	}
 	for _, tt := range tests {
@@ -211,7 +211,7 @@ func TestObserveStartupConfig(t *testing.T) {
 	})
 
 	t.Run("reading the overlay marks the pod assessed", func(t *testing.T) {
-		obs := startupConfigObservation{pod: "slapd-0"}
+		obs := startupConfigObservation{pod: testPod0}
 		observeStartupConfig(&obs, sessionlogDecision{
 			Kind: sessionlogKindAccesslog, SourceDN: sourceDN}, []string{sourceDN})
 		if !obs.assessed {
@@ -223,7 +223,7 @@ func TestObserveStartupConfig(t *testing.T) {
 	})
 
 	t.Run("a missing declared value is a divergence", func(t *testing.T) {
-		obs := startupConfigObservation{pod: "slapd-0"}
+		obs := startupConfigObservation{pod: testPod0}
 		observeStartupConfig(&obs, sessionlogDecision{
 			Kind: sessionlogKindAccesslog, SourceDN: sourceDN}, nil)
 		if !obs.assessed {
@@ -235,14 +235,14 @@ func TestObserveStartupConfig(t *testing.T) {
 	})
 
 	t.Run("the in-memory session log wants the attribute absent", func(t *testing.T) {
-		obs := startupConfigObservation{pod: "slapd-0"}
+		obs := startupConfigObservation{pod: testPod0}
 		observeStartupConfig(&obs,
 			sessionlogDecision{Kind: sessionlogKindInMemory, Ops: 5000}, nil)
 		if len(obs.diverged) != 0 {
 			t.Fatalf("absent attribute reported as divergence: %#v", obs.diverged)
 		}
 
-		left := startupConfigObservation{pod: "slapd-1"}
+		left := startupConfigObservation{pod: testPod1}
 		observeStartupConfig(&left,
 			sessionlogDecision{Kind: sessionlogKindInMemory, Ops: 5000}, []string{sourceDN})
 		if len(left.diverged) != 1 || left.diverged[0].Want != "" {
@@ -257,7 +257,7 @@ func TestObserveStartupConfig(t *testing.T) {
 // table entry the pods were never given.
 func TestDeclaresStartupOnlyAttributes(t *testing.T) {
 	accesslog := &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB},
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			Replication: ldapv1alpha1.DatabaseReplicationConfig{
 				SyncprovSessionlogSource: ldapv1alpha1.SyncprovSessionlogSourceAccesslog,
@@ -268,7 +268,7 @@ func TestDeclaresStartupOnlyAttributes(t *testing.T) {
 		t.Error("a database sourcing its session log from its journal declares a startup-only attribute")
 	}
 	if declaresStartupOnlyAttributes(&ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB},
 	}) {
 		t.Error("a default database declares no startup-only attribute")
 	}

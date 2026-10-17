@@ -49,7 +49,7 @@ func inMemoryDecision(ops int32, enabled bool) sessionlogDecision {
 func accesslogDecision() sessionlogDecision {
 	return sessionlogDecision{
 		Kind:     sessionlogKindAccesslog,
-		SourceDN: "cn=accesslog-default",
+		SourceDN: testAccesslogRDN,
 	}
 }
 

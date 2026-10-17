@@ -35,7 +35,7 @@ func TestParseClusterDomainFromResolvConf(t *testing.T) {
 		{
 			name: "default cluster.local",
 			in:   "search default.svc.cluster.local svc.cluster.local cluster.local\nnameserver 10.96.0.10\noptions ndots:5\n",
-			want: "cluster.local",
+			want: DefaultClusterDomain,
 		},
 		{
 			name: "only ns.svc.<domain> present (fallback path)",

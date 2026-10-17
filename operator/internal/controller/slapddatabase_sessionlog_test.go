@@ -176,7 +176,7 @@ func TestDesiredSessionlog(t *testing.T) {
 	}{
 		{
 			name:     "both unset: the in-memory log at the operator default",
-			dbName:   "default",
+			dbName:   testDefaultDB,
 			source:   "",
 			field:    nil,
 			wantKind: sessionlogKindInMemory,
@@ -184,7 +184,7 @@ func TestDesiredSessionlog(t *testing.T) {
 		},
 		{
 			name:     "explicit InMemory is the same as unset",
-			dbName:   "default",
+			dbName:   testDefaultDB,
 			source:   ldapv1alpha1.SyncprovSessionlogSourceInMemory,
 			field:    i(42),
 			wantKind: sessionlogKindInMemory,
@@ -192,18 +192,18 @@ func TestDesiredSessionlog(t *testing.T) {
 		},
 		{
 			name:     "zero ops with no source: no session log at all",
-			dbName:   "default",
+			dbName:   testDefaultDB,
 			source:   "",
 			field:    i(0),
 			wantKind: sessionlogKindNone,
 		},
 		{
 			name:     "Accesslog sources it from this database's own journal",
-			dbName:   "default",
+			dbName:   testDefaultDB,
 			source:   ldapv1alpha1.SyncprovSessionlogSourceAccesslog,
 			field:    nil,
 			wantKind: sessionlogKindAccesslog,
-			wantDN:   "cn=accesslog-default",
+			wantDN:   testAccesslogRDN,
 		},
 		{
 			name:     "Accesslog names the journal of THIS database, not a fixed DN",
@@ -215,11 +215,11 @@ func TestDesiredSessionlog(t *testing.T) {
 		},
 		{
 			name:     "Accesslog with an explicit 0 is still Accesslog",
-			dbName:   "default",
+			dbName:   testDefaultDB,
 			source:   ldapv1alpha1.SyncprovSessionlogSourceAccesslog,
 			field:    i(0),
 			wantKind: sessionlogKindAccesslog,
-			wantDN:   "cn=accesslog-default",
+			wantDN:   testAccesslogRDN,
 		},
 	}
 

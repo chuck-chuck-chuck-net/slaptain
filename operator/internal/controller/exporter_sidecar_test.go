@@ -64,7 +64,7 @@ const (
 // fields are set so image references are concrete in the golden.
 func goldenReconciler() *SlapdClusterReconciler {
 	return &SlapdClusterReconciler{
-		ClusterDomain:   "cluster.local",
+		ClusterDomain:   testClusterDomain,
 		DefaultImageTag: testOperatorVersion,
 		OperatorImage:   goldenOperatorImage,
 	}

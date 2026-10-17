@@ -64,7 +64,7 @@ func dbWithSessionlogSource(
 ) *ldapv1alpha1.SlapdDatabase {
 	segment := int32(0)
 	return &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: ns},
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			ClusterRef: "slapd",
 			Suffix:     "dc=example,dc=org",

@@ -201,7 +201,7 @@ func TestStartupConfigValueComesFromDesiredSessionlog(t *testing.T) {
 // than a second template shape.
 func TestPodTemplateMountsStartupConfigByName(t *testing.T) {
 	for _, readOnly := range []bool{false, true} {
-		r := &SlapdClusterReconciler{ClusterDomain: "cluster.local"}
+		r := &SlapdClusterReconciler{ClusterDomain: testClusterDomain}
 		sc := &ldapv1alpha1.SlapdCluster{}
 		sc.Name = "slapd"
 		sc.Namespace = "slaptain"

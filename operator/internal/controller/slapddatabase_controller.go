@@ -224,7 +224,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	setCondition(&sd.Status.Conditions, metav1.Condition{
 		Type:               tunablesConvergedCondition,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Converged",
+		Reason:             reasonConverged,
 		Message:            "every operator-managed tunable matches cn=config on every pod",
 		LastTransitionTime: metav1.Now(),
 		ObservedGeneration: sd.Generation,
@@ -1282,13 +1282,13 @@ func (r *SlapdDatabaseReconciler) applyIndices(
 func dataDBOverlays(conn *ldap.Conn, dataDN string) (hasAccesslog, hasSyncprov bool, err error) {
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		0, 0, false, "(objectClass=olcOverlayConfig)", []string{"olcOverlay"}, nil,
+		0, 0, false, "(objectClass=olcOverlayConfig)", []string{attrOlcOverlay}, nil,
 	))
 	if err != nil {
 		return false, false, fmt.Errorf("search overlays under %s: %w", dataDN, err)
 	}
 	for _, entry := range sr.Entries {
-		for _, ov := range entry.GetEqualFoldAttributeValues("olcOverlay") {
+		for _, ov := range entry.GetEqualFoldAttributeValues(attrOlcOverlay) {
 			switch stripOrderingPrefix(ov) {
 			case overlayAccesslog:
 				hasAccesslog = true
@@ -1340,9 +1340,9 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 		syncprovDN := "olcOverlay=syncprov," + dataDN
 		addReq := ldap.NewAddRequest(syncprovDN, nil)
 		addReq.Attribute("objectClass", []string{ocOverlayConfig, ocSyncProvConfig})
-		addReq.Attribute("olcOverlay", []string{overlaySyncprov})
+		addReq.Attribute(attrOlcOverlay, []string{overlaySyncprov})
 		if checkpoint := desiredSyncprovCheckpoint(sd); checkpoint != "" {
-			addReq.Attribute("olcSpCheckpoint", []string{checkpoint})
+			addReq.Attribute(attrOlcSpCheckpoint, []string{checkpoint})
 		}
 		if sessionlog {
 			addReq.Attribute("olcSpSessionlog", []string{strconv.Itoa(int(ops))})
@@ -1383,7 +1383,7 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovTunables(
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
 		0, 0, false, "(objectClass=olcSyncProvConfig)",
-		[]string{"olcSpSessionlog", "olcSpCheckpoint", startupAttrSessionlogSource}, nil,
+		[]string{"olcSpSessionlog", attrOlcSpCheckpoint, startupAttrSessionlogSource}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("search syncprov overlay under %s: %w", dataDN, err)
@@ -1406,8 +1406,8 @@ func (r *SlapdDatabaseReconciler) ensureSyncprovTunables(
 		return err
 	}
 
-	return ensureOverlayAttr(ctx, conn, host, overlayDN, "olcSpCheckpoint",
-		sr.Entries[0].GetEqualFoldAttributeValues("olcSpCheckpoint"), checkpoint)
+	return ensureOverlayAttr(ctx, conn, host, overlayDN, attrOlcSpCheckpoint,
+		sr.Entries[0].GetEqualFoldAttributeValues(attrOlcSpCheckpoint), checkpoint)
 }
 
 // defaultSyncprovSessionlogOps is the sessionlog size the operator applies when
@@ -1679,7 +1679,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		accesslogDN := "olcOverlay=accesslog," + dataDN
 		addReq := ldap.NewAddRequest(accesslogDN, nil)
 		addReq.Attribute("objectClass", []string{ocOverlayConfig, ocAccessLogConfig})
-		addReq.Attribute("olcOverlay", []string{overlayAccesslog})
+		addReq.Attribute(attrOlcOverlay, []string{overlayAccesslog})
 		addReq.Attribute("olcAccessLogDB", []string{ldapv1alpha1.AccesslogSuffix(sd.Name)})
 		addReq.Attribute("olcAccessLogOps", []string{"writes"})
 		addReq.Attribute("olcAccessLogSuccess", []string{olcTrue})
@@ -2119,7 +2119,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		log.Info("adding syncprov overlay to accesslog DB", "host", host, "suffix", logSuffix)
 		addReq := ldap.NewAddRequest("olcOverlay=syncprov,"+dbDN, nil)
 		addReq.Attribute("objectClass", []string{ocOverlayConfig, ocSyncProvConfig})
-		addReq.Attribute("olcOverlay", []string{overlaySyncprov})
+		addReq.Attribute(attrOlcOverlay, []string{overlaySyncprov})
 		addReq.Attribute("olcSpNoPresent", []string{olcTrue})
 		addReq.Attribute("olcSpReloadHint", []string{olcTrue})
 		if err := guardedAdd(conn, addReq); err != nil {
@@ -2327,14 +2327,14 @@ func (r *SlapdDatabaseReconciler) removeDataDBOverlay(
 
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dataDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		0, 0, false, "(objectClass=olcOverlayConfig)", []string{"olcOverlay"}, nil,
+		0, 0, false, "(objectClass=olcOverlayConfig)", []string{attrOlcOverlay}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("search overlays under %s: %w", dataDN, err)
 	}
 
 	for _, entry := range sr.Entries {
-		vals := entry.GetEqualFoldAttributeValues("olcOverlay")
+		vals := entry.GetEqualFoldAttributeValues(attrOlcOverlay)
 		if len(vals) == 0 || stripOrderingPrefix(vals[0]) != overlayName {
 			continue
 		}

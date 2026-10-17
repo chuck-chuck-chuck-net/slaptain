@@ -103,6 +103,8 @@ const (
 	attrUserPassword    = "userPassword"
 	attrOlcAccess       = "olcAccess"
 	attrOlcPasswordHash = "olcPasswordHash"
+	attrOlcOverlay      = "olcOverlay"
+	attrOlcSpCheckpoint = "olcSpCheckpoint"
 
 	// olcTrue and olcFalse are cn=config's boolean syntax.
 	olcTrue  = "TRUE"
@@ -121,6 +123,12 @@ const (
 	conditionReady   = "Ready"
 	conditionApplied = "Applied"
 )
+
+// reasonConverged is the True reason for every condition whose question is
+// "does the live cn=config match what the CR declares" — TunablesConverged and
+// StartupConfigConverged ask it of different attributes, and a reader moving
+// between them should not have to check whether the word is spelled the same.
+const reasonConverged = "Converged"
 
 // replicationModeConsumerOnly is spec.replication.mode for a cluster that only
 // pulls from its external peers (ADR-010).

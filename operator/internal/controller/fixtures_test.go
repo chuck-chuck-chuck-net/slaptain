@@ -25,8 +25,13 @@ const (
 
 	testDBName    = "example-db"
 	testDefaultDB = "default"
-	testDB2       = "db2"
-	testSuffix    = "dc=example,dc=org"
+	// testAccesslogRDN is the accesslog database naming the "default" data
+	// database (ADR-019); testAccesslogDN appends the throwaway suffix the
+	// startup-only comparison tests use, where the suffix carries no meaning.
+	testAccesslogRDN = "cn=accesslog-" + testDefaultDB
+	testAccesslogDN  = testAccesslogRDN + ",dc=x"
+	testDB2          = "db2"
+	testSuffix       = "dc=example,dc=org"
 
 	testPod0   = "slapd-0"
 	testPod1   = "slapd-1"

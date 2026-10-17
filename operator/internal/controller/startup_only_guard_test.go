@@ -55,15 +55,15 @@ func TestStartupOnlyAttrViolation(t *testing.T) {
 		want  string
 	}{
 		{"nothing", nil, ""},
-		{"ordinary attributes", []string{"olcSpSessionlog", "olcSpCheckpoint", "olcSyncRepl"}, ""},
-		{"the denied attribute", []string{"olcSpSessionlogSource"}, "olcSpSessionlogSource"},
+		{"ordinary attributes", []string{"olcSpSessionlog", attrOlcSpCheckpoint, "olcSyncRepl"}, ""},
+		{"the denied attribute", []string{startupAttrSessionlogSource}, startupAttrSessionlogSource},
 		{"lowercased", []string{"olcspsessionlogsource"}, "olcspsessionlogsource"},
 		{"uppercased", []string{"OLCSPSESSIONLOGSOURCE"}, "OLCSPSESSIONLOGSOURCE"},
 		{"with an option suffix", []string{"olcSpSessionlogSource;x-ordered"}, "olcSpSessionlogSource;x-ordered"},
 		{"with surrounding whitespace", []string{" olcSpSessionlogSource "}, " olcSpSessionlogSource "},
 		{"a denied one among many", []string{
-			"objectClass", "olcOverlay", "olcSpSessionlogSource", "olcSpCheckpoint",
-		}, "olcSpSessionlogSource"},
+			"objectClass", attrOlcOverlay, startupAttrSessionlogSource, attrOlcSpCheckpoint,
+		}, startupAttrSessionlogSource},
 		{"a near miss is allowed", []string{"olcSpSessionlogSourceExtra"}, ""},
 	}
 	for _, tt := range tests {
@@ -86,9 +86,9 @@ func TestGuardedModifyRefusesStartupOnlyAttribute(t *testing.T) {
 			req := ldap.NewModifyRequest("olcOverlay={0}syncprov,olcDatabase={1}mdb,cn=config", nil)
 			switch op {
 			case "replace":
-				req.Replace(startupAttrSessionlogSource, []string{"cn=accesslog-default,dc=x"})
+				req.Replace(startupAttrSessionlogSource, []string{testAccesslogDN})
 			case "add":
-				req.Add(startupAttrSessionlogSource, []string{"cn=accesslog-default,dc=x"})
+				req.Add(startupAttrSessionlogSource, []string{testAccesslogDN})
 			case "delete":
 				req.Delete(startupAttrSessionlogSource, nil)
 			}
@@ -119,8 +119,8 @@ func TestGuardedAddRefusesStartupOnlyAttribute(t *testing.T) {
 	w := &recordingWriter{}
 	req := ldap.NewAddRequest("olcOverlay=syncprov,olcDatabase={1}mdb,cn=config", nil)
 	req.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
-	req.Attribute("olcOverlay", []string{"syncprov"})
-	req.Attribute(startupAttrSessionlogSource, []string{"cn=accesslog-default,dc=x"})
+	req.Attribute(attrOlcOverlay, []string{"syncprov"})
+	req.Attribute(startupAttrSessionlogSource, []string{testAccesslogDN})
 
 	err := guardedAdd(w, req)
 	if err == nil {
@@ -154,7 +154,7 @@ func TestGuardedWritesPassOrdinaryRequestsThrough(t *testing.T) {
 	t.Run("add is forwarded", func(t *testing.T) {
 		w := &recordingWriter{}
 		req := ldap.NewAddRequest("olcOverlay=syncprov,olcDatabase={1}mdb,cn=config", nil)
-		req.Attribute("olcOverlay", []string{"syncprov"})
+		req.Attribute(attrOlcOverlay, []string{"syncprov"})
 		if err := guardedAdd(w, req); err != nil {
 			t.Fatalf("guardedAdd returned %v", err)
 		}
