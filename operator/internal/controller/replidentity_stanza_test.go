@@ -38,7 +38,7 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 	// rather than a base address. ridBase 100 is segment 1 and ridBase 200 is
 	// segment 2, the documented ridBase/100 migration.
 	layout := ridcoord.DefaultLayout()
-	rwRIDs, _ := inClusterStanzaRIDs(layout, 1, 3, i32(0))
+	rwRIDs, _ := inClusterStanzaRIDs(layout, 1, 3, new(int32(0)))
 	extRID, _ := externalStanzaRID(layout, 1, 0)
 	roRIDs, _ := inClusterStanzaRIDs(layout, 2, 3, nil)
 	rw, rwErr := buildDatabaseSyncRepl(

@@ -146,7 +146,7 @@ func runDebug(cmd *cobra.Command, args []string) error {
 		profile = "baseline" // adds nothing; our --custom adds the caps
 		no := false
 		sctx = debugSecurityContext{
-			RunAsUser:    ptrI64(0),
+			RunAsUser:    new(int64(0)),
 			RunAsNonRoot: &no,
 			Capabilities: &debugCapabilities{Add: debugFullCaps},
 		}
@@ -155,7 +155,7 @@ func runDebug(cmd *cobra.Command, args []string) error {
 	case psaBaseline:
 		profile = "baseline"
 		no := false
-		sctx = debugSecurityContext{RunAsUser: ptrI64(0), RunAsNonRoot: &no}
+		sctx = debugSecurityContext{RunAsUser: new(int64(0)), RunAsNonRoot: &no}
 		mounts = slapdMountsFor(pod.Spec.Volumes)
 		fmt.Fprintf(os.Stderr,
 			"⚠ namespace enforces PodSecurity \"baseline\" — reducing debugging power "+
@@ -166,7 +166,7 @@ func runDebug(cmd *cobra.Command, args []string) error {
 		fsHint = "slapd PVCs mounted read-only at: " + mountPaths(mounts)
 	case psaRestricted:
 		profile = "restricted"
-		sctx = debugSecurityContext{RunAsUser: ptrI64(1024), RunAsGroup: ptrI64(1024)}
+		sctx = debugSecurityContext{RunAsUser: new(int64(1024)), RunAsGroup: new(int64(1024))}
 		mounts = slapdMountsFor(pod.Spec.Volumes)
 		fmt.Fprintf(os.Stderr,
 			"⚠ namespace enforces PodSecurity \"restricted\" — running non-root (UID 1024), "+
@@ -235,7 +235,7 @@ func detectPSALevel(ctx context.Context, coreClient kubernetes.Interface, ns str
 	no := false
 	if !skipPrivileged {
 		privSC := &corev1.SecurityContext{
-			RunAsUser:    ptrI64(0),
+			RunAsUser:    new(int64(0)),
 			RunAsNonRoot: &no,
 			Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_PTRACE"}},
 		}
@@ -247,7 +247,7 @@ func detectPSALevel(ctx context.Context, coreClient kubernetes.Interface, ns str
 			return psaPrivileged, nil
 		}
 	}
-	rootSC := &corev1.SecurityContext{RunAsUser: ptrI64(0), RunAsNonRoot: &no}
+	rootSC := &corev1.SecurityContext{RunAsUser: new(int64(0)), RunAsNonRoot: &no}
 	ok, err := psaAdmits(ctx, coreClient, ns, rootSC)
 	if err != nil {
 		return psaBaseline, err

@@ -71,7 +71,7 @@ func TestResolveRIDSegmentListFails(t *testing.T) {
 		}).
 		Build()
 
-	sd := ridDB("alpha", testRIDCluster, i32(3))
+	sd := ridDB("alpha", testRIDCluster, new(int32(3)))
 	v := ridReconciler(c).resolveRIDSegment(context.Background(), &sd, ridcoord.DefaultLayout())
 
 	// 1. The withhold. Reading the failure as "no siblings, therefore no
@@ -105,8 +105,8 @@ func TestResolveRIDSegmentListFails(t *testing.T) {
 // implementation that never passed the siblings through would satisfy the
 // failure case above and silently approve every collision.
 func TestResolveRIDSegmentReadsSiblings(t *testing.T) {
-	alpha := ridDB("alpha", testRIDCluster, i32(3))
-	bravo := ridDB("bravo", testRIDCluster, i32(3))
+	alpha := ridDB("alpha", testRIDCluster, new(int32(3)))
+	bravo := ridDB("bravo", testRIDCluster, new(int32(3)))
 
 	c := fake.NewClientBuilder().
 		WithScheme(ridScheme(t)).
@@ -131,8 +131,8 @@ func TestResolveRIDSegmentReadsSiblings(t *testing.T) {
 // databases that share no pod and cannot collide (ADR-031: a RID is unique per
 // SERVER), stalling both for a reason neither can act on.
 func TestResolveRIDSegmentScopesToNamespace(t *testing.T) {
-	alpha := ridDB("alpha", testRIDCluster, i32(3))
-	foreign := ridDB("alpha", testRIDCluster, i32(3))
+	alpha := ridDB("alpha", testRIDCluster, new(int32(3)))
+	foreign := ridDB("alpha", testRIDCluster, new(int32(3)))
 	foreign.Namespace = "another-tenant"
 
 	c := fake.NewClientBuilder().

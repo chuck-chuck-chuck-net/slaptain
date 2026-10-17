@@ -251,7 +251,7 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 		keepalive     = ""
 	)
 	layout := ridcoord.DefaultLayout()
-	rwRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, i32(0))
+	rwRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, new(int32(0)))
 	roRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, nil)
 	extRID, _ := externalStanzaRID(layout, ridSegment, 0)
 
@@ -415,7 +415,7 @@ func TestBuildDatabaseSyncRepl_StanzaTimeouts(t *testing.T) {
 	)
 	keepalive := defaultKeepalive
 	layout := ridcoord.DefaultLayout()
-	rwRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, i32(0))
+	rwRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, new(int32(0)))
 	roRIDs, _ := inClusterStanzaRIDs(layout, ridSegment, replicas, nil)
 	extRID, _ := externalStanzaRID(layout, ridSegment, 0)
 

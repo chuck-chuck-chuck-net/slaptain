@@ -211,7 +211,7 @@ func TestAnUnreadableMeshsLayoutIsRefusedByTheSegmentJudgement(t *testing.T) {
 		t.Fatalf("the mesh is absent and ridLayoutFor did not refuse")
 	}
 
-	db := ridDB("alpha", testRIDCluster, i32(0))
+	db := ridDB("alpha", testRIDCluster, new(int32(0)))
 	v := judgeRIDSegment(&db, nil, layout)
 	if v.OK {
 		t.Fatalf("segment %d accepted against a layout that could not be resolved", v.Segment)

@@ -39,7 +39,7 @@ func TestInClusterStanzaRIDsAreTheLocalCoordinateOfEachProvider(t *testing.T) {
 	layout := ridcoord.DefaultLayout()
 	const segment, replicas, self = int32(3), int32(4), int32(1)
 
-	got, err := inClusterStanzaRIDs(layout, segment, replicas, i32(self))
+	got, err := inClusterStanzaRIDs(layout, segment, replicas, new(self))
 	if err != nil {
 		t.Fatalf("inClusterStanzaRIDs: unexpected refusal: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestInClusterStanzaRIDsReadNilSelfAsNotAProvider(t *testing.T) {
 		}
 	}
 
-	provider0, err := inClusterStanzaRIDs(layout, segment, replicas, i32(0))
+	provider0, err := inClusterStanzaRIDs(layout, segment, replicas, new(int32(0)))
 	if err != nil {
 		t.Fatalf("selfOrdinal 0: unexpected refusal: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestInClusterStanzaRIDsReadNilSelfAsNotAProvider(t *testing.T) {
 	// is no such provider to omit. Pinned rather than left to a doc comment,
 	// because the alternative — refusing — withholds a whole site's stanzas
 	// over a transient (a scale-down pass) that ADR-031 does not call a fault.
-	beyond, err := inClusterStanzaRIDs(layout, segment, replicas, i32(replicas))
+	beyond, err := inClusterStanzaRIDs(layout, segment, replicas, new(replicas))
 	if err != nil {
 		t.Fatalf("selfOrdinal past the fleet: unexpected refusal: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestInClusterStanzaRIDsForAReadOnlyPodCoverEveryProviderWithTheSameNumbers(
 	// provider. Compared against a RW pod's own set rather than against
 	// ridcoord directly, because the regression this guards is the two call
 	// sites drifting apart — the RO builder is a second copy of the loop.
-	rw, err := inClusterStanzaRIDs(layout, segment, replicas, i32(0))
+	rw, err := inClusterStanzaRIDs(layout, segment, replicas, new(int32(0)))
 	if err != nil {
 		t.Fatalf("read-write pod: unexpected refusal: %v", err)
 	}
@@ -196,19 +196,19 @@ func TestInClusterStanzaRIDsPropagateRidcoordRefusals(t *testing.T) {
 		{
 			name:    "an unusable layout refuses before any coordinate exists",
 			layout:  ridcoord.Layout{}, // the Go zero value: a CR that never met API-server defaulting
-			segment: 0, replicas: 3, selfOrd: i32(0),
+			segment: 0, replicas: 3, selfOrd: new(int32(0)),
 			want: ridcoord.ErrInvalidLayout,
 		},
 		{
 			name:    "a segment at the layout's ceiling has no run of RIDs",
 			layout:  ridcoord.DefaultLayout(),
-			segment: ridcoord.DefaultLayout().MaxSegments(), replicas: 3, selfOrd: i32(0),
+			segment: ridcoord.DefaultLayout().MaxSegments(), replicas: 3, selfOrd: new(int32(0)),
 			want: ridcoord.ErrSegmentOutOfRange,
 		},
 		{
 			name:    "a negative segment names no coordinate",
 			layout:  ridcoord.DefaultLayout(),
-			segment: -1, replicas: 3, selfOrd: i32(0),
+			segment: -1, replicas: 3, selfOrd: new(int32(0)),
 			want: ridcoord.ErrSegmentOutOfRange,
 		},
 		{
@@ -220,7 +220,7 @@ func TestInClusterStanzaRIDsPropagateRidcoordRefusals(t *testing.T) {
 			// two overwrite each other.
 			name:    "more replicas than the layout's podsPerSite walks into the remote block",
 			layout:  tightLayout(),
-			segment: 0, replicas: 3, selfOrd: i32(0),
+			segment: 0, replicas: 3, selfOrd: new(int32(0)),
 			want: ridcoord.ErrOrdinalOutOfRange,
 		},
 	}

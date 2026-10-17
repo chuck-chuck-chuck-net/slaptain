@@ -121,11 +121,11 @@ func TestDesiredRtxnSize(t *testing.T) {
 	if got := desiredRtxnSize(sd); got != defaultRtxnSize {
 		t.Errorf("unset rtxnSize = %d, want the operator default %d", got, defaultRtxnSize)
 	}
-	sd.Spec.RtxnSize = ptrI32(0)
+	sd.Spec.RtxnSize = new(int32(0))
 	if got := desiredRtxnSize(sd); got != 0 {
 		t.Errorf("explicit 0 must survive as 0, got %d", got)
 	}
-	sd.Spec.RtxnSize = ptrI32(50000)
+	sd.Spec.RtxnSize = new(int32(50000))
 	if got := desiredRtxnSize(sd); got != 50000 {
 		t.Errorf("explicit value = %d, want 50000", got)
 	}
@@ -165,7 +165,7 @@ func TestGlobalTuningDefaults(t *testing.T) {
 	if got := desiredToolThreads(sc); got != defaultToolThreads {
 		t.Errorf("toolThreads = %d, want %d", got, defaultToolThreads)
 	}
-	sc.Spec.Tuning.ToolThreads = ptrI32(8)
+	sc.Spec.Tuning.ToolThreads = new(int32(8))
 	if got := desiredToolThreads(sc); got != 8 {
 		t.Errorf("explicit toolThreads = %d, want 8", got)
 	}
@@ -223,7 +223,7 @@ func TestDesiredLogLevel(t *testing.T) {
 		t.Errorf("the default %d must not include the provider-side firehose", got)
 	}
 	// The whole reason LogLevel is a pointer: silence must be expressible.
-	sc.Spec.LogLevel = ptrI32(0)
+	sc.Spec.LogLevel = new(int32(0))
 	if got := desiredLogLevel(sc); got != 0 {
 		t.Errorf("explicit logLevel 0 = %d, want 0", got)
 	}

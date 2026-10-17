@@ -34,7 +34,7 @@ import (
 
 // resolvedPeer is one declared peer, in whichever mode, as a fixture.
 func declaredPeer(name string, discovery bool) ldapv1alpha1.ExternalPeer {
-	ep := ldapv1alpha1.ExternalPeer{Name: name, SiteIndex: i32(1)}
+	ep := ldapv1alpha1.ExternalPeer{Name: name, SiteIndex: new(int32(1))}
 	if discovery {
 		ep.Discovery = &ldapv1alpha1.ExternalPeerDiscovery{
 			KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: name + "-kubeconfig"},
