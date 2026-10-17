@@ -26,6 +26,9 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// pod0Target is testPod0's suffix-probe target, rendered name|host|readOnly.
+const pod0Target = "slapd-0|slapd-0.slapd-headless.ns.svc.cluster.local|false"
+
 // TestAggregateDataPresentReadOnly pins the RO-fleet extension of ADR-025
 // Decision 5. A glue provably propagates to a read-only replica — the
 // 2026-09-13 incident's RO pod carried the SAME glue with the SAME entryUUID as
@@ -58,56 +61,56 @@ func TestAggregateDataPresentReadOnly(t *testing.T) {
 		// because it is the one shape of this condition that has a legitimate
 		// transient cause.
 		{"RO pod hides the entry while every RW pod has it", []podPresence{
-			rw("slapd-0", true, true), rw("slapd-1", true, true),
-			ro("slapd-readonly-0", true, false),
-		}, true, metav1.ConditionFalse, reasonDataMissingOnReadOnlyPods, "slapd-readonly-0"},
+			rw(testPod0, true, true), rw(testPod1, true, true),
+			ro(testROPod0, true, false),
+		}, true, metav1.ConditionFalse, reasonDataMissingOnReadOnlyPods, testROPod0},
 
 		// A glue is corruption, not a sync stage: the same reason regardless of
 		// the pod's role, naming the RO pod.
 		{"glue on an RO pod is the glue reason", []podPresence{
-			rw("slapd-0", true, true), gluedRO("slapd-readonly-0"),
-		}, true, metav1.ConditionFalse, reasonGlueSuffix, "slapd-readonly-0"},
+			rw(testPod0, true, true), gluedRO(testROPod0),
+		}, true, metav1.ConditionFalse, reasonGlueSuffix, testROPod0},
 
 		// Positive control: a writable pod's divergence keeps the RW reason and
 		// is not softened by a healthy RO fleet.
 		{"RW divergence with the RO fleet healthy keeps the RW reason", []podPresence{
-			rw("slapd-0", true, false), rw("slapd-1", true, true),
-			ro("slapd-readonly-0", true, true),
-		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
+			rw(testPod0, true, false), rw(testPod1, true, true),
+			ro(testROPod0, true, true),
+		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, testPod0},
 
 		// Every RW pod hiding it while only the RO fleet still shows it is still
 		// the RW alert — an RO sighting is not an excuse.
 		{"every RW pod hides it, RO still has it", []podPresence{
-			rw("slapd-0", true, false), rw("slapd-1", true, false),
-			ro("slapd-readonly-0", true, true),
-		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
+			rw(testPod0, true, false), rw(testPod1, true, false),
+			ro(testROPod0, true, true),
+		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, testPod0},
 
 		// Unreachable is never evidence: an RO pod that could not be dialled
 		// must not manufacture a verdict in either direction.
 		{"RO pod unreachable, every RW pod present", []podPresence{
-			rw("slapd-0", true, true), rw("slapd-1", true, true),
-			ro("slapd-readonly-0", false, false),
-		}, true, metav1.ConditionTrue, reasonRootEntryVisible, "slapd-readonly-0"},
+			rw(testPod0, true, true), rw(testPod1, true, true),
+			ro(testROPod0, false, false),
+		}, true, metav1.ConditionTrue, reasonRootEntryVisible, testROPod0},
 
 		{"RO pod unreachable, RW divergence", []podPresence{
-			rw("slapd-0", true, false), rw("slapd-1", true, true),
-			ro("slapd-readonly-0", false, false),
-		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
+			rw(testPod0, true, false), rw(testPod1, true, true),
+			ro(testROPod0, false, false),
+		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, testPod0},
 
 		// Nothing visible anywhere: an RO pod's absence adds no new verdict, the
 		// knownPopulated axis still decides. A never-populated peer site bringing
 		// up an RO replica must not read as loss.
 		{"RO absent and RW unreachable on a never-populated database", []podPresence{
-			rw("slapd-0", false, false), ro("slapd-readonly-0", true, false),
+			rw(testPod0, false, false), ro(testROPod0, true, false),
 		}, false, metav1.ConditionUnknown, reasonNoDataYet, ""},
 
 		{"RO absent and RW unreachable on a populated database", []podPresence{
-			rw("slapd-0", false, false), ro("slapd-readonly-0", true, false),
+			rw(testPod0, false, false), ro(testROPod0, true, false),
 		}, true, metav1.ConditionFalse, reasonDataMissing, ""},
 
 		{"healthy fleet including RO is True", []podPresence{
-			rw("slapd-0", true, true), rw("slapd-1", true, true),
-			ro("slapd-readonly-0", true, true),
+			rw(testPod0, true, true), rw(testPod1, true, true),
+			ro(testROPod0, true, true),
 		}, true, metav1.ConditionTrue, reasonRootEntryVisible, "read-only"},
 	}
 	for _, tc := range tests {
@@ -140,14 +143,14 @@ func TestAggregateDataPresentRWOnlyMessagesUnchanged(t *testing.T) {
 		known   bool
 		wantMsg string
 	}{
-		{"all present", []podPresence{rw("slapd-0", true, true), rw("slapd-1", true, true)}, true,
+		{"all present", []podPresence{rw(testPod0, true, true), rw(testPod1, true, true)}, true,
 			"root entry dc=example,dc=org visible on all 2 reached RW pod(s)"},
-		{"none reachable", []podPresence{rw("slapd-0", false, false)}, true,
+		{"none reachable", []podPresence{rw(testPod0, false, false)}, true,
 			"could not reach any RW pod to verify data presence"},
-		{"missing everywhere, known populated", []podPresence{rw("slapd-0", true, false)}, true,
+		{"missing everywhere, known populated", []podPresence{rw(testPod0, true, false)}, true,
 			"root entry dc=example,dc=org not visible on any reachable RW pod — possible data loss; " +
 				"this condition is informational and does not trigger operator action (see ADR-012)"},
-		{"missing everywhere, never populated", []podPresence{rw("slapd-0", true, false)}, false,
+		{"missing everywhere, never populated", []podPresence{rw(testPod0, true, false)}, false,
 			"root entry dc=example,dc=org is not present on any reached RW pod, and this database has " +
 				"never been seeded, restored or observed holding data — it is waiting for its first " +
 				"data (replication from a founder site or a legacy provider). Not an alert: nothing " +
@@ -169,7 +172,7 @@ func TestAggregateDataPresentRWOnlyMessagesUnchanged(t *testing.T) {
 func TestSuffixProbeTargets(t *testing.T) {
 	cluster := func(replicas, readReplicas int32) *ldapv1alpha1.SlapdCluster {
 		return &ldapv1alpha1.SlapdCluster{
-			ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "ns"},
+			ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
 			Spec: ldapv1alpha1.SlapdClusterSpec{
 				Replicas:     replicas,
 				ReadReplicas: readReplicas,
@@ -183,14 +186,14 @@ func TestSuffixProbeTargets(t *testing.T) {
 		want []string // "pod|host|readOnly"
 	}{
 		{"no read replicas", cluster(2, 0), []string{
-			"slapd-0|slapd-0.slapd-headless.ns.svc.cluster.local|false",
+			pod0Target,
 			"slapd-1|slapd-1.slapd-headless.ns.svc.cluster.local|false",
 		}},
 		{"replicas unset defaults to one", cluster(0, 0), []string{
-			"slapd-0|slapd-0.slapd-headless.ns.svc.cluster.local|false",
+			pod0Target,
 		}},
 		{"read replicas ride the RO headless service", cluster(2, 2), []string{
-			"slapd-0|slapd-0.slapd-headless.ns.svc.cluster.local|false",
+			pod0Target,
 			"slapd-1|slapd-1.slapd-headless.ns.svc.cluster.local|false",
 			"slapd-readonly-0|slapd-readonly-0.slapd-readonly-headless.ns.svc.cluster.local|true",
 			"slapd-readonly-1|slapd-readonly-1.slapd-readonly-headless.ns.svc.cluster.local|true",

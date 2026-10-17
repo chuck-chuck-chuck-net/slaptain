@@ -28,15 +28,15 @@ import (
 // e2e suite, inherited that blindness.
 func TestSlapdContainerProbes(t *testing.T) {
 	for _, readOnly := range []bool{false, true} {
-		r := &SlapdClusterReconciler{ClusterDomain: "cluster.local"}
+		r := &SlapdClusterReconciler{ClusterDomain: testClusterDomain}
 		sc := &ldapv1alpha1.SlapdCluster{}
-		sc.Name = "slapd"
-		sc.Namespace = "slaptain"
+		sc.Name = testClusterName
+		sc.Namespace = testNamespace
 		sc.Spec.Replicas = 3
 		sc.Spec.ReadReplicas = 1
 		sc.Spec.Replication.Enabled = true
 		sc.Spec.LDAP.TLS.Enabled = true
-		sc.Spec.LDAP.TLS.SecretName = "slapd-tls"
+		sc.Spec.LDAP.TLS.SecretName = testTLSSecretName
 		tmpl := r.buildStatefulSetSpec(sc, readOnly).Template
 
 		var slapd *corev1.Container

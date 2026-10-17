@@ -13,7 +13,7 @@ import (
 // the bash script its main container (restore/wipe) runs.
 func newRestoreJobFixture(target restorePodTarget) (string, *ldapv1alpha1.SlapdDatabase) {
 	sc := &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
 	}
 	sc.Status.Restore = &ldapv1alpha1.SlapdClusterRestoreStatus{ID: "r1"}
 	sd := &ldapv1alpha1.SlapdDatabase{
@@ -39,9 +39,9 @@ func newRestoreJobFixture(target restorePodTarget) (string, *ldapv1alpha1.SlapdD
 func TestBuildRestoreJobWipesAccesslogWhenReplicated(t *testing.T) {
 	script, sd := newRestoreJobFixture(restorePodTarget{
 		jobName:      "j",
-		dataPVC:      "data-slapd-0",
-		configPVC:    "config-slapd-0",
-		accesslogPVC: "accesslog-slapd-0",
+		dataPVC:      testDataPVC0,
+		configPVC:    testConfigPVC0,
+		accesslogPVC: testAccesslogPVC0,
 		loadData:     true,
 	})
 
@@ -71,8 +71,8 @@ func TestBuildRestoreJobWipesAccesslogWhenReplicated(t *testing.T) {
 func TestBuildRestoreJobNoAccesslogWipeWhenStandalone(t *testing.T) {
 	script, _ := newRestoreJobFixture(restorePodTarget{
 		jobName:   "j",
-		dataPVC:   "data-slapd-0",
-		configPVC: "config-slapd-0",
+		dataPVC:   testDataPVC0,
+		configPVC: testConfigPVC0,
 		loadData:  true,
 	})
 	if strings.Contains(script, "/accesslog") {
@@ -91,8 +91,8 @@ func TestBuildRestoreJobNoAccesslogWipeWhenStandalone(t *testing.T) {
 // turns a safe optimisation into a corrupting one.
 func TestBuildRestoreJobUsesBulkLoadAfterWiping(t *testing.T) {
 	script, sd := newRestoreJobFixture(restorePodTarget{
-		jobName: "j", dataPVC: "data-slapd-0", configPVC: "config-slapd-0",
-		accesslogPVC: "accesslog-slapd-0", loadData: true,
+		jobName: "j", dataPVC: testDataPVC0, configPVC: testConfigPVC0,
+		accesslogPVC: testAccesslogPVC0, loadData: true,
 	})
 
 	if !strings.Contains(script, "slapadd -q ") {

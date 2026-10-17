@@ -46,7 +46,7 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 		3, 0, "pw", false, rwRIDs, "60 +", "", true,
 		ldapv1alpha1.AccesslogSuffix(dbName),
 		[]resolvedExternalPeer{{
-			Name: "site-b", RID: extRID, URIs: []string{"ldap://10.0.0.9:1024"},
+			Name: testSiteB, RID: extRID, URIs: []string{"ldap://198.51.100.9:1024"},
 			ReplicasPerPeer: 1, BindDN: extDN, Password: "pw",
 		}},
 		nil, false,
@@ -85,7 +85,7 @@ func TestSyncReplStanzasBindAsNodeLocalIdentity(t *testing.T) {
 // migration window also how an operator pins a cross-site stanza back to the
 // legacy identity until the remote site upgrades.
 func TestExternalBindIdentityOverrideStillWins(t *testing.T) {
-	got, _ := externalBindIdentity("cn=syncuser,dc=legacy,dc=net", "", "", "example-db", "pw")
+	got, _ := externalBindIdentity("cn=syncuser,dc=legacy,dc=net", "", "", testDBName, "pw")
 	if got != "cn=syncuser,dc=legacy,dc=net" {
 		t.Errorf("explicit bindDN must win verbatim, got %q", got)
 	}

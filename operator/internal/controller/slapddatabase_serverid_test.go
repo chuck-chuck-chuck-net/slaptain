@@ -18,6 +18,11 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const (
+	serverIDA = "1 ldap://a:1024"
+	serverIDB = "2 ldap://b:1024"
+)
+
 func scForServerIDs(name, ns string, replicas int32, replEnabled, tls bool, sidBase int32) *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -79,19 +84,19 @@ func TestServerIDSetsEqual(t *testing.T) {
 		a, b []string
 		want bool
 	}{
-		{"both empty", nil, nil, true},
-		{"identical", []string{"1 ldap://a:1024"}, []string{"1 ldap://a:1024"}, true},
+		{testCaseBothEmpty, nil, nil, true},
+		{"identical", []string{serverIDA}, []string{serverIDA}, true},
 		{"order-insensitive",
-			[]string{"1 ldap://a:1024", "2 ldap://b:1024"},
-			[]string{"2 ldap://b:1024", "1 ldap://a:1024"}, true},
+			[]string{serverIDA, serverIDB},
+			[]string{serverIDB, serverIDA}, true},
 		{"whitespace runs normalised",
-			[]string{"1  ldap://a:1024"}, []string{"1 ldap://a:1024"}, true},
-		{"different sid", []string{"1 ldap://a:1024"}, []string{"2 ldap://a:1024"}, false},
+			[]string{"1  ldap://a:1024"}, []string{serverIDA}, true},
+		{"different sid", []string{serverIDA}, []string{"2 ldap://a:1024"}, false},
 		{"missing on one side (the pod-0 transition case)",
-			nil, []string{"1 ldap://a:1024"}, false},
+			nil, []string{serverIDA}, false},
 		{"stale shorter list (scale-out drift)",
-			[]string{"1 ldap://a:1024", "2 ldap://b:1024"},
-			[]string{"1 ldap://a:1024", "2 ldap://b:1024", "3 ldap://c:1024"}, false},
+			[]string{serverIDA, serverIDB},
+			[]string{serverIDA, serverIDB, "3 ldap://c:1024"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

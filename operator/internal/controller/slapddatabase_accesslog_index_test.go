@@ -15,6 +15,11 @@ import (
 	"testing"
 )
 
+const (
+	indexReqTimesEq = "reqEnd,reqResult,reqStart eq"
+	indexDefaultEq  = "default eq"
+)
+
 // The per-database accesslog DBs (ADR-019) must carry the upstream index set:
 // entryCSN, objectClass, reqEnd, reqResult, reqStart, reqDN — all eq. reqDN is
 // the hot one: multi-provider out-of-order modify resolution searches the local
@@ -56,13 +61,13 @@ func TestPlanAccesslogIndices(t *testing.T) {
 		},
 		{
 			name:    "complete but split across values: no write",
-			current: []string{"entryCSN eq", "objectClass eq", "reqEnd,reqResult,reqStart eq", "reqDN eq"},
+			current: []string{testIndexEntryCSNEq, testIndexObjectClassEq, indexReqTimesEq, "reqDN eq"},
 			want:    nil,
 		},
 		{
 			name: "pre-fix log DB: add only what is missing, preserving upstream order",
 			// What every operator up to this change wrote.
-			current: []string{"default eq", "reqEnd,reqResult,reqStart eq"},
+			current: []string{indexDefaultEq, indexReqTimesEq},
 			want:    []string{"entryCSN,objectClass,reqDN eq"},
 		},
 		{
@@ -79,7 +84,7 @@ func TestPlanAccesslogIndices(t *testing.T) {
 			name: "an attribute indexed with another type counts as configured",
 			// Adding a second definition for an already-indexed attribute is a
 			// back-mdb config error, so a hand-set richer index must be left alone.
-			current: []string{"reqDN sub", "reqEnd,reqResult,reqStart eq"},
+			current: []string{"reqDN sub", indexReqTimesEq},
 			want:    []string{"entryCSN,objectClass eq"},
 		},
 		{
@@ -89,7 +94,7 @@ func TestPlanAccesslogIndices(t *testing.T) {
 		},
 		{
 			name:    "default eq alone covers nothing",
-			current: []string{"default eq"},
+			current: []string{indexDefaultEq},
 			want:    []string{full},
 		},
 	}
@@ -114,7 +119,7 @@ func TestPlanAccesslogIndices(t *testing.T) {
 func TestPlanAccesslogIndices_Idempotent(t *testing.T) {
 	for _, current := range [][]string{
 		nil,
-		{"default eq", "reqEnd,reqResult,reqStart eq"},
+		{indexDefaultEq, indexReqTimesEq},
 		{"reqDN sub"},
 	} {
 		after := append(append([]string{}, current...), planAccesslogIndices(current)...)
@@ -127,7 +132,7 @@ func TestPlanAccesslogIndices_Idempotent(t *testing.T) {
 
 // reqDN is the reason this exists (BACKLOG: "Accesslog index set is incomplete").
 func TestPlanAccesslogIndices_CoversReqDN(t *testing.T) {
-	got := planAccesslogIndices([]string{"default eq", "reqEnd,reqResult,reqStart eq"})
+	got := planAccesslogIndices([]string{indexDefaultEq, indexReqTimesEq})
 	if len(got) != 1 || !strings.Contains(strings.ToLower(got[0]), "reqdn") {
 		t.Fatalf("plan over a pre-fix log DB = %v, want it to add reqDN", got)
 	}

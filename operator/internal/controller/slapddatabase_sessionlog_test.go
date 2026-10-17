@@ -16,6 +16,9 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// wantDefaultSessionlog pins defaultSyncprovSessionlogOps as written.
+const wantDefaultSessionlog = "5000"
+
 // ADR-022: the data DB's syncprov overlay carries an in-memory sessionlog,
 // enabled by default. The decision lives in two pure functions — the value
 // (desiredSessionlogOps) and the convergence step (planSessionlog) — so the
@@ -82,11 +85,11 @@ func TestPlanSessionlog(t *testing.T) {
 			ops:        5000,
 			enabled:    true,
 			wantAction: sessionlogSet,
-			wantValue:  "5000",
+			wantValue:  wantDefaultSessionlog,
 		},
 		{
 			name:       "already at the wanted value: no write",
-			current:    []string{"5000"},
+			current:    []string{wantDefaultSessionlog},
 			ops:        5000,
 			enabled:    true,
 			wantAction: sessionlogNoop,
@@ -104,7 +107,7 @@ func TestPlanSessionlog(t *testing.T) {
 			ops:        5000,
 			enabled:    true,
 			wantAction: sessionlogSet,
-			wantValue:  "5000",
+			wantValue:  wantDefaultSessionlog,
 		},
 		{
 			name:       "unparseable live value: replace it",
@@ -112,11 +115,11 @@ func TestPlanSessionlog(t *testing.T) {
 			ops:        5000,
 			enabled:    true,
 			wantAction: sessionlogSet,
-			wantValue:  "5000",
+			wantValue:  wantDefaultSessionlog,
 		},
 		{
 			name:       "disabled with a live value: delete the attribute",
-			current:    []string{"5000"},
+			current:    []string{wantDefaultSessionlog},
 			enabled:    false,
 			wantAction: sessionlogRemove,
 		},

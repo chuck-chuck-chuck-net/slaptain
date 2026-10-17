@@ -53,8 +53,8 @@ import (
 // SyncreplStanzasReady with the reason that names the cause. Revert the
 // verdict to a bare bool at the call site and this goes red.
 
-// withExternalPeer puts one podAddresses-mode external peer on the fixture's
-// cluster, binding with a password from `secretName`.
+// withExternalPeer puts one podAddresses-mode external peer, testSite2, on the
+// fixture's cluster, binding with a password from testPeerBindSecret.
 //
 // podAddresses rather than discovery on purpose: it resolves to an address
 // without any remote cluster, so the ONLY thing that can fail is the Secret
@@ -72,15 +72,15 @@ import (
 // ONLY stanzas are the external ones. That makes it not a workaround but the
 // sharpest case there is: every stanza this database has is at stake in the
 // peer that cannot be resolved.
-func (f *ridFixture) withExternalPeer(ctx context.Context, peerName, secretName string) {
+func (f *ridFixture) withExternalPeer(ctx context.Context) {
 	sc := &ldapv1alpha1.SlapdCluster{}
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: f.cluster, Namespace: f.ns}, sc)).To(Succeed())
 	sc.Spec.Replication.Mode = replicationModeConsumerOnly
 	sc.Spec.Replication.ExternalPeers = []ldapv1alpha1.ExternalPeer{{
-		Name:                   peerName,
+		Name:                   testSite2,
 		SiteIndex:              new(int32(1)),
 		PodAddresses:           []string{"192.0.2.10"},
-		BindPasswordSecretName: secretName,
+		BindPasswordSecretName: testPeerBindSecret,
 	}}
 	Expect(k8sClient.Update(ctx, sc)).To(Succeed())
 
@@ -111,14 +111,14 @@ var _ = Describe("External peer withhold (ADR-031 M4b, RID-PLAN hazard 2)", func
 		// paths that used to `continue`, handing the atomic Replace a stanza
 		// set with this peer's link missing — a deletion of live cross-site
 		// replication, reported nowhere.
-		f.withExternalPeer(ctx, "site-2", "site-2-repl")
+		f.withExternalPeer(ctx)
 		Expect(f.createDB(ctx, "alpha", new(int32(3)))).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
 
 		expectRefusal(f.get(ctx, "alpha"), reasonPeerBindPasswordUnreadable,
-			"site-2",      // which peer could not be resolved
-			"site-2-repl", // and which Secret a human goes and looks at
+			testSite2,          // which peer could not be resolved
+			testPeerBindSecret, // and which Secret a human goes and looks at
 		)
 	})
 
@@ -138,13 +138,13 @@ var _ = Describe("External peer withhold (ADR-031 M4b, RID-PLAN hazard 2)", func
 		// louder problem than its spec) and is pinned where it is assertable,
 		// in TestDatabasePhasePrecedence.
 		readable := newRIDFixture(ctx)
-		createPeerBindSecret(ctx, readable.ns, "site-2-repl")
-		readable.withExternalPeer(ctx, "site-2", "site-2-repl")
+		createPeerBindSecret(ctx, readable.ns, testPeerBindSecret)
+		readable.withExternalPeer(ctx)
 		Expect(readable.createDB(ctx, "alpha", new(int32(3)))).To(Succeed())
 		readable.reconcile(ctx, "alpha")
 
 		broken := newRIDFixture(ctx)
-		broken.withExternalPeer(ctx, "site-2", "site-2-repl")
+		broken.withExternalPeer(ctx)
 		Expect(broken.createDB(ctx, "alpha", new(int32(3)))).To(Succeed())
 		broken.reconcile(ctx, "alpha")
 
@@ -168,16 +168,16 @@ var _ = Describe("External peer withhold (ADR-031 M4b, RID-PLAN hazard 2)", func
 
 	It("lifts the withhold once the bind-password Secret can be read", func() {
 		f := newRIDFixture(ctx)
-		f.withExternalPeer(ctx, "site-2", "site-2-repl")
+		f.withExternalPeer(ctx)
 		Expect(f.createDB(ctx, "alpha", new(int32(3)))).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
-		expectRefusal(f.get(ctx, "alpha"), reasonPeerBindPasswordUnreadable, "site-2")
+		expectRefusal(f.get(ctx, "alpha"), reasonPeerBindPasswordUnreadable, testSite2)
 
 		// A withhold that never lifts is as bad as one that writes. Nothing is
 		// stored, so there is nothing to release — this is what proves it for
 		// the peer half, as the collision spec does for the segment half.
-		createPeerBindSecret(ctx, f.ns, "site-2-repl")
+		createPeerBindSecret(ctx, f.ns, testPeerBindSecret)
 
 		f.reconcile(ctx, "alpha")
 

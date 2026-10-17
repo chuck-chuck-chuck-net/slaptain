@@ -35,7 +35,7 @@ func TestRecordedSourceConvergedConditionCaveatsLateRecording(t *testing.T) {
 		Type:    replicationConvergedCondition,
 		Status:  metav1.ConditionTrue,
 		Reason:  reasonCSNsMatch,
-		Message: "all local pods report identical contextCSN",
+		Message: testConvergedMessage,
 	})
 
 	timely := recordedSourceConvergedCondition(sc, 1, now, false)

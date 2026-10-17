@@ -22,18 +22,26 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const (
+	operatorRepo     = "ghcr.io/chuck-chuck-chuck-net/slaptain/operator"
+	operatorTag      = "v0.0.1"
+	operatorImage    = operatorRepo + ":" + operatorTag
+	registryPortRepo = "registry.example:5000/slaptain/operator"
+	componentSlapd   = "slapd"
+)
+
 func TestStripImageTag(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
 		want string
 	}{
-		{"repo:tag", "ghcr.io/chuck-chuck-chuck-net/slaptain/operator:v0.0.1", "ghcr.io/chuck-chuck-chuck-net/slaptain/operator"},
-		{"no tag", "ghcr.io/chuck-chuck-chuck-net/slaptain/operator", "ghcr.io/chuck-chuck-chuck-net/slaptain/operator"},
-		{"registry port preserved", "registry.example:5000/slaptain/operator:v1", "registry.example:5000/slaptain/operator"},
-		{"registry port, no tag", "registry.example:5000/slaptain/operator", "registry.example:5000/slaptain/operator"},
-		{"digest", "ghcr.io/chuck-chuck-chuck-net/slaptain/operator@sha256:abc123", "ghcr.io/chuck-chuck-chuck-net/slaptain/operator"},
-		{"empty", "", ""},
+		{"repo:tag", operatorImage, operatorRepo},
+		{"no tag", operatorRepo, operatorRepo},
+		{"registry port preserved", "registry.example:5000/slaptain/operator:v1", registryPortRepo},
+		{"registry port, no tag", registryPortRepo, registryPortRepo},
+		{"digest", "ghcr.io/chuck-chuck-chuck-net/slaptain/operator@sha256:abc123", operatorRepo},
+		{testCaseEmpty, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,26 +61,26 @@ func TestDefaultDataPlaneRepo(t *testing.T) {
 	}{
 		{
 			name:          "derives from operator image, drops tag",
-			operatorImage: "ghcr.io/chuck-chuck-chuck-net/slaptain/operator:v0.0.1",
-			component:     "slapd",
+			operatorImage: operatorImage,
+			component:     componentSlapd,
 			want:          "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd",
 		},
 		{
 			name:          "init component",
-			operatorImage: "ghcr.io/chuck-chuck-chuck-net/slaptain/operator:v0.0.1",
+			operatorImage: operatorImage,
 			component:     "slapd-init",
 			want:          "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-init",
 		},
 		{
 			name:          "private mirror follows the operator",
 			operatorImage: "registry.example:5000/mirror/slaptain/operator:v2",
-			component:     "slapd",
+			component:     componentSlapd,
 			want:          "registry.example:5000/mirror/slaptain/slapd",
 		},
 		{
 			name:          "unset falls back to canonical upstream",
 			operatorImage: "",
-			component:     "slapd",
+			component:     componentSlapd,
 			want:          canonicalRegistryPath + "/slapd",
 		},
 	}
@@ -96,7 +104,7 @@ func TestResolveImageRef(t *testing.T) {
 		{
 			name:       "both unset uses defaults",
 			img:        ldapv1alpha1.SlapdImageConfig{},
-			defaultTag: "v0.0.1",
+			defaultTag: operatorTag,
 			want:       "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd:v0.0.1",
 		},
 		{
@@ -108,19 +116,19 @@ func TestResolveImageRef(t *testing.T) {
 		{
 			name:       "explicit repository overrides default",
 			img:        ldapv1alpha1.SlapdImageConfig{Repository: "example.com/custom/slapd"},
-			defaultTag: "v0.0.1",
+			defaultTag: operatorTag,
 			want:       "example.com/custom/slapd:v0.0.1",
 		},
 		{
 			name:       "explicit tag overrides default",
 			img:        ldapv1alpha1.SlapdImageConfig{Tag: "v9.9.9"},
-			defaultTag: "v0.0.1",
+			defaultTag: operatorTag,
 			want:       "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd:v9.9.9",
 		},
 		{
 			name:       "fully pinned",
 			img:        ldapv1alpha1.SlapdImageConfig{Repository: "example.com/custom/slapd", Tag: "dev"},
-			defaultTag: "v0.0.1",
+			defaultTag: operatorTag,
 			want:       "example.com/custom/slapd:dev",
 		},
 	}

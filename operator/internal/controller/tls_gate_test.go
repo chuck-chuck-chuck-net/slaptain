@@ -32,7 +32,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 		{
 			name:       "TLS off with a Secret named anyway: still nothing to check",
 			enabled:    false,
-			secretName: "slapd-tls",
+			secretName: testTLSSecretName,
 			found:      false,
 			wantReady:  true,
 			wantReason: reasonTLSDisabled,
@@ -40,7 +40,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 		{
 			name:       "TLS on, complete Secret: ready",
 			enabled:    true,
-			secretName: "slapd-tls",
+			secretName: testTLSSecretName,
 			found:      true,
 			data:       map[string][]byte{corev1.TLSCertKey: []byte("x"), corev1.TLSPrivateKeyKey: []byte("y")},
 			wantReady:  true,
@@ -49,7 +49,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 		{
 			name:       "ca.crt is optional — a public-CA chain carries no separate bundle (ADR-007)",
 			enabled:    true,
-			secretName: "slapd-tls",
+			secretName: testTLSSecretName,
 			found:      true,
 			data:       map[string][]byte{corev1.TLSCertKey: []byte("x"), corev1.TLSPrivateKeyKey: []byte("y")},
 			wantReady:  true,
@@ -58,7 +58,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 		{
 			name:       "TLS on, Secret absent: the cert has not been issued yet",
 			enabled:    true,
-			secretName: "slapd-tls",
+			secretName: testTLSSecretName,
 			found:      false,
 			wantReady:  false,
 			wantReason: reasonTLSSecretMissing,
@@ -66,7 +66,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 		{
 			name:       "TLS on, Secret present but empty",
 			enabled:    true,
-			secretName: "slapd-tls",
+			secretName: testTLSSecretName,
 			found:      true,
 			data:       map[string][]byte{},
 			wantReady:  false,
@@ -75,7 +75,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 		{
 			name:       "TLS on, key without certificate",
 			enabled:    true,
-			secretName: "slapd-tls",
+			secretName: testTLSSecretName,
 			found:      true,
 			data:       map[string][]byte{corev1.TLSPrivateKeyKey: []byte("y")},
 			wantReady:  false,
@@ -84,7 +84,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 		{
 			name:       "TLS on, certificate without key",
 			enabled:    true,
-			secretName: "slapd-tls",
+			secretName: testTLSSecretName,
 			found:      true,
 			data:       map[string][]byte{corev1.TLSCertKey: []byte("x")},
 			wantReady:  false,
@@ -93,7 +93,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 		{
 			name:       "TLS on, a present but EMPTY tls.key: as unusable as an absent one",
 			enabled:    true,
-			secretName: "slapd-tls",
+			secretName: testTLSSecretName,
 			found:      true,
 			data:       map[string][]byte{corev1.TLSCertKey: []byte("x"), corev1.TLSPrivateKeyKey: []byte("")},
 			wantReady:  false,

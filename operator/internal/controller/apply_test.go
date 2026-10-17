@@ -30,6 +30,8 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const applyTestNamespace = "slaptain-testing"
+
 // TestApplyConfigurationBodyIsUnchanged pins the one thing the migration off the
 // deprecated client.Apply patch type must not change: the bytes on the wire.
 //
@@ -46,15 +48,15 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 		"Service": &corev1.Service{
 			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:        "slapd-headless",
-				Namespace:   "slaptain-testing",
+				Name:        testHeadlessSvc,
+				Namespace:   applyTestNamespace,
 				Annotations: map[string]string{"a": "b"},
 			},
 			Spec: corev1.ServiceSpec{
 				ClusterIP: corev1.ClusterIPNone,
 				Selector:  map[string]string{labelName: appName},
 				Ports: []corev1.ServicePort{{
-					Name:       "ldap",
+					Name:       portNameLDAP,
 					Port:       1024,
 					TargetPort: intstr.FromString("ldap"),
 					Protocol:   corev1.ProtocolTCP,
@@ -64,20 +66,20 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 		"StatefulSet": &appsv1.StatefulSet{
 			TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: "StatefulSet"},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "slapd",
-				Namespace: "slaptain-testing",
+				Name:      testClusterName,
+				Namespace: applyTestNamespace,
 			},
 			Spec: appsv1.StatefulSetSpec{
 				Replicas:    &replicas,
-				ServiceName: "slapd-headless",
+				ServiceName: testHeadlessSvc,
 				Selector:    &metav1.LabelSelector{MatchLabels: map[string]string{"x": "y"}},
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"x": "y"}},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
-							Name:  "slapd",
+							Name:  slapdContainerName,
 							Image: "example.invalid/slapd:v0",
-							Ports: []corev1.ContainerPort{{Name: "ldap", ContainerPort: 1024}},
+							Ports: []corev1.ContainerPort{{Name: portNameLDAP, ContainerPort: 1024}},
 						}},
 					},
 				},
@@ -89,7 +91,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 					APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
 					Kind:       "SlapdCluster",
 				},
-				ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "slaptain-testing"},
+				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: applyTestNamespace},
 			}
 			sc.Status.Phase = ldapv1alpha1.PhaseRunning
 			sc.Status.ReadyReplicas = 3
@@ -109,7 +111,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 					APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
 					Kind:       kindSlapdDatabase,
 				},
-				ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "slaptain-testing"},
+				ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: applyTestNamespace},
 			}
 			sd.Status.RestoreApplied = true
 			return sd

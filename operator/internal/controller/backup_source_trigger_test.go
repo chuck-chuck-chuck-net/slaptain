@@ -38,7 +38,7 @@ import (
 // nil SourceConverged condition, which tests/e2e/backup_test.go asserts against.
 
 func recordedStatus(condTypes ...string) ldapv1alpha1.SlapdBackupStatus {
-	st := ldapv1alpha1.SlapdBackupStatus{SourcePod: "slapd-0"}
+	st := ldapv1alpha1.SlapdBackupStatus{SourcePod: testPod0}
 	for _, t := range condTypes {
 		st.Conditions = append(st.Conditions, metav1.Condition{
 			Type:               t,

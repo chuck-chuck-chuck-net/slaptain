@@ -29,6 +29,8 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const backupTestMesh = "slapd-mesh"
+
 // The backup Job of a SINGLE-REPLICA mesh member must carry /accesslog
 // (MESH-PLAN Phase 6a; validated here, MESH-PLAN Phase 6).
 //
@@ -62,12 +64,12 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 	// A three-site mesh, indices 0/1/2 → serverID bases 0/16/32, which is
 	// the lab's shape and what tests/e2e.sh generates.
 	mesh := &ldapv1alpha1.SlapdMesh{
-		ObjectMeta: metav1.ObjectMeta{Name: "slapd-mesh", Namespace: "ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: backupTestMesh, Namespace: "ns"},
 		Spec: ldapv1alpha1.SlapdMeshSpec{
 			Sites: []ldapv1alpha1.MeshSite{
-				{Name: "site-1", ServerIDIndex: idx(0)},
-				{Name: "site-2", ServerIDIndex: idx(1)},
-				{Name: "site-3", ServerIDIndex: idx(2)},
+				{Name: testSite1, ServerIDIndex: idx(0)},
+				{Name: testSite2, ServerIDIndex: idx(1)},
+				{Name: testSite3, ServerIDIndex: idx(2)},
 			},
 			Network: &ldapv1alpha1.ReplicationNetworkConfig{Mode: "pod-routed"},
 		},
@@ -84,14 +86,14 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 			// The case the whole file exists for.
 			name: "single replica, peers derived from a mesh",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "ns"},
+				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
-					MeshRef:     "slapd-mesh",
+					MeshRef:     backupTestMesh,
 					Replication: ldapv1alpha1.SlapdReplicationConfig{Enabled: true},
 				},
 			},
-			identity: "site-2",
+			identity: testSite2,
 			want:     true,
 			why: "site-2 has two derived peers, so its cn=config carries an " +
 				"accesslog DB and slapcat validates that DB's olcDbDirectory",
@@ -103,13 +105,13 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 			// would pass the case above for the wrong reason.
 			name: "single replica, no mesh and no peers",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "ns"},
+				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
 					Replication: ldapv1alpha1.SlapdReplicationConfig{Enabled: true},
 				},
 			},
-			identity: "site-2",
+			identity: testSite2,
 			want:     false,
 			why:      "nothing replicates: no local peer, no mesh, no accesslog DB",
 		},
@@ -118,15 +120,15 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 			// peers, and one peer is enough.
 			name: "single replica, mesh narrowed by a site selector",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "ns"},
+				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
-					MeshRef:     "slapd-mesh",
-					Sites:       []string{"site-1", "site-2"},
+					MeshRef:     backupTestMesh,
+					Sites:       []string{testSite1, testSite2},
 					Replication: ldapv1alpha1.SlapdReplicationConfig{Enabled: true},
 				},
 			},
-			identity: "site-1",
+			identity: testSite1,
 			want:     true,
 			why:      "one derived peer (site-2) is still a replicated database",
 		},
@@ -149,7 +151,7 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 				&ldapv1alpha1.SlapdBackup{
 					ObjectMeta: metav1.ObjectMeta{Name: "bk", Namespace: "ns"},
 					Spec: ldapv1alpha1.SlapdBackupSpec{
-						DatabaseRef: "example-db",
+						DatabaseRef: testDBName,
 						Storage: ldapv1alpha1.S3StorageSpec{
 							Bucket:                "b",
 							CredentialsSecretName: "s3",
@@ -157,8 +159,8 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 					},
 				},
 				&ldapv1alpha1.SlapdDatabase{
-					ObjectMeta: metav1.ObjectMeta{Name: "example-db", Namespace: "ns"},
-					Spec:       ldapv1alpha1.SlapdDatabaseSpec{Suffix: "dc=example,dc=org"},
+					ObjectMeta: metav1.ObjectMeta{Name: testDBName, Namespace: "ns"},
+					Spec:       ldapv1alpha1.SlapdDatabaseSpec{Suffix: testSuffix},
 				},
 				sc, "init:img", "operator:img", "key",
 			)
@@ -177,9 +179,9 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 				t.Errorf("pod volume \"accesslog\" = %v, want %v — %s", gotVolume, tt.want, tt.why)
 			}
 			if gotMount && gotVolume {
-				if claim := pvcClaimOf(spec.Volumes, "accesslog"); claim != "accesslog-slapd-0" {
+				if claim := pvcClaimOf(spec.Volumes, "accesslog"); claim != testAccesslogPVC0 {
 					t.Errorf("accesslog volume claims %q, want %q (the Job co-locates with pod-0)",
-						claim, "accesslog-slapd-0")
+						claim, testAccesslogPVC0)
 				}
 			}
 		})

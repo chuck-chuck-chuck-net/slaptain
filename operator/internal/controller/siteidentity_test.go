@@ -29,16 +29,16 @@ func TestNormalizeSiteName(t *testing.T) {
 		want string
 	}{
 		// A configured site, as the operator chart renders it.
-		{"plain site name", "site-a", "site-a"},
+		{"plain site name", testSiteA, testSiteA},
 		// Env var absent entirely: os.Getenv yields "". No mesh features.
 		{"unset", "", ""},
 		// A values file with a stray trailing newline or space must not produce
 		// a name that compares unequal to every real site.
-		{"surrounding whitespace trimmed", "  site-b\n", "site-b"},
-		{"leading whitespace trimmed", "\tsite-c", "site-c"},
+		{"surrounding whitespace trimmed", "  site-b\n", testSiteB},
+		{"leading whitespace trimmed", "\tsite-c", testSiteC},
 		// Whitespace-only is indistinguishable from an operator mistake; treat
 		// it as unset rather than as a site literally named " ".
-		{"whitespace only treated as unset", "   ", ""},
+		{"whitespace only treated as unset", testBlank, ""},
 		{"newline only treated as unset", "\n", ""},
 		// Interior characters are not our business at this phase: no SlapdMesh
 		// type exists, so there is no sites[] to validate against (MESH-PLAN
@@ -58,8 +58,8 @@ func TestNormalizeSiteName(t *testing.T) {
 // trimmed, an unset/empty one stays empty.
 func TestResolveSiteName_Env(t *testing.T) {
 	t.Setenv("SITE_NAME", " site-a ")
-	if got := ResolveSiteName(); got != "site-a" {
-		t.Errorf("ResolveSiteName() with SITE_NAME=%q = %q, want %q", " site-a ", got, "site-a")
+	if got := ResolveSiteName(); got != testSiteA {
+		t.Errorf("ResolveSiteName() with SITE_NAME=%q = %q, want %q", " site-a ", got, testSiteA)
 	}
 	t.Setenv("SITE_NAME", "")
 	if got := ResolveSiteName(); got != "" {

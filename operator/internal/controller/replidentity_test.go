@@ -32,8 +32,8 @@ import (
 
 func TestReplicationBindDN(t *testing.T) {
 	for _, c := range []struct{ dbName, want string }{
-		{"example-db", "cn=repl-example-db,cn=slaptain-auth"},
-		{"default", "cn=repl-default,cn=slaptain-auth"},
+		{testDBName, "cn=repl-example-db,cn=slaptain-auth"},
+		{testDefaultDB, "cn=repl-default,cn=slaptain-auth"},
 	} {
 		if got := replicationBindDN(c.dbName); got != c.want {
 			t.Errorf("replicationBindDN(%q) = %q, want %q", c.dbName, got, c.want)
@@ -44,13 +44,13 @@ func TestReplicationBindDN(t *testing.T) {
 // Drift guard: the controller's notion of the bind identity must be the API
 // package's, not a parallel spelling that can wander away from it.
 func TestReplicationBindDNMatchesAPI(t *testing.T) {
-	if got, want := replicationBindDN("example-db"), ldapv1alpha1.AuthIdentityDN("example-db"); got != want {
+	if got, want := replicationBindDN(testDBName), ldapv1alpha1.AuthIdentityDN(testDBName); got != want {
 		t.Errorf("replicationBindDN = %q, API AuthIdentityDN = %q", got, want)
 	}
 }
 
 func TestLegacyReplicationBindDN(t *testing.T) {
-	if got, want := legacyReplicationBindDN("dc=example,dc=org"),
+	if got, want := legacyReplicationBindDN(testSuffix),
 		"cn=replication,dc=example,dc=org"; got != want {
 		t.Errorf("legacyReplicationBindDN = %q, want %q", got, want)
 	}
@@ -91,7 +91,7 @@ func TestReplicationACLGrantsBothIdentities(t *testing.T) {
 // The journal's grant (ADR-020). Same two identities; the rule ends in
 // `by * none`, because nothing else may read a change journal at all.
 func TestAccesslogACLGrantsBothIdentities(t *testing.T) {
-	got := accesslogACL("example-db", "dc=ex,dc=com")
+	got := accesslogACL(testDBName, "dc=ex,dc=com")
 
 	if !strings.Contains(got, `dn.exact="cn=repl-example-db,cn=slaptain-auth" read`) {
 		t.Errorf("accesslog ACL must grant the node-local identity (ADR-020 as amended by ADR-027):\n  %q", got)
@@ -110,7 +110,7 @@ func TestAccesslogACLGrantsBothIdentities(t *testing.T) {
 // matching limits exemption reproduces a defect this project already paid for.
 // Limits select on the bind DN, so the new identity needs its own value.
 func TestReplicationLimitsCoverBothIdentities(t *testing.T) {
-	got := replicationLimits("example-db", "dc=example,dc=org")
+	got := replicationLimits(testDBName, testSuffix)
 
 	if len(got) != 2 {
 		t.Fatalf("expected one olcLimits value per identity, got %d: %q", len(got), got)
@@ -132,7 +132,7 @@ func TestReplicationLimitsCoverBothIdentities(t *testing.T) {
 // cross-site peer that has not upgraded yet still reports its lag instead of
 // going Unreachable for the length of the migration window.
 func TestCSNBindDNsPreferNodeLocal(t *testing.T) {
-	got := csnBindDNs("example-db", "dc=example,dc=org")
+	got := csnBindDNs(testDBName, testSuffix)
 	want := []string{
 		"cn=repl-example-db,cn=slaptain-auth",
 		"cn=replication,dc=example,dc=org",

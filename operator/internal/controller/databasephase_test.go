@@ -51,15 +51,15 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 	}{
 		{
 			name:       "a clean pass is Running",
-			applied:    []string{"slapd-0", "slapd-1"},
+			applied:    []string{testPod0, testPod1},
 			wantPhase:  ldapv1alpha1.DatabasePhaseRunning,
 			wantReason: reasonApplied,
 			why:        "every pod took the database and nothing was withheld",
 		},
 		{
 			name:        "work still pending is Degraded/PartiallyApplied",
-			applied:     []string{"slapd-0"},
-			failed:      []string{"slapd-1"},
+			applied:     []string{testPod0},
+			failed:      []string{testPod1},
 			pendingWork: true,
 			wantPhase:   ldapv1alpha1.DatabasePhaseDegraded,
 			wantReason:  reasonPartiallyApplied,
@@ -67,7 +67,7 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 		},
 		{
 			name:        "a RID refusal outranks PartiallyApplied",
-			applied:     []string{"slapd-0", "slapd-1"},
+			applied:     []string{testPod0, testPod1},
 			pendingWork: true, // a refusal always sets this; the reason must still be the refusal's
 			refusal:     refusal,
 			wantPhase:   ldapv1alpha1.DatabasePhaseDegraded,
@@ -77,7 +77,7 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 		},
 		{
 			name:       "a RID refusal on an otherwise clean pass still reports the refusal",
-			applied:    []string{"slapd-0"},
+			applied:    []string{testPod0},
 			refusal:    refusal,
 			wantPhase:  ldapv1alpha1.DatabasePhaseDegraded,
 			wantReason: reasonRIDSegmentCollision,
@@ -86,7 +86,7 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 		},
 		{
 			name:       "no pod reachable is Error, whatever else was judged",
-			failed:     []string{"slapd-0", "slapd-1"},
+			failed:     []string{testPod0, testPod1},
 			refusal:    refusal,
 			wantPhase:  ldapv1alpha1.DatabasePhaseError,
 			wantReason: reasonNoPodsReachable,
@@ -95,7 +95,7 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 		},
 		{
 			name:        "no pod reachable with no refusal is Error too",
-			failed:      []string{"slapd-0"},
+			failed:      []string{testPod0},
 			pendingWork: true,
 			wantPhase:   ldapv1alpha1.DatabasePhaseError,
 			wantReason:  reasonNoPodsReachable,

@@ -51,7 +51,7 @@ func TestEvaluatePodsResponsive(t *testing.T) {
 	}{
 		{
 			name:       "every pod answers",
-			readings:   []csnReading{ok("slapd-0", "a"), ok("slapd-1", "a")},
+			readings:   []csnReading{ok(testPod0, "a"), ok(testPod1, "a")},
 			replicas:   2,
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonAllPodsAnswering,
@@ -59,11 +59,11 @@ func TestEvaluatePodsResponsive(t *testing.T) {
 		},
 		{
 			name:       "one pod answers nothing on any database",
-			readings:   []csnReading{ok("slapd-0", "a"), silent("slapd-1", "a")},
+			readings:   []csnReading{ok(testPod0, "a"), silent(testPod1, "a")},
 			replicas:   2,
 			wantStatus: metav1.ConditionFalse,
 			wantReason: reasonPodsNotAnswering,
-			mustName:   "slapd-1",
+			mustName:   testPod1,
 			because:    "this is the freeze, and the condition exists to name the pod",
 		},
 		{
@@ -73,7 +73,7 @@ func TestEvaluatePodsResponsive(t *testing.T) {
 			// as CSNQueriesIncomplete; duplicating it here would make this
 			// condition fire for reasons that have nothing to do with the pod.
 			name:       "a pod silent on one database only is still responsive",
-			readings:   []csnReading{ok("slapd-0", "a"), ok("slapd-1", "a"), silent("slapd-1", "b")},
+			readings:   []csnReading{ok(testPod0, "a"), ok(testPod1, "a"), silent(testPod1, "b")},
 			replicas:   2,
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonAllPodsAnswering,
@@ -84,7 +84,7 @@ func TestEvaluatePodsResponsive(t *testing.T) {
 			// up. A bind rejection is a credential problem, not a dead pod, and
 			// calling it unresponsive would send someone to the wrong place.
 			name:       "a pod that rejects the bind is answering",
-			readings:   []csnReading{ok("slapd-0", "a"), refused("slapd-1", "a")},
+			readings:   []csnReading{ok(testPod0, "a"), refused(testPod1, "a")},
 			replicas:   2,
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonAllPodsAnswering,
@@ -92,11 +92,11 @@ func TestEvaluatePodsResponsive(t *testing.T) {
 		},
 		{
 			name:       "several silent pods are all named",
-			readings:   []csnReading{silent("slapd-0", "a"), ok("slapd-1", "a"), silent("slapd-2", "a")},
+			readings:   []csnReading{silent(testPod0, "a"), ok(testPod1, "a"), silent(testPod2, "a")},
 			replicas:   3,
 			wantStatus: metav1.ConditionFalse,
 			wantReason: reasonPodsNotAnswering,
-			mustName:   "slapd-2",
+			mustName:   testPod2,
 			because:    "naming one of three sends someone to the wrong pod",
 		},
 		{
@@ -114,11 +114,11 @@ func TestEvaluatePodsResponsive(t *testing.T) {
 			// A pod the loop never reached — no reading was produced for it at
 			// all. Silence by omission is still silence.
 			name:       "a pod produced no reading whatsoever",
-			readings:   []csnReading{ok("slapd-0", "a")},
+			readings:   []csnReading{ok(testPod0, "a")},
 			replicas:   2,
 			wantStatus: metav1.ConditionFalse,
 			wantReason: reasonPodsNotAnswering,
-			mustName:   "slapd-1",
+			mustName:   testPod1,
 			because:    "a pod that was never reached is not a pod that is fine",
 		},
 	} {

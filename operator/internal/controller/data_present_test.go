@@ -55,21 +55,21 @@ func TestAggregateDataPresent(t *testing.T) {
 		wantInMsg  string // substring the message must carry ("" = don't check)
 	}{
 		{"all pods present", []podPresence{
-			p("slapd-0", true, true), p("slapd-1", true, true), p("slapd-2", true, true),
+			p(testPod0, true, true), p(testPod1, true, true), p(testPod2, true, true),
 		}, true, metav1.ConditionTrue, reasonRootEntryVisible, ""},
 
 		// The live incident shape: pod-0 hides a glue, peers look healthy.
 		// Any-pod-visible said True; all-pods must say False and name the pod.
 		{"one pod hides the entry", []podPresence{
-			p("slapd-0", true, false), p("slapd-1", true, true), p("slapd-2", true, true),
-		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
+			p(testPod0, true, false), p(testPod1, true, true), p(testPod2, true, true),
+		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, testPod0},
 
 		{"missing everywhere", []podPresence{
-			p("slapd-0", true, false), p("slapd-1", true, false),
+			p(testPod0, true, false), p(testPod1, true, false),
 		}, true, metav1.ConditionFalse, reasonDataMissing, ""},
 
 		{"no pod reachable", []podPresence{
-			p("slapd-0", false, false), p("slapd-1", false, false),
+			p(testPod0, false, false), p(testPod1, false, false),
 		}, true, metav1.ConditionUnknown, reasonNoReachablePod, ""},
 
 		{"empty result set", nil, true, metav1.ConditionUnknown, reasonNoReachablePod, ""},
@@ -77,19 +77,19 @@ func TestAggregateDataPresent(t *testing.T) {
 		// An unassessable pod is no evidence either way: the assessed pods carry
 		// the verdict, and the message discloses what went unchecked.
 		{"present on assessed, one unreachable", []podPresence{
-			p("slapd-0", true, true), p("slapd-1", false, false),
-		}, true, metav1.ConditionTrue, reasonRootEntryVisible, "slapd-1"},
+			p(testPod0, true, true), p(testPod1, false, false),
+		}, true, metav1.ConditionTrue, reasonRootEntryVisible, testPod1},
 
 		{"hidden on assessed, one unreachable", []podPresence{
-			p("slapd-0", true, false), p("slapd-1", false, false), p("slapd-2", true, true),
-		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
+			p(testPod0, true, false), p(testPod1, false, false), p(testPod2, true, true),
+		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, testPod0},
 
 		{"single pod present", []podPresence{
-			p("slapd-0", true, true),
+			p(testPod0, true, true),
 		}, true, metav1.ConditionTrue, reasonRootEntryVisible, ""},
 
 		{"single pod hidden", []podPresence{
-			p("slapd-0", true, false),
+			p(testPod0, true, false),
 		}, true, metav1.ConditionFalse, reasonDataMissing, ""},
 
 		// ── row a: the incident shape on a NEVER-SEEDED database ────────────
@@ -97,42 +97,42 @@ func TestAggregateDataPresent(t *testing.T) {
 		// D1 tells them to omit spec.seed). Split visibility is positive
 		// evidence in itself — it needs no seed latch and no memory.
 		{"seedless: one pod hides the entry", []podPresence{
-			p("slapd-0", true, false), p("slapd-1", true, true), p("slapd-2", true, true),
-		}, false, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
+			p(testPod0, true, false), p(testPod1, true, true), p(testPod2, true, true),
+		}, false, metav1.ConditionFalse, reasonDataMissingOnPods, testPod0},
 
 		// ── row b: the cry-wolf control ─────────────────────────────────────
 		// Never seeded, never restored, never observed, nothing anywhere yet:
 		// a peer site waiting for its first refresh. MUST NOT be False.
 		{"seedless and empty everywhere is not an alert", []podPresence{
-			p("slapd-0", true, false), p("slapd-1", true, false),
+			p(testPod0, true, false), p(testPod1, true, false),
 		}, false, metav1.ConditionUnknown, reasonNoDataYet, ""},
 
 		// ── row d: a glue is absolute ───────────────────────────────────────
 		// Positively identified by ManageDsaIT, so it stands on its own: no
 		// latch, no peer to disagree with, nothing else required.
 		{"glue on one pod fails even when never seeded", []podPresence{
-			glued("slapd-0"), p("slapd-1", true, true),
-		}, false, metav1.ConditionFalse, reasonGlueSuffix, "slapd-0"},
+			glued(testPod0), p(testPod1, true, true),
+		}, false, metav1.ConditionFalse, reasonGlueSuffix, testPod0},
 
 		{"glue on every pod fails", []podPresence{
-			glued("slapd-0"), glued("slapd-1"),
-		}, false, metav1.ConditionFalse, reasonGlueSuffix, "slapd-1"},
+			glued(testPod0), glued(testPod1),
+		}, false, metav1.ConditionFalse, reasonGlueSuffix, testPod1},
 
 		// A glue outranks the all-empty reading: it is a verdict, not an absence.
 		{"glue beats NoDataYet", []podPresence{
-			glued("slapd-0"), p("slapd-1", true, false),
+			glued(testPod0), p(testPod1, true, false),
 		}, false, metav1.ConditionFalse, reasonGlueSuffix, ""},
 
 		// ── row c: once known populated, empty everywhere is the alert ──────
 		{"known populated and empty everywhere alerts", []podPresence{
-			p("slapd-0", true, false), p("slapd-1", true, false),
+			p(testPod0, true, false), p(testPod1, true, false),
 		}, true, metav1.ConditionFalse, reasonDataMissing, ""},
 
 		// ── row e: positive control — the healthy seedless steady state ─────
 		// A refusal-heavy change passes vacuously against a deny-everything
 		// implementation; this row must still report True.
 		{"seedless and present everywhere is True", []podPresence{
-			p("slapd-0", true, true), p("slapd-1", true, true),
+			p(testPod0, true, true), p(testPod1, true, true),
 		}, false, metav1.ConditionTrue, reasonRootEntryVisible, ""},
 	}
 	for _, tc := range tests {
@@ -186,20 +186,20 @@ func TestDataObservedLatch(t *testing.T) {
 		want    bool
 	}{
 		{"nothing anywhere", []podPresence{
-			{pod: "slapd-0", assessed: true}, {pod: "slapd-1", assessed: true},
+			{pod: testPod0, assessed: true}, {pod: testPod1, assessed: true},
 		}, false},
 		{"unreachable pods", []podPresence{
-			{pod: "slapd-0"}, {pod: "slapd-1"},
+			{pod: testPod0}, {pod: testPod1},
 		}, false},
 		{"glue only", []podPresence{
-			{pod: "slapd-0", assessed: true, glued: true},
+			{pod: testPod0, assessed: true, glued: true},
 		}, false},
 		{"present on one pod", []podPresence{
-			{pod: "slapd-0", assessed: true, present: true}, {pod: "slapd-1", assessed: true},
+			{pod: testPod0, assessed: true, present: true}, {pod: testPod1, assessed: true},
 		}, true},
 		{"present everywhere", []podPresence{
-			{pod: "slapd-0", assessed: true, present: true},
-			{pod: "slapd-1", assessed: true, present: true},
+			{pod: testPod0, assessed: true, present: true},
+			{pod: testPod1, assessed: true, present: true},
 		}, true},
 	}
 	for _, tc := range tests {

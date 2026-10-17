@@ -25,6 +25,13 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const (
+	testMesh            = "mesh"
+	testSite3CASecret   = "site-3-ca"
+	testSite3Kubeconfig = "site-3-kubeconfig"
+	testMultusNetwork   = "infra/repl"
+)
+
 // meshSpec wraps the golden three-site topology into a whole SlapdMeshSpec,
 // with the pod-routed network the lab runs on.
 func meshSpec() *ldapv1alpha1.SlapdMeshSpec {
@@ -44,7 +51,7 @@ func meshSpec() *ldapv1alpha1.SlapdMeshSpec {
 func peersForSite2() []ldapv1alpha1.ExternalPeer {
 	return []ldapv1alpha1.ExternalPeer{
 		{
-			Name: "site-1",
+			Name: testSite1,
 			// The site's declared serverIDIndex, which is also its slot in the
 			// RID matrix's remote block (ADR-031 decision 4). site-1 declares
 			// 0 and site-3 declares 2 in threeSiteMesh; a wiring that dropped
@@ -57,12 +64,12 @@ func peersForSite2() []ldapv1alpha1.ExternalPeer {
 			},
 		},
 		{
-			Name:          "site-3",
+			Name:          testSite3,
 			SiteIndex:     new(int32(2)),
 			Port:          1025,
-			TLSSecretName: "site-3-ca",
+			TLSSecretName: testSite3CASecret,
 			Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
-				KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-3-kubeconfig"},
+				KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: testSite3Kubeconfig},
 			},
 		},
 	}
@@ -99,14 +106,14 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "meshRef unset derives nothing",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{},
-			self: "site-2",
+			self: testSite2,
 			want: nil,
 		},
 		{
 			name: "valid mesh derives base, peers and network",
 			mesh: meshSpec(),
-			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
-			self: "site-2",
+			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
+			self: testSite2,
 			want: &meshWiring{
 				ServerIDBase:  16,
 				ExternalPeers: peersForSite2(),
@@ -118,18 +125,18 @@ func TestDeriveClusterWiring(t *testing.T) {
 			// these is a defect, not a migration (MESH-PLAN hazard 2).
 			name: "first site keeps stride slot 0",
 			mesh: meshSpec(),
-			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
-			self: "site-1",
+			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
+			self: testSite1,
 			want: &meshWiring{
 				ServerIDBase: 0,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
-					{Name: "site-2", SiteIndex: new(int32(1)), Port: 1025, TLSSecretName: "site-2-ca",
+					{Name: testSite2, SiteIndex: new(int32(1)), Port: 1025, TLSSecretName: "site-2-ca",
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
 							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-2-kubeconfig"},
 						}},
-					{Name: "site-3", SiteIndex: new(int32(2)), Port: 1025, TLSSecretName: "site-3-ca",
+					{Name: testSite3, SiteIndex: new(int32(2)), Port: 1025, TLSSecretName: testSite3CASecret,
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
-							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-3-kubeconfig"},
+							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: testSite3Kubeconfig},
 						}},
 				},
 				Network: &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModePodRouted},
@@ -142,16 +149,16 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "site selector narrows the peer set but not the stride slot",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef: "mesh",
-				Sites:   []string{"site-2", "site-3"},
+				MeshRef: testMesh,
+				Sites:   []string{testSite2, testSite3},
 			},
-			self: "site-2",
+			self: testSite2,
 			want: &meshWiring{
 				ServerIDBase: 16,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
-					{Name: "site-3", SiteIndex: new(int32(2)), Port: 1025, TLSSecretName: "site-3-ca",
+					{Name: testSite3, SiteIndex: new(int32(2)), Port: 1025, TLSSecretName: testSite3CASecret,
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
-							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-3-kubeconfig"},
+							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: testSite3Kubeconfig},
 						}},
 				},
 				Network: &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModePodRouted},
@@ -167,10 +174,10 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "explicit serverIDBase conflicts",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef:     "mesh",
+				MeshRef:     testMesh,
 				Replication: ldapv1alpha1.SlapdReplicationConfig{ServerIDBase: 900},
 			},
-			self:       "site-2",
+			self:       testSite2,
 			wantReason: reasonSpecConflictsWithMesh,
 		},
 		{
@@ -180,10 +187,10 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "serverIDBase agreeing with the mesh is not a conflict",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef:     "mesh",
+				MeshRef:     testMesh,
 				Replication: ldapv1alpha1.SlapdReplicationConfig{ServerIDBase: 16},
 			},
-			self: "site-2",
+			self: testSite2,
 			want: &meshWiring{
 				ServerIDBase:  16,
 				ExternalPeers: peersForSite2(),
@@ -200,10 +207,10 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "explicit zero serverIDBase reads as unset",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef:     "mesh",
+				MeshRef:     testMesh,
 				Replication: ldapv1alpha1.SlapdReplicationConfig{ServerIDBase: 0},
 			},
-			self: "site-2",
+			self: testSite2,
 			want: &meshWiring{
 				ServerIDBase:  16,
 				ExternalPeers: peersForSite2(),
@@ -218,24 +225,24 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "explicit externalPeers conflict",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef: "mesh",
+				MeshRef: testMesh,
 				Replication: ldapv1alpha1.SlapdReplicationConfig{
 					ExternalPeers: []ldapv1alpha1.ExternalPeer{{Name: "legacy", URI: "ldaps://legacy.example:636"}},
 				},
 			},
-			self:       "site-2",
+			self:       testSite2,
 			wantReason: reasonSpecConflictsWithMesh,
 		},
 		{
 			name: "explicit network conflicts when the mesh declares one",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef: "mesh",
+				MeshRef: testMesh,
 				Replication: ldapv1alpha1.SlapdReplicationConfig{
-					Network: &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModeMultus, MultusNetwork: "infra/repl"},
+					Network: &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModeMultus, MultusNetwork: testMultusNetwork},
 				},
 			},
-			self:       "site-2",
+			self:       testSite2,
 			wantReason: reasonSpecConflictsWithMesh,
 		},
 		{
@@ -246,12 +253,12 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "cluster network survives a mesh that declares none",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{Sites: threeSiteMesh()},
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef: "mesh",
+				MeshRef: testMesh,
 				Replication: ldapv1alpha1.SlapdReplicationConfig{
 					Network: &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModePodRouted},
 				},
 			},
-			self: "site-2",
+			self: testSite2,
 			want: &meshWiring{
 				ServerIDBase:  16,
 				ExternalPeers: peersForSite2(),
@@ -264,7 +271,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			// this site a stride slot another site already owns.
 			name: "no site identity",
 			mesh: meshSpec(),
-			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
+			spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
 			self: "",
 
 			wantReason: reasonSiteIdentityMissing,
@@ -272,7 +279,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 		{
 			name:       "identity absent from the mesh",
 			mesh:       meshSpec(),
-			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
+			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
 			self:       "site-9",
 			wantReason: reasonSiteNotInMesh,
 		},
@@ -280,30 +287,30 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "identity excluded by the cluster's own selector",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef: "mesh",
-				Sites:   []string{"site-1", "site-3"},
+				MeshRef: testMesh,
+				Sites:   []string{testSite1, testSite3},
 			},
-			self:       "site-2",
+			self:       testSite2,
 			wantReason: reasonSiteNotSelected,
 		},
 		{
 			name: "selector naming a site the mesh does not have",
 			mesh: meshSpec(),
 			spec: ldapv1alpha1.SlapdClusterSpec{
-				MeshRef: "mesh",
-				Sites:   []string{"site-2", "site-typo"},
+				MeshRef: testMesh,
+				Sites:   []string{testSite2, "site-typo"},
 			},
-			self:       "site-2",
+			self:       testSite2,
 			wantReason: reasonSiteNotInMesh,
 		},
 		{
 			name: "malformed mesh is rejected, never half-derived",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{Sites: []ldapv1alpha1.MeshSite{
-				{Name: "site-1", ServerIDIndex: new(int32(0))},
-				{Name: "site-2", ServerIDIndex: new(int32(0))},
+				{Name: testSite1, ServerIDIndex: new(int32(0))},
+				{Name: testSite2, ServerIDIndex: new(int32(0))},
 			}},
-			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
-			self:       "site-2",
+			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
+			self:       testSite2,
 			wantReason: reasonMeshSitesInvalid,
 		},
 		{
@@ -313,13 +320,13 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "serverID stride ceiling",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{
 				Sites: []ldapv1alpha1.MeshSite{
-					{Name: "site-1", ServerIDIndex: new(int32(0))},
-					{Name: "site-2", ServerIDIndex: new(int32(256))},
+					{Name: testSite1, ServerIDIndex: new(int32(0))},
+					{Name: testSite2, ServerIDIndex: new(int32(256))},
 				},
 				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 999},
 			},
-			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
-			self:       "site-2",
+			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
+			self:       testSite2,
 			wantReason: reasonServerIDCeiling,
 		},
 		{
@@ -343,13 +350,13 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "a site index past this mesh's own maxSites is refused",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{
 				Sites: []ldapv1alpha1.MeshSite{
-					{Name: "site-1", ServerIDIndex: new(int32(0))},
-					{Name: "site-2", ServerIDIndex: new(int32(5))},
+					{Name: testSite1, ServerIDIndex: new(int32(0))},
+					{Name: testSite2, ServerIDIndex: new(int32(5))},
 				},
 				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 4},
 			},
-			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
-			self:       "site-1",
+			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
+			self:       testSite1,
 			wantReason: reasonSiteIndexPastLayout,
 		},
 		{
@@ -370,13 +377,13 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "slapd's immovable ceiling outranks the layout's movable one",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{
 				Sites: []ldapv1alpha1.MeshSite{
-					{Name: "site-1", ServerIDIndex: new(int32(0))},
-					{Name: "site-2", ServerIDIndex: new(int32(256))},
+					{Name: testSite1, ServerIDIndex: new(int32(0))},
+					{Name: testSite2, ServerIDIndex: new(int32(256))},
 				},
 				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 4},
 			},
-			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
-			self:       "site-1",
+			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: testMesh},
+			self:       testSite1,
 			wantReason: reasonServerIDCeiling,
 		},
 	}
@@ -430,7 +437,7 @@ func TestApplyMeshWiring_NoMeshRefIsByteIdentical(t *testing.T) {
 	}
 	sc := &ldapv1alpha1.SlapdCluster{Spec: *before.DeepCopy()}
 
-	w, err := deriveClusterWiring(meshSpec(), sc.Spec, "site-2")
+	w, err := deriveClusterWiring(meshSpec(), sc.Spec, testSite2)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -446,10 +453,10 @@ func TestApplyMeshWiring_NoMeshRefIsByteIdentical(t *testing.T) {
 // cluster's own in place.
 func TestApplyMeshWiring_Overwrites(t *testing.T) {
 	sc := &ldapv1alpha1.SlapdCluster{Spec: ldapv1alpha1.SlapdClusterSpec{
-		MeshRef: "mesh",
+		MeshRef: testMesh,
 		Replication: ldapv1alpha1.SlapdReplicationConfig{
 			Enabled: true,
-			Network: &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModeMultus, MultusNetwork: "infra/repl"},
+			Network: &ldapv1alpha1.ReplicationNetworkConfig{Mode: ldapv1alpha1.NetworkModeMultus, MultusNetwork: testMultusNetwork},
 		},
 	}}
 	applyMeshWiring(sc, &meshWiring{
@@ -464,7 +471,7 @@ func TestApplyMeshWiring_Overwrites(t *testing.T) {
 	if !reflect.DeepEqual(sc.Spec.Replication.ExternalPeers, peersForSite2()) {
 		t.Errorf("ExternalPeers = %+v, want the derived pair", sc.Spec.Replication.ExternalPeers)
 	}
-	if sc.Spec.Replication.Network == nil || sc.Spec.Replication.Network.MultusNetwork != "infra/repl" {
+	if sc.Spec.Replication.Network == nil || sc.Spec.Replication.Network.MultusNetwork != testMultusNetwork {
 		t.Errorf("a nil derived Network must leave the cluster's own alone, got %+v", sc.Spec.Replication.Network)
 	}
 	if !sc.Spec.Replication.Enabled {

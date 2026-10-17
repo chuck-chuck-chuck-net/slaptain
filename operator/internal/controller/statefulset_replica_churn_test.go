@@ -33,15 +33,15 @@ import (
 // template is a function of everything except the count.
 func TestPodTemplateDoesNotDependOnReplicaCount(t *testing.T) {
 	build := func(replicas int32) corev1.PodTemplateSpec {
-		r := &SlapdClusterReconciler{ClusterDomain: "cluster.local"}
+		r := &SlapdClusterReconciler{ClusterDomain: testClusterDomain}
 		sc := &ldapv1alpha1.SlapdCluster{}
-		sc.Name = "slapd"
-		sc.Namespace = "slaptain"
+		sc.Name = testClusterName
+		sc.Namespace = testNamespace
 		sc.Spec.Replicas = replicas
 		sc.Spec.ReadReplicas = 1
 		sc.Spec.Replication.Enabled = true
 		sc.Spec.LDAP.TLS.Enabled = true
-		sc.Spec.LDAP.TLS.SecretName = "slapd-tls"
+		sc.Spec.LDAP.TLS.SecretName = testTLSSecretName
 		return r.buildStatefulSetSpec(sc, false).Template
 	}
 
