@@ -108,6 +108,9 @@ type podAccesslogState struct {
 	DBs            []observedDB
 }
 
+// namingContextsCheck is the name checkNamingContexts reports under.
+const namingContextsCheck = "naming-contexts"
+
 // checkNamingContexts verifies the rootDSE naming contexts against the declared
 // databases: every replicated database has its own accesslog on every RW pod
 // (ADR-019 R1/R2), every RW pod serves data, and no RO pod carries a change
@@ -183,16 +186,19 @@ func checkNamingContexts(dbs []dbIdentity, pods []podAccesslogState) checkResult
 
 	switch {
 	case len(issues) > 0:
-		return checkResult{Name: "naming-contexts", Status: "fail",
+		return checkResult{Name: namingContextsCheck, Status: checkFail,
 			Detail: strings.Join(append(issues, notes...), "; ")}
 	case len(notes) > 0:
-		return checkResult{Name: "naming-contexts", Status: "warn",
+		return checkResult{Name: namingContextsCheck, Status: checkWarn,
 			Detail: strings.Join(notes, "; ")}
 	default:
-		return checkResult{Name: "naming-contexts", Status: "pass",
+		return checkResult{Name: namingContextsCheck, Status: checkPass,
 			Detail: fmt.Sprintf("RW: data + %d accesslog(s), RO: data only", wantLogs)}
 	}
 }
+
+// accesslogConsistencyCheck is the name checkAccesslogConsistency reports under.
+const accesslogConsistencyCheck = "accesslog-consistency"
 
 // checkAccesslogConsistency is the ADR-019 diagnostic: per replicated database
 // and per pod, the accesslog overlay's olcAccessLogDB, every in-cluster
@@ -344,10 +350,10 @@ func checkAccesslogConsistency(dbs []dbIdentity, pods []podAccesslogState, exter
 
 	switch {
 	case len(issues) > 0:
-		return checkResult{Name: "accesslog-consistency", Status: "fail",
+		return checkResult{Name: accesslogConsistencyCheck, Status: checkFail,
 			Detail: strings.Join(append(issues, legacyNotes...), "; ") + external}
 	case len(legacyNotes) > 0:
-		return checkResult{Name: "accesslog-consistency", Status: "warn",
+		return checkResult{Name: accesslogConsistencyCheck, Status: checkWarn,
 			Detail: strings.Join(legacyNotes, "; ") + external}
 	case allPodsSkipped(pods):
 		// Nobody was looked at, so there is nothing to report. Distinct from
@@ -357,10 +363,10 @@ func checkAccesslogConsistency(dbs []dbIdentity, pods []podAccesslogState, exter
 		// Reporting pass here is the vacuous green that let a cluster whose
 		// operator was locked out of cn=config read clean on this line while
 		// failing three others (2026-09-28, docs/BACKLOG.md reinstall trap).
-		return checkResult{Name: "accesslog-consistency", Status: "warn",
+		return checkResult{Name: accesslogConsistencyCheck, Status: checkWarn,
 			Detail: "not evaluated: no pod yielded a readable database list" + external}
 	default:
-		return checkResult{Name: "accesslog-consistency", Status: "pass",
+		return checkResult{Name: accesslogConsistencyCheck, Status: checkPass,
 			Detail: fmt.Sprintf("%d database/pod pair(s): logbase = olcAccessLogDB = log olcSuffix%s",
 				checked, external)}
 	}

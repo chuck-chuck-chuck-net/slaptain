@@ -45,7 +45,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 		"dc=one,dc=test": stanzas("rid=101 provider=ldaps://slapd-1...", "rid=102 provider=ldaps://slapd-2..."),
 		"dc=two,dc=test": stanzas("rid=201 provider=ldaps://slapd-1...", "rid=202 provider=ldaps://slapd-2..."),
 	}
-	if got := checkSyncreplStanzaCount(twoDBs, readings(rw(good)), 2, 3); got.Status != "pass" {
+	if got := checkSyncreplStanzaCount(twoDBs, readings(rw(good)), 2, 3); got.Status != checkPass {
 		t.Errorf("healthy two-database pod: %s — %s", got.Status, got.Detail)
 	}
 
@@ -55,7 +55,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 		"dc=two,dc=test": stanzas("rid=201 provider=ldaps://slapd-1..."),
 	}
 	got := checkSyncreplStanzaCount(twoDBs, readings(rw(short)), 2, 3)
-	if got.Status != "fail" {
+	if got.Status != checkFail {
 		t.Fatalf("a database short one stanza must fail, got %s — %s", got.Status, got.Detail)
 	}
 	if !strings.Contains(got.Detail, "dc=two,dc=test") {
@@ -65,7 +65,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 	// A database with NO stanzas at all is the severe case, and the one a
 	// first-database-only check is most likely to miss entirely.
 	none := map[string]syncreplDBReading{"dc=one,dc=test": good["dc=one,dc=test"]}
-	if got := checkSyncreplStanzaCount(twoDBs, readings(rw(none)), 2, 3); got.Status != "fail" {
+	if got := checkSyncreplStanzaCount(twoDBs, readings(rw(none)), 2, 3); got.Status != checkFail {
 		t.Errorf("a database with no stanzas must fail, got %s — %s", got.Status, got.Detail)
 	}
 
@@ -79,7 +79,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 		"dc=one,dc=test":   good["dc=one,dc=test"],
 		"dc=plain,dc=test": stanzas(),
 	}
-	if got := checkSyncreplStanzaCount(mixed, readings(rw(plain)), 2, 3); got.Status != "pass" {
+	if got := checkSyncreplStanzaCount(mixed, readings(rw(plain)), 2, 3); got.Status != checkPass {
 		t.Errorf("a non-replicated database must not be held to the stanza count: %s — %s", got.Status, got.Detail)
 	}
 
@@ -88,7 +88,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 		"dc=one,dc=test": stanzas("a", "b", "c"),
 		"dc=two,dc=test": stanzas("a", "b"),
 	}
-	if got := checkSyncreplStanzaCount(twoDBs, readings(ro("slapd-readonly-0", roShort)), 2, 3); got.Status != "fail" {
+	if got := checkSyncreplStanzaCount(twoDBs, readings(ro("slapd-readonly-0", roShort)), 2, 3); got.Status != checkFail {
 		t.Errorf("an RO pod short a stanza on db2 must fail, got %s — %s", got.Status, got.Detail)
 	}
 }
@@ -98,7 +98,7 @@ func TestCheckSyncreplSkipSelf(t *testing.T) {
 		"dc=one,dc=test": stanzas("rid=101 provider=ldaps://slapd-1.slapd-headless.ns.svc:1025"),
 		"dc=two,dc=test": stanzas("rid=201 provider=ldaps://slapd-1.slapd-headless.ns.svc:1025"),
 	}
-	if got := checkSyncreplSkipSelf(readings(rw(ok)), "slapd-headless"); got.Status != "pass" {
+	if got := checkSyncreplSkipSelf(readings(rw(ok)), "slapd-headless"); got.Status != checkPass {
 		t.Errorf("no self-reference must pass: %s — %s", got.Status, got.Detail)
 	}
 
@@ -108,7 +108,7 @@ func TestCheckSyncreplSkipSelf(t *testing.T) {
 		"dc=two,dc=test": stanzas("rid=201 provider=ldaps://slapd-0.slapd-headless.ns.svc:1025"),
 	}
 	got := checkSyncreplSkipSelf(readings(rw(self)), "slapd-headless")
-	if got.Status != "fail" {
+	if got.Status != checkFail {
 		t.Fatalf("a pod replicating from itself must fail, got %s — %s", got.Status, got.Detail)
 	}
 	if !strings.Contains(got.Detail, "dc=two,dc=test") {
@@ -125,7 +125,7 @@ func TestCheckRIDUniqueness(t *testing.T) {
 		"dc=one,dc=test": stanzas("rid=101 provider=x", "rid=102 provider=y"),
 		"dc=two,dc=test": stanzas("rid=201 provider=x", "rid=202 provider=y"),
 	}
-	if got := checkRIDUniqueness(readings(rw(ok))); got.Status != "pass" {
+	if got := checkRIDUniqueness(readings(rw(ok))); got.Status != checkPass {
 		t.Errorf("distinct ridBases must pass: %s — %s", got.Status, got.Detail)
 	}
 
@@ -136,7 +136,7 @@ func TestCheckRIDUniqueness(t *testing.T) {
 		"dc=two,dc=test": stanzas("rid=101 provider=x", "rid=102 provider=y"),
 	}
 	got := checkRIDUniqueness(readings(rw(clash)))
-	if got.Status != "fail" {
+	if got.Status != checkFail {
 		t.Fatalf("a RID reused across databases must fail, got %s — %s", got.Status, got.Detail)
 	}
 	if !strings.Contains(got.Detail, "101") {
@@ -147,7 +147,7 @@ func TestCheckRIDUniqueness(t *testing.T) {
 	dup := map[string]syncreplDBReading{
 		"dc=one,dc=test": stanzas("rid=101 provider=x", "rid=101 provider=y"),
 	}
-	if got := checkRIDUniqueness(readings(rw(dup))); got.Status != "fail" {
+	if got := checkRIDUniqueness(readings(rw(dup))); got.Status != checkFail {
 		t.Errorf("a duplicate RID within one database must fail, got %s", got.Status)
 	}
 }
@@ -157,7 +157,7 @@ func TestCheckMultiProvider(t *testing.T) {
 		"dc=one,dc=test": {Stanzas: []string{"x"}, MultiProvider: "TRUE"},
 		"dc=two,dc=test": {Stanzas: []string{"x"}, MultiProvider: "TRUE"},
 	}
-	if got := checkMultiProviderPerDB(twoDBs, readings(rw(both))); got.Status != "pass" {
+	if got := checkMultiProviderPerDB(twoDBs, readings(rw(both))); got.Status != checkPass {
 		t.Errorf("TRUE on both databases must pass: %s — %s", got.Status, got.Detail)
 	}
 
@@ -167,7 +167,7 @@ func TestCheckMultiProvider(t *testing.T) {
 		"dc=two,dc=test": {Stanzas: []string{"x"}},
 	}
 	got := checkMultiProviderPerDB(twoDBs, readings(rw(half)))
-	if got.Status != "fail" {
+	if got.Status != checkFail {
 		t.Fatalf("multiProvider missing on a database must fail, got %s — %s", got.Status, got.Detail)
 	}
 	if !strings.Contains(got.Detail, "dc=two,dc=test") {
@@ -179,7 +179,7 @@ func TestCheckMultiProvider(t *testing.T) {
 		"dc=one,dc=test": {MultiProvider: ""},
 		"dc=two,dc=test": {MultiProvider: "TRUE"},
 	}
-	if got := checkMultiProviderPerDB(twoDBs, readings(ro("slapd-readonly-0", roBad))); got.Status != "fail" {
+	if got := checkMultiProviderPerDB(twoDBs, readings(ro("slapd-readonly-0", roBad))); got.Status != checkFail {
 		t.Errorf("an RO pod with multiProvider on a database must fail, got %s — %s", got.Status, got.Detail)
 	}
 }
@@ -207,10 +207,10 @@ func TestChecksDoNotJudgeUnreadablePods(t *testing.T) {
 		checkMultiProviderPerDB(twoDBs, none),
 		checkRIDUniqueness(none),
 	} {
-		if got.Status == "fail" {
+		if got.Status == checkFail {
 			t.Errorf("%s FAILED on no evidence: %s", got.Name, got.Detail)
 		}
-		if got.Status == "pass" {
+		if got.Status == checkPass {
 			t.Errorf("%s PASSED on no evidence — a vacuous green is how a broken cluster reports clean: %s",
 				got.Name, got.Detail)
 		}
@@ -224,7 +224,7 @@ func TestChecksDoNotJudgeUnreadablePods(t *testing.T) {
 // And the cause itself has to be a check, not a line of prose above the checks.
 func TestCheckConfigReadable(t *testing.T) {
 	ok := checkConfigReadable(nil)
-	if ok.Status != "pass" {
+	if ok.Status != checkPass {
 		t.Errorf("no config errors must pass, got %s — %s", ok.Status, ok.Detail)
 	}
 
@@ -232,7 +232,7 @@ func TestCheckConfigReadable(t *testing.T) {
 		{Pod: "slapd-0", Err: `cn=config bind failed: LDAP Result Code 49 "Invalid Credentials"`},
 		{Pod: "slapd-1", Err: `cn=config bind failed: LDAP Result Code 49 "Invalid Credentials"`},
 	})
-	if bad.Status != "fail" {
+	if bad.Status != checkFail {
 		t.Fatalf("unreadable cn=config must fail, got %s", bad.Status)
 	}
 	for _, want := range []string{"slapd-0", "slapd-1", "49"} {

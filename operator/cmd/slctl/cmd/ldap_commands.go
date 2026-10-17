@@ -45,13 +45,19 @@ func splitLDAPArgs(raw []string, f *ldapTargetFlags) []string {
 		"--ldaps":           &f.useTLS,
 		"--port-forward":    &f.forcePortForward,
 		"--direct":          &f.forceDirect,
-		"--verbose":         &f.verbose,
-		"--show-password":   &f.showPassword,
+		flagVerbose:         &f.verbose,
+		flagShowPassword:    &f.showPassword,
 		"--redact-password": &f.redactPassword, // retained; now the default
 	}
 
 	return splitOwnFlags(raw, stringFlags, boolFlags)
 }
+
+// The transparency flags both wrappers (ldap and aws) take.
+const (
+	flagVerbose      = "--verbose"
+	flagShowPassword = "--show-password"
+)
 
 // splitOwnFlags pulls the flags named in stringFlags/boolFlags out of raw,
 // stores their values, and returns everything else in order for the wrapped
