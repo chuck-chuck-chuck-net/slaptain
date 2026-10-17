@@ -3,12 +3,14 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	ldap "github.com/go-ldap/ldap/v3"
@@ -60,12 +62,11 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Collecting debug artifacts in %s/\n", dir)
 
-	var warnings int
+	warnings := &dumpWarnings{w: cmd.ErrOrStderr()}
 	writeFile := func(filename, data string) {
 		path := filepath.Join(dir, filename)
 		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: write %s: %v\n", path, err)
-			warnings++
+			warnings.warnf("write %s: %v", path, err)
 		} else {
 			fmt.Printf("  %s\n", filename)
 		}
@@ -73,19 +74,20 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 	collect := func(filename string, fn func() (string, error)) {
 		data, err := fn()
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: %s: %v\n", filename, err)
-			warnings++
-			return
+			warnings.warnf("%s: %v", filename, err)
 		}
+		// Whatever was read is kept even alongside an error: a log stream that
+		// failed to close after a complete read is still the evidence wanted.
 		if data == "" {
 			return
 		}
 		writeFile(filename, data)
 	}
-	// collectOptional silently skips errors (e.g. previous logs when no crash).
+	// collectOptional silently skips errors (e.g. previous logs when no crash),
+	// keeping whatever was read, as collect does.
 	collectOptional := func(filename string, fn func() (string, error)) {
-		data, err := fn()
-		if err != nil || data == "" {
+		data, _ := fn()
+		if data == "" {
 			return
 		}
 		writeFile(filename, data)
@@ -132,14 +134,13 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 		// LDAP queries via port-forward + go-ldap (with timeout to avoid hanging)
 		done := make(chan struct{}, 1)
 		go func() {
-			collectLDAPArtifacts(ctx, coreClient, config, ns, pn, sc, configPW, dir, cmd, &warnings)
+			collectLDAPArtifacts(ctx, coreClient, config, ns, pn, sc, configPW, dir, warnings)
 			done <- struct{}{}
 		}()
 		select {
 		case <-done:
 		case <-time.After(15 * time.Second):
-			fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: LDAP queries for %s timed out after 15s\n", pn)
-			warnings++
+			warnings.warnf("LDAP queries for %s timed out after 15s", pn)
 		}
 	}
 
@@ -244,22 +245,54 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 	})
 
 	fmt.Printf("\nDone. %d artifacts collected", countFiles(dir))
-	if warnings > 0 {
-		fmt.Printf(" (%d warnings)", warnings)
+	if n := warnings.count(); n > 0 {
+		fmt.Printf(" (%d warnings)", n)
 	}
 	fmt.Println()
-	return nil
+	return warnings.writeErr()
 }
 
-func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, ns, podName string, sc *ldapv1alpha1.SlapdCluster, configPW, dir string, cmd *cobra.Command, warnings *int) {
+// dumpWarnings counts the problems a dump runs into and reports each on stderr.
+// It is shared with the per-pod LDAP goroutine, which can outlive its timeout,
+// hence the lock. A warning that cannot even be written is the one problem it
+// cannot report, so the first such failure becomes the command's error.
+type dumpWarnings struct {
+	w io.Writer
+
+	mu  sync.Mutex
+	n   int
+	err error
+}
+
+func (d *dumpWarnings) warnf(format string, a ...any) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.n++
+	if _, err := fmt.Fprintf(d.w, "  WARN: "+format+"\n", a...); err != nil && d.err == nil {
+		d.err = fmt.Errorf("write warning: %w", err)
+	}
+}
+
+func (d *dumpWarnings) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.n
+}
+
+func (d *dumpWarnings) writeErr() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.err
+}
+
+func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, ns, podName string, sc *ldapv1alpha1.SlapdCluster, configPW, dir string, warnings *dumpWarnings) {
 	// Per-pod timeout to avoid hanging on unresponsive pods
 	podCtx, podCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer podCancel()
 
 	localPort, cancel, err := k8scli.PortForward(podCtx, coreClient, config, ns, podName, 1024)
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: port-forward %s: %v\n", podName, err)
-		*warnings++
+		warnings.warnf("port-forward %s: %v", podName, err)
 		return
 	}
 	defer cancel()
@@ -271,8 +304,7 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 		}
 		path := filepath.Join(dir, filename)
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: write %s: %v\n", path, err)
-			*warnings++
+			warnings.warnf("write %s: %v", path, err)
 		} else {
 			fmt.Printf("  %s\n", filename)
 		}
@@ -282,8 +314,7 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	netConn, err := dialer.DialContext(podCtx, "tcp", addr)
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "  WARN: LDAP dial %s: %v\n", podName, err)
-		*warnings++
+		warnings.warnf("LDAP dial %s: %v", podName, err)
 		return
 	}
 	conn := ldap.NewConn(netConn, false)
@@ -328,7 +359,9 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 	if len(csnDump) > 0 {
 		write(fmt.Sprintf("contextcsn-%s.txt", podName), strings.Join(csnDump, "\n"))
 	}
-	conn.Close()
+	if err := conn.Close(); err != nil {
+		warnings.warnf("close LDAP connection to %s: %v", podName, err)
+	}
 
 	// cn=config queries (config admin)
 	// The data DB index varies: {1}mdb without accesslog, {2}mdb with accesslog.
@@ -371,7 +404,9 @@ func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, 
 					write(fmt.Sprintf("acls-%s.txt", podName), dump.String())
 				}
 			}
-			configConn.Close()
+			if err := configConn.Close(); err != nil {
+				warnings.warnf("close cn=config connection to %s: %v", podName, err)
+			}
 		}
 	}
 }
@@ -390,7 +425,7 @@ func formatLDAPEntry(entry *ldap.Entry) string {
 	return sb.String()
 }
 
-func getPodLogs(ctx context.Context, coreClient kubernetes.Interface, ns, podName, container string, previous bool) (string, error) {
+func getPodLogs(ctx context.Context, coreClient kubernetes.Interface, ns, podName, container string, previous bool) (logs string, err error) {
 	tailLines := int64(1000)
 	opts := &corev1.PodLogOptions{
 		Container: container,
@@ -402,7 +437,11 @@ func getPodLogs(ctx context.Context, coreClient kubernetes.Interface, ns, podNam
 	if err != nil {
 		return "", err
 	}
-	defer stream.Close()
+	defer func() {
+		if cerr := stream.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close log stream: %w", cerr))
+		}
+	}()
 	b, err := io.ReadAll(stream)
 	if err != nil {
 		return "", err

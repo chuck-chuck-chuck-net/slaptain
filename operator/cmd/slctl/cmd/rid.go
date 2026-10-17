@@ -629,7 +629,12 @@ func runRIDDecode(cmd *cobra.Command, args []string) error {
 	}
 	rid := int32(n)
 
-	res := resolveRIDContext(cmd)
+	res, notes := resolveRIDContext()
+	for _, note := range notes {
+		if _, err := fmt.Fprintln(cmd.ErrOrStderr(), note); err != nil {
+			return err
+		}
+	}
 
 	if ridLayoutFlag != "" {
 		layout, err := parseRIDLayoutFlag(ridLayoutFlag)
@@ -648,38 +653,39 @@ func runRIDDecode(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return err
 	}
-	fmt.Fprint(cmd.OutOrStdout(), renderRIDDecodeText(result))
-	return nil
+	_, err = fmt.Fprint(cmd.OutOrStdout(), renderRIDDecodeText(result))
+	return err
 }
 
 // resolveRIDContext reads as much naming context as the environment will give
 // up. Nothing in here is allowed to fail the command: a decode against the
 // compiled-in default is the base case, so every unreadable input degrades to
-// the offline answer with a line on stderr saying which input was unreadable.
-func resolveRIDContext(cmd *cobra.Command) ridResolution {
+// the offline answer with a note, for stderr, saying which input was unreadable.
+func resolveRIDContext() (ridResolution, []string) {
 	if ridOfflineFlag {
-		return buildRIDResolution(nil, nil, nil)
+		return buildRIDResolution(nil, nil, nil), nil
 	}
+	var notes []string
 
 	ctx := context.Background()
 	k8sClient, _, _, ns, err := initClient()
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Note: no cluster could be contacted (%v); decoding offline.\n", err)
-		return buildRIDResolution(nil, nil, nil)
+		notes = append(notes, fmt.Sprintf("Note: no cluster could be contacted (%v); decoding offline.", err))
+		return buildRIDResolution(nil, nil, nil), notes
 	}
 
 	sc, err := resolveRIDCluster(ctx, k8sClient, ns)
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Note: %v; decoding offline.\n", err)
-		return buildRIDResolution(nil, nil, nil)
+		notes = append(notes, fmt.Sprintf("Note: %v; decoding offline.", err))
+		return buildRIDResolution(nil, nil, nil), notes
 	}
 
 	dbList := &ldapv1alpha1.SlapdDatabaseList{}
 	if err := k8sClient.List(ctx, dbList, client.InNamespace(ns)); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Note: SlapdDatabases could not be listed (%v).\n", err)
+		notes = append(notes, fmt.Sprintf("Note: SlapdDatabases could not be listed (%v).", err))
 	}
 
 	var mesh *ldapv1alpha1.SlapdMesh
@@ -689,12 +695,12 @@ func resolveRIDContext(cmd *cobra.Command) ridResolution {
 		if err := k8sClient.Get(ctx, key, m); err != nil {
 			// Deliberately not fatal, and deliberately not silent: the decode
 			// labels its own answer untrusted.
-			fmt.Fprintf(cmd.ErrOrStderr(), "Note: SlapdMesh %q could not be read (%v).\n", sc.Spec.MeshRef, err)
+			notes = append(notes, fmt.Sprintf("Note: SlapdMesh %q could not be read (%v).", sc.Spec.MeshRef, err))
 		} else {
 			mesh = m
 		}
 	}
-	return buildRIDResolution(sc, mesh, dbList.Items)
+	return buildRIDResolution(sc, mesh, dbList.Items), notes
 }
 
 // resolveRIDCluster picks the SlapdCluster whose declarations name the segments
