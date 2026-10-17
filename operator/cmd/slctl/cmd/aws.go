@@ -58,7 +58,7 @@ func knownStorageKinds() string {
 	for alias, canonical := range storageKindAliases {
 		seen[canonical] = append(seen[canonical], alias)
 	}
-	var out []string
+	out := make([]string, 0, len(seen))
 	for canonical, aliases := range seen {
 		sort.Slice(aliases, func(i, j int) bool { return len(aliases[i]) > len(aliases[j]) })
 		out = append(out, fmt.Sprintf("%s (%s)", canonical, strings.Join(aliases, "|")))
@@ -226,8 +226,8 @@ func resolveServicePod(
 		return "", 0, fmt.Errorf("get Service %s/%s: %w", ns, svcName, err)
 	}
 	if len(svc.Spec.Selector) == 0 {
-		return "", 0, fmt.Errorf("Service %s/%s has no selector (an ExternalName or manually managed Service); "+
-			"it cannot be port-forwarded", ns, svcName)
+		return "", 0, fmt.Errorf("cannot port-forward Service %s/%s: it has no selector "+
+			"(an ExternalName or manually managed Service)", ns, svcName)
 	}
 
 	var target *corev1.ServicePort
@@ -242,9 +242,9 @@ func resolveServicePod(
 		for _, p := range svc.Spec.Ports {
 			have = append(have, strconv.Itoa(int(p.Port)))
 		}
-		return "", 0, fmt.Errorf("Service %s/%s has no port %d (it serves %s) — "+
+		return "", 0, fmt.Errorf("no port %d on Service %s/%s (it serves %s) — "+
 			"the storage spec's endpoint port does not match the Service",
-			ns, svcName, svcPort, strings.Join(have, ", "))
+			svcPort, ns, svcName, strings.Join(have, ", "))
 	}
 
 	var sel []string
@@ -528,7 +528,7 @@ func readS3Credentials(
 	id := string(sec.Data["access-key-id"])
 	key := string(sec.Data["secret-access-key"])
 	if id == "" || key == "" {
-		return "", "", fmt.Errorf("Secret %s/%s must carry non-empty %q and %q keys",
+		return "", "", fmt.Errorf("the Secret %s/%s must carry non-empty %q and %q keys",
 			ns, secretName, "access-key-id", "secret-access-key")
 	}
 	return id, key, nil

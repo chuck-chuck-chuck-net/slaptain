@@ -367,9 +367,6 @@ func splitImageRef(imageRef string) (string, string) {
 	return imageRef, ""
 }
 
-//go:fix inline
-func ptrI64(v int64) *int64 { return new(v) }
-
 type debugCapabilities struct {
 	Add  []string `json:"add,omitempty"`
 	Drop []string `json:"drop,omitempty"`
