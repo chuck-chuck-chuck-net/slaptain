@@ -189,19 +189,6 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// 7. Apply database to every pod. cn=config is node-local (ADR-002).
-	replicas := sc.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-	headlessSvc := sc.Name + "-headless"
-
-	var appliedPods, failedPods []string
-
-	// Pods whose per-pod database reconcile completed. reconcileReplication
-	// writes syncrepl stanzas only to these — see the comment on its healthyPods
-	// parameter.
-	healthyPods := map[string]bool{}
-
 	// Start each pass assuming every operator-managed tunable matches; the
 	// per-pod work flips this to False when it finds one it cannot apply to a
 	// live database (today: the map size). Set here rather than at the end so
@@ -238,40 +225,10 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// read" from "declares something unusable" (judgeRIDLayout).
 	ridSegment, ridRefusal := r.reconcileRIDSegment(ctx, sc, sd, ridLayout, ridLayoutErr)
 
-	// RW pods.
-	for i := int32(0); i < replicas; i++ {
-		podName := fmt.Sprintf("%s-%d", sc.Name, i)
-		host := fmt.Sprintf("%s.%s.%s.svc.%s",
-			podName, headlessSvc, sc.Namespace, r.ClusterDomain)
-		if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false, i); err != nil {
-			log.Info("database reconcile skipped for pod (will retry)",
-				"pod", podName, "err", err)
-			failedPods = append(failedPods, podName)
-		} else {
-			appliedPods = append(appliedPods, podName)
-			healthyPods[podName] = true
-		}
-	}
-
-	// RO pods.
-	if sc.Spec.ReadReplicas > 0 {
-		roHeadless := sc.Name + "-readonly-headless"
-		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
-			podName := fmt.Sprintf("%s-readonly-%d", sc.Name, i)
-			host := fmt.Sprintf("%s.%s.%s.svc.%s",
-				podName, roHeadless, sc.Namespace, r.ClusterDomain)
-			// ordinal is unused for RO pods (serverID is RW-only), but the
-			// signature requires it.
-			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true, i); err != nil {
-				log.Info("database reconcile skipped for read-only pod (will retry)",
-					"pod", podName, "err", err)
-				failedPods = append(failedPods, podName)
-			} else {
-				appliedPods = append(appliedPods, podName)
-				healthyPods[podName] = true
-			}
-		}
-	}
+	// Apply to every RW and RO pod. healthyPods are the pods whose per-pod
+	// reconcile completed: reconcileReplication writes syncrepl stanzas only
+	// to these — see the comment on its healthyPods parameter.
+	appliedPods, failedPods, healthyPods := r.applyToPods(ctx, sc, sd, configPW, rootPW)
 
 	// Track whether any step was incomplete — forces requeue even if database
 	// creation succeeded on all pods. Without this, the operator would stop
@@ -302,94 +259,16 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//    ADR-028 §4). The gate acts on what the spec DECLARES and runs before
 	//    any connection; the belt acts on what the directory shows has already
 	//    happened. Both still fire, independently.
-	if seedNeeded(sd) {
-		switch decideSeedSite(sd.Spec.Seed.Site, r.SiteName) {
-		case seedSiteWithhold:
-			// Permanent by nature: this site is not, and will not become, the
-			// declared founder. Latching is correct — the DIT arrives by
-			// replication, and re-evaluating every reconcile buys nothing.
-			log.Info("seed withheld: spec.seed.site names another site (ADR-028 §3); "+
-				"latching SeedApplied — the DIT arrives by replication",
-				"seedSite", sd.Spec.Seed.Site, "operatorSite", r.SiteName,
-				"suffix", sd.Spec.Suffix)
-			sd.Status.SeedApplied = true
-		case seedSiteUnknownIdentity:
-			// A MISCONFIGURATION, not a fact about the topology: we cannot tell
-			// whether this site is the founder. Withhold — unreadable identity
-			// never counts as a match — but deliberately do NOT latch, or
-			// setting SITE_NAME later would silently never seed. pendingWork
-			// keeps the database Degraded and on the tight requeue, so the
-			// misconfiguration is loud rather than silent.
-			log.Info("seed deferred: spec.seed.site names a site but this operator has no "+
-				"site identity (SITE_NAME unset — ADR-028 §4); not latching SeedApplied, "+
-				"set the operator chart's siteName to resolve",
-				"seedSite", sd.Spec.Seed.Site, "suffix", sd.Spec.Suffix)
-			pendingWork = true
-		default:
-			withheld, err := r.applySeedData(ctx, sc, sd, rootPW)
-			switch {
-			case err != nil:
-				log.Info("seed data not yet applied (will retry)", "err", err)
-				pendingWork = true
-			case withheld:
-				log.Info("seed withheld: suffix entry already created by a foreign serverID "+
-					"(founder site's seed replicated in first — ADR-025); latching SeedApplied",
-					"suffix", sd.Spec.Suffix)
-				sd.Status.SeedApplied = true
-			default:
-				sd.Status.SeedApplied = true
-			}
-		}
+	if seedNeeded(sd) && !r.reconcileSeed(ctx, sc, sd, rootPW) {
+		pendingWork = true
 	}
 
-	// 9. Create replication bind user if replication is enabled.
-	//    The user cn=replication,<suffix> must exist in the data tree before
-	//    syncrepl stanzas can authenticate. Created idempotently on pod-0.
-	//
-	//    Skipped in consumer-only mode (ADR-010): the cn=replication user is
-	//    the bind identity for external consumers authenticating *to* this
-	//    cluster, but consumer-only clusters don't advertise as a provider —
-	//    nobody binds, so the user isn't needed. Additionally the data DB
-	//    has olcReadOnly=TRUE in consumer-only, so the add would be rejected
-	//    with unwillingToPerform anyway. On in-place promotion to peer mode,
-	//    the next reconcile flips olcReadOnly (step 7) before this step
-	//    fires, and the bind user gets created cleanly.
-	//    Deferred for a not-yet-restored bootstrapFrom database (ADR-014): its
-	//    suffix base entry doesn't exist until the restore loads it, so adding
-	//    cn=replication,<suffix> fails with "No Such Object" and wedges the DB in
-	//    Degraded — which blocks the restore that is gated on the DB reaching
-	//    Running (a deadlock). The backup itself contains cn=replication, so the
-	//    post-restore add (restoreApplied=true) is idempotent.
-	restorePending := sd.Spec.BootstrapFrom != nil && !sd.Status.RestoreApplied
-	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() && !restorePending {
-		if err := r.ensureReplicationUser(ctx, sc, sd, rootPW); err != nil {
-			log.Info("replication user not yet created (will retry)", "err", err)
-			pendingWork = true
-		}
-	}
-
-	// 9b. Project this database's replication identity into the node-local auth
-	//     database on every pod (ADR-027), and learn whether every pod now has
-	//     it. Since the cutover (ADR-027 migration step 3) the syncrepl stanzas
-	//     in step 10 bind as this identity, so this step is no longer additive
-	//     decoration — it is step 10's precondition.
-	//
-	//     Gated exactly like step 9, and for the same reasons: an identity only
-	//     has a purpose where this cluster acts as a provider. restorePending is
-	//     deliberately NOT part of the gate — that guard exists because
-	//     cn=replication,<suffix> needs the data tree's suffix entry, which a
-	//     not-yet-restored database lacks; this entry's parent is operator-created
-	//     infrastructure that is always there.
-	//
-	//     A cluster that does not reach this branch (replication disabled, or
-	//     consumer-only) writes no in-cluster stanza that binds as the identity,
-	//     so the zero value must not gate step 10 — it is set converged.
-	authIdentity := authIdentityState{AllRWPodsConverged: true, AllROPodsConverged: true}
-	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() {
-		authIdentity = r.reconcileAuthIdentity(ctx, sc, sd, configPW)
-		if !authIdentity.AllRWPodsConverged || !authIdentity.AllROPodsConverged {
-			pendingWork = true
-		}
+	// 9, 9b. The replication identities: the legacy cn=replication,<suffix>
+	//    entry, and the node-local identity step 10's stanzas bind as (ADR-027).
+	//    See reconcileReplicationIdentities.
+	authIdentity, identityPending := r.reconcileReplicationIdentities(ctx, sc, sd, configPW, rootPW)
+	if identityPending {
+		pendingWork = true
 	}
 
 	// 10. Configure replication stanzas if replication is enabled.
@@ -472,6 +351,174 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// ADR-027's declared source of truth — is still picked up. See
 	// databaseRequeueAfter for the measurement that prompted it.
 	return ctrl.Result{RequeueAfter: databaseRequeueAfter(phase)}, nil
+}
+
+// applyToPods runs reconcilePodDatabase against every RW pod, then every RO
+// pod, and sorts them into applied and failed. healthyPods holds the applied
+// ones by name.
+func (r *SlapdDatabaseReconciler) applyToPods(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	sd *ldapv1alpha1.SlapdDatabase,
+	configPW, rootPW string,
+) (appliedPods, failedPods []string, healthyPods map[string]bool) {
+	log := logf.FromContext(ctx)
+	replicas := sc.Spec.Replicas
+	if replicas == 0 {
+		replicas = 1
+	}
+	headlessSvc := sc.Name + "-headless"
+	healthyPods = map[string]bool{}
+
+	// RW pods.
+	for i := int32(0); i < replicas; i++ {
+		podName := fmt.Sprintf("%s-%d", sc.Name, i)
+		host := fmt.Sprintf("%s.%s.%s.svc.%s",
+			podName, headlessSvc, sc.Namespace, r.ClusterDomain)
+		if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, false, i); err != nil {
+			log.Info("database reconcile skipped for pod (will retry)",
+				"pod", podName, "err", err)
+			failedPods = append(failedPods, podName)
+		} else {
+			appliedPods = append(appliedPods, podName)
+			healthyPods[podName] = true
+		}
+	}
+
+	// RO pods.
+	if sc.Spec.ReadReplicas > 0 {
+		roHeadless := sc.Name + "-readonly-headless"
+		for i := int32(0); i < sc.Spec.ReadReplicas; i++ {
+			podName := fmt.Sprintf("%s-readonly-%d", sc.Name, i)
+			host := fmt.Sprintf("%s.%s.%s.svc.%s",
+				podName, roHeadless, sc.Namespace, r.ClusterDomain)
+			// ordinal is unused for RO pods (serverID is RW-only), but the
+			// signature requires it.
+			if err := r.reconcilePodDatabase(ctx, host, configPW, rootPW, sd, sc, true, i); err != nil {
+				log.Info("database reconcile skipped for read-only pod (will retry)",
+					"pod", podName, "err", err)
+				failedPods = append(failedPods, podName)
+			} else {
+				appliedPods = append(appliedPods, podName)
+				healthyPods[podName] = true
+			}
+		}
+	}
+	return appliedPods, failedPods, healthyPods
+}
+
+// reconcileSeed is step 8 for a database that still needs its seed. It
+// reports whether the seed is settled — applied, or withheld for good — and
+// false when it must be retried; see the step 8 comment in Reconcile.
+func (r *SlapdDatabaseReconciler) reconcileSeed(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	sd *ldapv1alpha1.SlapdDatabase,
+	rootPW string,
+) bool {
+	log := logf.FromContext(ctx)
+	switch decideSeedSite(sd.Spec.Seed.Site, r.SiteName) {
+	case seedSiteWithhold:
+		// Permanent by nature: this site is not, and will not become, the
+		// declared founder. Latching is correct — the DIT arrives by
+		// replication, and re-evaluating every reconcile buys nothing.
+		log.Info("seed withheld: spec.seed.site names another site (ADR-028 §3); "+
+			"latching SeedApplied — the DIT arrives by replication",
+			"seedSite", sd.Spec.Seed.Site, "operatorSite", r.SiteName,
+			"suffix", sd.Spec.Suffix)
+		sd.Status.SeedApplied = true
+	case seedSiteUnknownIdentity:
+		// A MISCONFIGURATION, not a fact about the topology: we cannot tell
+		// whether this site is the founder. Withhold — unreadable identity
+		// never counts as a match — but deliberately do NOT latch, or
+		// setting SITE_NAME later would silently never seed. Reporting it
+		// unsettled keeps the database Degraded and on the tight requeue, so
+		// the misconfiguration is loud rather than silent.
+		log.Info("seed deferred: spec.seed.site names a site but this operator has no "+
+			"site identity (SITE_NAME unset — ADR-028 §4); not latching SeedApplied, "+
+			"set the operator chart's siteName to resolve",
+			"seedSite", sd.Spec.Seed.Site, "suffix", sd.Spec.Suffix)
+		return false
+	default:
+		withheld, err := r.applySeedData(ctx, sc, sd, rootPW)
+		switch {
+		case err != nil:
+			log.Info("seed data not yet applied (will retry)", "err", err)
+			return false
+		case withheld:
+			log.Info("seed withheld: suffix entry already created by a foreign serverID "+
+				"(founder site's seed replicated in first — ADR-025); latching SeedApplied",
+				"suffix", sd.Spec.Suffix)
+			sd.Status.SeedApplied = true
+		default:
+			sd.Status.SeedApplied = true
+		}
+	}
+	return true
+}
+
+// reconcileReplicationIdentities runs steps 9 and 9b: the legacy
+// cn=replication,<suffix> entry in the data tree, and the node-local
+// replication identity on every pod. pending reports that either has to be
+// retried; the returned state gates step 10.
+func (r *SlapdDatabaseReconciler) reconcileReplicationIdentities(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	sd *ldapv1alpha1.SlapdDatabase,
+	configPW, rootPW string,
+) (authIdentity authIdentityState, pending bool) {
+	log := logf.FromContext(ctx)
+
+	// 9. Create replication bind user if replication is enabled.
+	//    The user cn=replication,<suffix> must exist in the data tree before
+	//    syncrepl stanzas can authenticate. Created idempotently on pod-0.
+	//
+	//    Skipped in consumer-only mode (ADR-010): the cn=replication user is
+	//    the bind identity for external consumers authenticating *to* this
+	//    cluster, but consumer-only clusters don't advertise as a provider —
+	//    nobody binds, so the user isn't needed. Additionally the data DB
+	//    has olcReadOnly=TRUE in consumer-only, so the add would be rejected
+	//    with unwillingToPerform anyway. On in-place promotion to peer mode,
+	//    the next reconcile flips olcReadOnly (step 7) before this step
+	//    fires, and the bind user gets created cleanly.
+	//    Deferred for a not-yet-restored bootstrapFrom database (ADR-014): its
+	//    suffix base entry doesn't exist until the restore loads it, so adding
+	//    cn=replication,<suffix> fails with "No Such Object" and wedges the DB in
+	//    Degraded — which blocks the restore that is gated on the DB reaching
+	//    Running (a deadlock). The backup itself contains cn=replication, so the
+	//    post-restore add (restoreApplied=true) is idempotent.
+	restorePending := sd.Spec.BootstrapFrom != nil && !sd.Status.RestoreApplied
+	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() && !restorePending {
+		if err := r.ensureReplicationUser(ctx, sc, sd, rootPW); err != nil {
+			log.Info("replication user not yet created (will retry)", "err", err)
+			pending = true
+		}
+	}
+
+	// 9b. Project this database's replication identity into the node-local auth
+	//     database on every pod (ADR-027), and learn whether every pod now has
+	//     it. Since the cutover (ADR-027 migration step 3) the syncrepl stanzas
+	//     in step 10 bind as this identity, so this step is no longer additive
+	//     decoration — it is step 10's precondition.
+	//
+	//     Gated exactly like step 9, and for the same reasons: an identity only
+	//     has a purpose where this cluster acts as a provider. restorePending is
+	//     deliberately NOT part of the gate — that guard exists because
+	//     cn=replication,<suffix> needs the data tree's suffix entry, which a
+	//     not-yet-restored database lacks; this entry's parent is operator-created
+	//     infrastructure that is always there.
+	//
+	//     A cluster that does not reach this branch (replication disabled, or
+	//     consumer-only) writes no in-cluster stanza that binds as the identity,
+	//     so the zero value must not gate step 10 — it is set converged.
+	authIdentity = authIdentityState{AllRWPodsConverged: true, AllROPodsConverged: true}
+	if sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly() {
+		authIdentity = r.reconcileAuthIdentity(ctx, sc, sd, configPW)
+		if !authIdentity.AllRWPodsConverged || !authIdentity.AllROPodsConverged {
+			pending = true
+		}
+	}
+	return authIdentity, pending
 }
 
 // ── Credentials ──────────────────────────────────────────────────────────────
