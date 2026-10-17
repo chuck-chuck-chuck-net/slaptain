@@ -961,139 +961,9 @@ func printInspectResult(result inspectJSON) {
 
 	if !shortOutput {
 		for _, pod := range result.Pods {
-			fmt.Printf("\n  Pod: %s  [%s", pod.Name, pod.Phase)
-			if pod.Ready {
-				fmt.Print(", ready")
-			}
-			fmt.Println("]")
-
-			if pod.Error != "" {
-				fmt.Printf("    Error: %s\n", pod.Error)
-				continue
-			}
-
-			if len(pod.NamingContexts) > 0 {
-				fmt.Printf("    namingContexts: %s\n", strings.Join(pod.NamingContexts, ", "))
-			}
-
-			// One section per database: two databases' vectors differ by
-			// construction, so an unlabelled list of CSNs invites exactly the
-			// cross-database comparison ADR-008 rules out.
-			for _, suffix := range sortedKeys(pod.ContextCSNBySuffix) {
-				csns := pod.ContextCSNBySuffix[suffix]
-				if len(csns) == 0 {
-					fmt.Printf("    contextCSN (%s): none readable\n", suffix)
-					continue
-				}
-				fmt.Printf("    contextCSN (%s):\n", suffix)
-				for _, csn := range csns {
-					fmt.Printf("      %s\n", csn)
-				}
-			}
-
-			// Per data suffix, matching the contextCSN block above:
-			// olcSyncRepl lives on one olcDatabase={N}mdb entry, so a pod
-			// serving two databases has two independent stanza sets. This used
-			// to print the first one and label it as the pod's.
-			for _, suffix := range sortedKeysOf(pod.SyncReplBySuffix) {
-				// Classify stanzas into in-cluster and cross-site.
-				// Match against URI (NodePort), podAddresses (static Multus),
-				// or DiscoveredProviders (discovery mode).
-				var inCluster, crossSite []string
-				for _, sr := range pod.SyncReplBySuffix[suffix] {
-					matched := false
-					for _, ep := range result.ExternalPeers {
-						var needles []string
-						if len(ep.DiscoveredProviders) > 0 {
-							needles = providerAddressList(ep.DiscoveredProviders)
-						} else if ep.Multus {
-							needles = ep.PodAddresses
-						} else {
-							needles = []string{ep.URI}
-						}
-						for _, needle := range needles {
-							if needle != "" && strings.Contains(sr, needle) {
-								label := fmt.Sprintf("[%s] ", ep.Name)
-								if len(sr) > 100 {
-									sr = sr[:100] + "..."
-								}
-								crossSite = append(crossSite, label+sr)
-								matched = true
-								break
-							}
-						}
-						if matched {
-							break
-						}
-					}
-					if !matched {
-						if len(sr) > 120 {
-							sr = sr[:120] + "..."
-						}
-						inCluster = append(inCluster, sr)
-					}
-				}
-				if len(inCluster) > 0 {
-					fmt.Printf("    syncRepl (%s, in-cluster):\n", suffix)
-					for _, sr := range inCluster {
-						fmt.Printf("      %s\n", sr)
-					}
-				}
-				if len(crossSite) > 0 {
-					fmt.Printf("    syncRepl (%s, cross-site):\n", suffix)
-					for _, sr := range crossSite {
-						fmt.Printf("      %s\n", sr)
-					}
-				}
-			}
-			for _, suffix := range sortedKeysOfString(pod.MultiProviderBySuffix) {
-				fmt.Printf("    multiProvider (%s): %s\n", suffix, pod.MultiProviderBySuffix[suffix])
-			}
-			if pod.ConfigQueryError != "" {
-				fmt.Printf("    cn=config:    %s\n", pod.ConfigQueryError)
-			}
+			printPodDetail(pod, result.ExternalPeers)
 		}
-
-		// External peers summary
-		if len(result.ExternalPeers) > 0 {
-			fmt.Println("\n  External Peers:")
-			for _, ep := range result.ExternalPeers {
-				var replStr string
-				switch ep.ReplicationState {
-				case string(ldapv1alpha1.ReplicationSynced):
-					replStr = string(ldapv1alpha1.ReplicationSynced)
-				case string(ldapv1alpha1.ReplicationLagging):
-					if ep.LagSeconds != "" {
-						replStr = fmt.Sprintf("Lagging (%ss)", ep.LagSeconds)
-					} else {
-						replStr = string(ldapv1alpha1.ReplicationLagging)
-					}
-				case string(ldapv1alpha1.ReplicationPartiallyVerified):
-					replStr = string(ldapv1alpha1.ReplicationPartiallyVerified)
-					if ep.LastError != "" {
-						replStr += " (" + ep.LastError + ")"
-					}
-				case string(ldapv1alpha1.ReplicationUnreachable):
-					replStr = string(ldapv1alpha1.ReplicationUnreachable)
-					if ep.LastError != "" {
-						replStr += " (" + ep.LastError + ")"
-					}
-				default:
-					if ep.Connected != nil && !*ep.Connected {
-						replStr = "disconnected"
-						if ep.LastError != "" {
-							replStr += " (" + ep.LastError + ")"
-						}
-					}
-				}
-				if replStr != "" {
-					fmt.Printf("    %-20s %s  %s\n", ep.Name, ep.URI, replStr)
-				} else {
-					fmt.Printf("    %-20s %s\n", ep.Name, ep.URI)
-				}
-			}
-		}
-
+		printExternalPeers(result.ExternalPeers)
 		fmt.Println()
 	}
 
@@ -1113,6 +983,156 @@ func printInspectResult(result inspectJSON) {
 	}
 
 	fmt.Printf("\n%s\n", result.Summary)
+}
+
+// printPodDetail prints one pod's section of the long inspect output.
+func printPodDetail(pod podJSON, peers []externalPeerInfo) {
+	fmt.Printf("\n  Pod: %s  [%s", pod.Name, pod.Phase)
+	if pod.Ready {
+		fmt.Print(", ready")
+	}
+	fmt.Println("]")
+
+	if pod.Error != "" {
+		fmt.Printf("    Error: %s\n", pod.Error)
+		return
+	}
+
+	if len(pod.NamingContexts) > 0 {
+		fmt.Printf("    namingContexts: %s\n", strings.Join(pod.NamingContexts, ", "))
+	}
+
+	// One section per database: two databases' vectors differ by
+	// construction, so an unlabelled list of CSNs invites exactly the
+	// cross-database comparison ADR-008 rules out.
+	for _, suffix := range sortedKeys(pod.ContextCSNBySuffix) {
+		csns := pod.ContextCSNBySuffix[suffix]
+		if len(csns) == 0 {
+			fmt.Printf("    contextCSN (%s): none readable\n", suffix)
+			continue
+		}
+		fmt.Printf("    contextCSN (%s):\n", suffix)
+		for _, csn := range csns {
+			fmt.Printf("      %s\n", csn)
+		}
+	}
+
+	// Per data suffix, matching the contextCSN block above:
+	// olcSyncRepl lives on one olcDatabase={N}mdb entry, so a pod
+	// serving two databases has two independent stanza sets. This used
+	// to print the first one and label it as the pod's.
+	for _, suffix := range sortedKeysOf(pod.SyncReplBySuffix) {
+		inCluster, crossSite := classifyStanzas(pod.SyncReplBySuffix[suffix], peers)
+		if len(inCluster) > 0 {
+			fmt.Printf("    syncRepl (%s, in-cluster):\n", suffix)
+			for _, sr := range inCluster {
+				fmt.Printf("      %s\n", sr)
+			}
+		}
+		if len(crossSite) > 0 {
+			fmt.Printf("    syncRepl (%s, cross-site):\n", suffix)
+			for _, sr := range crossSite {
+				fmt.Printf("      %s\n", sr)
+			}
+		}
+	}
+	for _, suffix := range sortedKeysOfString(pod.MultiProviderBySuffix) {
+		fmt.Printf("    multiProvider (%s): %s\n", suffix, pod.MultiProviderBySuffix[suffix])
+	}
+	if pod.ConfigQueryError != "" {
+		fmt.Printf("    cn=config:    %s\n", pod.ConfigQueryError)
+	}
+}
+
+// classifyStanzas splits stanzas into in-cluster and cross-site, the latter
+// labelled with the peer they point at. A stanza is cross-site when it
+// contains the peer's URI (NodePort), one of its podAddresses (static
+// Multus) or one of its DiscoveredProviders (discovery mode). Both lists are
+// truncated for display.
+func classifyStanzas(stanzas []string, peers []externalPeerInfo) (inCluster, crossSite []string) {
+	for _, sr := range stanzas {
+		if peer, ok := stanzaPeer(sr, peers); ok {
+			if len(sr) > 100 {
+				sr = sr[:100] + "..."
+			}
+			crossSite = append(crossSite, fmt.Sprintf("[%s] ", peer)+sr)
+			continue
+		}
+		if len(sr) > 120 {
+			sr = sr[:120] + "..."
+		}
+		inCluster = append(inCluster, sr)
+	}
+	return inCluster, crossSite
+}
+
+// stanzaPeer names the first external peer the stanza points at.
+func stanzaPeer(sr string, peers []externalPeerInfo) (string, bool) {
+	for _, ep := range peers {
+		var needles []string
+		if len(ep.DiscoveredProviders) > 0 {
+			needles = providerAddressList(ep.DiscoveredProviders)
+		} else if ep.Multus {
+			needles = ep.PodAddresses
+		} else {
+			needles = []string{ep.URI}
+		}
+		for _, needle := range needles {
+			if needle != "" && strings.Contains(sr, needle) {
+				return ep.Name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// printExternalPeers prints the external peers summary, if there are any.
+func printExternalPeers(peers []externalPeerInfo) {
+	if len(peers) == 0 {
+		return
+	}
+	fmt.Println("\n  External Peers:")
+	for _, ep := range peers {
+		if replStr := externalPeerReplication(ep); replStr != "" {
+			fmt.Printf("    %-20s %s  %s\n", ep.Name, ep.URI, replStr)
+		} else {
+			fmt.Printf("    %-20s %s\n", ep.Name, ep.URI)
+		}
+	}
+}
+
+// externalPeerReplication renders a peer's replication state for the
+// summary, or "" when there is nothing to say.
+func externalPeerReplication(ep externalPeerInfo) string {
+	var replStr string
+	switch ep.ReplicationState {
+	case string(ldapv1alpha1.ReplicationSynced):
+		replStr = string(ldapv1alpha1.ReplicationSynced)
+	case string(ldapv1alpha1.ReplicationLagging):
+		if ep.LagSeconds != "" {
+			replStr = fmt.Sprintf("Lagging (%ss)", ep.LagSeconds)
+		} else {
+			replStr = string(ldapv1alpha1.ReplicationLagging)
+		}
+	case string(ldapv1alpha1.ReplicationPartiallyVerified):
+		replStr = string(ldapv1alpha1.ReplicationPartiallyVerified)
+		if ep.LastError != "" {
+			replStr += " (" + ep.LastError + ")"
+		}
+	case string(ldapv1alpha1.ReplicationUnreachable):
+		replStr = string(ldapv1alpha1.ReplicationUnreachable)
+		if ep.LastError != "" {
+			replStr += " (" + ep.LastError + ")"
+		}
+	default:
+		if ep.Connected != nil && !*ep.Connected {
+			replStr = "disconnected"
+			if ep.LastError != "" {
+				replStr += " (" + ep.LastError + ")"
+			}
+		}
+	}
+	return replStr
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
