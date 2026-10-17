@@ -66,7 +66,7 @@ func meshWithSites(ns string, layout *ldapv1alpha1.RIDLayout, indices ...int32) 
 		})
 	}
 	return &ldapv1alpha1.SlapdMesh{
-		ObjectMeta: metav1.ObjectMeta{Name: "ldap", Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: testMeshName, Namespace: ns},
 		Spec: ldapv1alpha1.SlapdMeshSpec{
 			Sites:     sites,
 			RIDLayout: layout,

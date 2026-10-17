@@ -26,6 +26,12 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// Errors a contextCSN read can fail with.
+const (
+	dialTimeoutErr = "dial: i/o timeout"
+	bindRefusedErr = "bind cn=replication: LDAP Result Code 49"
+)
+
 // Two databases whose CSN vectors differ by construction. Independent write
 // histories mean disjoint serverID activity and different timestamps; the only
 // comparable unit is one suffix across pods.
@@ -75,12 +81,12 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			// converged three-pod mesh.
 			name: "two healthy databases with different vectors are converged",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-0", Suffix: sfxB, CSNs: csnsB},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxB, CSNs: csnsB},
-				{Pod: "slapd-2", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-2", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod0, Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPod2, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod2, Suffix: sfxB, CSNs: csnsB},
 			},
 			replicas:   3,
 			wantStatus: metav1.ConditionTrue,
@@ -93,8 +99,8 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			// cannot pass this suite vacuously.
 			name: "single database converged across pods",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsA},
 			},
 			replicas:   2,
 			wantStatus: metav1.ConditionTrue,
@@ -105,10 +111,10 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			// database diverged, since that is the actionable half.
 			name: "one database diverged across pods names that database",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-0", Suffix: sfxB, CSNs: csnsB},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsAOlder},
-				{Pod: "slapd-1", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod0, Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsAOlder},
+				{Pod: testPod1, Suffix: sfxB, CSNs: csnsB},
 			},
 			replicas:   2,
 			wantStatus: metav1.ConditionFalse,
@@ -121,8 +127,8 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			// shape, ADR-025).
 			name: "a pod with no contextCSN diverges from pods that have one",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: nil},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: nil},
 			},
 			replicas:   2,
 			wantStatus: metav1.ConditionFalse,
@@ -136,23 +142,23 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			// not read it" must never count toward the good verdict.
 			name: "an unreadable pod/database caps the verdict at Unknown",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-2", Suffix: sfxA, Err: "dial slapd-2: connection refused"},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod2, Suffix: sfxA, Err: "dial slapd-2: connection refused"},
 			},
 			replicas:   3,
 			wantStatus: metav1.ConditionUnknown,
 			wantReason: reasonCSNQueriesIncomplete,
-			wantMsgHas: []string{"slapd-2", sfxA},
+			wantMsgHas: []string{testPod2, sfxA},
 		},
 		{
 			// Observed divergence outranks incompleteness: a problem we can see
 			// is reported as a problem, not downgraded to "unknown".
 			name: "observed divergence wins over an unreadable pod",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "slapd-1", Suffix: sfxA, CSNs: csnsAOlder},
-				{Pod: "slapd-2", Suffix: sfxA, Err: "dial slapd-2: connection refused"},
+				{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPod1, Suffix: sfxA, CSNs: csnsAOlder},
+				{Pod: testPod2, Suffix: sfxA, Err: "dial slapd-2: connection refused"},
 			},
 			replicas:   3,
 			wantStatus: metav1.ConditionFalse,
@@ -165,8 +171,8 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			// previous condition untouched).
 			name: "all queries failing is Unknown, not silence",
 			readings: []csnReading{
-				{Pod: "slapd-0", Suffix: sfxA, Err: "dial: i/o timeout"},
-				{Pod: "slapd-1", Suffix: sfxA, Err: "dial: i/o timeout"},
+				{Pod: testPod0, Suffix: sfxA, Err: dialTimeoutErr},
+				{Pod: testPod1, Suffix: sfxA, Err: dialTimeoutErr},
 			},
 			replicas:   2,
 			wantStatus: metav1.ConditionUnknown,
@@ -212,8 +218,8 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 // against our db2 and never against our db1.
 func TestEvaluateLocalConvergenceNewestBySuffix(t *testing.T) {
 	got := evaluateLocalConvergence([]csnReading{
-		{Pod: "slapd-0", Suffix: sfxA, CSNs: csnsA},
-		{Pod: "slapd-0", Suffix: sfxB, CSNs: csnsB},
+		{Pod: testPod0, Suffix: sfxA, CSNs: csnsA},
+		{Pod: testPod0, Suffix: sfxB, CSNs: csnsB},
 	}, 1)
 
 	a, ok := got.NewestBySuffix[sfxA]
@@ -255,8 +261,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			// because each database is compared against its own counterpart.
 			name: "peer current on every database is Synced",
 			readings: []csnReading{
-				{Pod: "10.0.0.1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "10.0.0.1", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPodIP1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPodIP1, Suffix: sfxB, CSNs: csnsB},
 			},
 			wantState:   ldapv1alpha1.ReplicationSynced,
 			wantNoError: true,
@@ -269,8 +275,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			// read failure. Some databases verified, some not: PartiallyVerified.
 			name: "a database with no readable evidence is not Synced",
 			readings: []csnReading{
-				{Pod: "10.0.0.1", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "10.0.0.1", Suffix: sfxB, Err: "bind cn=replication: LDAP Result Code 49"},
+				{Pod: testPodIP1, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPodIP1, Suffix: sfxB, Err: bindRefusedErr},
 			},
 			wantState:  ldapv1alpha1.ReplicationPartiallyVerified,
 			wantErrHas: []string{sfxB},
@@ -281,8 +287,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			// database could not be read at all.
 			name: "measured lag outranks an unverifiable database",
 			readings: []csnReading{
-				{Pod: "10.0.0.1", Suffix: sfxA, CSNs: csnsAOlder},
-				{Pod: "10.0.0.1", Suffix: sfxB, Err: "bind cn=replication: LDAP Result Code 49"},
+				{Pod: testPodIP1, Suffix: sfxA, CSNs: csnsAOlder},
+				{Pod: testPodIP1, Suffix: sfxB, Err: bindRefusedErr},
 			},
 			wantState:  ldapv1alpha1.ReplicationLagging,
 			wantLag:    "146.7",
@@ -296,8 +302,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			// in its peer-side form.
 			name: "lag is measured per database, never across databases",
 			readings: []csnReading{
-				{Pod: "10.0.0.1", Suffix: sfxA, Err: "bind cn=replication: LDAP Result Code 49"},
-				{Pod: "10.0.0.2", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPodIP1, Suffix: sfxA, Err: bindRefusedErr},
+				{Pod: testPodIP2, Suffix: sfxB, CSNs: csnsB},
 			},
 			wantState:  ldapv1alpha1.ReplicationPartiallyVerified,
 			wantErrHas: []string{sfxA},
@@ -306,8 +312,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			// Nothing answered anywhere: Unreachable, unchanged.
 			name: "no readable evidence at all is Unreachable",
 			readings: []csnReading{
-				{Pod: "10.0.0.1", Suffix: sfxA, Err: "dial: i/o timeout"},
-				{Pod: "10.0.0.1", Suffix: sfxB, Err: "dial: i/o timeout"},
+				{Pod: testPodIP1, Suffix: sfxA, Err: dialTimeoutErr},
+				{Pod: testPodIP1, Suffix: sfxB, Err: dialTimeoutErr},
 			},
 			wantState:  ldapv1alpha1.ReplicationUnreachable,
 			wantErrHas: []string{"queries failed"},
@@ -317,9 +323,9 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			// is not a gap in evidence: the database IS verified.
 			name: "one address failing does not make a verified database unverified",
 			readings: []csnReading{
-				{Pod: "10.0.0.1", Suffix: sfxA, Err: "dial: i/o timeout"},
-				{Pod: "10.0.0.2", Suffix: sfxA, CSNs: csnsA},
-				{Pod: "10.0.0.2", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPodIP1, Suffix: sfxA, Err: dialTimeoutErr},
+				{Pod: testPodIP2, Suffix: sfxA, CSNs: csnsA},
+				{Pod: testPodIP2, Suffix: sfxB, CSNs: csnsB},
 			},
 			wantState:   ldapv1alpha1.ReplicationSynced,
 			wantNoError: true,
@@ -329,8 +335,8 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 			// it is behind, not merely unverified.
 			name: "an empty remote database is Lagging",
 			readings: []csnReading{
-				{Pod: "10.0.0.1", Suffix: sfxA, CSNs: nil},
-				{Pod: "10.0.0.1", Suffix: sfxB, CSNs: csnsB},
+				{Pod: testPodIP1, Suffix: sfxA, CSNs: nil},
+				{Pod: testPodIP1, Suffix: sfxB, CSNs: csnsB},
 			},
 			wantState: ldapv1alpha1.ReplicationLagging,
 		},

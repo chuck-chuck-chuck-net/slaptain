@@ -69,10 +69,10 @@ func TestJudgePeerResolutions(t *testing.T) {
 		},
 		{
 			name:  "every peer resolving cleanly converges",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true), declaredPeer("site-3", false)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true), declaredPeer(testSite3, false)},
 			outcomes: []peerResolution{
-				{Name: "site-2", Discovery: true, Addresses: 3},
-				{Name: "site-3", Addresses: 1},
+				{Name: testSite2, Discovery: true, Addresses: 3},
+				{Name: testSite3, Addresses: 1},
 			},
 			wantOK: true,
 			why:    "the ordinary mesh: this is the path that must stay exactly as it is today",
@@ -85,9 +85,9 @@ func TestJudgePeerResolutions(t *testing.T) {
 			// business, and refusing it here would be a behaviour change
 			// M4b did not ask for.
 			name:  "a bind-password Secret that was read but carries nothing still resolves",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true)},
 			outcomes: []peerResolution{
-				{Name: "site-2", Discovery: true, BindPasswordSecret: "site-2-repl", Addresses: 2},
+				{Name: testSite2, Discovery: true, BindPasswordSecret: testPeerBindSecret, Addresses: 2},
 			},
 			wantOK: true,
 			why: "\"could not read it\" is not \"not set\"; only the unreadable Secret withholds, " +
@@ -98,24 +98,24 @@ func TestJudgePeerResolutions(t *testing.T) {
 			// stanza's point of view (both end with no credential), opposite
 			// verdicts, and the difference is the read.
 			name:  "a bind-password Secret that could not be read withholds the pass",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true)},
 			outcomes: []peerResolution{
-				{Name: "site-2", Discovery: true, BindPasswordSecret: "site-2-repl",
+				{Name: testSite2, Discovery: true, BindPasswordSecret: testPeerBindSecret,
 					SecretErr: unreadable, Addresses: 2},
 			},
 			wantReason: reasonPeerBindPasswordUnreadable,
-			naming:     []string{"site-2", "site-2-repl", unreadable.Error()},
+			naming:     []string{testSite2, testPeerBindSecret, unreadable.Error()},
 			why: "today it `continue`s: a transiently unreadable Secret deletes that peer's " +
 				"stanzas from every pod, and the message is the only place an RBAC regression surfaces",
 		},
 		{
 			name:  "a discovery peer that has resolved no provider withholds the pass",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true)},
 			outcomes: []peerResolution{
-				{Name: "site-2", Discovery: true, Addresses: 0},
+				{Name: testSite2, Discovery: true, Addresses: 0},
 			},
 			wantReason: reasonPeerProvidersUndiscovered,
-			naming:     []string{"site-2"},
+			naming:     []string{testSite2},
 			why: "M1 added two triggers to this path — an unparseable remote pod name and a " +
 				"duplicate remote ordinal both publish as an empty provider list — and neither may ship",
 		},
@@ -124,12 +124,12 @@ func TestJudgePeerResolutions(t *testing.T) {
 			// third path and the one with no mode to hide behind: nothing
 			// about this peer will resolve on a later pass.
 			name:  "a peer that resolved to no address at all withholds the pass",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-3", false)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite3, false)},
 			outcomes: []peerResolution{
-				{Name: "site-3", Addresses: 0},
+				{Name: testSite3, Addresses: 0},
 			},
 			wantReason: reasonPeerAddressesEmpty,
-			naming:     []string{"site-3"},
+			naming:     []string{testSite3},
 			why: "a CR naming a peer site with nothing to connect to is a defect that does not heal, " +
 				"and it must not read the same as discovery still working",
 		},
@@ -139,13 +139,13 @@ func TestJudgePeerResolutions(t *testing.T) {
 			// its own. A set holding only site-2 is a deletion of site-3's
 			// link on every pod.
 			name:  "one failing peer withholds the whole set, not just its own stanzas",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true), declaredPeer("site-3", true)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true), declaredPeer(testSite3, true)},
 			outcomes: []peerResolution{
-				{Name: "site-2", Discovery: true, Addresses: 3},
-				{Name: "site-3", Discovery: true, Addresses: 0},
+				{Name: testSite2, Discovery: true, Addresses: 3},
+				{Name: testSite3, Discovery: true, Addresses: 0},
 			},
 			wantReason: reasonPeerProvidersUndiscovered,
-			naming:     []string{"site-3"},
+			naming:     []string{testSite3},
 			why: "this is the shape the backlog entry names: two peers, one broken, and the " +
 				"converged set must not be the short one",
 		},
@@ -154,14 +154,14 @@ func TestJudgePeerResolutions(t *testing.T) {
 			// peer-major in DECLARED order. The first failing peer decides the
 			// reason; every failing peer is named.
 			name:  "two failing peers are named in declared order and the first decides the reason",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true), declaredPeer("site-3", false)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true), declaredPeer(testSite3, false)},
 			outcomes: []peerResolution{
-				{Name: "site-2", Discovery: true, BindPasswordSecret: "site-2-repl",
+				{Name: testSite2, Discovery: true, BindPasswordSecret: testPeerBindSecret,
 					SecretErr: unreadable, Addresses: 2},
-				{Name: "site-3", Addresses: 0},
+				{Name: testSite3, Addresses: 0},
 			},
 			wantReason: reasonPeerBindPasswordUnreadable,
-			naming:     []string{"site-2", "site-3"},
+			naming:     []string{testSite2, testSite3},
 			why: "a reason that depended on which fault was checked first, or a message naming " +
 				"only one of two broken peers, sends a human to fix a coin flip",
 		},
@@ -170,13 +170,13 @@ func TestJudgePeerResolutions(t *testing.T) {
 			// peer can fail both ways at once, and the Secret is the fault
 			// that does not resolve itself.
 			name:  "an unreadable Secret outranks an empty address list on the same peer",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true)},
 			outcomes: []peerResolution{
-				{Name: "site-2", Discovery: true, BindPasswordSecret: "site-2-repl",
+				{Name: testSite2, Discovery: true, BindPasswordSecret: testPeerBindSecret,
 					SecretErr: unreadable, Addresses: 0},
 			},
 			wantReason: reasonPeerBindPasswordUnreadable,
-			naming:     []string{"site-2"},
+			naming:     []string{testSite2},
 			why: "reporting the empty provider list would send a human to the remote cluster when " +
 				"the local Secret is what failed, and discovery may never have been attempted",
 		},
@@ -186,12 +186,12 @@ func TestJudgePeerResolutions(t *testing.T) {
 			// judge inspecting only the outcomes it was handed would call this
 			// complete and approve the deletion it describes.
 			name:  "a declared peer with no outcome is unknown, not resolved",
-			peers: []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true), declaredPeer("site-3", true)},
+			peers: []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true), declaredPeer(testSite3, true)},
 			outcomes: []peerResolution{
-				{Name: "site-2", Discovery: true, Addresses: 3},
+				{Name: testSite2, Discovery: true, Addresses: 3},
 			},
 			wantReason: reasonPeerResolutionIncomplete,
-			naming:     []string{"site-3"},
+			naming:     []string{testSite3},
 			why: "the three skips are exactly a loop that produces fewer entries than it was given; " +
 				"an unaccounted peer is unknown, and unknown withholds (RID-PLAN hazard 3's rule)",
 		},
@@ -228,13 +228,13 @@ func TestJudgePeerResolutions(t *testing.T) {
 // RIDLayoutUnresolved beside RIDLayoutInvalid: identical withholds, deliberately
 // distinct reasons, because alerting and slctl key on the reason.
 func TestJudgePeerResolutionsThreeCausesAreThreeReasons(t *testing.T) {
-	peers := []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true)}
+	peers := []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true)}
 
 	causes := map[string]peerResolution{
-		"unreadable Secret": {Name: "site-2", Discovery: true,
-			BindPasswordSecret: "site-2-repl", SecretErr: errors.New("forbidden"), Addresses: 1},
-		"discovery with no providers": {Name: "site-2", Discovery: true, Addresses: 0},
-		"no address at all":           {Name: "site-2", Addresses: 0},
+		"unreadable Secret": {Name: testSite2, Discovery: true,
+			BindPasswordSecret: testPeerBindSecret, SecretErr: errors.New("forbidden"), Addresses: 1},
+		"discovery with no providers": {Name: testSite2, Discovery: true, Addresses: 0},
+		"no address at all":           {Name: testSite2, Addresses: 0},
 	}
 
 	seen := map[string]string{}
@@ -272,8 +272,8 @@ func TestJudgePeerResolutionsThreeCausesAreThreeReasons(t *testing.T) {
 // replication stopped after adding a peer has to be able to read that from the
 // condition, not infer it from a log line.
 func TestJudgePeerResolutionsFirstBringupSaysWhatItCosts(t *testing.T) {
-	peers := []ldapv1alpha1.ExternalPeer{declaredPeer("site-2", true)}
-	v := judgePeerResolutions(peers, []peerResolution{{Name: "site-2", Discovery: true, Addresses: 0}})
+	peers := []ldapv1alpha1.ExternalPeer{declaredPeer(testSite2, true)}
+	v := judgePeerResolutions(peers, []peerResolution{{Name: testSite2, Discovery: true, Addresses: 0}})
 
 	if v.OK {
 		t.Fatalf("a discovery peer with no providers resolved: on a later pass that is a " +
@@ -285,7 +285,7 @@ func TestJudgePeerResolutionsFirstBringupSaysWhatItCosts(t *testing.T) {
 
 	msg := strings.ToLower(v.Message)
 	for _, want := range []string{
-		"site-2",     // which peer
+		testSite2,    // which peer
 		"discovery",  // what failed
 		"kubeconfig", // where to look, because this is also what a bad kubeconfig looks like
 		"in-cluster", // and what it costs: the local stanzas are withheld too

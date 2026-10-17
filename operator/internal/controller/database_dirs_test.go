@@ -48,13 +48,13 @@ func TestDatabaseDirsFor(t *testing.T) {
 		},
 		{
 			name: "the CR name is the directory when dataDirectory is unset",
-			in:   []ldapv1alpha1.SlapdDatabase{db("example-db", "slapd", "")},
-			want: databaseDirs{Data: []string{"example-db"}, Accesslog: []string{"example-db"}},
+			in:   []ldapv1alpha1.SlapdDatabase{db(testDBName, "slapd", "")},
+			want: databaseDirs{Data: []string{testDBName}, Accesslog: []string{testDBName}},
 		},
 		{
 			name: "dataDirectory overrides the DATA directory only",
-			in:   []ldapv1alpha1.SlapdDatabase{db("example-db", "slapd", "custom")},
-			want: databaseDirs{Data: []string{"custom"}, Accesslog: []string{"example-db"}},
+			in:   []ldapv1alpha1.SlapdDatabase{db(testDBName, "slapd", "custom")},
+			want: databaseDirs{Data: []string{"custom"}, Accesslog: []string{testDBName}},
 		},
 		{
 			name: "another cluster's databases are not ours to provision",

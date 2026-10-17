@@ -64,11 +64,11 @@ func newRIDFixture(ctx context.Context) *ridFixture {
 	ridFixtureSeq++
 	f := &ridFixture{
 		ns:      fmt.Sprintf("rid-withhold-%d", ridFixtureSeq),
-		cluster: "slapd",
+		cluster: testClusterName,
 		reconciler: &SlapdDatabaseReconciler{
 			Client:        k8sClient,
 			Scheme:        k8sClient.Scheme(),
-			ClusterDomain: "cluster.local",
+			ClusterDomain: testClusterDomain,
 		},
 	}
 

@@ -63,7 +63,7 @@ func TestJudgeExternalPeers(t *testing.T) {
 	}{
 		{
 			name:    "a peer list with distinct indices converges",
-			cluster: peerCluster(ridPeer("site-2", new(int32(1))), ridPeer("site-3", new(int32(2)))),
+			cluster: peerCluster(ridPeer(testSite2, new(int32(1))), ridPeer(testSite3, new(int32(2)))),
 			layout:  def,
 			wantOK:  true,
 			why:     "the ordinary mesh: one slot per peer site, nothing shared",
@@ -77,19 +77,19 @@ func TestJudgeExternalPeers(t *testing.T) {
 		},
 		{
 			name:       "two peers declaring one siteIndex are refused, both named",
-			cluster:    peerCluster(ridPeer("site-2", new(int32(1))), ridPeer("site-3", new(int32(1)))),
+			cluster:    peerCluster(ridPeer(testSite2, new(int32(1))), ridPeer(testSite3, new(int32(1)))),
 			layout:     def,
 			wantReason: reasonPeerSiteIndexCollision,
-			naming:     []string{"site-2", "site-3"},
+			naming:     []string{testSite2, testSite3},
 			why: "they share remote slot P+1, so both links carry one RID — the shared-connid state " +
 				"slapd never rejects. Naming only one of them tells a human to edit a coin flip",
 		},
 		{
 			name:       "a peer with no siteIndex has no slot to live in",
-			cluster:    peerCluster(ridPeer("site-2", new(int32(1))), ridPeer("site-3", nil)),
+			cluster:    peerCluster(ridPeer(testSite2, new(int32(1))), ridPeer(testSite3, nil)),
 			layout:     def,
 			wantReason: reasonPeerSiteIndexMissing,
-			naming:     []string{"site-3"},
+			naming:     []string{testSite3},
 			why: "nothing else carries a peer site's identity off-mesh, and a positional fallback is " +
 				"exactly the inference ADR-031 forbids",
 		},
@@ -108,10 +108,10 @@ func TestJudgeExternalPeers(t *testing.T) {
 		},
 		{
 			name:       "a negative siteIndex names no slot",
-			cluster:    peerCluster(ridPeer("site-2", new(int32(-1)))),
+			cluster:    peerCluster(ridPeer(testSite2, new(int32(-1)))),
 			layout:     def,
 			wantReason: reasonPeerSiteIndexOutOfRange,
-			naming:     []string{"site-2"},
+			naming:     []string{testSite2},
 			why:        "the Go zero value is 0 and a negative can only be typed, so it is a refusal and never a default",
 		},
 		{
@@ -160,9 +160,9 @@ func TestJudgeExternalPeersRefusesASecondLinkPerPeerSite(t *testing.T) {
 	def := ridcoord.DefaultLayout()
 
 	t.Run("per-peer replicasPerPeer", func(t *testing.T) {
-		p := ridPeer("site-2", new(int32(1)))
+		p := ridPeer(testSite2, new(int32(1)))
 		p.ReplicasPerPeer = new(int32(2))
-		sc := peerCluster(p, ridPeer("site-3", new(int32(2))))
+		sc := peerCluster(p, ridPeer(testSite3, new(int32(2))))
 
 		v := judgeExternalPeers(sc, def)
 		if v.OK {
@@ -171,13 +171,13 @@ func TestJudgeExternalPeersRefusesASecondLinkPerPeerSite(t *testing.T) {
 		if v.Reason != reasonReplicasPerPeerUnsupported {
 			t.Errorf("reason = %q, want %q", v.Reason, reasonReplicasPerPeerUnsupported)
 		}
-		if !strings.Contains(v.Message, "site-2") {
+		if !strings.Contains(v.Message, testSite2) {
 			t.Errorf("message %q does not name the peer whose fan-out is refused", v.Message)
 		}
 	})
 
 	t.Run("cluster-wide replicasPerPeer", func(t *testing.T) {
-		sc := peerCluster(ridPeer("site-2", new(int32(1))))
+		sc := peerCluster(ridPeer(testSite2, new(int32(1))))
 		sc.Spec.Replication.ReplicasPerPeer = new(int32(3))
 
 		v := judgeExternalPeers(sc, def)
@@ -194,7 +194,7 @@ func TestJudgeExternalPeersRefusesASecondLinkPerPeerSite(t *testing.T) {
 	})
 
 	t.Run("one link per peer site is the supported topology", func(t *testing.T) {
-		sc := peerCluster(ridPeer("site-2", new(int32(1))))
+		sc := peerCluster(ridPeer(testSite2, new(int32(1))))
 		sc.Spec.Replication.ReplicasPerPeer = new(int32(1))
 		if v := judgeExternalPeers(sc, def); !v.OK {
 			t.Fatalf("refused the topology as deployed today: %s (%s)", v.Reason, v.Message)
@@ -220,12 +220,12 @@ func TestMeshDerivedPeersCarryThePeerSitesServerIDIndex(t *testing.T) {
 	// The golden three-site mesh with a gap: site-3 was added after a
 	// decommissioned site's index was retired, so position and index differ.
 	sites := []ldapv1alpha1.MeshSite{
-		{Name: "site-1", ServerIDIndex: new(int32(0))},
-		{Name: "site-2", ServerIDIndex: new(int32(1))},
-		{Name: "site-3", ServerIDIndex: new(int32(5))},
+		{Name: testSite1, ServerIDIndex: new(int32(0))},
+		{Name: testSite2, ServerIDIndex: new(int32(1))},
+		{Name: testSite3, ServerIDIndex: new(int32(5))},
 	}
 
-	peers, err := externalPeersForSite(sites, nil, "site-1", nil)
+	peers, err := externalPeersForSite(sites, nil, testSite1, nil)
 	if err != nil {
 		t.Fatalf("externalPeersForSite: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestMeshDerivedPeersCarryThePeerSitesServerIDIndex(t *testing.T) {
 		t.Fatalf("got %d peers, want 2 (every site but this one)", len(peers))
 	}
 
-	want := map[string]int32{"site-2": 1, "site-3": 5}
+	want := map[string]int32{testSite2: 1, testSite3: 5}
 	for _, p := range peers {
 		idx, known := want[p.Name]
 		if !known {
@@ -265,14 +265,14 @@ func TestMeshDerivedPeersCarryThePeerSitesServerIDIndex(t *testing.T) {
 // what to write next.
 func TestASiteIndexSetAlongsideMeshRefIsRefused(t *testing.T) {
 	mesh := ldapv1alpha1.SlapdMeshSpec{Sites: []ldapv1alpha1.MeshSite{
-		{Name: "site-1", ServerIDIndex: new(int32(0))},
-		{Name: "site-2", ServerIDIndex: new(int32(1))},
+		{Name: testSite1, ServerIDIndex: new(int32(0))},
+		{Name: testSite2, ServerIDIndex: new(int32(1))},
 	}}
 	spec := ldapv1alpha1.SlapdClusterSpec{
 		MeshRef: testMeshName,
 		Replication: ldapv1alpha1.SlapdReplicationConfig{
 			Enabled:       true,
-			ExternalPeers: []ldapv1alpha1.ExternalPeer{ridPeer("site-2", new(int32(1)))},
+			ExternalPeers: []ldapv1alpha1.ExternalPeer{ridPeer(testSite2, new(int32(1)))},
 		},
 	}
 

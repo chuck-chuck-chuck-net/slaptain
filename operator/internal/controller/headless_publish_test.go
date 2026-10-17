@@ -42,10 +42,10 @@ import (
 // this fix in May 2026 and it never shipped, because the probe it was written
 // for never shipped.
 func TestHeadlessServicesPublishNotReadyAddresses(t *testing.T) {
-	r := &SlapdClusterReconciler{ClusterDomain: "cluster.local"}
+	r := &SlapdClusterReconciler{ClusterDomain: testClusterDomain}
 	sc := &ldapv1alpha1.SlapdCluster{}
-	sc.Name = "slapd"
-	sc.Namespace = "slaptain"
+	sc.Name = testClusterName
+	sc.Namespace = testNamespace
 	sc.Spec.Replicas = 3
 	sc.Spec.ReadReplicas = 1
 
@@ -56,7 +56,7 @@ func TestHeadlessServicesPublishNotReadyAddresses(t *testing.T) {
 		because string
 	}{
 		{
-			name:    "slapd-headless",
+			name:    testHeadlessSvc,
 			build:   func() *corev1.Service { return r.headlessService(sc) },
 			want:    true,
 			because: "the operator dials RW pods through it, and so do their peers",

@@ -22,6 +22,9 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// pod0CSN is an entryCSN written by serverID 1, the founder site's pod-0.
+const pod0CSN = "20260913185307.000000Z#000000#001#000000"
+
 // TestCSNSID pins the sid extraction from a CSN value. The sid field is the
 // third '#'-separated component, 3 hex digits (RFC 4533 / slapd csn.c). The
 // live-captured glue evidence (ADR-025) carried sid 065 hex = 101 decimal.
@@ -39,7 +42,7 @@ func TestCSNSID(t *testing.T) {
 		{"missing fields", "20260913185308.559566Z", 0, false},
 		{"two fields only", "20260913185308.559566Z#000000", 0, false},
 		{"non-hex sid", "20260913185308.559566Z#000000#xyz#000000", 0, false},
-		{"empty", "", 0, false},
+		{testCaseEmpty, "", 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,7 +81,7 @@ func TestSeedCreatorIsForeign(t *testing.T) {
 			cluster(0, 3), true},
 		// Our own pod-0 (sid 1) created it — an earlier partial seed run.
 		// Proceed with the idempotent per-entry loop.
-		{"own pod-0 creator proceeds", "20260913185307.000000Z#000000#001#000000",
+		{"own pod-0 creator proceeds", pod0CSN,
 			cluster(0, 3), false},
 		// Highest local ordinal is still local.
 		{"own pod-2 creator proceeds", "20260913185307.000000Z#000000#003#000000",
@@ -87,12 +90,12 @@ func TestSeedCreatorIsForeign(t *testing.T) {
 		{"sid just past local range withheld", "20260913185307.000000Z#000000#004#000000",
 			cluster(0, 3), true},
 		// Non-zero serverIDBase shifts the local range (ADR-011).
-		{"foreign below shifted base withheld", "20260913185307.000000Z#000000#001#000000",
+		{"foreign below shifted base withheld", pod0CSN,
 			cluster(100, 3), true},
 		{"local in shifted range proceeds", "20260913185307.000000Z#000000#066#000000", // 0x66 = 102 = base100+ord1+1
 			cluster(100, 3), false},
 		// replicas=0 means 1 (the controller's default elsewhere).
-		{"replicas zero treated as one", "20260913185307.000000Z#000000#001#000000",
+		{"replicas zero treated as one", pod0CSN,
 			cluster(0, 0), false},
 		// Unknown evidence → proceed (never withhold on a failed read).
 		{"unparseable CSN proceeds", "not-a-csn", cluster(0, 3), false},

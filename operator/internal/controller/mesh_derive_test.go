@@ -24,15 +24,21 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const (
+	soloSite      = "solo"
+	farSite       = "far"
+	nonMemberSite = "site-4"
+)
+
 // threeSiteMesh is the golden topology: the shape a three-site lab runs today,
 // with the site names the e2e fixture assigns (site-1..site-N, deliberately
 // independent of any lab's context names — MESH-PLAN Phase 2b) and the indices
 // 0/1/2, which under the hex stride give serverID bases 0/16/32.
 func threeSiteMesh() []ldapv1alpha1.MeshSite {
 	return []ldapv1alpha1.MeshSite{
-		{Name: "site-1", ServerIDIndex: new(int32(0))},
-		{Name: "site-2", ServerIDIndex: new(int32(1))},
-		{Name: "site-3", ServerIDIndex: new(int32(2))},
+		{Name: testSite1, ServerIDIndex: new(int32(0))},
+		{Name: testSite2, ServerIDIndex: new(int32(1))},
+		{Name: testSite3, ServerIDIndex: new(int32(2))},
 	}
 }
 
@@ -60,16 +66,16 @@ func TestServerIDBaseForSite(t *testing.T) {
 	// changed. Every site must keep the slot it had — that is the whole point
 	// of the explicit index.
 	reordered := []ldapv1alpha1.MeshSite{
-		{Name: "site-3", ServerIDIndex: new(int32(2))},
-		{Name: "site-1", ServerIDIndex: new(int32(0))},
-		{Name: "site-2", ServerIDIndex: new(int32(1))},
+		{Name: testSite3, ServerIDIndex: new(int32(2))},
+		{Name: testSite1, ServerIDIndex: new(int32(0))},
+		{Name: testSite2, ServerIDIndex: new(int32(1))},
 	}
 
 	// sparse: index 1 has been decommissioned and its slot retired rather
 	// than reused, and a later site was added at 9. Gaps are legal.
 	sparse := []ldapv1alpha1.MeshSite{
-		{Name: "site-a", ServerIDIndex: new(int32(0))},
-		{Name: "site-c", ServerIDIndex: new(int32(5))},
+		{Name: testSiteA, ServerIDIndex: new(int32(0))},
+		{Name: testSiteC, ServerIDIndex: new(int32(5))},
 		{Name: "site-d", ServerIDIndex: new(int32(9))},
 	}
 
@@ -81,13 +87,13 @@ func TestServerIDBaseForSite(t *testing.T) {
 		wantErr error
 	}{
 		// Golden case — the values a three-site lab is running right now.
-		{"first site keeps stride slot 0", threeSiteMesh(), "site-1", 0, nil},
-		{"second site gets 0x10", threeSiteMesh(), "site-2", 16, nil},
-		{"third site gets 0x20", threeSiteMesh(), "site-3", 32, nil},
+		{"first site keeps stride slot 0", threeSiteMesh(), testSite1, 0, nil},
+		{"second site gets 0x10", threeSiteMesh(), testSite2, 16, nil},
+		{"third site gets 0x20", threeSiteMesh(), testSite3, 32, nil},
 
 		// A single-site mesh is the degenerate case and must stay at 0, which
 		// is also what every standalone cluster has today.
-		{"single-site mesh", []ldapv1alpha1.MeshSite{{Name: "solo", ServerIDIndex: new(int32(0))}}, "solo", 0, nil},
+		{"single-site mesh", []ldapv1alpha1.MeshSite{{Name: soloSite, ServerIDIndex: new(int32(0))}}, soloSite, 0, nil},
 
 		// Identity handling matches decideSeedSite exactly: trimmed, never
 		// case-folded. Folding would let two distinct SITE_NAME values collide
@@ -98,23 +104,23 @@ func TestServerIDBaseForSite(t *testing.T) {
 		// A configured identity absent from the mesh is LOUD. Never a silent
 		// default to the first site: that would hand this site slot 0, which
 		// some other site is already using, and collide the two.
-		{"self absent from mesh", threeSiteMesh(), "site-4", 0, errSiteUnknown},
+		{"self absent from mesh", threeSiteMesh(), nonMemberSite, 0, errSiteUnknown},
 		{"empty identity", threeSiteMesh(), "", 0, errSiteIdentity},
-		{"whitespace identity", threeSiteMesh(), "   ", 0, errSiteIdentity},
+		{"whitespace identity", threeSiteMesh(), testBlank, 0, errSiteIdentity},
 
 		// A malformed mesh is rejected rather than silently indexed: duplicate
 		// names are two sites claiming one identity, one slot.
 		{
 			"duplicate site names",
-			[]ldapv1alpha1.MeshSite{{Name: "site-1", ServerIDIndex: new(int32(0))}, {Name: "site-1", ServerIDIndex: new(int32(1))}},
-			"site-1", 0, errMeshSites,
+			[]ldapv1alpha1.MeshSite{{Name: testSite1, ServerIDIndex: new(int32(0))}, {Name: testSite1, ServerIDIndex: new(int32(1))}},
+			testSite1, 0, errMeshSites,
 		},
 		{
 			"empty site name in mesh",
-			[]ldapv1alpha1.MeshSite{{Name: "site-1", ServerIDIndex: new(int32(0))}, {Name: " ", ServerIDIndex: new(int32(1))}},
-			"site-1", 0, errMeshSites,
+			[]ldapv1alpha1.MeshSite{{Name: testSite1, ServerIDIndex: new(int32(0))}, {Name: " ", ServerIDIndex: new(int32(1))}},
+			testSite1, 0, errMeshSites,
 		},
-		{"empty mesh", nil, "site-1", 0, errMeshSites},
+		{"empty mesh", nil, testSite1, 0, errMeshSites},
 
 		// The regression that motivates the explicit index. spec.sites is a
 		// YAML list; people reorder those, formatters sort them, a merge moves
@@ -123,15 +129,15 @@ func TestServerIDBaseForSite(t *testing.T) {
 		// future writes under a different sid from its entire history, which is
 		// unrecoverable by design (MESH-PLAN hazard 2). Bound to a field, the
 		// same edit is a no-op.
-		{"reordered mesh: first site keeps 0", reordered, "site-1", 0, nil},
-		{"reordered mesh: second site keeps 0x10", reordered, "site-2", 16, nil},
-		{"reordered mesh: third site keeps 0x20", reordered, "site-3", 32, nil},
+		{"reordered mesh: first site keeps 0", reordered, testSite1, 0, nil},
+		{"reordered mesh: second site keeps 0x10", reordered, testSite2, 16, nil},
+		{"reordered mesh: third site keeps 0x20", reordered, testSite3, 32, nil},
 
 		// Gaps are legal and are the correct way to remove a site: retire the
 		// index, never reuse it, because a reused index inherits the retired
 		// site's CSN lineage.
-		{"sparse indices, first", sparse, "site-a", 0, nil},
-		{"sparse indices, middle", sparse, "site-c", 80, nil},
+		{"sparse indices, first", sparse, testSiteA, 0, nil},
+		{"sparse indices, middle", sparse, testSiteC, 80, nil},
 		{"sparse indices, last", sparse, "site-d", 144, nil},
 
 		// Two sites on one index is the same class of fault as two sites on one
@@ -141,10 +147,10 @@ func TestServerIDBaseForSite(t *testing.T) {
 		{
 			"duplicate indices",
 			[]ldapv1alpha1.MeshSite{
-				{Name: "site-1", ServerIDIndex: new(int32(3))},
-				{Name: "site-2", ServerIDIndex: new(int32(3))},
+				{Name: testSite1, ServerIDIndex: new(int32(3))},
+				{Name: testSite2, ServerIDIndex: new(int32(3))},
 			},
-			"site-1", 0, errMeshSites,
+			testSite1, 0, errMeshSites,
 		},
 		{
 			// Required, not defaulted-to-position: a missing index is rejected
@@ -152,28 +158,28 @@ func TestServerIDBaseForSite(t *testing.T) {
 			// position is exactly the fragility the field exists to remove.
 			"missing index",
 			[]ldapv1alpha1.MeshSite{
-				{Name: "site-1", ServerIDIndex: new(int32(0))},
-				{Name: "site-2"},
+				{Name: testSite1, ServerIDIndex: new(int32(0))},
+				{Name: testSite2},
 			},
-			"site-1", 0, errMeshSites,
+			testSite1, 0, errMeshSites,
 		},
 		{
 			"negative index",
-			[]ldapv1alpha1.MeshSite{{Name: "site-1", ServerIDIndex: new(int32(-1))}},
-			"site-1", 0, errMeshSites,
+			[]ldapv1alpha1.MeshSite{{Name: testSite1, ServerIDIndex: new(int32(-1))}},
+			testSite1, 0, errMeshSites,
 		},
 
 		// The ceiling, stated rather than left implicit — and keyed off the
 		// INDEX, not the site count, since the list is sparse-legal.
 		{
 			"last index below the ceiling",
-			[]ldapv1alpha1.MeshSite{{Name: "site-1", ServerIDIndex: new(int32(0))}, {Name: "far", ServerIDIndex: new(int32(255))}},
-			"far", 4080, nil,
+			[]ldapv1alpha1.MeshSite{{Name: testSite1, ServerIDIndex: new(int32(0))}, {Name: farSite, ServerIDIndex: new(int32(255))}},
+			farSite, 4080, nil,
 		},
 		{
 			"first index past the ceiling",
-			[]ldapv1alpha1.MeshSite{{Name: "site-1", ServerIDIndex: new(int32(0))}, {Name: "far", ServerIDIndex: new(int32(256))}},
-			"far", 0, errServerIDCeiling,
+			[]ldapv1alpha1.MeshSite{{Name: testSite1, ServerIDIndex: new(int32(0))}, {Name: farSite, ServerIDIndex: new(int32(256))}},
+			farSite, 0, errServerIDCeiling,
 		},
 		{
 			// A two-site mesh can still breach the ceiling: the limit is on the
@@ -216,10 +222,10 @@ func TestValidateSelfSite(t *testing.T) {
 		self    string
 		wantErr error
 	}{
-		{"member", threeSiteMesh(), "site-2", nil},
+		{"member", threeSiteMesh(), testSite2, nil},
 		{"member after trimming", threeSiteMesh(), " site-3 ", nil},
-		{"single-site mesh", []ldapv1alpha1.MeshSite{{Name: "solo", ServerIDIndex: new(int32(0))}}, "solo", nil},
-		{"not a member", threeSiteMesh(), "site-4", errSiteUnknown},
+		{"single-site mesh", []ldapv1alpha1.MeshSite{{Name: soloSite, ServerIDIndex: new(int32(0))}}, soloSite, nil},
+		{"not a member", threeSiteMesh(), nonMemberSite, errSiteUnknown},
 		{"case mismatch is not a member", threeSiteMesh(), "Site-1", errSiteUnknown},
 		{"identity unset", threeSiteMesh(), "", errSiteIdentity},
 		{"identity whitespace only", threeSiteMesh(), "\t\n", errSiteIdentity},
@@ -289,36 +295,36 @@ func TestExternalPeersForSite(t *testing.T) {
 		{
 			name:  "golden three-site mesh, middle site",
 			sites: threeSiteMesh(),
-			self:  "site-2",
+			self:  testSite2,
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-1", 0, "site-1-ca", "site-1-kubeconfig"),
-				peer("site-3", 2, "site-3-ca", "site-3-kubeconfig"),
+				peer(testSite1, 0, "site-1-ca", "site-1-kubeconfig"),
+				peer(testSite3, 2, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{
 			name:  "golden three-site mesh, first site",
 			sites: threeSiteMesh(),
-			self:  "site-1",
+			self:  testSite1,
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-2", 1, "site-2-ca", "site-2-kubeconfig"),
-				peer("site-3", 2, "site-3-ca", "site-3-kubeconfig"),
+				peer(testSite2, 1, "site-2-ca", "site-2-kubeconfig"),
+				peer(testSite3, 2, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{
 			// A single-site mesh has no peers at all — and that is an empty
 			// list, not an error. It is exactly today's single-site cluster.
 			name:  "single-site mesh has no peers",
-			sites: []ldapv1alpha1.MeshSite{{Name: "solo", ServerIDIndex: new(int32(0))}},
-			self:  "solo",
+			sites: []ldapv1alpha1.MeshSite{{Name: soloSite, ServerIDIndex: new(int32(0))}},
+			self:  soloSite,
 			want:  nil,
 		},
 		{
 			name:     "selector narrows the peer set",
 			sites:    threeSiteMesh(),
-			selector: []string{"site-1", "site-2"},
-			self:     "site-2",
+			selector: []string{testSite1, testSite2},
+			self:     testSite2,
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-1", 0, "site-1-ca", "site-1-kubeconfig"),
+				peer(testSite1, 0, "site-1-ca", "site-1-kubeconfig"),
 			},
 		},
 		{
@@ -326,10 +332,10 @@ func TestExternalPeersForSite(t *testing.T) {
 			// the authority on ordering.
 			name:     "selector order does not reorder peers",
 			sites:    threeSiteMesh(),
-			selector: []string{"site-3", "site-1"},
-			self:     "site-1",
+			selector: []string{testSite3, testSite1},
+			self:     testSite1,
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-3", 2, "site-3-ca", "site-3-kubeconfig"),
+				peer(testSite3, 2, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{
@@ -338,13 +344,13 @@ func TestExternalPeersForSite(t *testing.T) {
 			// their outputs, ADR-028 §7).
 			name: "explicit secret names override the convention",
 			sites: []ldapv1alpha1.MeshSite{
-				{Name: "site-1", ServerIDIndex: new(int32(0)), CASecretName: "bundle-a", KubeconfigSecret: &ldapv1alpha1.KubeconfigSecretRef{Name: "kc-a", Key: "config"}},
-				{Name: "site-2", ServerIDIndex: new(int32(1))},
+				{Name: testSite1, ServerIDIndex: new(int32(0)), CASecretName: "bundle-a", KubeconfigSecret: &ldapv1alpha1.KubeconfigSecretRef{Name: "kc-a", Key: "config"}},
+				{Name: testSite2, ServerIDIndex: new(int32(1))},
 			},
-			self: "site-2",
+			self: testSite2,
 			want: []ldapv1alpha1.ExternalPeer{
 				{
-					Name:          "site-1",
+					Name:          testSite1,
 					SiteIndex:     new(int32(0)),
 					Port:          1025,
 					TLSSecretName: "bundle-a",
@@ -383,14 +389,14 @@ func TestExternalPeersForSite(t *testing.T) {
 			// refuses outright.
 			name: "a peer carries its declared index, not its list position",
 			sites: []ldapv1alpha1.MeshSite{
-				{Name: "site-1", ServerIDIndex: new(int32(7))},
-				{Name: "site-2", ServerIDIndex: new(int32(0))},
-				{Name: "site-3", ServerIDIndex: new(int32(9))},
+				{Name: testSite1, ServerIDIndex: new(int32(7))},
+				{Name: testSite2, ServerIDIndex: new(int32(0))},
+				{Name: testSite3, ServerIDIndex: new(int32(9))},
 			},
-			self: "site-2",
+			self: testSite2,
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-1", 7, "site-1-ca", "site-1-kubeconfig"),
-				peer("site-3", 9, "site-3-ca", "site-3-kubeconfig"),
+				peer(testSite1, 7, "site-1-ca", "site-1-kubeconfig"),
+				peer(testSite3, 9, "site-3-ca", "site-3-kubeconfig"),
 			},
 		},
 		{
@@ -403,14 +409,14 @@ func TestExternalPeersForSite(t *testing.T) {
 			// 0, so reordering moves stanzas and renumbers nothing.
 			name: "peer order follows the list, not the index",
 			sites: []ldapv1alpha1.MeshSite{
-				{Name: "site-3", ServerIDIndex: new(int32(2))},
-				{Name: "site-2", ServerIDIndex: new(int32(1))},
-				{Name: "site-1", ServerIDIndex: new(int32(0))},
+				{Name: testSite3, ServerIDIndex: new(int32(2))},
+				{Name: testSite2, ServerIDIndex: new(int32(1))},
+				{Name: testSite1, ServerIDIndex: new(int32(0))},
 			},
-			self: "site-2",
+			self: testSite2,
 			want: []ldapv1alpha1.ExternalPeer{
-				peer("site-3", 2, "site-3-ca", "site-3-kubeconfig"),
-				peer("site-1", 0, "site-1-ca", "site-1-kubeconfig"),
+				peer(testSite3, 2, "site-3-ca", "site-3-kubeconfig"),
+				peer(testSite1, 0, "site-1-ca", "site-1-kubeconfig"),
 			},
 		},
 		{
@@ -419,18 +425,18 @@ func TestExternalPeersForSite(t *testing.T) {
 			// caller has to decide that (Phase 4), loudly.
 			name:     "self not in selector",
 			sites:    threeSiteMesh(),
-			selector: []string{"site-1", "site-3"},
-			self:     "site-2",
+			selector: []string{testSite1, testSite3},
+			self:     testSite2,
 			wantErr:  errSiteNotSelected,
 		},
 		{
 			name:     "selector names a site the mesh does not have",
 			sites:    threeSiteMesh(),
-			selector: []string{"site-1", "site-9"},
-			self:     "site-1",
+			selector: []string{testSite1, "site-9"},
+			self:     testSite1,
 			wantErr:  errSiteUnknown,
 		},
-		{"self absent from mesh", threeSiteMesh(), nil, "site-4", nil, errSiteUnknown},
+		{"self absent from mesh", threeSiteMesh(), nil, nonMemberSite, nil, errSiteUnknown},
 		{"identity unset", threeSiteMesh(), nil, "", nil, errSiteIdentity},
 		{
 			"malformed mesh",
@@ -459,7 +465,7 @@ func TestExternalPeersForSite(t *testing.T) {
 // builder. The default is what makes a mesh spec short; the explicit field is
 // what makes it compatible with a platform that names Secrets its own way.
 func TestMeshSiteSecretConventions(t *testing.T) {
-	bare := ldapv1alpha1.MeshSite{Name: "site-1"}
+	bare := ldapv1alpha1.MeshSite{Name: testSite1}
 	if got := bare.CASecretNameFor(); got != "site-1-ca" {
 		t.Errorf("default CA secret = %q, want %q", got, "site-1-ca")
 	}
@@ -468,7 +474,7 @@ func TestMeshSiteSecretConventions(t *testing.T) {
 	}
 
 	named := ldapv1alpha1.MeshSite{
-		Name:             "site-1",
+		Name:             testSite1,
 		CASecretName:     "trust-bundle",
 		KubeconfigSecret: &ldapv1alpha1.KubeconfigSecretRef{Name: "remote-kc", Key: "value"},
 	}
@@ -480,7 +486,7 @@ func TestMeshSiteSecretConventions(t *testing.T) {
 	}
 
 	// A half-specified ref keeps the convention for the part it omits.
-	half := ldapv1alpha1.MeshSite{Name: "site-2", KubeconfigSecret: &ldapv1alpha1.KubeconfigSecretRef{Key: "k"}}
+	half := ldapv1alpha1.MeshSite{Name: testSite2, KubeconfigSecret: &ldapv1alpha1.KubeconfigSecretRef{Key: "k"}}
 	if got := half.KubeconfigSecretFor(); got.Name != "site-2-kubeconfig" || got.Key != "k" {
 		t.Errorf("half-specified ref = %+v, want site-2-kubeconfig/k", got)
 	}
@@ -496,15 +502,15 @@ func TestMeshSiteSecretConventions(t *testing.T) {
 func TestDerivedPeersCarryReplicasPerPeer(t *testing.T) {
 	idx := func(v int32) *int32 { return &v }
 	sites := []ldapv1alpha1.MeshSite{
-		{Name: "site-1", ServerIDIndex: idx(0)},
-		{Name: "site-2", ServerIDIndex: idx(1)},
-		{Name: "site-3", ServerIDIndex: idx(2)},
+		{Name: testSite1, ServerIDIndex: idx(0)},
+		{Name: testSite2, ServerIDIndex: idx(1)},
+		{Name: testSite3, ServerIDIndex: idx(2)},
 	}
 
 	// Unset stays unset rather than becoming an explicit 1: the stanza builder
 	// already reads nil as 1, and writing a value in would make every existing
 	// mesh's derived spec change shape for no behavioural difference.
-	peers, err := externalPeersForSite(sites, nil, "site-1", nil)
+	peers, err := externalPeersForSite(sites, nil, testSite1, nil)
 	if err != nil {
 		t.Fatalf("derivation failed: %v", err)
 	}
@@ -522,7 +528,7 @@ func TestDerivedPeersCarryReplicasPerPeer(t *testing.T) {
 	// peer and not another would be a half-connected topology that looks
 	// healthy from both ends of every link that does exist.
 	want := int32(3)
-	peers, err = externalPeersForSite(sites, nil, "site-1", &want)
+	peers, err = externalPeersForSite(sites, nil, testSite1, &want)
 	if err != nil {
 		t.Fatalf("derivation failed: %v", err)
 	}

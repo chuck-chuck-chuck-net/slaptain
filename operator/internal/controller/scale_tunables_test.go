@@ -7,6 +7,11 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const (
+	envFlagNoMetaSync = "nometasync"
+	envFlagWriteMap   = "writemap"
+)
+
 func clusterFor() *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{}
 }
@@ -133,14 +138,14 @@ func TestEnvFlagsMatch(t *testing.T) {
 		current, desired []string
 		want             bool
 	}{
-		{"both empty", nil, nil, true},
-		{"same single flag", []string{"nometasync"}, []string{"nometasync"}, true},
-		{"order does not matter", []string{"nometasync", "writemap"},
-			[]string{"writemap", "nometasync"}, true},
-		{"case does not matter", []string{"WriteMap"}, []string{"writemap"}, true},
-		{"missing on the database", nil, []string{"writemap"}, false},
-		{"extra on the database", []string{"writemap"}, nil, false},
-		{"different flag", []string{"nosync"}, []string{"nometasync"}, false},
+		{testCaseBothEmpty, nil, nil, true},
+		{"same single flag", []string{envFlagNoMetaSync}, []string{envFlagNoMetaSync}, true},
+		{"order does not matter", []string{envFlagNoMetaSync, envFlagWriteMap},
+			[]string{envFlagWriteMap, envFlagNoMetaSync}, true},
+		{"case does not matter", []string{"WriteMap"}, []string{envFlagWriteMap}, true},
+		{"missing on the database", nil, []string{envFlagWriteMap}, false},
+		{"extra on the database", []string{envFlagWriteMap}, nil, false},
+		{"different flag", []string{"nosync"}, []string{envFlagNoMetaSync}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,7 +242,7 @@ func TestDesiredKeepalive(t *testing.T) {
 	if got := desiredKeepalive(sc); got != "60:2:10" {
 		t.Errorf("explicit keepalive = %q", got)
 	}
-	sc.Spec.Replication.Keepalive = "none"
+	sc.Spec.Replication.Keepalive = noneSentinel
 	if got := desiredKeepalive(sc); got != "" {
 		t.Errorf(`keepalive "none" must opt out entirely, got %q`, got)
 	}

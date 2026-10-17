@@ -16,6 +16,14 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const (
+	// wantDefaultPurge pins defaultAccesslogPurge's value, so it is spelled
+	// out here rather than taken from the constant it checks.
+	wantDefaultPurge   = "7+00:00 1+00:00"
+	explicitPurge      = "2+00:00 1+00:00"
+	explicitCheckpoint = "500 15"
+)
+
 // ADR-024 R4/R5: the accesslog purge window and the syncprov checkpoint are
 // converged on every reconcile, not written once at overlay creation. The
 // decision lives in pure functions — the resolved value
@@ -55,11 +63,11 @@ func TestDesiredAccesslogPurge(t *testing.T) {
 		want  string
 	}{
 		{"unset falls back to the operator default", "", defaultAccesslogPurge},
-		{"whitespace-only is still unset", "   ", defaultAccesslogPurge},
-		{"none opts out of purging entirely", "none", ""},
+		{"whitespace-only is still unset", testBlank, defaultAccesslogPurge},
+		{"none opts out of purging entirely", noneSentinel, ""},
 		{"none is matched case-insensitively", "None", ""},
 		{"none tolerates surrounding whitespace", "  none  ", ""},
-		{"an explicit window is used verbatim", "2+00:00 1+00:00", "2+00:00 1+00:00"},
+		{"an explicit window is used verbatim", explicitPurge, explicitPurge},
 		{"an explicit window is trimmed", "  14+00:00 1+00:00 ", "14+00:00 1+00:00"},
 	}
 
@@ -80,7 +88,7 @@ func TestDefaultAccesslogPurge_IsAWindowNotNothing(t *testing.T) {
 	if defaultAccesslogPurge == "" {
 		t.Fatal("defaultAccesslogPurge is empty — unset would mean no purge at all")
 	}
-	if want := "7+00:00 1+00:00"; defaultAccesslogPurge != want {
+	if want := wantDefaultPurge; defaultAccesslogPurge != want {
 		t.Fatalf("defaultAccesslogPurge = %q, want %q (7-day window, daily sweep)",
 			defaultAccesslogPurge, want)
 	}
@@ -94,8 +102,8 @@ func TestDesiredSyncprovCheckpoint(t *testing.T) {
 	}{
 		{"unset means no checkpoint attribute", "", ""},
 		{"whitespace-only is still unset", "  ", ""},
-		{"none opts out explicitly", "none", ""},
-		{"an explicit checkpoint is used verbatim", "500 15", "500 15"},
+		{"none opts out explicitly", noneSentinel, ""},
+		{"an explicit checkpoint is used verbatim", explicitCheckpoint, explicitCheckpoint},
 		{"an explicit checkpoint is trimmed", " 1000 10 ", "1000 10"},
 	}
 
@@ -119,45 +127,45 @@ func TestPlanOverlayAttr(t *testing.T) {
 		{
 			name:       "absent and wanted: set it",
 			current:    nil,
-			want:       "7+00:00 1+00:00",
+			want:       wantDefaultPurge,
 			wantAction: overlayAttrSet,
-			wantValue:  "7+00:00 1+00:00",
+			wantValue:  wantDefaultPurge,
 		},
 		{
 			name:       "already at the wanted value: no write",
-			current:    []string{"7+00:00 1+00:00"},
-			want:       "7+00:00 1+00:00",
+			current:    []string{wantDefaultPurge},
+			want:       wantDefaultPurge,
 			wantAction: overlayAttrNoop,
 		},
 		{
 			name:       "whitespace around the live value is not a difference",
 			current:    []string{"  7+00:00 1+00:00  "},
-			want:       "7+00:00 1+00:00",
+			want:       wantDefaultPurge,
 			wantAction: overlayAttrNoop,
 		},
 		{
 			name:       "internal respacing by slapd is not a difference",
 			current:    []string{"500\t15"},
-			want:       "500 15",
+			want:       explicitCheckpoint,
 			wantAction: overlayAttrNoop,
 		},
 		{
 			name:       "a different live value: replace it",
-			current:    []string{"2+00:00 1+00:00"},
-			want:       "7+00:00 1+00:00",
+			current:    []string{explicitPurge},
+			want:       wantDefaultPurge,
 			wantAction: overlayAttrSet,
-			wantValue:  "7+00:00 1+00:00",
+			wantValue:  wantDefaultPurge,
 		},
 		{
 			name:       "an unexpectedly multi-valued attribute is replaced",
-			current:    []string{"2+00:00 1+00:00", "7+00:00 1+00:00"},
-			want:       "7+00:00 1+00:00",
+			current:    []string{explicitPurge, wantDefaultPurge},
+			want:       wantDefaultPurge,
 			wantAction: overlayAttrSet,
-			wantValue:  "7+00:00 1+00:00",
+			wantValue:  wantDefaultPurge,
 		},
 		{
 			name:       "not wanted with a live value: delete the attribute",
-			current:    []string{"500 15"},
+			current:    []string{explicitCheckpoint},
 			want:       "",
 			wantAction: overlayAttrRemove,
 		},

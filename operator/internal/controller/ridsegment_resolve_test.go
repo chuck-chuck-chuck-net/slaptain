@@ -51,7 +51,7 @@ func ridScheme(t *testing.T) *runtime.Scheme {
 }
 
 func ridReconciler(c client.Client) *SlapdDatabaseReconciler {
-	return &SlapdDatabaseReconciler{Client: c, ClusterDomain: "cluster.local"}
+	return &SlapdDatabaseReconciler{Client: c, ClusterDomain: testClusterDomain}
 }
 
 // TestResolveRIDSegmentListFails pins hazard 3 on both axes at once: the

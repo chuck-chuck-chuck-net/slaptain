@@ -8,6 +8,9 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// wantDefaultSize pins the config/accesslog PVC default as written.
+const wantDefaultSize = "1Gi"
+
 // The PVC defaults live in exactly ONE place — resolvePersistence — because a
 // second copy (a +kubebuilder:default on the CRD, a value written by a Helm
 // chart) freezes whatever it says into every object created while it stood, and
@@ -29,9 +32,9 @@ func TestResolvePersistenceDefaults(t *testing.T) {
 		{
 			name:       "nothing set: every volume gets slaptain's default",
 			in:         ldapv1alpha1.SlapdPersistenceConfig{},
-			wantCfg:    ldapv1alpha1.SlapdPVCConfig{Size: "1Gi", AccessMode: rwo},
+			wantCfg:    ldapv1alpha1.SlapdPVCConfig{Size: wantDefaultSize, AccessMode: rwo},
 			wantData:   ldapv1alpha1.SlapdPVCConfig{Size: "5Gi", AccessMode: rwo},
-			wantAccess: ldapv1alpha1.SlapdPVCConfig{Size: "1Gi", AccessMode: rwo},
+			wantAccess: ldapv1alpha1.SlapdPVCConfig{Size: wantDefaultSize, AccessMode: rwo},
 		},
 		{
 			name: "explicit sizes win over every default",
@@ -49,9 +52,9 @@ func TestResolvePersistenceDefaults(t *testing.T) {
 			in: ldapv1alpha1.SlapdPersistenceConfig{
 				Data: ldapv1alpha1.SlapdPVCConfig{AccessMode: corev1.ReadWriteMany, StorageClass: "ceph"},
 			},
-			wantCfg:    ldapv1alpha1.SlapdPVCConfig{Size: "1Gi", AccessMode: rwo},
+			wantCfg:    ldapv1alpha1.SlapdPVCConfig{Size: wantDefaultSize, AccessMode: rwo},
 			wantData:   ldapv1alpha1.SlapdPVCConfig{Size: "5Gi", AccessMode: corev1.ReadWriteMany, StorageClass: "ceph"},
-			wantAccess: ldapv1alpha1.SlapdPVCConfig{Size: "1Gi", AccessMode: rwo},
+			wantAccess: ldapv1alpha1.SlapdPVCConfig{Size: wantDefaultSize, AccessMode: rwo},
 		},
 	}
 

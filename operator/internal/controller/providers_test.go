@@ -20,6 +20,12 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// Addresses whose numeric order differs from their lexical order.
+const (
+	podIP30  = "198.51.100.30"
+	podIP100 = "198.51.100.100"
+)
+
 // ADR-031 keys a syncrepl RID on the provider's IDENTITY, and the only place a
 // remote pod's identity can be read from is its StatefulSet name. These tests
 // pin the parse and the reduction that together turn "a list of IPs" into "a
@@ -51,7 +57,7 @@ func TestPodOrdinal(t *testing.T) {
 		},
 		{
 			name:    "ordinal zero parses, and is not confused with absence",
-			podName: "slapd-0",
+			podName: testPod0,
 			want:    0,
 			because: "pod-0 is an ordinary provider and 0 is its real ordinal",
 		},
@@ -84,7 +90,7 @@ func TestPodOrdinal(t *testing.T) {
 		},
 		{
 			name:    "a name with no dash is refused",
-			podName: "slapd",
+			podName: testClusterName,
 			wantErr: true,
 			because: "nothing in the name names an ordinal",
 		},
@@ -209,15 +215,15 @@ func TestProvidersFromPods(t *testing.T) {
 	}{
 		{
 			name:         "pod-routed mode takes the pod's primary IP",
-			pods:         []corev1.Pod{runningPod("slapd-0", "10.0.0.5", "")},
+			pods:         []corev1.Pod{runningPod(testPod0, "198.51.100.5", "")},
 			podRouted:    true,
 			wantOrdinals: []int32{0},
-			wantAddrs:    []string{"10.0.0.5"},
+			wantAddrs:    []string{"198.51.100.5"},
 			because:      "ADR-016 replication rides the natively routed pod network",
 		},
 		{
 			name:         "multus mode takes the NAD's IP, not the pod IP",
-			pods:         []corev1.Pod{runningPod("slapd-0", "10.0.0.5", "192.0.2.7")},
+			pods:         []corev1.Pod{runningPod(testPod0, "198.51.100.5", "192.0.2.7")},
 			podRouted:    false,
 			nadName:      "replication-net",
 			wantOrdinals: []int32{0},
@@ -230,25 +236,25 @@ func TestProvidersFromPods(t *testing.T) {
 			// identity. These three addresses sort to ordinals 2, 0, 1.
 			name: "the result is ordered by ordinal, not by address",
 			pods: []corev1.Pod{
-				runningPod("slapd-0", "10.0.0.20", ""),
-				runningPod("slapd-1", "10.0.0.3", ""),
-				runningPod("slapd-2", "10.0.0.100", ""),
+				runningPod(testPod0, "198.51.100.20", ""),
+				runningPod(testPod1, testPodIP3, ""),
+				runningPod(testPod2, podIP100, ""),
 			},
 			podRouted:    true,
 			wantOrdinals: []int32{0, 1, 2},
-			wantAddrs:    []string{"10.0.0.20", "10.0.0.3", "10.0.0.100"},
+			wantAddrs:    []string{"198.51.100.20", testPodIP3, podIP100},
 			because:      "sorting by address is what let remote churn permute provider identity",
 		},
 		{
 			name: "input order does not survive; ordinal order does",
 			pods: []corev1.Pod{
-				runningPod("slapd-2", "10.0.0.3", ""),
-				runningPod("slapd-0", "10.0.0.1", ""),
-				runningPod("slapd-1", "10.0.0.2", ""),
+				runningPod(testPod2, testPodIP3, ""),
+				runningPod(testPod0, testPodIP1, ""),
+				runningPod(testPod1, testPodIP2, ""),
 			},
 			podRouted:    true,
 			wantOrdinals: []int32{0, 1, 2},
-			wantAddrs:    []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			wantAddrs:    []string{testPodIP1, testPodIP2, testPodIP3},
 			because:      "the k8s List order is not an identity either",
 		},
 		{
@@ -258,34 +264,34 @@ func TestProvidersFromPods(t *testing.T) {
 			// wrong provider.
 			name: "a missing middle pod leaves a gap in the ordinals",
 			pods: []corev1.Pod{
-				runningPod("slapd-0", "10.0.0.1", ""),
-				pendingPod("slapd-1", "10.0.0.2"),
-				runningPod("slapd-2", "10.0.0.3", ""),
+				runningPod(testPod0, testPodIP1, ""),
+				pendingPod(testPod1, testPodIP2),
+				runningPod(testPod2, testPodIP3, ""),
 			},
 			podRouted:    true,
 			wantOrdinals: []int32{0, 2},
-			wantAddrs:    []string{"10.0.0.1", "10.0.0.3"},
+			wantAddrs:    []string{testPodIP1, testPodIP3},
 			because:      "position is not identity; the gap is the evidence",
 		},
 		{
 			name:         "a pod that is not Running is skipped",
-			pods:         []corev1.Pod{pendingPod("slapd-0", "10.0.0.1"), runningPod("slapd-1", "10.0.0.2", "")},
+			pods:         []corev1.Pod{pendingPod(testPod0, testPodIP1), runningPod(testPod1, testPodIP2, "")},
 			podRouted:    true,
 			wantOrdinals: []int32{1},
-			wantAddrs:    []string{"10.0.0.2"},
+			wantAddrs:    []string{testPodIP2},
 			because:      "a pod that is not up is not a provider this pass",
 		},
 		{
 			name:         "a Running pod with no address is skipped",
-			pods:         []corev1.Pod{runningPod("slapd-0", "", ""), runningPod("slapd-1", "10.0.0.2", "")},
+			pods:         []corev1.Pod{runningPod(testPod0, "", ""), runningPod(testPod1, testPodIP2, "")},
 			podRouted:    true,
 			wantOrdinals: []int32{1},
-			wantAddrs:    []string{"10.0.0.2"},
+			wantAddrs:    []string{testPodIP2},
 			because:      "an empty address is not a reachable provider",
 		},
 		{
 			name:         "in multus mode a Running pod without the NAD is skipped",
-			pods:         []corev1.Pod{runningPod("slapd-0", "10.0.0.1", ""), runningPod("slapd-1", "10.0.0.2", "192.0.2.8")},
+			pods:         []corev1.Pod{runningPod(testPod0, testPodIP1, ""), runningPod(testPod1, testPodIP2, "192.0.2.8")},
 			nadName:      "replication-net",
 			wantOrdinals: []int32{1},
 			wantAddrs:    []string{"192.0.2.8"},
@@ -293,7 +299,7 @@ func TestProvidersFromPods(t *testing.T) {
 		},
 		{
 			name:         "no surviving pods is an empty answer, not an error",
-			pods:         []corev1.Pod{pendingPod("slapd-0", "10.0.0.1"), pendingPod("slapd-1", "10.0.0.2")},
+			pods:         []corev1.Pod{pendingPod(testPod0, testPodIP1), pendingPod(testPod1, testPodIP2)},
 			podRouted:    true,
 			wantOrdinals: []int32{},
 			wantAddrs:    []string{},
@@ -314,8 +320,8 @@ func TestProvidersFromPods(t *testing.T) {
 			// Replace, so short means deleted (hazard 2).
 			name: "a surviving pod whose name will not parse refuses the whole peer",
 			pods: []corev1.Pod{
-				runningPod("slapd-0", "10.0.0.1", ""),
-				runningPod("slapd-weird", "10.0.0.2", ""),
+				runningPod(testPod0, testPodIP1, ""),
+				runningPod("slapd-weird", testPodIP2, ""),
 			},
 			podRouted: true,
 			wantErr:   true,
@@ -325,9 +331,9 @@ func TestProvidersFromPods(t *testing.T) {
 		{
 			name: "a refusal yields no providers at all, not the parseable subset",
 			pods: []corev1.Pod{
-				runningPod("slapd-0", "10.0.0.1", ""),
-				runningPod("slapd-1", "10.0.0.2", ""),
-				runningPod("slapd-oops", "10.0.0.3", ""),
+				runningPod(testPod0, testPodIP1, ""),
+				runningPod(testPod1, testPodIP2, ""),
+				runningPod("slapd-oops", testPodIP3, ""),
 			},
 			podRouted: true,
 			wantErr:   true,
@@ -341,23 +347,23 @@ func TestProvidersFromPods(t *testing.T) {
 			// would take the peer down whenever it happened to be Pending.
 			name: "a non-Running pod with an unparseable name does not refuse",
 			pods: []corev1.Pod{
-				runningPod("slapd-0", "10.0.0.1", ""),
-				pendingPod("slapd-weird", "10.0.0.2"),
+				runningPod(testPod0, testPodIP1, ""),
+				pendingPod("slapd-weird", testPodIP2),
 			},
 			podRouted:    true,
 			wantOrdinals: []int32{0},
-			wantAddrs:    []string{"10.0.0.1"},
+			wantAddrs:    []string{testPodIP1},
 			because:      "only a pod that would have become a provider can refuse the peer",
 		},
 		{
 			name: "an addressless pod with an unparseable name does not refuse",
 			pods: []corev1.Pod{
-				runningPod("slapd-0", "10.0.0.1", ""),
+				runningPod(testPod0, testPodIP1, ""),
 				runningPod("slapd-weird", "", ""),
 			},
 			podRouted:    true,
 			wantOrdinals: []int32{0},
-			wantAddrs:    []string{"10.0.0.1"},
+			wantAddrs:    []string{testPodIP1},
 			because:      "same rule, the other filter",
 		},
 		{
@@ -366,8 +372,8 @@ func TestProvidersFromPods(t *testing.T) {
 			// guess about which cluster the peer is.
 			name: "two surviving pods with the same ordinal refuse, naming both",
 			pods: []corev1.Pod{
-				runningPod("a-slapd-0", "10.0.0.1", ""),
-				runningPod("b-slapd-0", "10.0.0.2", ""),
+				runningPod("a-slapd-0", testPodIP1, ""),
+				runningPod("b-slapd-0", testPodIP2, ""),
 			},
 			podRouted: true,
 			wantErr:   true,
@@ -423,9 +429,9 @@ func TestProvidersFromPodAddresses(t *testing.T) {
 			// meaning for list position: index = provider ordinal."
 			// Zero-based. Mutation: Ordinal: int32(i+1).
 			name:         "list index is the provider ordinal, counting from zero",
-			addrs:        []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			addrs:        []string{testPodIP1, testPodIP2, testPodIP3},
 			wantOrdinals: []int32{0, 1, 2},
-			wantAddrs:    []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
+			wantAddrs:    []string{testPodIP1, testPodIP2, testPodIP3},
 			because:      "ordinal 0 is pod-0; starting at 1 shifts every provider by one",
 		},
 		{
@@ -434,25 +440,25 @@ func TestProvidersFromPodAddresses(t *testing.T) {
 			// are deliberately not in sorted order. Mutation: a sort.Slice on
 			// Address, or on Ordinal after shuffling, inside the constructor.
 			name:         "the declared order is preserved verbatim, never sorted",
-			addrs:        []string{"10.0.0.30", "10.0.0.2", "10.0.0.100"},
+			addrs:        []string{podIP30, testPodIP2, podIP100},
 			wantOrdinals: []int32{0, 1, 2},
-			wantAddrs:    []string{"10.0.0.30", "10.0.0.2", "10.0.0.100"},
+			wantAddrs:    []string{podIP30, testPodIP2, podIP100},
 			because:      "sorting here would silently renumber a hand-written peer list",
 		},
 		{
 			// Position is the only identity this mode has, so two identical
 			// addresses are still two providers. Mutation: deduplicate.
 			name:         "two identical addresses are still two providers",
-			addrs:        []string{"10.0.0.1", "10.0.0.1"},
+			addrs:        []string{testPodIP1, testPodIP1},
 			wantOrdinals: []int32{0, 1},
-			wantAddrs:    []string{"10.0.0.1", "10.0.0.1"},
+			wantAddrs:    []string{testPodIP1, testPodIP1},
 			because:      "dedup would shorten the set, and a short stanza set deletes (hazard 2)",
 		},
 		{
 			name:         "a single address is provider zero",
-			addrs:        []string{"10.0.0.1"},
+			addrs:        []string{testPodIP1},
 			wantOrdinals: []int32{0},
-			wantAddrs:    []string{"10.0.0.1"},
+			wantAddrs:    []string{testPodIP1},
 			because:      "the one-peer case must not be special-cased into ordinal 1",
 		},
 		{
@@ -544,8 +550,8 @@ func TestProviderAddresses(t *testing.T) {
 		{
 			// Mutation: reverse the slice, or sort it by Address.
 			name:      "order is preserved exactly, so position still means ordinal order",
-			providers: []ldapv1alpha1.DiscoveredProvider{p(0, "10.0.0.30"), p(1, "10.0.0.2"), p(2, "10.0.0.100")},
-			want:      []string{"10.0.0.30", "10.0.0.2", "10.0.0.100"},
+			providers: []ldapv1alpha1.DiscoveredProvider{p(0, podIP30), p(1, testPodIP2), p(2, podIP100)},
+			want:      []string{podIP30, testPodIP2, podIP100},
 			because:   "the diagonal (localOrdinal + k) % remoteN indexes this slice; reordering it repoints every link",
 		},
 		{
@@ -553,16 +559,16 @@ func TestProviderAddresses(t *testing.T) {
 			// caller's modulo is over len(addrs), not over the max ordinal.
 			// Mutation: pad the slice to the highest ordinal.
 			name:      "a gap in the ordinals compacts, it does not pad",
-			providers: []ldapv1alpha1.DiscoveredProvider{p(0, "10.0.0.1"), p(2, "10.0.0.3")},
-			want:      []string{"10.0.0.1", "10.0.0.3"},
+			providers: []ldapv1alpha1.DiscoveredProvider{p(0, testPodIP1), p(2, testPodIP3)},
+			want:      []string{testPodIP1, testPodIP3},
 			because:   "padding would hand the diagonal an empty address to dial",
 		},
 		{
 			// Mutation: skip empty addresses. Dropping one shortens the slice
 			// and silently shifts every provider after it.
 			name:      "nothing is filtered out, so the slice stays aligned with the providers",
-			providers: []ldapv1alpha1.DiscoveredProvider{p(0, "10.0.0.1"), p(1, ""), p(2, "10.0.0.3")},
-			want:      []string{"10.0.0.1", "", "10.0.0.3"},
+			providers: []ldapv1alpha1.DiscoveredProvider{p(0, testPodIP1), p(1, ""), p(2, testPodIP3)},
+			want:      []string{testPodIP1, "", testPodIP3},
 			because:   "filtering here would misalign the slice against the provider list the caller holds",
 		},
 		{

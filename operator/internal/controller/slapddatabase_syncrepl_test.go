@@ -20,6 +20,8 @@ import (
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 )
 
+const externalPeerPassword = "epw"
+
 // extractRIDs returns the set of rid=NNN values from a list of syncrepl stanzas.
 func extractRIDs(stanzas []string) []string {
 	re := regexp.MustCompile(`rid=(\d+)`)
@@ -70,12 +72,12 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 		}
 		extRID, _ := externalStanzaRID(ridcoord.DefaultLayout(), ridSegment, 0)
 		return []resolvedExternalPeer{{
-			Name:            "site-b",
+			Name:            testSiteB,
 			RID:             extRID,
 			URIs:            uris,
 			ReplicasPerPeer: rpp,
 			BindDN:          "cn=replication," + suffix,
-			Password:        "epw",
+			Password:        externalPeerPassword,
 		}}
 	}
 
@@ -290,12 +292,12 @@ func TestBuildDatabaseSyncRepl_PerDatabaseLogbase(t *testing.T) {
 
 	mkExternal := func(plain bool) []resolvedExternalPeer {
 		return []resolvedExternalPeer{{
-			Name:            "site-b",
+			Name:            testSiteB,
 			RID:             extRID,
 			URIs:            []string{"ldaps://10.9.9.9:1025"},
 			ReplicasPerPeer: 1,
 			BindDN:          "cn=replication," + suffix,
-			Password:        "epw",
+			Password:        externalPeerPassword,
 			PlainSyncRepl:   plain,
 		}}
 	}
@@ -410,12 +412,12 @@ func TestBuildDatabaseSyncRepl_StanzaTimeouts(t *testing.T) {
 	sd := &ldapv1alpha1.SlapdDatabase{}
 	sd.Name = dbName
 	external := []resolvedExternalPeer{{
-		Name:            "site-b",
+		Name:            testSiteB,
 		RID:             extRID,
 		URIs:            []string{"ldaps://10.9.9.9:1025"},
 		ReplicasPerPeer: 1,
 		BindDN:          "cn=replication," + suffix,
-		Password:        "epw",
+		Password:        externalPeerPassword,
 	}}
 
 	rwStanzas, rwErr := buildDatabaseSyncRepl(

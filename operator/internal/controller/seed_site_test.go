@@ -51,25 +51,25 @@ func TestDecideSeedSite(t *testing.T) {
 	}{
 		// Compatibility: the field is absent on every pre-ADR-028 CR.
 		{"no selector, no identity", "", "", seedSiteApply},
-		{"no selector, identity set", "", "site-a", seedSiteApply},
-		{"no selector, whitespace identity", "", "   ", seedSiteApply},
+		{"no selector, identity set", "", testSiteA, seedSiteApply},
+		{"no selector, whitespace identity", "", testBlank, seedSiteApply},
 
 		// The founder.
-		{"selector matches identity", "site-a", "site-a", seedSiteApply},
+		{"selector matches identity", testSiteA, testSiteA, seedSiteApply},
 		{"selector matches after trimming", " site-a ", "site-a\n", seedSiteApply},
 
 		// A non-founder site: permanent, latchable.
-		{"selector names another site", "site-a", "site-b", seedSiteWithhold},
+		{"selector names another site", testSiteA, testSiteB, seedSiteWithhold},
 		// Names are compared verbatim apart from surrounding whitespace: a site
 		// is whatever the operator chart was given, and folding case here would
 		// silently make two distinct SITE_NAME values collide.
-		{"case differs is a different site", "site-a", "SITE-A", seedSiteWithhold},
+		{"case differs is a different site", testSiteA, "SITE-A", seedSiteWithhold},
 
 		// Declared founder, but this operator cannot tell whether it is the
 		// one. Withhold, and do NOT latch — fixing SITE_NAME must still seed.
-		{"selector set, identity unset", "site-a", "", seedSiteUnknownIdentity},
-		{"selector set, identity whitespace only", "site-a", " \t ", seedSiteUnknownIdentity},
-		{"whitespace-only selector is unset", "   ", "", seedSiteApply},
+		{"selector set, identity unset", testSiteA, "", seedSiteUnknownIdentity},
+		{"selector set, identity whitespace only", testSiteA, " \t ", seedSiteUnknownIdentity},
+		{"whitespace-only selector is unset", testBlank, "", seedSiteApply},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

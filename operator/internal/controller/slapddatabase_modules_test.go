@@ -15,12 +15,14 @@ import (
 	"testing"
 )
 
+const loadedBackMDB = "{0}back_mdb"
+
 func TestModuleBaseName(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
 		{overlayAccesslog, overlayAccesslog},
-		{"{0}back_mdb", "back_mdb"},
+		{loadedBackMDB, "back_mdb"},
 		{"{12}syncprov", overlaySyncprov},
 		{"accesslog.la", overlayAccesslog},
 		{"syncprov.so", overlaySyncprov},
@@ -48,19 +50,19 @@ func TestMissingModules(t *testing.T) {
 			// The standalone→HA transition that motivated this helper:
 			// pod bootstrapped without replication has only back_mdb.
 			name:   "standalone pod missing both",
-			loaded: []string{"{0}back_mdb"},
+			loaded: []string{loadedBackMDB},
 			wanted: []string{overlayAccesslog, overlaySyncprov},
 			want:   []string{overlayAccesslog, overlaySyncprov},
 		},
 		{
 			name:   "fresh replicated pod has everything",
-			loaded: []string{"{0}back_mdb", "{1}accesslog", "{2}syncprov"},
+			loaded: []string{loadedBackMDB, "{1}accesslog", "{2}syncprov"},
 			wanted: []string{overlayAccesslog, overlaySyncprov},
 			want:   nil,
 		},
 		{
 			name:   "partial: syncprov missing",
-			loaded: []string{"{0}back_mdb", "{1}accesslog"},
+			loaded: []string{loadedBackMDB, "{1}accesslog"},
 			wanted: []string{overlayAccesslog, overlaySyncprov},
 			want:   []string{overlaySyncprov},
 		},
@@ -78,13 +80,13 @@ func TestMissingModules(t *testing.T) {
 		},
 		{
 			name:   "empty wanted list",
-			loaded: []string{"{0}back_mdb"},
+			loaded: []string{loadedBackMDB},
 			wanted: nil,
 			want:   nil,
 		},
 		{
 			name:   "order of wanted preserved",
-			loaded: []string{"{0}back_mdb"},
+			loaded: []string{loadedBackMDB},
 			wanted: []string{overlaySyncprov, overlayAccesslog},
 			want:   []string{overlaySyncprov, overlayAccesslog},
 		},

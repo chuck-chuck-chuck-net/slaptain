@@ -63,7 +63,7 @@ func TestAuthDBACLsOrderIsLoadBearing(t *testing.T) {
 // verifies against is structurally identical to the one it replaces; only its
 // placement changed.
 func TestDesiredAuthIdentityAttrs(t *testing.T) {
-	got := desiredAuthIdentityAttrs("example-db", "{SSHA}deadbeef")
+	got := desiredAuthIdentityAttrs(testDBName, "{SSHA}deadbeef")
 
 	want := map[string][]string{
 		attrObjectClass:  {ocSimpleSecurityObject, ocOrganizationalRole},
@@ -97,6 +97,9 @@ func TestDesiredAuthIdentityAttrs(t *testing.T) {
 // operator rewrites userPassword on every reconcile (a write storm on every pod
 // of every cluster); too lax and a rotated Secret never reaches the directory,
 // which is the failure ADR-027 exists to remove.
+// replpass is the cleartext hashOfReplpass was made from.
+const replpass = "replpass123"
+
 func TestSSHAMatches(t *testing.T) {
 	// Fixtures with known salts, in slappasswd's exact encoding:
 	// base64(sha1(password||salt) || salt), 8-byte salt.
@@ -111,23 +114,23 @@ func TestSSHAMatches(t *testing.T) {
 		password string
 		want     bool
 	}{
-		{"matching password", hashOfReplpass, "replpass123", true},
+		{"matching password", hashOfReplpass, replpass, true},
 		{"rotated password", hashOfReplpass, "replpass124", false},
 		{"different fixture, its own password", hashOfOther, "other", true},
-		{"different fixture, wrong password", hashOfOther, "replpass123", false},
-		{"empty stored value (attribute absent)", "", "replpass123", false},
+		{"different fixture, wrong password", hashOfOther, replpass, false},
+		{"empty stored value (attribute absent)", "", replpass, false},
 		// The password-stripped copy measured live (ADR-027 Context): an entry
 		// whose userPassword arrived empty satisfies an existence check forever.
 		// It must NOT satisfy a convergence check.
-		{"stripped userPassword", "{SSHA}", "replpass123", false},
+		{"stripped userPassword", "{SSHA}", replpass, false},
 		// Not our scheme: a cleartext or {CRYPT} value must be reported as a
 		// mismatch so the operator replaces it, never silently accepted.
-		{"cleartext value", "replpass123", "replpass123", false},
-		{"foreign scheme", "{CRYPT}abcdefg", "replpass123", false},
-		{"truncated base64", "{SSHA}!!!not-base64!!!", "replpass123", false},
+		{"cleartext value", replpass, replpass, false},
+		{"foreign scheme", "{CRYPT}abcdefg", replpass, false},
+		{"truncated base64", "{SSHA}!!!not-base64!!!", replpass, false},
 		// Shorter than one SHA-1 digest: there is no salt to recover, so the
 		// value cannot be verified and must not be trusted.
-		{"too short to carry a salt", "{SSHA}YWJj", "replpass123", false},
+		{"too short to carry a salt", "{SSHA}YWJj", replpass, false},
 	}
 
 	for _, c := range cases {
@@ -141,7 +144,7 @@ func TestSSHAMatches(t *testing.T) {
 // Round-trip against the hash generator the operator actually writes with —
 // the two halves of convergence must agree, or every reconcile rewrites.
 func TestSSHAMatchesAgreesWithGenerateSSHAHash(t *testing.T) {
-	for _, pw := range []string{"replpass123", "", "ünïcödé-påss", "a"} {
+	for _, pw := range []string{replpass, "", "ünïcödé-påss", "a"} {
 		h, err := generateSSHAHash(pw)
 		if err != nil {
 			t.Fatalf("generateSSHAHash(%q): %v", pw, err)

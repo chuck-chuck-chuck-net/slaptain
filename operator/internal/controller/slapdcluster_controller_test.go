@@ -38,7 +38,7 @@ var _ = Describe("SlapdCluster Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: metav1.NamespaceDefault, // TODO(user):Modify as needed
 		}
 		slapdcluster := &ldapv1alpha1.SlapdCluster{}
 
@@ -49,7 +49,7 @@ var _ = Describe("SlapdCluster Controller", func() {
 				resource := &ldapv1alpha1.SlapdCluster{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
-						Namespace: "default",
+						Namespace: metav1.NamespaceDefault,
 					},
 					// TODO(user): Specify other spec details if needed.
 				}

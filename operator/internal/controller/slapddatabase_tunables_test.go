@@ -7,6 +7,16 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+const (
+	indexUIDEqSub         = "uid eq,sub"
+	indexBaselineCombined = "objectClass,entryCSN,entryUUID eq"
+	indexMember           = "member"
+	// size32GiBytes is 32 GiB written as slapd stores olcDbMaxSize.
+	size32GiBytes = "34359738368"
+	// wantDefaultLimit pins slaptainDefaultSearchLimit's value.
+	wantDefaultLimit = "unlimited"
+)
+
 // The pure seams behind the five breaks-at-scale fixes (ADR-024). Each of these
 // decides something the LDAP half only executes: which olcLimits values a
 // database must carry, whether an olcDbMaxSize write is a grow or a rejected
@@ -19,7 +29,7 @@ import (
 func dbWith(f func(*ldapv1alpha1.SlapdDatabaseSpec)) *ldapv1alpha1.SlapdDatabase {
 	sd := &ldapv1alpha1.SlapdDatabase{}
 	sd.Name = "exdb"
-	sd.Spec.Suffix = "dc=example,dc=org"
+	sd.Spec.Suffix = testSuffix
 	f(&sd.Spec)
 	return sd
 }
@@ -27,7 +37,7 @@ func dbWith(f func(*ldapv1alpha1.SlapdDatabaseSpec)) *ldapv1alpha1.SlapdDatabase
 // ── 1. Replication identity limits (ADR-024 R7, ADR-020 amendment) ──────────
 
 func TestReplicationLimits(t *testing.T) {
-	got := replicationLimits("exdb", "dc=example,dc=org")
+	got := replicationLimits("exdb", testSuffix)
 	want := []string{
 		`dn.exact="cn=repl-exdb,cn=slaptain-auth" ` +
 			`time.soft=unlimited time.hard=unlimited size.soft=unlimited size.hard=unlimited`,
@@ -79,7 +89,7 @@ func TestReplicationLimitsMatchesACLIdentity(t *testing.T) {
 func TestDesiredLimits(t *testing.T) {
 	// Both replication identities, in the order desiredLimits emits them
 	// (ADR-027: node-local first, legacy second — see replicationLimits).
-	repl := replicationLimits("exdb", "dc=example,dc=org")
+	repl := replicationLimits("exdb", testSuffix)
 	user := `dn.exact="cn=bulk,dc=example,dc=org" size=unlimited`
 
 	cases := []struct {
@@ -121,14 +131,14 @@ func TestDesiredLimitsDoesNotMutateSpec(t *testing.T) {
 }
 
 func TestLimitsMatch(t *testing.T) {
-	repl := replicationLimits("exdb", "dc=example,dc=org")[0]
+	repl := replicationLimits("exdb", testSuffix)[0]
 	cases := []struct {
 		name    string
 		current []string
 		desired []string
 		want    bool
 	}{
-		{"both empty", nil, nil, true},
+		{testCaseBothEmpty, nil, nil, true},
 		{"stored with {N} prefix matches", []string{"{0}" + repl}, []string{repl}, true},
 		{"missing entirely", nil, []string{repl}, false},
 		{"stale value", []string{`{0}dn.exact="cn=replication,dc=example,dc=org" size=500`}, []string{repl}, false},
@@ -151,7 +161,7 @@ func TestParseMaxSize(t *testing.T) {
 		want    int64
 		wantErr bool
 	}{
-		{"34359738368", 34359738368, false}, // bare bytes, the form slapd takes
+		{size32GiBytes, 34359738368, false}, // bare bytes, the form slapd takes
 		{"32Gi", 34359738368, false},        // the form the doc comment promised
 		{"1Gi", 1073741824, false},
 		{"1G", 1000000000, false},
@@ -236,7 +246,7 @@ func TestCompareMaxSize(t *testing.T) {
 		wantCurrent string
 	}{
 		{"absent → needs grow (back-mdb's ~10 MB)", "", want32Gi, maxSizeNeedsGrow, ""},
-		{"equal → matches", "34359738368", want32Gi, maxSizeMatches, "34359738368"},
+		{"equal → matches", size32GiBytes, want32Gi, maxSizeMatches, size32GiBytes},
 		{"smaller → needs grow", "1073741824", want32Gi, maxSizeNeedsGrow, "1073741824"},
 		{"larger → needs shrink", "68719476736", want32Gi, maxSizeNeedsShrink, "68719476736"},
 		{"unparseable current → needs grow, reported verbatim", "wat", want32Gi, maxSizeNeedsGrow, "wat"},
@@ -267,9 +277,9 @@ func TestDesiredSearchLimits(t *testing.T) {
 		wantTime  string
 		wantWrite bool
 	}{
-		{"unset → slaptain's unlimited, not slapd's 500/3600", nil, nil, "unlimited", "unlimited", true},
+		{"unset → slaptain's unlimited, not slapd's 500/3600", nil, nil, wantDefaultLimit, wantDefaultLimit, true},
 		{"explicit numbers are honoured", new("500"), new("3600"), "500", "3600", true},
-		{"explicit unlimited", new("unlimited"), new("unlimited"), "unlimited", "unlimited", true},
+		{"explicit unlimited", new("unlimited"), new("unlimited"), wantDefaultLimit, wantDefaultLimit, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -308,12 +318,12 @@ func TestPlanDataBaselineIndices(t *testing.T) {
 		current []string
 		want    []string
 	}{
-		{"fresh DB plans the whole set", nil, []string{"objectClass,entryCSN,entryUUID eq"}},
-		{"only objectClass today", []string{"objectClass eq"}, []string{"entryCSN,entryUUID eq"}},
-		{"user declared them already", []string{"objectClass eq", "entryCSN eq", "entryUUID eq"}, nil},
-		{"combined value counts", []string{"objectClass,entryCSN,entryUUID eq"}, nil},
-		{"richer index types are left alone", []string{"objectClass eq", "entryCSN,entryUUID eq,sub"}, nil},
-		{"unrelated indices don't help", []string{"uid eq,sub"}, []string{"objectClass,entryCSN,entryUUID eq"}},
+		{"fresh DB plans the whole set", nil, []string{indexBaselineCombined}},
+		{"only objectClass today", []string{testIndexObjectClassEq}, []string{"entryCSN,entryUUID eq"}},
+		{"user declared them already", []string{testIndexObjectClassEq, testIndexEntryCSNEq, "entryUUID eq"}, nil},
+		{"combined value counts", []string{indexBaselineCombined}, nil},
+		{"richer index types are left alone", []string{testIndexObjectClassEq, "entryCSN,entryUUID eq,sub"}, nil},
+		{"unrelated indices don't help", []string{indexUIDEqSub}, []string{indexBaselineCombined}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -333,7 +343,7 @@ func TestPlanDataBaselineIndices(t *testing.T) {
 // Converging twice must be a no-op — the property that makes this safe to run
 // on every reconcile (ADR-001).
 func TestPlanDataBaselineIndicesIdempotent(t *testing.T) {
-	current := []string{"uid eq,sub"}
+	current := []string{indexUIDEqSub}
 	after := append(append([]string{}, current...), planDataBaselineIndices(current)...)
 	if got := planDataBaselineIndices(after); got != nil {
 		t.Fatalf("planDataBaselineIndices is not idempotent: second pass wants %v", got)
@@ -343,7 +353,7 @@ func TestPlanDataBaselineIndicesIdempotent(t *testing.T) {
 // planIndices is the shared seam; the accesslog planner must be exactly it,
 // applied to accesslogIndexAttrs. Drift-guard against a future edit to one.
 func TestPlanIndicesIsSharedWithAccesslog(t *testing.T) {
-	current := []string{"objectClass eq"}
+	current := []string{testIndexObjectClassEq}
 	a := planAccesslogIndices(current)
 	b := planIndices(current, accesslogIndexAttrs)
 	if len(a) != len(b) {
@@ -392,33 +402,33 @@ func TestPlanUserIndices(t *testing.T) {
 	}{
 		{
 			name:    "the t3e wedge: baseline as one combined value",
-			current: []string{"objectClass,entryCSN,entryUUID eq"},
-			desired: []string{"objectClass eq", "uid eq,sub", "entryCSN eq", "entryUUID eq"},
-			want:    []string{"uid eq,sub"},
+			current: []string{indexBaselineCombined},
+			desired: []string{testIndexObjectClassEq, indexUIDEqSub, testIndexEntryCSNEq, "entryUUID eq"},
+			want:    []string{indexUIDEqSub},
 		},
 		{
 			name:    "nothing indexed yet",
 			current: nil,
-			desired: []string{"uid eq,sub", "cn eq"},
-			want:    []string{"uid eq,sub", "cn eq"},
+			desired: []string{indexUIDEqSub, "cn eq"},
+			want:    []string{indexUIDEqSub, "cn eq"},
 		},
 		{
 			name:    "partially covered multi-attribute value keeps the rest",
-			current: []string{"objectClass eq"},
+			current: []string{testIndexObjectClassEq},
 			desired: []string{"objectClass,sn eq"},
 			want:    []string{"sn eq"},
 		},
 		{
 			name:    "exact duplicates are dropped",
-			current: []string{"uid eq,sub"},
-			desired: []string{"uid eq,sub"},
+			current: []string{indexUIDEqSub},
+			desired: []string{indexUIDEqSub},
 			want:    nil,
 		},
 		{
 			name:    "a value with no type field still parses",
-			current: []string{"objectClass eq"},
-			desired: []string{"member"},
-			want:    []string{"member"},
+			current: []string{testIndexObjectClassEq},
+			desired: []string{indexMember},
+			want:    []string{indexMember},
 		},
 	}
 	for _, tc := range cases {

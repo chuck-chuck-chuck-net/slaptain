@@ -18,6 +18,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const pod0Host = "slapd-0.slapd-headless.ns.svc.cluster.local"
+
 // The live shape this guards, read off t3e (3-replica replicated cluster,
 // OpenLDAP 2.7.1) on 2026-09-14:
 //
@@ -120,7 +122,7 @@ func TestPlanSubtreeDeletion(t *testing.T) {
 func TestDatabasePodHosts(t *testing.T) {
 	sc := func(replicas, readReplicas int32) *ldapv1alpha1.SlapdCluster {
 		return &ldapv1alpha1.SlapdCluster{
-			ObjectMeta: metav1.ObjectMeta{Name: "slapd", Namespace: "ns"},
+			ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
 			Spec: ldapv1alpha1.SlapdClusterSpec{
 				Replicas:     replicas,
 				ReadReplicas: readReplicas,
@@ -137,26 +139,26 @@ func TestDatabasePodHosts(t *testing.T) {
 			name: "unset replicas means one pod, not zero",
 			sc:   sc(0, 0),
 			want: []databasePodHost{
-				{Name: "slapd-0", Host: "slapd-0.slapd-headless.ns.svc.cluster.local", Ordinal: 0},
+				{Name: testPod0, Host: pod0Host, Ordinal: 0},
 			},
 		},
 		{
 			name: "three RW pods",
 			sc:   sc(3, 0),
 			want: []databasePodHost{
-				{Name: "slapd-0", Host: "slapd-0.slapd-headless.ns.svc.cluster.local", Ordinal: 0},
-				{Name: "slapd-1", Host: "slapd-1.slapd-headless.ns.svc.cluster.local", Ordinal: 1},
-				{Name: "slapd-2", Host: "slapd-2.slapd-headless.ns.svc.cluster.local", Ordinal: 2},
+				{Name: testPod0, Host: pod0Host, Ordinal: 0},
+				{Name: testPod1, Host: "slapd-1.slapd-headless.ns.svc.cluster.local", Ordinal: 1},
+				{Name: testPod2, Host: "slapd-2.slapd-headless.ns.svc.cluster.local", Ordinal: 2},
 			},
 		},
 		{
 			name: "read replicas ride the RO headless service and are flagged",
 			sc:   sc(2, 2),
 			want: []databasePodHost{
-				{Name: "slapd-0", Host: "slapd-0.slapd-headless.ns.svc.cluster.local", Ordinal: 0},
-				{Name: "slapd-1", Host: "slapd-1.slapd-headless.ns.svc.cluster.local", Ordinal: 1},
+				{Name: testPod0, Host: pod0Host, Ordinal: 0},
+				{Name: testPod1, Host: "slapd-1.slapd-headless.ns.svc.cluster.local", Ordinal: 1},
 				{
-					Name: "slapd-readonly-0", ReadOnly: true, Ordinal: 0,
+					Name: testROPod0, ReadOnly: true, Ordinal: 0,
 					Host: "slapd-readonly-0.slapd-readonly-headless.ns.svc.cluster.local",
 				},
 				{
