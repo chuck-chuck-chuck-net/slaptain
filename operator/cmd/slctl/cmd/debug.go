@@ -160,7 +160,8 @@ func runDebug(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr,
 			"⚠ namespace enforces PodSecurity \"baseline\" — reducing debugging power "+
 				"(no ptrace/strace, no /proc/1/root traversal).\n"+
-				"  For full power, raise the level:  kubectl label ns %s pod-security.kubernetes.io/enforce=privileged --overwrite\n\n",
+				"  For full power, raise the level:  "+
+				"kubectl label ns %s pod-security.kubernetes.io/enforce=privileged --overwrite\n\n",
 			ns)
 		who = "root, no added capabilities (baseline-safe)"
 		fsHint = "slapd PVCs mounted read-only at: " + mountPaths(mounts)
@@ -171,7 +172,8 @@ func runDebug(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr,
 			"⚠ namespace enforces PodSecurity \"restricted\" — running non-root (UID 1024), "+
 				"further reduced.\n"+
-				"  For full power, raise the level:  kubectl label ns %s pod-security.kubernetes.io/enforce=privileged --overwrite\n\n",
+				"  For full power, raise the level:  "+
+				"kubectl label ns %s pod-security.kubernetes.io/enforce=privileged --overwrite\n\n",
 			ns)
 		who = "UID 1024 (restricted-compatible: drop ALL, seccomp RuntimeDefault)"
 		fsHint = "slapd PVCs mounted read-only at: " + mountPaths(mounts)
@@ -231,7 +233,9 @@ func runDebug(cmd *cobra.Command, args []string) error {
 // forces the reduced (mount-based) path even where privileged is allowed. A
 // non-nil error means the probe itself failed (e.g. no create permission); the
 // caller should treat the returned level (baseline) as a best-effort default.
-func detectPSALevel(ctx context.Context, coreClient kubernetes.Interface, ns string, skipPrivileged bool) (psaLevel, error) {
+func detectPSALevel(
+	ctx context.Context, coreClient kubernetes.Interface, ns string, skipPrivileged bool,
+) (psaLevel, error) {
 	no := false
 	if !skipPrivileged {
 		privSC := &corev1.SecurityContext{
@@ -262,7 +266,9 @@ func detectPSALevel(ctx context.Context, coreClient kubernetes.Interface, ns str
 // would be admitted into the namespace (server-side dry-run — nothing is
 // created). A PodSecurity rejection returns (false, nil); any other error
 // (RBAC, connectivity) returns (false, err) so the caller can fall back.
-func psaAdmits(ctx context.Context, coreClient kubernetes.Interface, ns string, sc *corev1.SecurityContext) (bool, error) {
+func psaAdmits(
+	ctx context.Context, coreClient kubernetes.Interface, ns string, sc *corev1.SecurityContext,
+) (bool, error) {
 	probe := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "slctl-psa-probe", Namespace: ns},
 		Spec: corev1.PodSpec{
@@ -419,8 +425,10 @@ func removeDebugProfile(path string) {
 func init() {
 	debugCmd.Flags().StringVar(&debugPod, "pod", "0", "pod to debug: ordinal (0), 'readonly-N', or full pod name")
 	debugCmd.Flags().StringVar(&debugImage, "image", "", "debug container image (default: derived slapd-toolkit image)")
-	debugCmd.Flags().StringVar(&debugPullPolicy, "image-pull-policy", "IfNotPresent", "image pull policy for the debug container")
+	debugCmd.Flags().StringVar(&debugPullPolicy, "image-pull-policy", "IfNotPresent",
+		"image pull policy for the debug container")
 	debugCmd.Flags().StringVar(&debugTarget, "target", "slapd", "container whose process namespace to share")
-	debugCmd.Flags().BoolVar(&debugNoPrivileged, "no-privileged", false, "never escalate to privileged; use the read-only-mount mode even where privileged is allowed")
+	debugCmd.Flags().BoolVar(&debugNoPrivileged, "no-privileged", false,
+		"never escalate to privileged; use the read-only-mount mode even where privileged is allowed")
 	rootCmd.AddCommand(debugCmd)
 }

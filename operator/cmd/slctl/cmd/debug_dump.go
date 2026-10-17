@@ -134,7 +134,7 @@ func runDebugDump(cmd *cobra.Command, args []string) error {
 		// LDAP queries via port-forward + go-ldap (with timeout to avoid hanging)
 		done := make(chan struct{}, 1)
 		go func() {
-			collectLDAPArtifacts(ctx, coreClient, config, ns, pn, sc, configPW, dir, warnings)
+			collectLDAPArtifacts(ctx, coreClient, config, ns, pn, configPW, dir, warnings)
 			done <- struct{}{}
 		}()
 		select {
@@ -285,7 +285,10 @@ func (d *dumpWarnings) writeErr() error {
 	return d.err
 }
 
-func collectLDAPArtifacts(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, ns, podName string, sc *ldapv1alpha1.SlapdCluster, configPW, dir string, warnings *dumpWarnings) {
+func collectLDAPArtifacts(
+	ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, ns, podName string,
+	configPW, dir string, warnings *dumpWarnings,
+) {
 	// Per-pod timeout to avoid hanging on unresponsive pods
 	podCtx, podCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer podCancel()
@@ -425,7 +428,9 @@ func formatLDAPEntry(entry *ldap.Entry) string {
 	return sb.String()
 }
 
-func getPodLogs(ctx context.Context, coreClient kubernetes.Interface, ns, podName, container string, previous bool) (logs string, err error) {
+func getPodLogs(
+	ctx context.Context, coreClient kubernetes.Interface, ns, podName, container string, previous bool,
+) (logs string, err error) {
 	tailLines := int64(1000)
 	opts := &corev1.PodLogOptions{
 		Container: container,

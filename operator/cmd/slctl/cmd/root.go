@@ -26,7 +26,8 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "slctl",
 	Short: "CLI for slaptain SlapdCluster resources",
-	Long:  "slctl is a diagnostic and management utility for SlapdCluster custom resources managed by the slaptain operator.",
+	Long: "slctl is a diagnostic and management utility for SlapdCluster custom resources " +
+		"managed by the slaptain operator.",
 }
 
 func Execute() error {
@@ -36,7 +37,8 @@ func Execute() error {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig file")
 	rootCmd.PersistentFlags().StringVar(&kubeContext, "context", "", "kubeconfig context to use")
-	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "", "target namespace (defaults to kubeconfig context)")
+	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "",
+		"target namespace (defaults to kubeconfig context)")
 	rootCmd.PersistentFlags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "list across all namespaces")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output in JSON format")
 
@@ -60,7 +62,9 @@ func initClient() (client.Client, kubernetes.Interface, *rest.Config, string, er
 }
 
 // resolveTargets returns the list of SlapdCluster object keys to operate on.
-func resolveTargets(ctx context.Context, k8sClient client.Client, args []string, ns string) ([]client.ObjectKey, error) {
+func resolveTargets(
+	ctx context.Context, k8sClient client.Client, args []string, ns string,
+) ([]client.ObjectKey, error) {
 	if len(args) > 0 {
 		return []client.ObjectKey{{Name: args[0], Namespace: ns}}, nil
 	}
@@ -85,7 +89,9 @@ func resolveTargets(ctx context.Context, k8sClient client.Client, args []string,
 }
 
 // completeSlapdClusterNames provides tab completion for SlapdCluster names.
-func completeSlapdClusterNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completeSlapdClusterNames(
+	cmd *cobra.Command, args []string, toComplete string,
+) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
