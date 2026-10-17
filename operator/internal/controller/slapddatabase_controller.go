@@ -759,50 +759,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	// between a cluster that works at fixture size and one that works at
 	// production size — and every one of them is invisible below ~500 entries.
 
-	// Baseline indices (ADR-024 R7): entryCSN + entryUUID are searched by
-	// syncrepl itself; unindexed they are a full scan on a replication hot path.
-	if err := r.ensureDataBaselineIndices(ctx, conn, host, dataDN); err != nil {
-		return fmt.Errorf("ensure baseline indices at %s: %w", host, err)
-	}
-
-	// Map size (ADR-024 R4): set at creation, REPORTED (never written) on an
-	// existing database — modifying olcDbMaxSize under a running slapd
-	// segfaults it. See compareMaxSize.
-	maxSize, err := desiredDataMaxSize(sd)
-	if err != nil {
-		return fmt.Errorf("spec.maxSize: %w", err)
-	}
-	if err := r.checkMaxSize(ctx, conn, host, dataDN, "data database", maxSize, sd); err != nil {
-		return err
-	}
-
-	// Search limits (ADR-024 R5): unlimited by default, so a client
-	// enumerating a real subtree is not silently handed the first 500 entries.
-	if err := r.ensureSearchLimits(ctx, conn, host, dataDN, sd); err != nil {
-		return fmt.Errorf("ensure search limits at %s: %w", host, err)
-	}
-
-	// Per-identity limits (ADR-024 R7): the replication identity's exemption
-	// from those limits. Without it a consumer's syncrepl search caps at
-	// slapd's default 500 entries and the directory stops replicating there —
-	// silently, on a cluster reporting itself Synced (ADR-020 amendment).
-	replicatingIdentity := sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly()
-	if err := r.ensureLimits(ctx, conn, host, dataDN, desiredLimits(sd, replicatingIdentity)); err != nil {
-		return fmt.Errorf("ensure limits at %s: %w", host, err)
-	}
-
-	// Durability and read-transaction tunables (ADR-024 R1): fsync mode,
-	// checkpoint interval, read-txn bound, per-database monitor counters. noSync
-	// used to be create-only — flipping it on a live database was a silent
-	// no-op, the R4 violation this converges away.
-	if err := r.ensureBackendTunables(ctx, conn, host, dataDN, sd, sc, ""); err != nil {
-		return fmt.Errorf("ensure backend tunables at %s: %w", host, err)
-	}
-
-	// LMDB environment flags (ADR-024 R2/R4): create-only, so a divergence is
-	// reported through TunablesConverged rather than written. Writing it is not
-	// an option — adding writemap to a live database segfaults slapd.
-	if err := r.checkEnvFlags(ctx, conn, host, dataDN, sd); err != nil {
+	if err := r.convergeScaleTunables(ctx, conn, host, dataDN, sd, sc); err != nil {
 		return err
 	}
 
@@ -849,71 +806,9 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	wantsAccesslog := wantsSyncProv && sd.DeltaSyncEnabled()
 
 	if !readOnly {
-		// Ensure the dynamic modules backing the overlays are loaded BEFORE
-		// any ensure call below. Fresh bootstraps load them via slapd.conf
-		// (bootstrap.sh), but only when replication was enabled at first-boot
-		// time — a pod bootstrapped standalone and later transitioned to
-		// replication (replicas 1→N + replication.enabled flip) still has a
-		// cn=config without them, and every overlay add then fails with
-		// "objectClass: value #N invalid per syntax" (the olcSyncProvConfig /
-		// olcAccessLogConfig classes come from the modules). slapd loads
-		// modules dynamically via cn=module ldapmodify, no restart needed.
-		// See docs/reconcile-loop-fixes.md (2026-07-15).
-		var wantModules []string
-		if wantsAccesslog {
-			wantModules = append(wantModules, "accesslog")
-		}
-		if wantsSyncProv {
-			wantModules = append(wantModules, "syncprov")
-		}
-		if len(wantModules) > 0 {
-			if err := r.ensureModulesLoaded(ctx, conn, host, wantModules); err != nil {
-				return fmt.Errorf("ensure modules at %s: %w", host, err)
-			}
-		}
-
-		// Ensure olcServerID matches this pod's ordinal-derived identity
-		// (ADR-017, bare integer). bootstrap.sh emits it only at fresh
-		// bootstrap, so a pod bootstrapped by an operator predating
-		// sid-1-per-default (sid 0) or carrying the pre-ADR-017 URL list needs
-		// reconciling. The desired value is ordinal-keyed and equals the live
-		// sid of any correctly-booted pod, so a Replace here never changes a
-		// running identity — only its stored representation.
-		if err := r.ensureServerIDs(ctx, conn, host, sc, ordinal); err != nil {
-			return fmt.Errorf("ensure serverIDs at %s: %w", host, err)
-		}
-
-		if !wantsAccesslog {
-			if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "accesslog"); err != nil {
-				return fmt.Errorf("remove accesslog overlay at %s: %w", host, err)
-			}
-			deleted, err := r.removeAccesslogDB(ctx, conn, host, sd.Name)
-			if err != nil {
-				return fmt.Errorf("remove accesslog DB at %s: %w", host, err)
-			}
-			if deleted {
-				if dataDN, err = findDataDBDN(conn, sd.Spec.Suffix); err != nil {
-					return fmt.Errorf("re-resolve data DB DN at %s: %w", host, err)
-				}
-			}
-		}
-		if !wantsSyncProv {
-			if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "syncprov"); err != nil {
-				return fmt.Errorf("remove syncprov overlay at %s: %w", host, err)
-			}
-		}
-		if wantsSyncProv {
-			if err := r.ensureSyncProvOverlay(ctx, conn, host, dataDN, sd); err != nil {
-				return fmt.Errorf("ensure syncprov overlay at %s: %w", host, err)
-			}
-		}
-		if wantsAccesslog {
-			if err := r.ensureAccesslogDB(ctx, conn, host, ensureDirs, sd, sc); err != nil {
-				return fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
-			}
-			if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd); err != nil {
-				return fmt.Errorf("ensure accesslog overlay at %s: %w", host, err)
-			}
+		if dataDN, err = r.convergeProviderInfra(ctx, conn, host, dataDN, ensureDirs, sd, sc,
+			ordinal, wantsSyncProv, wantsAccesslog); err != nil {
+			return err
 		}
 	}
 
@@ -931,6 +826,149 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	}
 
 	return nil
+}
+
+// convergeScaleTunables converges the data database's scale tunables on one
+// pod (ADR-024): baseline indices, map size (reported, never written), search
+// limits, per-identity limits, backend tunables and LMDB env flags (reported).
+func (r *SlapdDatabaseReconciler) convergeScaleTunables(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	sd *ldapv1alpha1.SlapdDatabase,
+	sc *ldapv1alpha1.SlapdCluster,
+) error {
+	// Baseline indices (ADR-024 R7): entryCSN + entryUUID are searched by
+	// syncrepl itself; unindexed they are a full scan on a replication hot path.
+	if err := r.ensureDataBaselineIndices(ctx, conn, host, dataDN); err != nil {
+		return fmt.Errorf("ensure baseline indices at %s: %w", host, err)
+	}
+
+	// Map size (ADR-024 R4): set at creation, REPORTED (never written) on an
+	// existing database — modifying olcDbMaxSize under a running slapd
+	// segfaults it. See compareMaxSize.
+	maxSize, err := desiredDataMaxSize(sd)
+	if err != nil {
+		return fmt.Errorf("spec.maxSize: %w", err)
+	}
+	if err := r.checkMaxSize(ctx, conn, host, dataDN, "data database", maxSize, sd); err != nil {
+		return err
+	}
+
+	// Search limits (ADR-024 R5): unlimited by default, so a client
+	// enumerating a real subtree is not silently handed the first 500 entries.
+	if err := r.ensureSearchLimits(ctx, conn, host, dataDN, sd); err != nil {
+		return fmt.Errorf("ensure search limits at %s: %w", host, err)
+	}
+
+	// Per-identity limits (ADR-024 R7): the replication identity's exemption
+	// from those limits. Without it a consumer's syncrepl search caps at
+	// slapd's default 500 entries and the directory stops replicating there —
+	// silently, on a cluster reporting itself Synced (ADR-020 amendment).
+	replicatingIdentity := sc.Spec.Replication.Enabled && sd.ReplicationEnabled() && !sc.IsConsumerOnly()
+	if err := r.ensureLimits(ctx, conn, host, dataDN, desiredLimits(sd, replicatingIdentity)); err != nil {
+		return fmt.Errorf("ensure limits at %s: %w", host, err)
+	}
+
+	// Durability and read-transaction tunables (ADR-024 R1): fsync mode,
+	// checkpoint interval, read-txn bound, per-database monitor counters. noSync
+	// used to be create-only — flipping it on a live database was a silent
+	// no-op, the R4 violation this converges away.
+	if err := r.ensureBackendTunables(ctx, conn, host, dataDN, sd, sc, ""); err != nil {
+		return fmt.Errorf("ensure backend tunables at %s: %w", host, err)
+	}
+
+	// LMDB environment flags (ADR-024 R2/R4): create-only, so a divergence is
+	// reported through TunablesConverged rather than written. Writing it is not
+	// an option — adding writemap to a live database segfaults slapd.
+	if err := r.checkEnvFlags(ctx, conn, host, dataDN, sd); err != nil {
+		return err
+	}
+	return nil
+}
+
+// convergeProviderInfra converges a read-write pod's provider side of
+// replication: the overlay modules, olcServerID, and the data DB's syncprov
+// and accesslog overlays plus its own accesslog DB, in the order the
+// reconcilePodDatabase comment above the call lays out. It returns dataDN,
+// re-resolved if removing the accesslog DB renumbered it.
+func (r *SlapdDatabaseReconciler) convergeProviderInfra(
+	ctx context.Context,
+	conn *ldap.Conn,
+	host, dataDN string,
+	ensureDirs func() error,
+	sd *ldapv1alpha1.SlapdDatabase,
+	sc *ldapv1alpha1.SlapdCluster,
+	ordinal int32,
+	wantsSyncProv, wantsAccesslog bool,
+) (string, error) {
+	// Ensure the dynamic modules backing the overlays are loaded BEFORE
+	// any ensure call below. Fresh bootstraps load them via slapd.conf
+	// (bootstrap.sh), but only when replication was enabled at first-boot
+	// time — a pod bootstrapped standalone and later transitioned to
+	// replication (replicas 1→N + replication.enabled flip) still has a
+	// cn=config without them, and every overlay add then fails with
+	// "objectClass: value #N invalid per syntax" (the olcSyncProvConfig /
+	// olcAccessLogConfig classes come from the modules). slapd loads
+	// modules dynamically via cn=module ldapmodify, no restart needed.
+	// See docs/reconcile-loop-fixes.md (2026-07-15).
+	var wantModules []string
+	if wantsAccesslog {
+		wantModules = append(wantModules, "accesslog")
+	}
+	if wantsSyncProv {
+		wantModules = append(wantModules, "syncprov")
+	}
+	if len(wantModules) > 0 {
+		if err := r.ensureModulesLoaded(ctx, conn, host, wantModules); err != nil {
+			return dataDN, fmt.Errorf("ensure modules at %s: %w", host, err)
+		}
+	}
+
+	// Ensure olcServerID matches this pod's ordinal-derived identity
+	// (ADR-017, bare integer). bootstrap.sh emits it only at fresh
+	// bootstrap, so a pod bootstrapped by an operator predating
+	// sid-1-per-default (sid 0) or carrying the pre-ADR-017 URL list needs
+	// reconciling. The desired value is ordinal-keyed and equals the live
+	// sid of any correctly-booted pod, so a Replace here never changes a
+	// running identity — only its stored representation.
+	if err := r.ensureServerIDs(ctx, conn, host, sc, ordinal); err != nil {
+		return dataDN, fmt.Errorf("ensure serverIDs at %s: %w", host, err)
+	}
+
+	if !wantsAccesslog {
+		if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "accesslog"); err != nil {
+			return dataDN, fmt.Errorf("remove accesslog overlay at %s: %w", host, err)
+		}
+		deleted, err := r.removeAccesslogDB(ctx, conn, host, sd.Name)
+		if err != nil {
+			return dataDN, fmt.Errorf("remove accesslog DB at %s: %w", host, err)
+		}
+		if deleted {
+			if dataDN, err = findDataDBDN(conn, sd.Spec.Suffix); err != nil {
+				return dataDN, fmt.Errorf("re-resolve data DB DN at %s: %w", host, err)
+			}
+		}
+	}
+	if !wantsSyncProv {
+		if err := r.removeDataDBOverlay(ctx, conn, host, dataDN, "syncprov"); err != nil {
+			return dataDN, fmt.Errorf("remove syncprov overlay at %s: %w", host, err)
+		}
+	}
+	if wantsSyncProv {
+		if err := r.ensureSyncProvOverlay(ctx, conn, host, dataDN, sd); err != nil {
+			return dataDN, fmt.Errorf("ensure syncprov overlay at %s: %w", host, err)
+		}
+	}
+	if wantsAccesslog {
+		if err := r.ensureAccesslogDB(ctx, conn, host, ensureDirs, sd, sc); err != nil {
+			return dataDN, fmt.Errorf("ensure accesslog DB at %s: %w", host, err)
+		}
+		if err := r.ensureAccesslogOverlay(ctx, conn, host, dataDN, sd); err != nil {
+			return dataDN, fmt.Errorf("ensure accesslog overlay at %s: %w", host, err)
+		}
+	}
+	return dataDN, nil
 }
 
 // ensureReadOnly aligns the data DB's olcReadOnly attribute to the desired
