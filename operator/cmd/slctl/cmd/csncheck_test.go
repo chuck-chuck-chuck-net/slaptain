@@ -66,7 +66,7 @@ func TestCheckCSNConvergence(t *testing.T) {
 				csnPod("slapd-0", map[string][]string{db1: db1Healthy}),
 				csnPod("slapd-1", map[string][]string{db1: db1Healthy}),
 			},
-			wantStatus:  "pass",
+			wantStatus:  checkPass,
 			wantContain: []string{"2 pods"},
 		},
 		{
@@ -77,7 +77,7 @@ func TestCheckCSNConvergence(t *testing.T) {
 				csnPod("slapd-0", map[string][]string{db1: db1Healthy}),
 				csnPod("slapd-1", map[string][]string{db1: {db1old, db1v2, db1v3}}),
 			},
-			wantStatus:  "warn",
+			wantStatus:  checkWarn,
 			wantContain: []string{db1, "slapd-1"},
 		},
 		{
@@ -86,7 +86,7 @@ func TestCheckCSNConvergence(t *testing.T) {
 				csnPod("slapd-0", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
 				csnPod("slapd-1", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
 			},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 			// The verdict must state how many databases it covers — a pass
 			// that says only "all pods agree" is the defect's own wording.
 			wantContain: []string{"2 database"},
@@ -99,7 +99,7 @@ func TestCheckCSNConvergence(t *testing.T) {
 				csnPod("slapd-0", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
 				csnPod("slapd-1", map[string][]string{db1: db1Healthy, db2: {db2old}}),
 			},
-			wantStatus:  "warn",
+			wantStatus:  checkWarn,
 			wantContain: []string{db2, "slapd-1"},
 			// The healthy database must not be dragged into the indictment.
 			wantAbsent: []string{db1},
@@ -113,7 +113,7 @@ func TestCheckCSNConvergence(t *testing.T) {
 				csnPod("slapd-0", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
 				csnPod("slapd-1", map[string][]string{db1: db1Healthy, db2: nil}),
 			},
-			wantStatus:  "fail",
+			wantStatus:  checkFail,
 			wantContain: []string{db2, "slapd-1"},
 		},
 		{
@@ -124,7 +124,7 @@ func TestCheckCSNConvergence(t *testing.T) {
 				csnPod("slapd-0", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
 				csnPod("slapd-1", map[string][]string{db1: {db1old, db1v2, db1v3}, db2: nil}),
 			},
-			wantStatus:  "fail",
+			wantStatus:  checkFail,
 			wantContain: []string{db1, db2},
 		},
 		{
@@ -136,7 +136,7 @@ func TestCheckCSNConvergence(t *testing.T) {
 				csnPod("slapd-0", map[string][]string{db1: db1Healthy}),
 				csnPod("slapd-1", map[string][]string{db1: nil}),
 			},
-			wantStatus:  "fail",
+			wantStatus:  checkFail,
 			wantContain: []string{"glue", "ACL"},
 			wantAbsent:  []string{"never synced?"},
 		},
@@ -146,7 +146,7 @@ func TestCheckCSNConvergence(t *testing.T) {
 				csnPod("slapd-0", map[string][]string{db1: nil}),
 				csnPod("slapd-1", map[string][]string{db1: nil}),
 			},
-			wantStatus: "warn",
+			wantStatus: checkWarn,
 		},
 	}
 

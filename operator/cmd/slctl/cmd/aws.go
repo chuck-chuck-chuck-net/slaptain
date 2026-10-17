@@ -40,17 +40,31 @@ type storageSource struct {
 	Name string
 }
 
+// The kinds that carry an S3StorageSpec, by canonical name.
+const (
+	kindSlapdBackup          = "SlapdBackup"
+	kindSlapdScheduledBackup = "SlapdScheduledBackup"
+	kindSlapdDatabase        = "SlapdDatabase"
+	kindSlapdRestore         = "SlapdRestore"
+)
+
+// The endpoint schemes a storage spec may name.
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
+
 // storageKindAliases maps what a user may type to the canonical kind. The short
 // forms are the CRD short names, so they match `kubectl get sb` muscle memory.
 var storageKindAliases = map[string]string{
-	"slapdbackup":          "SlapdBackup",
-	"sb":                   "SlapdBackup",
-	"slapdscheduledbackup": "SlapdScheduledBackup",
-	"ssb":                  "SlapdScheduledBackup",
-	"slapddatabase":        "SlapdDatabase",
-	"sd":                   "SlapdDatabase",
-	"slapdrestore":         "SlapdRestore",
-	"sr":                   "SlapdRestore",
+	"slapdbackup":          kindSlapdBackup,
+	"sb":                   kindSlapdBackup,
+	"slapdscheduledbackup": kindSlapdScheduledBackup,
+	"ssb":                  kindSlapdScheduledBackup,
+	"slapddatabase":        kindSlapdDatabase,
+	"sd":                   kindSlapdDatabase,
+	"slapdrestore":         kindSlapdRestore,
+	"sr":                   kindSlapdRestore,
 }
 
 func knownStorageKinds() string {
@@ -99,21 +113,21 @@ func resolveStorage(
 	}
 
 	switch src.Kind {
-	case "SlapdBackup":
+	case kindSlapdBackup:
 		var obj ldapv1alpha1.SlapdBackup
 		if err := k8sClient.Get(ctx, key, &obj); err != nil {
 			return nil, notFound(err)
 		}
 		return &obj.Spec.Storage, nil
 
-	case "SlapdScheduledBackup":
+	case kindSlapdScheduledBackup:
 		var obj ldapv1alpha1.SlapdScheduledBackup
 		if err := k8sClient.Get(ctx, key, &obj); err != nil {
 			return nil, notFound(err)
 		}
 		return &obj.Spec.Storage, nil
 
-	case "SlapdDatabase":
+	case kindSlapdDatabase:
 		var obj ldapv1alpha1.SlapdDatabase
 		if err := k8sClient.Get(ctx, key, &obj); err != nil {
 			return nil, notFound(err)
@@ -123,7 +137,7 @@ func resolveStorage(
 		}
 		return &obj.Spec.BootstrapFrom.S3.Storage, nil
 
-	case "SlapdRestore":
+	case kindSlapdRestore:
 		var obj ldapv1alpha1.SlapdRestore
 		if err := k8sClient.Get(ctx, key, &obj); err != nil {
 			return nil, notFound(err)
@@ -165,7 +179,7 @@ func planEndpoint(raw, defaultNS string) (endpointPlan, error) {
 	// A bare host with no scheme is not something to guess at: picking http vs
 	// https wrong against a real store either fails or sends a credential in
 	// clear. The CRD documents the field as a URL.
-	if u.Scheme != "http" && u.Scheme != "https" {
+	if u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS {
 		return endpointPlan{}, fmt.Errorf(
 			"endpoint %q must be a URL with an http:// or https:// scheme", raw)
 	}
@@ -176,7 +190,7 @@ func planEndpoint(raw, defaultNS string) (endpointPlan, error) {
 		if port, err = strconv.Atoi(p); err != nil {
 			return endpointPlan{}, fmt.Errorf("endpoint %q: bad port %q", raw, p)
 		}
-	} else if u.Scheme == "https" {
+	} else if u.Scheme == schemeHTTPS {
 		port = 443
 	} else {
 		port = 80
@@ -369,8 +383,8 @@ func splitAWSArgs(raw []string, f *awsFlags) []string {
 		"-n":           &namespace,
 	}
 	boolFlags := map[string]*bool{
-		"--verbose":         &f.verbose,
-		"--show-password":   &f.showPassword,
+		flagVerbose:         &f.verbose,
+		flagShowPassword:    &f.showPassword,
 		"--redact-password": &f.redactPassword,
 	}
 
@@ -429,7 +443,7 @@ func runAWS(raw []string) error {
 		// Through a forward the endpoint is localhost, which no certificate
 		// issued for the Service name can match. Say so rather than quietly
 		// turning verification off.
-		if plan.Scheme == "https" && !storage.InsecureTLS {
+		if plan.Scheme == schemeHTTPS && !storage.InsecureTLS {
 			fmt.Fprintf(os.Stderr,
 				"! %s is https, but a port-forward makes the endpoint localhost — TLS verification will fail.\n"+
 					"  Set spec.storage.insecureTLS, or reach the endpoint directly.\n", storage.Endpoint)

@@ -75,11 +75,11 @@ func checkSyncreplStanzaCount(dbs []dbIdentity, readings []syncreplPodReading, e
 		}
 	}
 	if len(issues) > 0 {
-		return checkResult{Name: "syncrepl-stanza-count", Status: "fail", Detail: strings.Join(issues, "; ")}
+		return checkResult{Name: "syncrepl-stanza-count", Status: checkFail, Detail: strings.Join(issues, "; ")}
 	}
 	return checkResult{
 		Name:   "syncrepl-stanza-count",
-		Status: "pass",
+		Status: checkPass,
 		Detail: fmt.Sprintf("%d replicated database(s): RW %d stanzas each, RO %d each",
 			len(replicatedDBs(dbs)), expectedRW, expectedRO),
 	}
@@ -108,9 +108,9 @@ func checkSyncreplSkipSelf(readings []syncreplPodReading, headlessSvc string) ch
 		}
 	}
 	if len(issues) > 0 {
-		return checkResult{Name: "syncrepl-skip-self", Status: "fail", Detail: strings.Join(issues, "; ")}
+		return checkResult{Name: "syncrepl-skip-self", Status: checkFail, Detail: strings.Join(issues, "; ")}
 	}
-	return checkResult{Name: "syncrepl-skip-self", Status: "pass",
+	return checkResult{Name: "syncrepl-skip-self", Status: checkPass,
 		Detail: "no RW pod replicates from itself on any database"}
 }
 
@@ -151,9 +151,9 @@ func checkRIDUniqueness(readings []syncreplPodReading) checkResult {
 		}
 	}
 	if len(issues) > 0 {
-		return checkResult{Name: "rid-uniqueness", Status: "fail", Detail: strings.Join(issues, "; ")}
+		return checkResult{Name: "rid-uniqueness", Status: checkFail, Detail: strings.Join(issues, "; ")}
 	}
-	return checkResult{Name: "rid-uniqueness", Status: "pass",
+	return checkResult{Name: "rid-uniqueness", Status: checkPass,
 		Detail: "all RIDs unique within each pod, across its databases"}
 }
 
@@ -183,9 +183,9 @@ func checkMultiProviderPerDB(dbs []dbIdentity, readings []syncreplPodReading) ch
 		}
 	}
 	if len(issues) > 0 {
-		return checkResult{Name: "multi-provider", Status: "fail", Detail: strings.Join(issues, "; ")}
+		return checkResult{Name: "multi-provider", Status: checkFail, Detail: strings.Join(issues, "; ")}
 	}
-	return checkResult{Name: "multi-provider", Status: "pass",
+	return checkResult{Name: "multi-provider", Status: checkPass,
 		Detail: "TRUE on every replicated database of every RW pod, absent on RO"}
 }
 
@@ -235,7 +235,7 @@ type configReadFailure struct {
 // a reader scans, ahead of the checks it invalidates.
 func checkConfigReadable(failures []configReadFailure) checkResult {
 	if len(failures) == 0 {
-		return checkResult{Name: "cn-config-readable", Status: "pass", Detail: "cn=config readable on every queried pod"}
+		return checkResult{Name: "cn-config-readable", Status: checkPass, Detail: "cn=config readable on every queried pod"}
 	}
 	parts := make([]string, 0, len(failures))
 	for _, f := range failures {
@@ -244,7 +244,7 @@ func checkConfigReadable(failures []configReadFailure) checkResult {
 	sort.Strings(parts)
 	return checkResult{
 		Name:   "cn-config-readable",
-		Status: "fail",
+		Status: checkFail,
 		Detail: fmt.Sprintf("%d pod(s) refused the cn=config bind, so every check below that reads it "+
 			"was NOT evaluated: %s", len(failures), strings.Join(parts, "; ")),
 	}
@@ -259,7 +259,7 @@ func checkConfigReadable(failures []configReadFailure) checkResult {
 func notEvaluated(name string) checkResult {
 	return checkResult{
 		Name:   name,
-		Status: "warn",
+		Status: checkWarn,
 		Detail: "not evaluated: no pod's cn=config could be read (see cn-config-readable)",
 	}
 }

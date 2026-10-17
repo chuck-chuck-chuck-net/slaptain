@@ -40,6 +40,9 @@ import (
 // chances to disagree.
 type suffixObservation = suffixprobe.Observation
 
+// suffixVisibilityCheck is the name checkSuffixVisibility reports under.
+const suffixVisibilityCheck = "suffix-visibility"
+
 // checkSuffixVisibility verifies that every data suffix's base entry is
 // visible to an ordinary base search on every queryable pod (RW and RO — a
 // consumer initial-syncing from a glued provider replicates the glue). A
@@ -107,14 +110,17 @@ func checkSuffixVisibility(dbs []dbIdentity, pods []podState) checkResult {
 
 	switch {
 	case len(fails) > 0:
-		return checkResult{Name: "suffix-visibility", Status: "fail", Detail: strings.Join(fails, "; ")}
+		return checkResult{Name: suffixVisibilityCheck, Status: checkFail, Detail: strings.Join(fails, "; ")}
 	case len(warns) > 0:
-		return checkResult{Name: "suffix-visibility", Status: "warn", Detail: strings.Join(warns, "; ")}
+		return checkResult{Name: suffixVisibilityCheck, Status: checkWarn, Detail: strings.Join(warns, "; ")}
 	default:
-		return checkResult{Name: "suffix-visibility", Status: "pass",
+		return checkResult{Name: suffixVisibilityCheck, Status: checkPass,
 			Detail: fmt.Sprintf("%d database suffix(es): base entry visible on every queried pod", assessed)}
 	}
 }
+
+// suffixUUIDAgreementCheck is the name checkSuffixUUIDAgreement reports under.
+const suffixUUIDAgreementCheck = "suffix-uuid-agreement"
 
 // checkSuffixUUIDAgreement verifies that every pod reports the SAME entryUUID
 // for each data suffix's base entry. entryUUID is syncrepl's identity: a
@@ -167,11 +173,11 @@ func checkSuffixUUIDAgreement(dbs []dbIdentity, pods []podState) checkResult {
 
 	switch {
 	case len(fails) > 0:
-		return checkResult{Name: "suffix-uuid-agreement", Status: "fail", Detail: strings.Join(fails, "; ")}
+		return checkResult{Name: suffixUUIDAgreementCheck, Status: checkFail, Detail: strings.Join(fails, "; ")}
 	case len(warns) > 0:
-		return checkResult{Name: "suffix-uuid-agreement", Status: "warn", Detail: strings.Join(warns, "; ")}
+		return checkResult{Name: suffixUUIDAgreementCheck, Status: checkWarn, Detail: strings.Join(warns, "; ")}
 	default:
-		return checkResult{Name: "suffix-uuid-agreement", Status: "pass",
+		return checkResult{Name: suffixUUIDAgreementCheck, Status: checkPass,
 			Detail: fmt.Sprintf("%d database suffix(es): all pods agree on the base entry's entryUUID", agreed)}
 	}
 }

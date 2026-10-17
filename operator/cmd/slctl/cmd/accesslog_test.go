@@ -100,7 +100,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				Name:           "slapd-0",
 				NamingContexts: []string{sufA, logA},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "two replicated databases: two logs, no failure",
@@ -109,7 +109,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				Name:           "slapd-0",
 				NamingContexts: []string{sufA, sufB, logA, logB},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "a replicated database with no log of its own fails",
@@ -118,7 +118,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				Name:           "slapd-0",
 				NamingContexts: []string{sufA, sufB, logA},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"slapd-0", "dbB", logB},
 		},
 		{
@@ -128,7 +128,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				Name:           "slapd-0",
 				NamingContexts: []string{logA},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"missing data namingContext"},
 		},
 		{
@@ -138,7 +138,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				{Name: "slapd-0", NamingContexts: []string{sufA, logA}},
 				{Name: "slapd-readonly-0", RO: true, NamingContexts: []string{sufA, logB}},
 			},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"slapd-readonly-0", logB},
 		},
 		{
@@ -148,7 +148,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				{Name: "slapd-0", NamingContexts: []string{sufA, logA}},
 				{Name: "slapd-readonly-0", RO: true, NamingContexts: []string{sufA, legacySharedAccesslogSuffix}},
 			},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"slapd-readonly-0", legacySharedAccesslogSuffix},
 		},
 		{
@@ -158,7 +158,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				Name:           "slapd-0",
 				NamingContexts: []string{sufA, legacySharedAccesslogSuffix, logA},
 			}},
-			wantStatus: "warn",
+			wantStatus: checkWarn,
 			wantDetail: []string{"legacy", legacySharedAccesslogSuffix},
 		},
 		{
@@ -168,7 +168,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				Name:           "slapd-0",
 				NamingContexts: []string{sufA, logA, logB},
 			}},
-			wantStatus: "warn",
+			wantStatus: checkWarn,
 			wantDetail: []string{"orphan", logB},
 		},
 		{
@@ -178,7 +178,7 @@ func TestCheckNamingContexts(t *testing.T) {
 				{Name: "slapd-0", NamingContexts: []string{sufA, logA}},
 				{Name: "slapd-1", Skip: true},
 			},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "a database excluded from delta-sync is not expected to have a log",
@@ -190,15 +190,15 @@ func TestCheckNamingContexts(t *testing.T) {
 				Name:           "slapd-0",
 				NamingContexts: []string{sufA, sufB, logA},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := checkNamingContexts(tc.dbs, tc.pods)
-			if got.Name != "naming-contexts" {
-				t.Errorf("check name = %q, want %q", got.Name, "naming-contexts")
+			if got.Name != namingContextsCheck {
+				t.Errorf("check name = %q, want %q", got.Name, namingContextsCheck)
 			}
 			if got.Status != tc.wantStatus {
 				t.Errorf("status = %q, want %q (detail: %s)", got.Status, tc.wantStatus, got.Detail)
@@ -243,7 +243,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
 				},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "two replicated databases, one log each",
@@ -257,7 +257,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(4, logB, ldapv1alpha1.AccesslogDir("dbB")),
 				},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "two databases sharing one log fails (the ADR-019 condition)",
@@ -270,7 +270,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					dataDB(3, sufB, logA, logA),
 				},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"share", logA, "dbA", "dbB"},
 		},
 		{
@@ -283,7 +283,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
 				},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"slapd-0", "logbase", logB},
 		},
 		{
@@ -296,7 +296,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
 				},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"olcAccessLogDB", logB},
 		},
 		{
@@ -306,7 +306,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 				Name: "slapd-0",
 				DBs:  []observedDB{dataDB(1, sufA, logA, logA)},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"slapd-0", logA, "absent"},
 		},
 		{
@@ -319,7 +319,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
 				},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"no accesslog overlay"},
 		},
 		{
@@ -340,7 +340,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
 				},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 			wantDetail: []string{"cn=log", "peer"},
 		},
 		{
@@ -359,7 +359,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
 				},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "an RO pod's stanza logbase must name the provider's log",
@@ -369,7 +369,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 				RO:   true,
 				DBs:  []observedDB{dataDB(1, sufA, "", logB)},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"slapd-readonly-0", "logbase", logB},
 		},
 		{
@@ -380,7 +380,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 				RO:   true,
 				DBs:  []observedDB{dataDB(1, sufA, "", logA)},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "a single database still on the legacy shared log is reported as legacy",
@@ -392,7 +392,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, legacySharedAccesslogSuffix, ldapv1alpha1.AccesslogRoot),
 				},
 			}},
-			wantStatus: "warn",
+			wantStatus: checkWarn,
 			wantDetail: []string{"legacy", legacySharedAccesslogSuffix},
 		},
 		{
@@ -411,7 +411,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, logA, ldapv1alpha1.AccesslogDir("dbA")),
 				},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"slapd-0", legacySharedAccesslogSuffix, "not a database"},
 		},
 		{
@@ -425,7 +425,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 					logDB(2, legacySharedAccesslogSuffix, ldapv1alpha1.AccesslogRoot),
 				},
 			}},
-			wantStatus: "fail",
+			wantStatus: checkFail,
 			wantDetail: []string{"share", "dbA", "dbB"},
 		},
 		{
@@ -444,7 +444,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 						ldapv1alpha1.AccesslogDir("default")),
 				},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "unreachable pods are skipped",
@@ -459,7 +459,7 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 				},
 				{Name: "slapd-1", Skip: true},
 			},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 		{
 			name: "a database excluded from delta-sync is not checked",
@@ -470,15 +470,15 @@ func TestCheckAccesslogConsistency(t *testing.T) {
 				Name: "slapd-0",
 				DBs:  []observedDB{{DN: dbDN(1), Suffix: sufB}},
 			}},
-			wantStatus: "pass",
+			wantStatus: checkPass,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := checkAccesslogConsistency(tc.dbs, tc.pods, externalNeedles)
-			if got.Name != "accesslog-consistency" {
-				t.Errorf("check name = %q, want %q", got.Name, "accesslog-consistency")
+			if got.Name != accesslogConsistencyCheck {
+				t.Errorf("check name = %q, want %q", got.Name, accesslogConsistencyCheck)
 			}
 			if got.Status != tc.wantStatus {
 				t.Errorf("status = %q, want %q (detail: %s)", got.Status, tc.wantStatus, got.Detail)

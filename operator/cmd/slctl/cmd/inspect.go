@@ -85,9 +85,16 @@ type podJSON struct {
 
 type checkResult struct {
 	Name   string `json:"name"`
-	Status string `json:"status"` // "pass", "warn", "fail"
+	Status string `json:"status"` // checkPass, checkWarn or checkFail
 	Detail string `json:"detail,omitempty"`
 }
+
+// A check's verdict, as reported in checkResult.Status.
+const (
+	checkPass = "pass"
+	checkWarn = "warn"
+	checkFail = "fail"
+)
 
 // ── Internal pod state (shared by display + checks) ──────────────────────────
 
@@ -220,7 +227,7 @@ func runInspect(cmd *cobra.Command, args []string) error {
 		}
 
 		for _, c := range result.Checks {
-			if c.Status == "fail" {
+			if c.Status == checkFail {
 				hasFail = true
 			}
 		}
@@ -344,11 +351,11 @@ func inspectAndVerify(
 	pass, warn, fail := 0, 0, 0
 	for _, c := range result.Checks {
 		switch c.Status {
-		case "pass":
+		case checkPass:
 			pass++
-		case "warn":
+		case checkWarn:
 			warn++
-		case "fail":
+		case checkFail:
 			fail++
 		}
 	}
@@ -568,20 +575,20 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 
 	// ── RW replica count ──
 	if sc.Status.ReadyReplicas == sc.Spec.Replicas {
-		check("rw-replica-count", "pass",
+		check("rw-replica-count", checkPass,
 			fmt.Sprintf("%d/%d ready", sc.Status.ReadyReplicas, sc.Spec.Replicas))
 	} else {
-		check("rw-replica-count", "fail",
+		check("rw-replica-count", checkFail,
 			fmt.Sprintf("%d/%d ready (want %d)", sc.Status.ReadyReplicas, sc.Status.Replicas, sc.Spec.Replicas))
 	}
 
 	// ── RO replica count ──
 	if sc.Spec.ReadReplicas > 0 {
 		if sc.Status.ReadOnlyReadyReplicas == sc.Spec.ReadReplicas {
-			check("ro-replica-count", "pass",
+			check("ro-replica-count", checkPass,
 				fmt.Sprintf("%d/%d ready", sc.Status.ReadOnlyReadyReplicas, sc.Spec.ReadReplicas))
 		} else {
-			check("ro-replica-count", "fail",
+			check("ro-replica-count", checkFail,
 				fmt.Sprintf("%d/%d ready (want %d)",
 					sc.Status.ReadOnlyReadyReplicas, sc.Status.ReadOnlyReplicas, sc.Spec.ReadReplicas))
 		}
@@ -597,16 +604,16 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		}
 	}
 	if allReady {
-		check("pod-readiness", "pass", "all pods running and ready")
+		check("pod-readiness", checkPass, "all pods running and ready")
 	} else {
-		check("pod-readiness", "fail", fmt.Sprintf("not ready: %s", strings.Join(notReady, ", ")))
+		check("pod-readiness", checkFail, fmt.Sprintf("not ready: %s", strings.Join(notReady, ", ")))
 	}
 
 	// ── Bootstrap (inferred from phase) ──
 	if sc.Status.Phase == ldapv1alpha1.PhaseRunning {
-		check("bootstrap", "pass", "cluster phase is Running")
+		check("bootstrap", checkPass, "cluster phase is Running")
 	} else {
-		check("bootstrap", "warn", fmt.Sprintf("cluster phase is %s", sc.Status.Phase))
+		check("bootstrap", checkWarn, fmt.Sprintf("cluster phase is %s", sc.Status.Phase))
 	}
 
 	// Remaining checks require replication
@@ -736,10 +743,10 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 				}
 			}
 			if epOK {
-				check("external-peers", "pass",
+				check("external-peers", checkPass,
 					fmt.Sprintf("all %d URI peers connected", uriPeerCount))
 			} else {
-				check("external-peers", "fail", strings.Join(epIssues, "; "))
+				check("external-peers", checkFail, strings.Join(epIssues, "; "))
 			}
 		}
 		if discoveryPeerCount > 0 {
@@ -767,12 +774,12 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 			// play is spec.replication.network.mode, not the peer shape. This
 			// line used to claim "Multus" for every discovery peer, which was
 			// simply wrong on a pod-routed mesh.
-			check("external-peers", "pass",
+			check("external-peers", checkPass,
 				fmt.Sprintf("all %d peers resolved by discovery (%s)",
 					discoveryPeerCount, strings.Join(details, ", ")))
 		}
 		if multusPeerCount > 0 && uriPeerCount == 0 && discoveryPeerCount == 0 {
-			check("external-peers", "pass",
+			check("external-peers", checkPass,
 				fmt.Sprintf("all %d external peers use Multus podAddresses (connectivity not testable from operator)",
 					multusPeerCount))
 		}
@@ -838,11 +845,11 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		if !epStanzaEvaluated {
 			checks = append(checks, notEvaluated("external-syncrepl"))
 		} else if epStanzaOK {
-			check("external-syncrepl", "pass",
+			check("external-syncrepl", checkPass,
 				fmt.Sprintf("every replicated database on every RW pod has stanzas for all %d external peers",
 					len(sc.Spec.Replication.ExternalPeers)))
 		} else {
-			check("external-syncrepl", "fail", strings.Join(epStanzaIssues, "; "))
+			check("external-syncrepl", checkFail, strings.Join(epStanzaIssues, "; "))
 		}
 
 		// ── Cross-site CSN convergence (from operator status) ──
@@ -851,9 +858,9 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		anyCSNData := false
 		for _, eps := range sc.Status.ExternalPeerStatuses {
 			switch eps.ReplicationState {
-			case "Synced":
+			case ldapv1alpha1.ReplicationSynced:
 				anyCSNData = true
-			case "Lagging":
+			case ldapv1alpha1.ReplicationLagging:
 				anyCSNData = true
 				csnOK = false
 				detail := eps.Name + ": Lagging"
@@ -861,7 +868,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 					detail += fmt.Sprintf(" (%ss)", eps.LagSeconds)
 				}
 				csnIssues = append(csnIssues, detail)
-			case "PartiallyVerified":
+			case ldapv1alpha1.ReplicationPartiallyVerified:
 				// The peer answered, and everything that could be read is
 				// current — but at least one database yielded no evidence.
 				// Surfaced rather than swallowed: a state nobody renders is a
@@ -873,7 +880,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 					detail += " (" + eps.LastError + ")"
 				}
 				csnIssues = append(csnIssues, detail)
-			case "Unreachable":
+			case ldapv1alpha1.ReplicationUnreachable:
 				anyCSNData = true
 				csnOK = false
 				csnIssues = append(csnIssues, eps.Name+": Unreachable")
@@ -881,21 +888,21 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		}
 		if anyCSNData {
 			if csnOK {
-				check("cross-site-csn", "pass", "all external peers report Synced")
+				check("cross-site-csn", checkPass, "all external peers report Synced")
 			} else {
 				// Use "warn" for Lagging (data is flowing, just delayed) and
 				// "fail" for Unreachable (can't reach remote pods).
 				hasUnreachable := false
 				for _, issue := range csnIssues {
-					if strings.Contains(issue, "Unreachable") {
+					if strings.Contains(issue, string(ldapv1alpha1.ReplicationUnreachable)) {
 						hasUnreachable = true
 						break
 					}
 				}
 				if hasUnreachable {
-					check("cross-site-csn", "fail", strings.Join(csnIssues, "; "))
+					check("cross-site-csn", checkFail, strings.Join(csnIssues, "; "))
 				} else {
-					check("cross-site-csn", "warn", strings.Join(csnIssues, "; "))
+					check("cross-site-csn", checkWarn, strings.Join(csnIssues, "; "))
 				}
 			}
 		}
@@ -1024,21 +1031,21 @@ func printInspectResult(result inspectJSON) {
 			for _, ep := range result.ExternalPeers {
 				var replStr string
 				switch ep.ReplicationState {
-				case "Synced":
-					replStr = "Synced"
-				case "Lagging":
+				case string(ldapv1alpha1.ReplicationSynced):
+					replStr = string(ldapv1alpha1.ReplicationSynced)
+				case string(ldapv1alpha1.ReplicationLagging):
 					if ep.LagSeconds != "" {
 						replStr = fmt.Sprintf("Lagging (%ss)", ep.LagSeconds)
 					} else {
-						replStr = "Lagging"
+						replStr = string(ldapv1alpha1.ReplicationLagging)
 					}
-				case "PartiallyVerified":
-					replStr = "PartiallyVerified"
+				case string(ldapv1alpha1.ReplicationPartiallyVerified):
+					replStr = string(ldapv1alpha1.ReplicationPartiallyVerified)
 					if ep.LastError != "" {
 						replStr += " (" + ep.LastError + ")"
 					}
-				case "Unreachable":
-					replStr = "Unreachable"
+				case string(ldapv1alpha1.ReplicationUnreachable):
+					replStr = string(ldapv1alpha1.ReplicationUnreachable)
 					if ep.LastError != "" {
 						replStr += " (" + ep.LastError + ")"
 					}
@@ -1066,11 +1073,11 @@ func printInspectResult(result inspectJSON) {
 	for _, c := range result.Checks {
 		var symbol string
 		switch c.Status {
-		case "pass":
+		case checkPass:
 			symbol = "OK"
-		case "warn":
+		case checkWarn:
 			symbol = "WARN"
-		case "fail":
+		case checkFail:
 			symbol = "FAIL"
 		}
 		fmt.Printf("  [%-4s] %-24s %s\n", symbol, c.Name, c.Detail)
@@ -1219,13 +1226,13 @@ func meshResolutionCheck(peers peerResolution) checkResult {
 	if !peers.OK() {
 		return checkResult{
 			Name:   "mesh-resolution",
-			Status: "fail",
+			Status: checkFail,
 			Detail: peers.Note,
 		}
 	}
 	return checkResult{
 		Name:   "mesh-resolution",
-		Status: "pass",
+		Status: checkPass,
 		Detail: fmt.Sprintf("%d external peer(s) derived from SlapdMesh %q",
 			len(peers.Peers), peers.MeshRef),
 	}

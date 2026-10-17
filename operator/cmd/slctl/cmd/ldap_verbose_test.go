@@ -143,7 +143,7 @@ func TestPasswordRedactionIsTheDefault(t *testing.T) {
 			because:    "the default must be the safe one; this is the case that runs on a projector",
 		},
 		{
-			name:       "--show-password",
+			name:       flagShowPassword,
 			show:       true,
 			wantRedact: false,
 			because:    "the escape hatch must actually work, or people will paste passwords by hand instead",
@@ -178,7 +178,7 @@ func TestPasswordRedactionIsTheDefault(t *testing.T) {
 // The flag has to be reachable, and by the name the help text promises.
 func TestShowPasswordFlagIsParsed(t *testing.T) {
 	var f ldapTargetFlags
-	rest := splitLDAPArgs([]string{"--verbose", "--show-password", "-b", "dc=x"}, &f)
+	rest := splitLDAPArgs([]string{flagVerbose, flagShowPassword, "-b", "dc=x"}, &f)
 	if !f.verbose {
 		t.Error("--verbose was not parsed")
 	}

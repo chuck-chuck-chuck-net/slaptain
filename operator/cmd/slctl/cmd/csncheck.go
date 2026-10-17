@@ -33,6 +33,9 @@ type csnPodReading struct {
 	BySuffix map[string][]string
 }
 
+// csnConvergenceCheck is the name checkCSNConvergence reports under.
+const csnConvergenceCheck = "csn-convergence"
+
 // checkCSNConvergence judges whether the pods agree on contextCSN, PER
 // DATABASE.
 //
@@ -123,14 +126,14 @@ func checkCSNConvergence(readings []csnPodReading) checkResult {
 
 	switch {
 	case len(suffixes) == 0:
-		return checkResult{Name: "csn-convergence", Status: "warn", Detail: "no contextCSN data available"}
+		return checkResult{Name: csnConvergenceCheck, Status: checkWarn, Detail: "no contextCSN data available"}
 	case len(fails) > 0:
-		return checkResult{Name: "csn-convergence", Status: "fail",
+		return checkResult{Name: csnConvergenceCheck, Status: checkFail,
 			Detail: strings.Join(append(fails, warns...), "; ")}
 	case len(warns) > 0:
-		return checkResult{Name: "csn-convergence", Status: "warn", Detail: strings.Join(warns, "; ")}
+		return checkResult{Name: csnConvergenceCheck, Status: checkWarn, Detail: strings.Join(warns, "; ")}
 	default:
-		return checkResult{Name: "csn-convergence", Status: "pass", Detail: fmt.Sprintf(
+		return checkResult{Name: csnConvergenceCheck, Status: checkPass, Detail: fmt.Sprintf(
 			"%d database(s): all %d pods report identical contextCSN for each",
 			converged, readablePods)}
 	}

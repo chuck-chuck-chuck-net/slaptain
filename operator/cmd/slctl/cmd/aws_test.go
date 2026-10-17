@@ -16,15 +16,15 @@ func TestParseStorageSource(t *testing.T) {
 		in   string
 		want storageSource
 	}{
-		{"slapdbackup/demo-backup-1", storageSource{"SlapdBackup", "demo-backup-1"}},
-		{"sb/demo-backup-1", storageSource{"SlapdBackup", "demo-backup-1"}},
-		{"SlapdBackup/demo-backup-1", storageSource{"SlapdBackup", "demo-backup-1"}},
-		{"slapdscheduledbackup/nightly", storageSource{"SlapdScheduledBackup", "nightly"}},
-		{"ssb/nightly", storageSource{"SlapdScheduledBackup", "nightly"}},
-		{"slapddatabase/demo-db", storageSource{"SlapdDatabase", "demo-db"}},
-		{"sd/demo-db", storageSource{"SlapdDatabase", "demo-db"}},
-		{"slapdrestore/rollback", storageSource{"SlapdRestore", "rollback"}},
-		{"sr/rollback", storageSource{"SlapdRestore", "rollback"}},
+		{"slapdbackup/demo-backup-1", storageSource{kindSlapdBackup, "demo-backup-1"}},
+		{"sb/demo-backup-1", storageSource{kindSlapdBackup, "demo-backup-1"}},
+		{"SlapdBackup/demo-backup-1", storageSource{kindSlapdBackup, "demo-backup-1"}},
+		{"slapdscheduledbackup/nightly", storageSource{kindSlapdScheduledBackup, "nightly"}},
+		{"ssb/nightly", storageSource{kindSlapdScheduledBackup, "nightly"}},
+		{"slapddatabase/demo-db", storageSource{kindSlapdDatabase, "demo-db"}},
+		{"sd/demo-db", storageSource{kindSlapdDatabase, "demo-db"}},
+		{"slapdrestore/rollback", storageSource{kindSlapdRestore, "rollback"}},
+		{"sr/rollback", storageSource{kindSlapdRestore, "rollback"}},
 	}
 	for _, tc := range ok {
 		got, err := parseStorageSource(tc.in)
@@ -37,13 +37,14 @@ func TestParseStorageSource(t *testing.T) {
 		}
 	}
 
+	const wantFromForm = "<kind>/<name>"
 	bad := []struct{ in, wantSubstr string }{
 		{"", "--from is required"},
-		{"demo-backup-1", "<kind>/<name>"},
+		{"demo-backup-1", wantFromForm},
 		{"backup/demo-backup-1", "unknown kind"},
-		{"sb/", "<kind>/<name>"},
-		{"/demo-backup-1", "<kind>/<name>"},
-		{"sb/a/b", "<kind>/<name>"},
+		{"sb/", wantFromForm},
+		{"/demo-backup-1", wantFromForm},
+		{"sb/a/b", wantFromForm},
 	}
 	for _, tc := range bad {
 		_, err := parseStorageSource(tc.in)
@@ -81,22 +82,22 @@ func TestPlanEndpoint(t *testing.T) {
 		{
 			name: "service DNS needs a forward",
 			raw:  "http://versitygw.slaptain-demo.svc:7480", ns: "demo",
-			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "slaptain-demo", Port: 7480, Scheme: "http"},
+			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "slaptain-demo", Port: 7480, Scheme: schemeHTTP},
 		},
 		{
 			name: "fully qualified service DNS needs a forward",
 			raw:  "http://versitygw.slaptain-demo.svc.cluster.local:7480", ns: "demo",
-			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "slaptain-demo", Port: 7480, Scheme: "http"},
+			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "slaptain-demo", Port: 7480, Scheme: schemeHTTP},
 		},
 		{
 			name: "bare single label is in the target namespace",
 			raw:  "http://versitygw:7480", ns: "demo",
-			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "demo", Port: 7480, Scheme: "http"},
+			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "demo", Port: 7480, Scheme: schemeHTTP},
 		},
 		{
 			name: "no port defaults to the scheme's port",
 			raw:  "https://rgw.store.svc", ns: "demo",
-			want: endpointPlan{Forward: true, Service: "rgw", Namespace: "store", Port: 443, Scheme: "https"},
+			want: endpointPlan{Forward: true, Service: "rgw", Namespace: "store", Port: 443, Scheme: schemeHTTPS},
 		},
 		{
 			name: "two labels without .svc is external",

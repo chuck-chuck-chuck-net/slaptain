@@ -204,21 +204,21 @@ func printStatusText(sc *ldapv1alpha1.SlapdCluster, peers peerResolution) {
 				}
 				// Replication state.
 				switch eps.ReplicationState {
-				case "Synced":
-					replStr = "Synced"
-				case "Lagging":
+				case ldapv1alpha1.ReplicationSynced:
+					replStr = string(ldapv1alpha1.ReplicationSynced)
+				case ldapv1alpha1.ReplicationLagging:
 					if eps.LagSeconds != "" {
 						replStr = fmt.Sprintf("Lagging (%ss)", eps.LagSeconds)
 					} else {
-						replStr = "Lagging"
+						replStr = string(ldapv1alpha1.ReplicationLagging)
 					}
-				case "PartiallyVerified":
-					replStr = "PartiallyVerified"
+				case ldapv1alpha1.ReplicationPartiallyVerified:
+					replStr = string(ldapv1alpha1.ReplicationPartiallyVerified)
 					if eps.LastError != "" {
 						replStr += " (" + eps.LastError + ")"
 					}
-				case "Unreachable":
-					replStr = "Unreachable"
+				case ldapv1alpha1.ReplicationUnreachable:
+					replStr = string(ldapv1alpha1.ReplicationUnreachable)
 				}
 				break
 			}
