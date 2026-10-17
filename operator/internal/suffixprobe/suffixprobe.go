@@ -100,10 +100,18 @@ func (o Observation) Glue() bool { return o.Outcome == OutcomeGlue }
 // Assessable reports whether the probe reached a verdict at all.
 func (o Observation) Assessable() bool { return o.Outcome != OutcomeError }
 
+// The schema names the probe reads and classifies by.
+const (
+	attrObjectClass           = "objectClass"
+	attrStructuralObjectClass = "structuralObjectClass"
+	attrEntryUUID             = "entryUUID"
+	objectClassGlue           = "glue"
+)
+
 // probeAttrs is what both searches ask for. entryUUID rides along on the
 // ordinary search too so the UUID-agreement check can compare healthy pods
 // against each other, not just against a glue.
-var probeAttrs = []string{"objectClass", "structuralObjectClass", "entryUUID"}
+var probeAttrs = []string{attrObjectClass, attrStructuralObjectClass, attrEntryUUID}
 
 // Probe reads suffix's base entry over an already-bound connection: an ordinary
 // base search first, then — only when that comes up empty — a ManageDsaIT base
@@ -128,7 +136,7 @@ func Probe(conn *ldap.Conn, suffix string) Observation {
 	switch {
 	case err == nil && len(res.Entries) > 0:
 		o.Outcome = OutcomeVisible
-		o.UUID = res.Entries[0].GetEqualFoldAttributeValue("entryUUID")
+		o.UUID = res.Entries[0].GetEqualFoldAttributeValue(attrEntryUUID)
 		return o
 	case err != nil && !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject):
 		// A real failure (transport, timeout, denied). Not evidence of absence.
@@ -162,11 +170,11 @@ func Probe(conn *ldap.Conn, suffix string) Observation {
 // so the classification — the part that encodes ADR-025's signature — is unit
 // testable without a server.
 func Classify(e *ldap.Entry, suffix string) Observation {
-	o := Observation{Suffix: suffix, UUID: e.GetEqualFoldAttributeValue("entryUUID")}
+	o := Observation{Suffix: suffix, UUID: e.GetEqualFoldAttributeValue(attrEntryUUID)}
 
-	glue := strings.EqualFold(e.GetEqualFoldAttributeValue("structuralObjectClass"), "glue")
-	for _, oc := range e.GetEqualFoldAttributeValues("objectClass") {
-		if strings.EqualFold(strings.TrimSpace(oc), "glue") {
+	glue := strings.EqualFold(e.GetEqualFoldAttributeValue(attrStructuralObjectClass), objectClassGlue)
+	for _, oc := range e.GetEqualFoldAttributeValues(attrObjectClass) {
+		if strings.EqualFold(strings.TrimSpace(oc), objectClassGlue) {
 			glue = true
 		}
 	}

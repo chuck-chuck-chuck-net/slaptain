@@ -104,7 +104,9 @@ func PortForward(ctx context.Context, coreClient kubernetes.Interface, config *r
 		return 0, nil, fmt.Errorf("find free port: %w", err)
 	}
 	localPort = ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
+	if err := ln.Close(); err != nil {
+		return 0, nil, fmt.Errorf("release probed port %d: %w", localPort, err)
+	}
 
 	// Apply a timeout to the HTTP transport so the SPDY dial doesn't block forever
 	cfgCopy := rest.CopyConfig(config)

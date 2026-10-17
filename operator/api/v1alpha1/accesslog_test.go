@@ -2,6 +2,9 @@ package v1alpha1
 
 import "testing"
 
+// testDBName is the SlapdDatabase name the derivation tests key on.
+const testDBName = "default"
+
 // ── ADR-019: per-database accesslog derivation ───────────────────────────────
 
 func TestAccesslogSuffixAndDir(t *testing.T) {
@@ -12,7 +15,7 @@ func TestAccesslogSuffixAndDir(t *testing.T) {
 		wantSfx string
 		wantDir string
 	}{
-		{"default", "cn=accesslog-default", "/accesslog/default"},
+		{testDBName, "cn=accesslog-default", "/accesslog/default"},
 		{"secondary", "cn=accesslog-secondary", "/accesslog/secondary"},
 	}
 	for _, c := range cases {
@@ -25,7 +28,7 @@ func TestAccesslogSuffixAndDir(t *testing.T) {
 	}
 	// Every per-database directory sits beneath the one accesslog mount
 	// (ADR-019 R3) — one PVC, one LMDB directory per database.
-	if got, want := AccesslogDir("default"), AccesslogRoot+"/default"; got != want {
+	if got, want := AccesslogDir(testDBName), AccesslogRoot+"/"+testDBName; got != want {
 		t.Errorf("AccesslogDir must be rooted at AccesslogRoot: %q, want %q", got, want)
 	}
 }
@@ -34,16 +37,17 @@ func TestExternalLogBase(t *testing.T) {
 	// ADR-019 R9/R10: default is derived from this database's own accesslog
 	// suffix; a non-empty spec override wins, and nothing is written back.
 	sd := &SlapdDatabase{}
-	sd.Name = "default"
+	sd.Name = testDBName
 	if got, want := ExternalLogBase(sd), "cn=accesslog-default"; got != want {
 		t.Errorf("ExternalLogBase (derived) = %q, want %q", got, want)
 	}
 
-	sd.Spec.Replication.ExternalAccesslogSuffix = "cn=log"
-	if got, want := ExternalLogBase(sd), "cn=log"; got != want {
+	const override = "cn=log"
+	sd.Spec.Replication.ExternalAccesslogSuffix = override
+	if got, want := ExternalLogBase(sd), override; got != want {
 		t.Errorf("ExternalLogBase (override) = %q, want %q", got, want)
 	}
-	if sd.Spec.Replication.ExternalAccesslogSuffix != "cn=log" {
+	if sd.Spec.Replication.ExternalAccesslogSuffix != override {
 		t.Errorf("ExternalLogBase must not mutate .spec (ADR-019 R10)")
 	}
 }
