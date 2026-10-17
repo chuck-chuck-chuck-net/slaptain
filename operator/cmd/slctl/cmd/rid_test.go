@@ -78,9 +78,9 @@ func TestDecodeRID(t *testing.T) {
 			rid:         4,
 			res:         offlineRes(),
 			wantStatus:  ridDecodeOK,
-			wantSegment: ptrI32(0),
+			wantSegment: new(int32(0)),
 			wantKind:    ridcoord.KindLocal,
-			wantOrdinal: ptrI32(3),
+			wantOrdinal: new(int32(3)),
 		},
 		{
 			// The last slot of the local block. One below the boundary.
@@ -88,9 +88,9 @@ func TestDecodeRID(t *testing.T) {
 			rid:         8,
 			res:         offlineRes(),
 			wantStatus:  ridDecodeOK,
-			wantSegment: ptrI32(0),
+			wantSegment: new(int32(0)),
 			wantKind:    ridcoord.KindLocal,
-			wantOrdinal: ptrI32(7),
+			wantOrdinal: new(int32(7)),
 		},
 		{
 			// The boundary itself: offset == P is the FIRST remote slot, peer
@@ -99,9 +99,9 @@ func TestDecodeRID(t *testing.T) {
 			rid:           9,
 			res:           offlineRes(),
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(0),
+			wantSegment:   new(int32(0)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(0),
+			wantSiteIndex: new(int32(0)),
 		},
 		{
 			// The ADR's own worked example (Consequences, slctl bullet):
@@ -110,9 +110,9 @@ func TestDecodeRID(t *testing.T) {
 			rid:           317,
 			res:           offlineRes(),
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(15),
+			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(8),
+			wantSiteIndex: new(int32(8)),
 		},
 		{
 			// C·M exactly: the last RID the default layout can produce, and
@@ -121,9 +121,9 @@ func TestDecodeRID(t *testing.T) {
 			rid:           defaultLastRID,
 			res:           offlineRes(),
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(48),
+			wantSegment:   new(int32(48)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(11),
+			wantSiteIndex: new(int32(11)),
 		},
 
 		// ── The layout changes what a number MEANS ───────────────────────
@@ -137,9 +137,9 @@ func TestDecodeRID(t *testing.T) {
 			rid:         9,
 			res:         withRIDLayout(offlineRes(), 12, 8),
 			wantStatus:  ridDecodeOK,
-			wantSegment: ptrI32(0),
+			wantSegment: new(int32(0)),
 			wantKind:    ridcoord.KindLocal,
-			wantOrdinal: ptrI32(8),
+			wantOrdinal: new(int32(8)),
 		},
 		{
 			// Same shape, through the segment term instead of the offset term:
@@ -230,9 +230,9 @@ func TestDecodeRID(t *testing.T) {
 			rid:         3,
 			res:         withRIDLayout(offlineRes(), 1, 1),
 			wantStatus:  ridDecodeOK,
-			wantSegment: ptrI32(1),
+			wantSegment: new(int32(1)),
 			wantKind:    ridcoord.KindLocal,
-			wantOrdinal: ptrI32(0),
+			wantOrdinal: new(int32(0)),
 		},
 
 		// ── Resolution against a cluster ─────────────────────────────────
@@ -252,9 +252,9 @@ func TestDecodeRID(t *testing.T) {
 				Sites:         map[int32]string{8: "site-i"},
 			},
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(15),
+			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(8),
+			wantSiteIndex: new(int32(8)),
 			wantDatabases: []string{"customers"},
 			wantSite:      "site-i",
 			wantNoNotes:   true,
@@ -273,9 +273,9 @@ func TestDecodeRID(t *testing.T) {
 				Databases:     map[int32][]string{0: {"default"}},
 			},
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(15),
+			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(8),
+			wantSiteIndex: new(int32(8)),
 			wantNotesHave: []string{"15", "slapd", "no slapddatabase"},
 		},
 		{
@@ -285,9 +285,9 @@ func TestDecodeRID(t *testing.T) {
 			rid:           317,
 			res:           offlineRes(),
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(15),
+			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(8),
+			wantSiteIndex: new(int32(8)),
 			wantNotesHave: []string{"no cluster"},
 		},
 		{
@@ -304,9 +304,9 @@ func TestDecodeRID(t *testing.T) {
 				Databases:     map[int32][]string{15: {"customers", "staging"}},
 			},
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(15),
+			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(8),
+			wantSiteIndex: new(int32(8)),
 			wantDatabases: []string{"customers", "staging"},
 			wantNotesHave: []string{"customers", "staging", "15"},
 		},
@@ -326,9 +326,9 @@ func TestDecodeRID(t *testing.T) {
 				Sites:         map[int32]string{0: "site-a"},
 			},
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(15),
+			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(8),
+			wantSiteIndex: new(int32(8)),
 			wantDatabases: []string{"customers"},
 			wantSite:      "",
 			wantNotesHave: []string{"8", "lab", "serveridindex"},
@@ -347,9 +347,9 @@ func TestDecodeRID(t *testing.T) {
 				Databases:     map[int32][]string{0: {"default"}},
 			},
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(0),
+			wantSegment:   new(int32(0)),
 			wantKind:      ridcoord.KindLocal,
-			wantOrdinal:   ptrI32(2),
+			wantOrdinal:   new(int32(2)),
 			wantDatabases: []string{"default"},
 			wantPod:       "slapd-2",
 			wantNoNotes:   true,
@@ -371,9 +371,9 @@ func TestDecodeRID(t *testing.T) {
 				Databases:     map[int32][]string{0: {"default"}},
 			},
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(0),
+			wantSegment:   new(int32(0)),
 			wantKind:      ridcoord.KindLocal,
-			wantOrdinal:   ptrI32(4),
+			wantOrdinal:   new(int32(4)),
 			wantDatabases: []string{"default"},
 			wantPod:       "slapd-4",
 			wantNotesHave: []string{"3", "slapd"},
@@ -394,9 +394,9 @@ func TestDecodeRID(t *testing.T) {
 				Sites:         map[int32]string{8: "site-i"},
 			},
 			wantStatus:    ridDecodeOK,
-			wantSegment:   ptrI32(15),
+			wantSegment:   new(int32(15)),
 			wantKind:      ridcoord.KindRemote,
-			wantSiteIndex: ptrI32(8),
+			wantSiteIndex: new(int32(8)),
 			wantDatabases: []string{"customers"},
 			wantSite:      "site-i",
 			wantNotesHave: []string{"lab", "layout"},
@@ -639,8 +639,8 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	t.Run("no meshRef uses the default layout and resolves databases", func(t *testing.T) {
 		sc := ridCluster("slapd", "", 3)
 		dbs := []ldapv1alpha1.SlapdDatabase{
-			ridDatabase("default", "slapd", ptrI32(0)),
-			ridDatabase("customers", "slapd", ptrI32(15)),
+			ridDatabase("default", "slapd", new(int32(0))),
+			ridDatabase("customers", "slapd", new(int32(15))),
 		}
 
 		res := buildRIDResolution(sc, nil, dbs)
@@ -670,8 +670,8 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	t.Run("databases are filtered by clusterRef and by a declared segment", func(t *testing.T) {
 		sc := ridCluster("slapd", "", 3)
 		dbs := []ldapv1alpha1.SlapdDatabase{
-			ridDatabase("mine", "slapd", ptrI32(1)),
-			ridDatabase("theirs", "other", ptrI32(1)),
+			ridDatabase("mine", "slapd", new(int32(1))),
+			ridDatabase("theirs", "other", new(int32(1))),
 			ridDatabase("unnumbered", "slapd", nil),
 		}
 
@@ -688,8 +688,8 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	t.Run("two databases on one segment are both recorded", func(t *testing.T) {
 		sc := ridCluster("slapd", "", 3)
 		dbs := []ldapv1alpha1.SlapdDatabase{
-			ridDatabase("staging", "slapd", ptrI32(7)),
-			ridDatabase("customers", "slapd", ptrI32(7)),
+			ridDatabase("staging", "slapd", new(int32(7))),
+			ridDatabase("customers", "slapd", new(int32(7))),
 		}
 
 		res := buildRIDResolution(sc, nil, dbs)
@@ -750,9 +750,9 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	t.Run("sites are indexed by serverIDIndex, not list position", func(t *testing.T) {
 		sc := ridCluster("slapd", "lab", 3)
 		mesh := ridMesh("lab", nil,
-			ldapv1alpha1.MeshSite{Name: "site-c", ServerIDIndex: ptrI32(5)},
-			ldapv1alpha1.MeshSite{Name: "site-a", ServerIDIndex: ptrI32(0)},
-			ldapv1alpha1.MeshSite{Name: "site-b", ServerIDIndex: ptrI32(2)},
+			ldapv1alpha1.MeshSite{Name: "site-c", ServerIDIndex: new(int32(5))},
+			ldapv1alpha1.MeshSite{Name: "site-a", ServerIDIndex: new(int32(0))},
+			ldapv1alpha1.MeshSite{Name: "site-b", ServerIDIndex: new(int32(2))},
 		)
 
 		res := buildRIDResolution(sc, mesh, nil)
@@ -770,7 +770,7 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	t.Run("a site with no serverIDIndex claims no slot", func(t *testing.T) {
 		sc := ridCluster("slapd", "lab", 3)
 		mesh := ridMesh("lab", nil,
-			ldapv1alpha1.MeshSite{Name: "site-a", ServerIDIndex: ptrI32(0)},
+			ldapv1alpha1.MeshSite{Name: "site-a", ServerIDIndex: new(int32(0))},
 			ldapv1alpha1.MeshSite{Name: "nameless"},
 		)
 

@@ -49,7 +49,7 @@ func peersForSite2() []ldapv1alpha1.ExternalPeer {
 			// RID matrix's remote block (ADR-031 decision 4). site-1 declares
 			// 0 and site-3 declares 2 in threeSiteMesh; a wiring that dropped
 			// the field would leave every cross-site stanza without a RID.
-			SiteIndex:     si(0),
+			SiteIndex:     new(int32(0)),
 			Port:          1025,
 			TLSSecretName: "site-1-ca",
 			Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
@@ -58,7 +58,7 @@ func peersForSite2() []ldapv1alpha1.ExternalPeer {
 		},
 		{
 			Name:          "site-3",
-			SiteIndex:     si(2),
+			SiteIndex:     new(int32(2)),
 			Port:          1025,
 			TLSSecretName: "site-3-ca",
 			Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
@@ -123,11 +123,11 @@ func TestDeriveClusterWiring(t *testing.T) {
 			want: &meshWiring{
 				ServerIDBase: 0,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
-					{Name: "site-2", SiteIndex: si(1), Port: 1025, TLSSecretName: "site-2-ca",
+					{Name: "site-2", SiteIndex: new(int32(1)), Port: 1025, TLSSecretName: "site-2-ca",
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
 							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-2-kubeconfig"},
 						}},
-					{Name: "site-3", SiteIndex: si(2), Port: 1025, TLSSecretName: "site-3-ca",
+					{Name: "site-3", SiteIndex: new(int32(2)), Port: 1025, TLSSecretName: "site-3-ca",
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
 							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-3-kubeconfig"},
 						}},
@@ -149,7 +149,7 @@ func TestDeriveClusterWiring(t *testing.T) {
 			want: &meshWiring{
 				ServerIDBase: 16,
 				ExternalPeers: []ldapv1alpha1.ExternalPeer{
-					{Name: "site-3", SiteIndex: si(2), Port: 1025, TLSSecretName: "site-3-ca",
+					{Name: "site-3", SiteIndex: new(int32(2)), Port: 1025, TLSSecretName: "site-3-ca",
 						Discovery: &ldapv1alpha1.ExternalPeerDiscovery{
 							KubeconfigSecret: ldapv1alpha1.KubeconfigSecretRef{Name: "site-3-kubeconfig"},
 						}},
@@ -299,8 +299,8 @@ func TestDeriveClusterWiring(t *testing.T) {
 		{
 			name: "malformed mesh is rejected, never half-derived",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{Sites: []ldapv1alpha1.MeshSite{
-				{Name: "site-1", ServerIDIndex: si(0)},
-				{Name: "site-2", ServerIDIndex: si(0)},
+				{Name: "site-1", ServerIDIndex: new(int32(0))},
+				{Name: "site-2", ServerIDIndex: new(int32(0))},
 			}},
 			spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: "mesh"},
 			self:       "site-2",
@@ -313,8 +313,8 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "serverID stride ceiling",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{
 				Sites: []ldapv1alpha1.MeshSite{
-					{Name: "site-1", ServerIDIndex: si(0)},
-					{Name: "site-2", ServerIDIndex: si(256)},
+					{Name: "site-1", ServerIDIndex: new(int32(0))},
+					{Name: "site-2", ServerIDIndex: new(int32(256))},
 				},
 				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 999},
 			},
@@ -343,8 +343,8 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "a site index past this mesh's own maxSites is refused",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{
 				Sites: []ldapv1alpha1.MeshSite{
-					{Name: "site-1", ServerIDIndex: si(0)},
-					{Name: "site-2", ServerIDIndex: si(5)},
+					{Name: "site-1", ServerIDIndex: new(int32(0))},
+					{Name: "site-2", ServerIDIndex: new(int32(5))},
 				},
 				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 4},
 			},
@@ -370,8 +370,8 @@ func TestDeriveClusterWiring(t *testing.T) {
 			name: "slapd's immovable ceiling outranks the layout's movable one",
 			mesh: &ldapv1alpha1.SlapdMeshSpec{
 				Sites: []ldapv1alpha1.MeshSite{
-					{Name: "site-1", ServerIDIndex: si(0)},
-					{Name: "site-2", ServerIDIndex: si(256)},
+					{Name: "site-1", ServerIDIndex: new(int32(0))},
+					{Name: "site-2", ServerIDIndex: new(int32(256))},
 				},
 				RIDLayout: &ldapv1alpha1.RIDLayout{PodsPerSite: 8, MaxSites: 4},
 			},

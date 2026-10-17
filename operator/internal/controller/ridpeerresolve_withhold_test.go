@@ -78,7 +78,7 @@ func (f *ridFixture) withExternalPeer(ctx context.Context, peerName, secretName 
 	sc.Spec.Replication.Mode = "consumer-only"
 	sc.Spec.Replication.ExternalPeers = []ldapv1alpha1.ExternalPeer{{
 		Name:                   peerName,
-		SiteIndex:              ptrInt32(1),
+		SiteIndex:              new(int32(1)),
 		PodAddresses:           []string{"192.0.2.10"},
 		BindPasswordSecretName: secretName,
 	}}
@@ -112,7 +112,7 @@ var _ = Describe("External peer withhold (ADR-031 M4b, RID-PLAN hazard 2)", func
 		// set with this peer's link missing — a deletion of live cross-site
 		// replication, reported nowhere.
 		f.withExternalPeer(ctx, "site-2", "site-2-repl")
-		Expect(f.createDB(ctx, "alpha", ptrInt32(3))).To(Succeed())
+		Expect(f.createDB(ctx, "alpha", new(int32(3)))).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
 
@@ -140,12 +140,12 @@ var _ = Describe("External peer withhold (ADR-031 M4b, RID-PLAN hazard 2)", func
 		readable := newRIDFixture(ctx)
 		createPeerBindSecret(ctx, readable.ns, "site-2-repl")
 		readable.withExternalPeer(ctx, "site-2", "site-2-repl")
-		Expect(readable.createDB(ctx, "alpha", ptrInt32(3))).To(Succeed())
+		Expect(readable.createDB(ctx, "alpha", new(int32(3)))).To(Succeed())
 		readable.reconcile(ctx, "alpha")
 
 		broken := newRIDFixture(ctx)
 		broken.withExternalPeer(ctx, "site-2", "site-2-repl")
-		Expect(broken.createDB(ctx, "alpha", ptrInt32(3))).To(Succeed())
+		Expect(broken.createDB(ctx, "alpha", new(int32(3)))).To(Succeed())
 		broken.reconcile(ctx, "alpha")
 
 		ok := ridCondition(readable.get(ctx, "alpha"))
@@ -169,7 +169,7 @@ var _ = Describe("External peer withhold (ADR-031 M4b, RID-PLAN hazard 2)", func
 	It("lifts the withhold once the bind-password Secret can be read", func() {
 		f := newRIDFixture(ctx)
 		f.withExternalPeer(ctx, "site-2", "site-2-repl")
-		Expect(f.createDB(ctx, "alpha", ptrInt32(3))).To(Succeed())
+		Expect(f.createDB(ctx, "alpha", new(int32(3)))).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
 		expectRefusal(f.get(ctx, "alpha"), reasonPeerBindPasswordUnreadable, "site-2")

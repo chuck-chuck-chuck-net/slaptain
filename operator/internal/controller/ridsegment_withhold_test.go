@@ -178,8 +178,8 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 
 	It("refuses BOTH databases of a colliding pair, each naming the other", func() {
 		f := newRIDFixture(ctx)
-		Expect(f.createDB(ctx, "alpha", ptrInt32(4))).To(Succeed())
-		Expect(f.createDB(ctx, "bravo", ptrInt32(4))).To(Succeed())
+		Expect(f.createDB(ctx, "alpha", new(int32(4)))).To(Succeed())
+		Expect(f.createDB(ctx, "bravo", new(int32(4)))).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
 		f.reconcile(ctx, "bravo")
@@ -193,8 +193,8 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 
 	It("refuses the pair in the reverse reconcile order too", func() {
 		f := newRIDFixture(ctx)
-		Expect(f.createDB(ctx, "alpha", ptrInt32(4))).To(Succeed())
-		Expect(f.createDB(ctx, "bravo", ptrInt32(4))).To(Succeed())
+		Expect(f.createDB(ctx, "alpha", new(int32(4)))).To(Succeed())
+		Expect(f.createDB(ctx, "bravo", new(int32(4)))).To(Succeed())
 
 		f.reconcile(ctx, "bravo")
 		f.reconcile(ctx, "alpha")
@@ -205,8 +205,8 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 
 	It("accepts a pair declaring distinct segments", func() {
 		f := newRIDFixture(ctx)
-		Expect(f.createDB(ctx, "alpha", ptrInt32(1))).To(Succeed())
-		Expect(f.createDB(ctx, "bravo", ptrInt32(2))).To(Succeed())
+		Expect(f.createDB(ctx, "alpha", new(int32(1)))).To(Succeed())
+		Expect(f.createDB(ctx, "bravo", new(int32(2)))).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
 		f.reconcile(ctx, "bravo")
@@ -217,8 +217,8 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 
 	It("lifts the withhold on both when the collision is resolved", func() {
 		f := newRIDFixture(ctx)
-		Expect(f.createDB(ctx, "alpha", ptrInt32(4))).To(Succeed())
-		Expect(f.createDB(ctx, "bravo", ptrInt32(4))).To(Succeed())
+		Expect(f.createDB(ctx, "alpha", new(int32(4)))).To(Succeed())
+		Expect(f.createDB(ctx, "bravo", new(int32(4)))).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
 		f.reconcile(ctx, "bravo")
@@ -229,7 +229,7 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 		// ADR-031 decision 3 stores nothing, so there is nothing to release —
 		// this spec is what proves that claim end to end.
 		bravo := f.get(ctx, "bravo")
-		bravo.Spec.Replication.RIDSegment = ptrInt32(5)
+		bravo.Spec.Replication.RIDSegment = new(int32(5))
 		Expect(k8sClient.Update(ctx, bravo)).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
@@ -252,8 +252,8 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 	// pass for exactly this reason; this condition has to follow it.
 	It("does not leave a stale refusal on a database that stops replicating", func() {
 		f := newRIDFixture(ctx)
-		Expect(f.createDB(ctx, "alpha", ptrInt32(4))).To(Succeed())
-		Expect(f.createDB(ctx, "bravo", ptrInt32(4))).To(Succeed())
+		Expect(f.createDB(ctx, "alpha", new(int32(4)))).To(Succeed())
+		Expect(f.createDB(ctx, "bravo", new(int32(4)))).To(Succeed())
 
 		f.reconcile(ctx, "alpha")
 		expectRefusal(f.get(ctx, "alpha"), reasonRIDSegmentCollision, "bravo")
@@ -291,7 +291,7 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 		// and is outside the default layout's C = 49. The two bounds are
 		// deliberately different layers: the API server cannot know the mesh's
 		// ridLayout, so the operator is the only place this can be caught.
-		Expect(f.createDB(ctx, "wide", ptrInt32(60))).To(Succeed())
+		Expect(f.createDB(ctx, "wide", new(int32(60)))).To(Succeed())
 
 		f.reconcile(ctx, "wide")
 

@@ -96,8 +96,8 @@ func TestJudgeRIDSegment(t *testing.T) {
 	}{
 		{
 			name:        "a distinct in-range segment converges, carrying the declared number",
-			db:          ridDB("default", testRIDCluster, i32(3)),
-			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("other", testRIDCluster, i32(0)), ridDB("third", testRIDCluster, i32(1))},
+			db:          ridDB("default", testRIDCluster, new(int32(3))),
+			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("other", testRIDCluster, new(int32(0))), ridDB("third", testRIDCluster, new(int32(1)))},
 			layout:      def,
 			wantOK:      true,
 			wantReason:  reasonRIDSegmentOK,
@@ -106,8 +106,8 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:        "segment zero is a legal coordinate, not an unset field",
-			db:          ridDB("default", testRIDCluster, i32(0)),
-			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("other", testRIDCluster, i32(1))},
+			db:          ridDB("default", testRIDCluster, new(int32(0))),
+			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("other", testRIDCluster, new(int32(1)))},
 			layout:      def,
 			wantOK:      true,
 			wantReason:  reasonRIDSegmentOK,
@@ -116,8 +116,8 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:       "a collision refuses the database that asks first",
-			db:         ridDB("a", testRIDCluster, i32(7)),
-			siblings:   []ldapv1alpha1.SlapdDatabase{ridDB("b", testRIDCluster, i32(7))},
+			db:         ridDB("a", testRIDCluster, new(int32(7))),
+			siblings:   []ldapv1alpha1.SlapdDatabase{ridDB("b", testRIDCluster, new(int32(7)))},
 			layout:     def,
 			wantReason: reasonRIDSegmentCollision,
 			wantInMsg:  []string{"b"},
@@ -125,8 +125,8 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:       "a collision refuses the database that asks second, symmetrically",
-			db:         ridDB("b", testRIDCluster, i32(7)),
-			siblings:   []ldapv1alpha1.SlapdDatabase{ridDB("a", testRIDCluster, i32(7))},
+			db:         ridDB("b", testRIDCluster, new(int32(7))),
+			siblings:   []ldapv1alpha1.SlapdDatabase{ridDB("a", testRIDCluster, new(int32(7)))},
 			layout:     def,
 			wantReason: reasonRIDSegmentCollision,
 			wantInMsg:  []string{"a"},
@@ -134,8 +134,8 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:       "a sibling with replication disabled still owns its segment",
-			db:         ridDB("a", testRIDCluster, i32(2)),
-			siblings:   []ldapv1alpha1.SlapdDatabase{ridDBNotReplicated("b", testRIDCluster, i32(2))},
+			db:         ridDB("a", testRIDCluster, new(int32(2))),
+			siblings:   []ldapv1alpha1.SlapdDatabase{ridDBNotReplicated("b", testRIDCluster, new(int32(2)))},
 			layout:     def,
 			wantReason: reasonRIDSegmentCollision,
 			wantInMsg:  []string{"b"},
@@ -143,8 +143,8 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:        "a sibling of another cluster is not a collision",
-			db:          ridDB("a", testRIDCluster, i32(5)),
-			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("b", "other-cluster", i32(5))},
+			db:          ridDB("a", testRIDCluster, new(int32(5))),
+			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("b", "other-cluster", new(int32(5)))},
 			layout:      def,
 			wantOK:      true,
 			wantReason:  reasonRIDSegmentOK,
@@ -153,8 +153,8 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:        "the database itself appearing among the siblings is not a collision with itself",
-			db:          ridDB("a", testRIDCluster, i32(5)),
-			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("a", testRIDCluster, i32(5)), ridDB("b", testRIDCluster, i32(6))},
+			db:          ridDB("a", testRIDCluster, new(int32(5))),
+			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("a", testRIDCluster, new(int32(5))), ridDB("b", testRIDCluster, new(int32(6)))},
 			layout:      def,
 			wantOK:      true,
 			wantReason:  reasonRIDSegmentOK,
@@ -163,7 +163,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:        "a sibling that declares no segment collides with nothing, not with segment zero",
-			db:          ridDB("a", testRIDCluster, i32(0)),
+			db:          ridDB("a", testRIDCluster, new(int32(0))),
 			siblings:    []ldapv1alpha1.SlapdDatabase{ridDB("b", testRIDCluster, nil)},
 			layout:      def,
 			wantOK:      true,
@@ -182,7 +182,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:       "a segment AT the layout's ceiling is out of range",
-			db:         ridDB("a", testRIDCluster, i32(49)),
+			db:         ridDB("a", testRIDCluster, new(int32(49))),
 			siblings:   nil,
 			layout:     def,
 			wantReason: reasonRIDSegmentOutOfRange,
@@ -191,7 +191,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:       "a segment above the ceiling is out of range",
-			db:         ridDB("a", testRIDCluster, i32(100)),
+			db:         ridDB("a", testRIDCluster, new(int32(100))),
 			siblings:   nil,
 			layout:     def,
 			wantReason: reasonRIDSegmentOutOfRange,
@@ -200,7 +200,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:       "a negative segment is out of range",
-			db:         ridDB("a", testRIDCluster, i32(-1)),
+			db:         ridDB("a", testRIDCluster, new(int32(-1))),
 			siblings:   nil,
 			layout:     def,
 			wantReason: reasonRIDSegmentOutOfRange,
@@ -213,7 +213,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 			// applied. 60 is a perfectly good segment at P=S=1 and is off the
 			// end at the defaults.
 			name:        "a segment legal under a wide layout is accepted under that layout",
-			db:          ridDB("a", testRIDCluster, i32(60)),
+			db:          ridDB("a", testRIDCluster, new(int32(60))),
 			siblings:    nil,
 			layout:      wideLayout(),
 			wantOK:      true,
@@ -223,7 +223,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:       "that same segment is out of range under the default layout",
-			db:         ridDB("a", testRIDCluster, i32(60)),
+			db:         ridDB("a", testRIDCluster, new(int32(60))),
 			siblings:   nil,
 			layout:     def,
 			wantReason: reasonRIDSegmentOutOfRange,
@@ -232,7 +232,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:        "the only segment a one-segment layout admits is accepted",
-			db:          ridDB("a", testRIDCluster, i32(0)),
+			db:          ridDB("a", testRIDCluster, new(int32(0))),
 			siblings:    nil,
 			layout:      narrowLayout(),
 			wantOK:      true,
@@ -242,7 +242,7 @@ func TestJudgeRIDSegment(t *testing.T) {
 		},
 		{
 			name:       "a plausible segment is out of range once a narrow layout is applied",
-			db:         ridDB("a", testRIDCluster, i32(30)),
+			db:         ridDB("a", testRIDCluster, new(int32(30))),
 			siblings:   nil,
 			layout:     narrowLayout(),
 			wantReason: reasonRIDSegmentOutOfRange,
@@ -256,15 +256,15 @@ func TestJudgeRIDSegment(t *testing.T) {
 			// reason and send a human to move a number that is not the
 			// problem.
 			name:       "an unusable layout is judged before the segment, even when the segment is also wrong",
-			db:         ridDB("a", testRIDCluster, i32(99)),
-			siblings:   []ldapv1alpha1.SlapdDatabase{ridDB("b", testRIDCluster, i32(99))},
+			db:         ridDB("a", testRIDCluster, new(int32(99))),
+			siblings:   []ldapv1alpha1.SlapdDatabase{ridDB("b", testRIDCluster, new(int32(99)))},
 			layout:     ridcoord.Layout{},
 			wantReason: reasonRIDLayoutInvalid,
 			because:    "d5 + ridcoord: a zero Layout reaches the arithmetic; no segment is in range while no segment exists",
 		},
 		{
 			name:       "a layout with one zero axis is unusable",
-			db:         ridDB("a", testRIDCluster, i32(0)),
+			db:         ridDB("a", testRIDCluster, new(int32(0))),
 			siblings:   nil,
 			layout:     ridcoord.Layout{PodsPerSite: 8},
 			wantReason: reasonRIDLayoutInvalid,
@@ -276,8 +276,8 @@ func TestJudgeRIDSegment(t *testing.T) {
 			// can collide with sd are the ones that share a pod with it, and
 			// clusterRef is what names those.
 			name:       "a sibling naming the same clusterRef collides; clusterRef is the scope",
-			db:         ridDB("a", "a-third-cluster", i32(4)),
-			siblings:   []ldapv1alpha1.SlapdDatabase{ridDB("b", "a-third-cluster", i32(4)), ridDB("c", testRIDCluster, i32(4))},
+			db:         ridDB("a", "a-third-cluster", new(int32(4))),
+			siblings:   []ldapv1alpha1.SlapdDatabase{ridDB("b", "a-third-cluster", new(int32(4))), ridDB("c", testRIDCluster, new(int32(4)))},
 			layout:     def,
 			wantReason: reasonRIDSegmentCollision,
 			wantInMsg:  []string{"b"},
@@ -459,7 +459,7 @@ func TestStanzaRIDsRefuseANegativeSegment(t *testing.T) {
 		} else if !errors.Is(err, ridcoord.ErrSegmentOutOfRange) {
 			t.Errorf("segment %d: error = %v, want one wrapping %v", segment, err, ridcoord.ErrSegmentOutOfRange)
 		}
-		if rids, err := inClusterStanzaRIDs(layout, segment, 3, i32(0)); err == nil {
+		if rids, err := inClusterStanzaRIDs(layout, segment, 3, new(int32(0))); err == nil {
 			t.Errorf("segment %d: produced rids %v instead of refusing", segment, rids)
 		} else if !errors.Is(err, ridcoord.ErrSegmentOutOfRange) {
 			t.Errorf("segment %d: error = %v, want one wrapping %v", segment, err, ridcoord.ErrSegmentOutOfRange)
