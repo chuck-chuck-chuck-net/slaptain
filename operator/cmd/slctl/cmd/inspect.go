@@ -244,9 +244,12 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 	}
 
 	// Gather state from all pods (one port-forward + LDAP session per pod)
-	var rwPods, roPods []podState
+	rwNames := podNames(sc.Name, sc.Spec.Replicas)
+	rwPods := make([]podState, 0, len(rwNames))
+	roNames := roPodNames(sc.Name, sc.Spec.ReadReplicas)
+	roPods := make([]podState, 0, len(roNames))
 
-	for _, pn := range podNames(sc.Name, sc.Spec.Replicas) {
+	for _, pn := range rwNames {
 		if !jsonOutput && !shortOutput {
 			fmt.Fprintf(os.Stderr, "  Inspecting %s...\n", pn)
 		}
@@ -254,7 +257,7 @@ func inspectAndVerify(ctx context.Context, coreClient kubernetes.Interface, conf
 		rwPods = append(rwPods, ps)
 		result.Pods = append(result.Pods, ps.toJSON())
 	}
-	for _, pn := range roPodNames(sc.Name, sc.Spec.ReadReplicas) {
+	for _, pn := range roNames {
 		if !jsonOutput && !shortOutput {
 			fmt.Fprintf(os.Stderr, "  Inspecting %s...\n", pn)
 		}

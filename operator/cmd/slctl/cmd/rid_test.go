@@ -574,11 +574,12 @@ func TestParseRIDLayoutFlag(t *testing.T) {
 
 // ── buildRIDResolution ────────────────────────────────────────────────────────
 
-func ridCluster(name, meshRef string, replicas int32) *ldapv1alpha1.SlapdCluster {
+// ridCluster is a three-replica cluster, optionally a mesh member.
+func ridCluster(meshRef string) *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
 		Spec: ldapv1alpha1.SlapdClusterSpec{
-			Replicas: replicas,
+			Replicas: 3,
 			MeshRef:  meshRef,
 		},
 	}
@@ -596,9 +597,9 @@ func ridDatabase(name, clusterRef string, segment *int32) ldapv1alpha1.SlapdData
 	}
 }
 
-func ridMesh(name string, layout *ldapv1alpha1.RIDLayout, sites ...ldapv1alpha1.MeshSite) *ldapv1alpha1.SlapdMesh {
+func ridMesh(layout *ldapv1alpha1.RIDLayout, sites ...ldapv1alpha1.MeshSite) *ldapv1alpha1.SlapdMesh {
 	return &ldapv1alpha1.SlapdMesh{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: testMeshName, Namespace: "ns"},
 		Spec: ldapv1alpha1.SlapdMeshSpec{
 			Sites:     sites,
 			RIDLayout: layout,
@@ -637,7 +638,7 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	// A cluster with no meshRef uses the defaults and consults no mesh
 	// (ADR-031 decision 5: such a cluster has only to be self-consistent).
 	t.Run("no meshRef uses the default layout and resolves databases", func(t *testing.T) {
-		sc := ridCluster("slapd", "", 3)
+		sc := ridCluster("")
 		dbs := []ldapv1alpha1.SlapdDatabase{
 			ridDatabase("default", "slapd", new(int32(0))),
 			ridDatabase("customers", "slapd", new(int32(15))),
@@ -668,7 +669,7 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	// A database naming another cluster is a different RID space entirely, and
 	// one with no ridSegment occupies no column.
 	t.Run("databases are filtered by clusterRef and by a declared segment", func(t *testing.T) {
-		sc := ridCluster("slapd", "", 3)
+		sc := ridCluster("")
 		dbs := []ldapv1alpha1.SlapdDatabase{
 			ridDatabase("mine", "slapd", new(int32(1))),
 			ridDatabase("theirs", "other", new(int32(1))),
@@ -686,7 +687,7 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 	// ADR-031 decision 3 makes a collision a refusal in the operator, so the
 	// state exists in the world and the decode must be able to show it.
 	t.Run("two databases on one segment are both recorded", func(t *testing.T) {
-		sc := ridCluster("slapd", "", 3)
+		sc := ridCluster("")
 		dbs := []ldapv1alpha1.SlapdDatabase{
 			ridDatabase("staging", "slapd", new(int32(7))),
 			ridDatabase("customers", "slapd", new(int32(7))),
@@ -701,8 +702,8 @@ func TestBuildRIDResolutionFromCluster(t *testing.T) {
 func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	// An absent ridLayout means the documented defaults, not an unusable zero.
 	t.Run("a mesh without ridLayout means the defaults", func(t *testing.T) {
-		sc := ridCluster("slapd", "lab", 3)
-		res := buildRIDResolution(sc, ridMesh("lab", nil), nil)
+		sc := ridCluster(testMeshName)
+		res := buildRIDResolution(sc, ridMesh(nil), nil)
 
 		if res.Layout != ridcoord.DefaultLayout() {
 			t.Errorf("Layout = %+v, want the default", res.Layout)
@@ -721,8 +722,8 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	// (ADR-031 decision 5, second arithmetic bullet). Taking the zero would
 	// make M=4 and renumber everything this command then prints.
 	t.Run("a half-declared ridLayout is defaulted per axis", func(t *testing.T) {
-		sc := ridCluster("slapd", "lab", 3)
-		mesh := ridMesh("lab", &ldapv1alpha1.RIDLayout{PodsPerSite: 4})
+		sc := ridCluster(testMeshName)
+		mesh := ridMesh(&ldapv1alpha1.RIDLayout{PodsPerSite: 4})
 
 		res := buildRIDResolution(sc, mesh, nil)
 
@@ -733,8 +734,8 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	})
 
 	t.Run("a fully declared ridLayout is taken verbatim", func(t *testing.T) {
-		sc := ridCluster("slapd", "lab", 3)
-		mesh := ridMesh("lab", &ldapv1alpha1.RIDLayout{PodsPerSite: 4, MaxSites: 6})
+		sc := ridCluster(testMeshName)
+		mesh := ridMesh(&ldapv1alpha1.RIDLayout{PodsPerSite: 4, MaxSites: 6})
 
 		res := buildRIDResolution(sc, mesh, nil)
 
@@ -748,8 +749,8 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	// in spec.sites. A decode indexing by position renames every site the
 	// moment someone sorts the YAML.
 	t.Run("sites are indexed by serverIDIndex, not list position", func(t *testing.T) {
-		sc := ridCluster("slapd", "lab", 3)
-		mesh := ridMesh("lab", nil,
+		sc := ridCluster(testMeshName)
+		mesh := ridMesh(nil,
 			ldapv1alpha1.MeshSite{Name: "site-c", ServerIDIndex: new(int32(5))},
 			ldapv1alpha1.MeshSite{Name: "site-a", ServerIDIndex: new(int32(0))},
 			ldapv1alpha1.MeshSite{Name: "site-b", ServerIDIndex: new(int32(2))},
@@ -768,8 +769,8 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	})
 
 	t.Run("a site with no serverIDIndex claims no slot", func(t *testing.T) {
-		sc := ridCluster("slapd", "lab", 3)
-		mesh := ridMesh("lab", nil,
+		sc := ridCluster(testMeshName)
+		mesh := ridMesh(nil,
 			ldapv1alpha1.MeshSite{Name: "site-a", ServerIDIndex: new(int32(0))},
 			ldapv1alpha1.MeshSite{Name: "nameless"},
 		)
@@ -786,7 +787,7 @@ func TestBuildRIDResolutionFromMesh(t *testing.T) {
 	// against the defaults and marks the answer untrusted, naming the mesh it
 	// could not read.
 	t.Run("a meshRef that could not be read answers untrusted, naming the mesh", func(t *testing.T) {
-		sc := ridCluster("slapd", "lab", 3)
+		sc := ridCluster(testMeshName)
 
 		res := buildRIDResolution(sc, nil, nil)
 

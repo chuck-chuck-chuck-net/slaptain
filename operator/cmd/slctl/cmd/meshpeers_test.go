@@ -32,8 +32,8 @@ func peerCluster(peers ...ldapv1alpha1.ExternalPeer) *ldapv1alpha1.SlapdCluster 
 	}
 }
 
-func withMeshRef(sc *ldapv1alpha1.SlapdCluster, ref string) *ldapv1alpha1.SlapdCluster {
-	sc.Spec.MeshRef = ref
+func withMeshRef(sc *ldapv1alpha1.SlapdCluster) *ldapv1alpha1.SlapdCluster {
+	sc.Spec.MeshRef = testMeshName
 	return sc
 }
 
@@ -99,7 +99,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			// operator derived two and published them into status.
 			name: "meshRef resolved, peers in status",
 			sc: withPeerStatuses(
-				withMeshCondition(withMeshRef(peerCluster(), "lab"),
+				withMeshCondition(withMeshRef(peerCluster()),
 					metav1.ConditionTrue, "Derived", "cross-site wiring derived from SlapdMesh \"lab\""),
 				"site-b", "site-c"),
 			wantSource:  peerSourceMesh,
@@ -111,7 +111,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			// and must be SAID, not left as silence that reads identically to
 			// a standalone cluster.
 			name: "meshRef resolved, zero peers",
-			sc: withMeshCondition(withMeshRef(peerCluster(), "lab"),
+			sc: withMeshCondition(withMeshRef(peerCluster()),
 				metav1.ConditionTrue, "Derived", "derived"),
 			wantSource:  peerSourceMesh,
 			wantPeers:   nil,
@@ -122,7 +122,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			// own reason rather than invent a verdict, and must never render
 			// this as "no external peers".
 			name: "meshRef unresolved",
-			sc: withMeshCondition(withMeshRef(peerCluster(), "lab"),
+			sc: withMeshCondition(withMeshRef(peerCluster()),
 				metav1.ConditionFalse, "MeshNotFound", "SlapdMesh \"lab\" not found in namespace \"ns\""),
 			wantSource:  peerSourceUnknown,
 			wantPeers:   nil,
@@ -133,7 +133,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			// once and cannot now, so they are shown and labelled last-known.
 			name: "meshRef unresolved, stale peers still in status",
 			sc: withPeerStatuses(
-				withMeshCondition(withMeshRef(peerCluster(), "lab"),
+				withMeshCondition(withMeshRef(peerCluster()),
 					metav1.ConditionFalse, "MeshUnreadable", "cannot read SlapdMesh"),
 				"site-b"),
 			wantSource:  peerSourceUnknown,
@@ -144,7 +144,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			// No condition at all: an operator that has not reconciled this
 			// cluster, or one too old to know about meshes. Unknown, loudly.
 			name:        "meshRef set, operator published no verdict",
-			sc:          withMeshRef(peerCluster(), "lab"),
+			sc:          withMeshRef(peerCluster()),
 			wantSource:  peerSourceUnknown,
 			wantPeers:   nil,
 			wantNoteHas: []string{"lab", "no MeshResolved"},
@@ -153,7 +153,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 			// Condition present but Unknown — same treatment as False. An
 			// inconclusive verdict is not a verdict.
 			name: "meshRef, MeshResolved Unknown",
-			sc: withMeshCondition(withMeshRef(peerCluster(), "lab"),
+			sc: withMeshCondition(withMeshRef(peerCluster()),
 				metav1.ConditionUnknown, "Pending", "not yet evaluated"),
 			wantSource:  peerSourceUnknown,
 			wantPeers:   nil,
@@ -208,7 +208,7 @@ func TestResolveExternalPeersForDisplay(t *testing.T) {
 // cross-site stanza as a single-URI one.
 func TestResolvedMeshPeersPresentAsDiscovery(t *testing.T) {
 	sc := withPeerStatuses(
-		withMeshCondition(withMeshRef(peerCluster(), "lab"),
+		withMeshCondition(withMeshRef(peerCluster()),
 			metav1.ConditionTrue, "Derived", "derived"),
 		"site-b")
 
@@ -250,7 +250,7 @@ func TestApplyResolvedPeersLeavesNonMeshClustersAlone(t *testing.T) {
 
 func TestApplyResolvedPeersFillsMeshClusterSpec(t *testing.T) {
 	sc := withPeerStatuses(
-		withMeshCondition(withMeshRef(peerCluster(), "lab"),
+		withMeshCondition(withMeshRef(peerCluster()),
 			metav1.ConditionTrue, "Derived", "derived"),
 		"site-b", "site-c")
 

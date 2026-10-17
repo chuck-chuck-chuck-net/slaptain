@@ -150,7 +150,7 @@ func checkSuffixUUIDAgreement(dbs []dbIdentity, pods []podState) checkResult {
 				uuids = append(uuids, u)
 			}
 			sort.Strings(uuids)
-			var parts []string
+			parts := make([]string, 0, len(uuids))
 			for _, u := range uuids {
 				parts = append(parts, fmt.Sprintf("%s on %s", u, strings.Join(byUUID[u], ", ")))
 			}

@@ -144,12 +144,6 @@ type ridDecodeResult struct {
 	Notes []string
 }
 
-// ptrI32 is the int32 counterpart of ptrI64, for the optional terms of a
-// decoded coordinate.
-//
-//go:fix inline
-func ptrI32(v int32) *int32 { return new(v) }
-
 // decodeRID is the whole decision, pure.
 //
 // It never returns an error: the four non-OK statuses are the answers for the

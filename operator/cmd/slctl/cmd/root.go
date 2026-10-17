@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -153,9 +152,4 @@ func roPodNames(name string, roReplicas int32) []string {
 		names[i] = fmt.Sprintf("%s-readonly-%d", name, i)
 	}
 	return names
-}
-
-func errExit(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", a...)
-	os.Exit(1)
 }

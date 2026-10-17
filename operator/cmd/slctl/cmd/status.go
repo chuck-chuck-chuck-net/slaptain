@@ -316,22 +316,6 @@ func age(t metav1.Time) string {
 	}
 }
 
-// phaseSymbol returns a visual indicator for the phase.
-func phaseSymbol(phase ldapv1alpha1.SlapdClusterPhase) string {
-	switch phase {
-	case ldapv1alpha1.PhaseRunning:
-		return "OK"
-	case ldapv1alpha1.PhaseDegraded:
-		return "WARN"
-	case ldapv1alpha1.PhaseError:
-		return "ERR"
-	case ldapv1alpha1.PhaseBootstrapping:
-		return "BOOT"
-	default:
-		return strings.ToUpper(string(phase))
-	}
-}
-
 // providerOrdinalList renders discovered providers as their ordinals, e.g.
 // "0,1,2" — or "0,2" when the remote pod-1 is away, which is precisely the
 // state a bare count hides.

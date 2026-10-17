@@ -157,7 +157,7 @@ func describeCSNDivergence(
 			oldest, oldestPod = t, pod
 		}
 	}
-	var groups []string
+	groups := make([]string, 0, len(unique))
 	for _, set := range unique {
 		groups = append(groups, fmt.Sprintf("[%s]", strings.Join(podsBySet[set], ",")))
 	}

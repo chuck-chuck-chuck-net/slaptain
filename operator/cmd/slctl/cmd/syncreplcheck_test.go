@@ -25,8 +25,8 @@ import (
 
 func readings(pods ...syncreplPodReading) []syncreplPodReading { return pods }
 
-func rw(name string, dbs map[string]syncreplDBReading) syncreplPodReading {
-	return syncreplPodReading{Pod: name, BySuffix: dbs}
+func rw(dbs map[string]syncreplDBReading) syncreplPodReading {
+	return syncreplPodReading{Pod: testPod0, BySuffix: dbs}
 }
 
 func ro(name string, dbs map[string]syncreplDBReading) syncreplPodReading {
@@ -45,7 +45,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 		"dc=one,dc=test": stanzas("rid=101 provider=ldaps://slapd-1...", "rid=102 provider=ldaps://slapd-2..."),
 		"dc=two,dc=test": stanzas("rid=201 provider=ldaps://slapd-1...", "rid=202 provider=ldaps://slapd-2..."),
 	}
-	if got := checkSyncreplStanzaCount(twoDBs, readings(rw("slapd-0", good)), 2, 3); got.Status != "pass" {
+	if got := checkSyncreplStanzaCount(twoDBs, readings(rw(good)), 2, 3); got.Status != "pass" {
 		t.Errorf("healthy two-database pod: %s — %s", got.Status, got.Detail)
 	}
 
@@ -54,7 +54,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 		"dc=one,dc=test": good["dc=one,dc=test"],
 		"dc=two,dc=test": stanzas("rid=201 provider=ldaps://slapd-1..."),
 	}
-	got := checkSyncreplStanzaCount(twoDBs, readings(rw("slapd-0", short)), 2, 3)
+	got := checkSyncreplStanzaCount(twoDBs, readings(rw(short)), 2, 3)
 	if got.Status != "fail" {
 		t.Fatalf("a database short one stanza must fail, got %s — %s", got.Status, got.Detail)
 	}
@@ -65,7 +65,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 	// A database with NO stanzas at all is the severe case, and the one a
 	// first-database-only check is most likely to miss entirely.
 	none := map[string]syncreplDBReading{"dc=one,dc=test": good["dc=one,dc=test"]}
-	if got := checkSyncreplStanzaCount(twoDBs, readings(rw("slapd-0", none)), 2, 3); got.Status != "fail" {
+	if got := checkSyncreplStanzaCount(twoDBs, readings(rw(none)), 2, 3); got.Status != "fail" {
 		t.Errorf("a database with no stanzas must fail, got %s — %s", got.Status, got.Detail)
 	}
 
@@ -79,7 +79,7 @@ func TestCheckSyncreplStanzaCount(t *testing.T) {
 		"dc=one,dc=test":   good["dc=one,dc=test"],
 		"dc=plain,dc=test": stanzas(),
 	}
-	if got := checkSyncreplStanzaCount(mixed, readings(rw("slapd-0", plain)), 2, 3); got.Status != "pass" {
+	if got := checkSyncreplStanzaCount(mixed, readings(rw(plain)), 2, 3); got.Status != "pass" {
 		t.Errorf("a non-replicated database must not be held to the stanza count: %s — %s", got.Status, got.Detail)
 	}
 
@@ -98,7 +98,7 @@ func TestCheckSyncreplSkipSelf(t *testing.T) {
 		"dc=one,dc=test": stanzas("rid=101 provider=ldaps://slapd-1.slapd-headless.ns.svc:1025"),
 		"dc=two,dc=test": stanzas("rid=201 provider=ldaps://slapd-1.slapd-headless.ns.svc:1025"),
 	}
-	if got := checkSyncreplSkipSelf(readings(rw("slapd-0", ok)), "slapd-headless"); got.Status != "pass" {
+	if got := checkSyncreplSkipSelf(readings(rw(ok)), "slapd-headless"); got.Status != "pass" {
 		t.Errorf("no self-reference must pass: %s — %s", got.Status, got.Detail)
 	}
 
@@ -107,7 +107,7 @@ func TestCheckSyncreplSkipSelf(t *testing.T) {
 		"dc=one,dc=test": ok["dc=one,dc=test"],
 		"dc=two,dc=test": stanzas("rid=201 provider=ldaps://slapd-0.slapd-headless.ns.svc:1025"),
 	}
-	got := checkSyncreplSkipSelf(readings(rw("slapd-0", self)), "slapd-headless")
+	got := checkSyncreplSkipSelf(readings(rw(self)), "slapd-headless")
 	if got.Status != "fail" {
 		t.Fatalf("a pod replicating from itself must fail, got %s — %s", got.Status, got.Detail)
 	}
@@ -125,7 +125,7 @@ func TestCheckRIDUniqueness(t *testing.T) {
 		"dc=one,dc=test": stanzas("rid=101 provider=x", "rid=102 provider=y"),
 		"dc=two,dc=test": stanzas("rid=201 provider=x", "rid=202 provider=y"),
 	}
-	if got := checkRIDUniqueness(readings(rw("slapd-0", ok))); got.Status != "pass" {
+	if got := checkRIDUniqueness(readings(rw(ok))); got.Status != "pass" {
 		t.Errorf("distinct ridBases must pass: %s — %s", got.Status, got.Detail)
 	}
 
@@ -135,7 +135,7 @@ func TestCheckRIDUniqueness(t *testing.T) {
 		"dc=one,dc=test": stanzas("rid=101 provider=x", "rid=102 provider=y"),
 		"dc=two,dc=test": stanzas("rid=101 provider=x", "rid=102 provider=y"),
 	}
-	got := checkRIDUniqueness(readings(rw("slapd-0", clash)))
+	got := checkRIDUniqueness(readings(rw(clash)))
 	if got.Status != "fail" {
 		t.Fatalf("a RID reused across databases must fail, got %s — %s", got.Status, got.Detail)
 	}
@@ -147,7 +147,7 @@ func TestCheckRIDUniqueness(t *testing.T) {
 	dup := map[string]syncreplDBReading{
 		"dc=one,dc=test": stanzas("rid=101 provider=x", "rid=101 provider=y"),
 	}
-	if got := checkRIDUniqueness(readings(rw("slapd-0", dup))); got.Status != "fail" {
+	if got := checkRIDUniqueness(readings(rw(dup))); got.Status != "fail" {
 		t.Errorf("a duplicate RID within one database must fail, got %s", got.Status)
 	}
 }
@@ -157,7 +157,7 @@ func TestCheckMultiProvider(t *testing.T) {
 		"dc=one,dc=test": {Stanzas: []string{"x"}, MultiProvider: "TRUE"},
 		"dc=two,dc=test": {Stanzas: []string{"x"}, MultiProvider: "TRUE"},
 	}
-	if got := checkMultiProviderPerDB(twoDBs, readings(rw("slapd-0", both))); got.Status != "pass" {
+	if got := checkMultiProviderPerDB(twoDBs, readings(rw(both))); got.Status != "pass" {
 		t.Errorf("TRUE on both databases must pass: %s — %s", got.Status, got.Detail)
 	}
 
@@ -166,7 +166,7 @@ func TestCheckMultiProvider(t *testing.T) {
 		"dc=one,dc=test": both["dc=one,dc=test"],
 		"dc=two,dc=test": {Stanzas: []string{"x"}},
 	}
-	got := checkMultiProviderPerDB(twoDBs, readings(rw("slapd-0", half)))
+	got := checkMultiProviderPerDB(twoDBs, readings(rw(half)))
 	if got.Status != "fail" {
 		t.Fatalf("multiProvider missing on a database must fail, got %s — %s", got.Status, got.Detail)
 	}
