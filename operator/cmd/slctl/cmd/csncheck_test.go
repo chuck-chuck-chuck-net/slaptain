@@ -63,8 +63,8 @@ func TestCheckCSNConvergence(t *testing.T) {
 			// written for must behave exactly as before.
 			name: "single database, all pods identical",
 			readings: []csnPodReading{
-				csnPod("slapd-0", map[string][]string{db1: db1Healthy}),
-				csnPod("slapd-1", map[string][]string{db1: db1Healthy}),
+				csnPod(testPod0, map[string][]string{db1: db1Healthy}),
+				csnPod(testPod1, map[string][]string{db1: db1Healthy}),
 			},
 			wantStatus:  checkPass,
 			wantContain: []string{"2 pods"},
@@ -74,17 +74,17 @@ func TestCheckCSNConvergence(t *testing.T) {
 			// be reported, with the lag.
 			name: "single database, one pod behind",
 			readings: []csnPodReading{
-				csnPod("slapd-0", map[string][]string{db1: db1Healthy}),
-				csnPod("slapd-1", map[string][]string{db1: {db1old, db1v2, db1v3}}),
+				csnPod(testPod0, map[string][]string{db1: db1Healthy}),
+				csnPod(testPod1, map[string][]string{db1: {db1old, db1v2, db1v3}}),
 			},
 			wantStatus:  checkWarn,
-			wantContain: []string{db1, "slapd-1"},
+			wantContain: []string{db1, testPod1},
 		},
 		{
 			name: "two databases, both converged",
 			readings: []csnPodReading{
-				csnPod("slapd-0", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
-				csnPod("slapd-1", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
+				csnPod(testPod0, map[string][]string{db1: db1Healthy, db2: db2Healthy}),
+				csnPod(testPod1, map[string][]string{db1: db1Healthy, db2: db2Healthy}),
 			},
 			wantStatus: checkPass,
 			// The verdict must state how many databases it covers — a pass
@@ -96,11 +96,11 @@ func TestCheckCSNConvergence(t *testing.T) {
 			// the first suffix reports a clean pass.
 			name: "two databases, the SECOND one diverged",
 			readings: []csnPodReading{
-				csnPod("slapd-0", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
-				csnPod("slapd-1", map[string][]string{db1: db1Healthy, db2: {db2old}}),
+				csnPod(testPod0, map[string][]string{db1: db1Healthy, db2: db2Healthy}),
+				csnPod(testPod1, map[string][]string{db1: db1Healthy, db2: {db2old}}),
 			},
 			wantStatus:  checkWarn,
-			wantContain: []string{db2, "slapd-1"},
+			wantContain: []string{db2, testPod1},
 			// The healthy database must not be dragged into the indictment.
 			wantAbsent: []string{db1},
 		},
@@ -110,19 +110,19 @@ func TestCheckCSNConvergence(t *testing.T) {
 			// the good verdict and never silently vanishes.
 			name: "a pod with no readable contextCSN for the second database",
 			readings: []csnPodReading{
-				csnPod("slapd-0", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
-				csnPod("slapd-1", map[string][]string{db1: db1Healthy, db2: nil}),
+				csnPod(testPod0, map[string][]string{db1: db1Healthy, db2: db2Healthy}),
+				csnPod(testPod1, map[string][]string{db1: db1Healthy, db2: nil}),
 			},
 			wantStatus:  checkFail,
-			wantContain: []string{db2, "slapd-1"},
+			wantContain: []string{db2, testPod1},
 		},
 		{
 			// Severity order across databases: a failing database is not
 			// diluted by a merely diverged one.
 			name: "one database unreadable on a pod, another diverged",
 			readings: []csnPodReading{
-				csnPod("slapd-0", map[string][]string{db1: db1Healthy, db2: db2Healthy}),
-				csnPod("slapd-1", map[string][]string{db1: {db1old, db1v2, db1v3}, db2: nil}),
+				csnPod(testPod0, map[string][]string{db1: db1Healthy, db2: db2Healthy}),
+				csnPod(testPod1, map[string][]string{db1: {db1old, db1v2, db1v3}, db2: nil}),
 			},
 			wantStatus:  checkFail,
 			wantContain: []string{db1, db2},
@@ -133,18 +133,18 @@ func TestCheckCSNConvergence(t *testing.T) {
 			// and this probe is anonymous, so an ACL can deny it.
 			name: "the unreadable verdict does not claim to know why",
 			readings: []csnPodReading{
-				csnPod("slapd-0", map[string][]string{db1: db1Healthy}),
-				csnPod("slapd-1", map[string][]string{db1: nil}),
+				csnPod(testPod0, map[string][]string{db1: db1Healthy}),
+				csnPod(testPod1, map[string][]string{db1: nil}),
 			},
 			wantStatus:  checkFail,
-			wantContain: []string{"glue", "ACL"},
+			wantContain: []string{glueMarker, "ACL"},
 			wantAbsent:  []string{"never synced?"},
 		},
 		{
 			name: "nothing readable anywhere is not a failure",
 			readings: []csnPodReading{
-				csnPod("slapd-0", map[string][]string{db1: nil}),
-				csnPod("slapd-1", map[string][]string{db1: nil}),
+				csnPod(testPod0, map[string][]string{db1: nil}),
+				csnPod(testPod1, map[string][]string{db1: nil}),
 			},
 			wantStatus: checkWarn,
 		},

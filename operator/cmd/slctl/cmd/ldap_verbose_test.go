@@ -6,6 +6,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// An invocation's parts as the fixtures spell them: the tool, the endpoint a
+// port-forward gives it, and the demo database's admin.
+const (
+	toolSearch  = "ldapsearch"
+	forwardURI  = "ldap://localhost:1024"
+	demoAdminDN = "cn=admin,dc=demo,dc=example"
+)
+
 func TestFormatInvocation(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -16,35 +24,35 @@ func TestFormatInvocation(t *testing.T) {
 	}{
 		{
 			name: "bind invocation, password shown and single-quoted",
-			tool: "ldapsearch",
-			args: []string{"-H", "ldap://localhost:34287", "-x", "-D", "cn=admin,dc=demo,dc=example", "-w", "s3cr3t",
+			tool: toolSearch,
+			args: []string{"-H", "ldap://localhost:34287", "-x", "-D", demoAdminDN, "-w", "s3cr3t",
 				"-b", "dc=demo,dc=example", "-s", "one", "dn"},
 			want: "ldapsearch -H ldap://localhost:34287 -x -D cn=admin,dc=demo,dc=example -w 's3cr3t' " +
 				"-b dc=demo,dc=example -s one dn",
 		},
 		{
 			name:   "redacted password",
-			tool:   "ldapsearch",
-			args:   []string{"-H", "ldap://localhost:34287", "-x", "-D", "cn=admin,dc=demo,dc=example", "-w", "s3cr3t"},
+			tool:   toolSearch,
+			args:   []string{"-H", "ldap://localhost:34287", "-x", "-D", demoAdminDN, "-w", "s3cr3t"},
 			redact: true,
 			want:   "ldapsearch -H ldap://localhost:34287 -x -D cn=admin,dc=demo,dc=example -w '<password>'",
 		},
 		{
 			name: "anonymous bind has no -w to touch",
-			tool: "ldapsearch",
-			args: []string{"-H", "ldap://localhost:1024", "-x", "-b", "", "-s", "base", "+"},
+			tool: toolSearch,
+			args: []string{"-H", forwardURI, "-x", "-b", "", "-s", "base", "+"},
 			want: "ldapsearch -H ldap://localhost:1024 -x -b '' -s base +",
 		},
 		{
 			name: "value needing quotes is shell-quoted",
-			tool: "ldapsearch",
-			args: []string{"-H", "ldap://localhost:1024", "-x", "-b", "ou=People,dc=demo,dc=example", "(uid=alice)"},
+			tool: toolSearch,
+			args: []string{"-H", forwardURI, "-x", "-b", "ou=People,dc=demo,dc=example", "(uid=alice)"},
 			want: "ldapsearch -H ldap://localhost:1024 -x -b ou=People,dc=demo,dc=example '(uid=alice)'",
 		},
 		{
 			name: "password with a single quote stays safely quoted",
 			tool: "ldapadd",
-			args: []string{"-H", "ldap://localhost:1024", "-x", "-D", "cn=admin,dc=demo,dc=example", "-w", "a'b"},
+			args: []string{"-H", forwardURI, "-x", "-D", demoAdminDN, "-w", "a'b"},
 			want: `ldapadd -H ldap://localhost:1024 -x -D cn=admin,dc=demo,dc=example -w 'a'\''b'`,
 		},
 	}
@@ -69,8 +77,8 @@ func TestFormatPortForwardCmd(t *testing.T) {
 	}{
 		{
 			name:       "no global flags",
-			ns:         "slaptain-demo",
-			pod:        "slapd-0",
+			ns:         demoNamespace,
+			pod:        testPod0,
 			localPort:  34287,
 			remotePort: 1024,
 			want:       "kubectl -n slaptain-demo port-forward pod/slapd-0 34287:1024",
@@ -78,8 +86,8 @@ func TestFormatPortForwardCmd(t *testing.T) {
 		{
 			name:       "context flag threaded through",
 			global:     []string{"--context=s1"},
-			ns:         "slaptain-demo",
-			pod:        "slapd-0",
+			ns:         demoNamespace,
+			pod:        testPod0,
 			localPort:  40001,
 			remotePort: 1025,
 			want:       "kubectl --context=s1 -n slaptain-demo port-forward pod/slapd-0 40001:1025",
@@ -187,5 +195,20 @@ func TestShowPasswordFlagIsParsed(t *testing.T) {
 	}
 	if len(rest) != 2 || rest[0] != "-b" {
 		t.Errorf("slctl flags leaked into the wrapped tool's args: %v", rest)
+	}
+}
+
+// --name=value takes a boolean the way pflag does, so --verbose=1 is on and
+// --verbose=no (not a boolean at all) leaves it off.
+func TestBoolFlagValueSpellings(t *testing.T) {
+	for in, want := range map[string]bool{
+		"true": true, "1": true, "TRUE": true, "t": true,
+		"false": false, "0": false, "no": false, "": false,
+	} {
+		var f ldapTargetFlags
+		splitLDAPArgs([]string{flagVerbose + "=" + in}, &f)
+		if f.verbose != want {
+			t.Errorf("--verbose=%s: verbose = %v, want %v", in, f.verbose, want)
+		}
 	}
 }

@@ -11,14 +11,22 @@ import (
 // S3StorageSpec and nothing makes one of them the obvious choice, so the
 // command refuses rather than picking — the KISS counterpart to the discovery
 // `slctl ldapsearch` does, where there is exactly one thing to discover.
+// The command's own namespace, and a backup it may name.
+const (
+	cmdNamespace = "demo"
+	demoBackup   = "demo-backup-1"
+	// s3Service is the demo's S3 server (versitygw), as a Service name.
+	s3Service = "versitygw"
+)
+
 func TestParseStorageSource(t *testing.T) {
 	ok := []struct {
 		in   string
 		want storageSource
 	}{
-		{"slapdbackup/demo-backup-1", storageSource{kindSlapdBackup, "demo-backup-1"}},
-		{"sb/demo-backup-1", storageSource{kindSlapdBackup, "demo-backup-1"}},
-		{"SlapdBackup/demo-backup-1", storageSource{kindSlapdBackup, "demo-backup-1"}},
+		{"slapdbackup/demo-backup-1", storageSource{kindSlapdBackup, demoBackup}},
+		{"sb/demo-backup-1", storageSource{kindSlapdBackup, demoBackup}},
+		{"SlapdBackup/demo-backup-1", storageSource{kindSlapdBackup, demoBackup}},
 		{"slapdscheduledbackup/nightly", storageSource{kindSlapdScheduledBackup, "nightly"}},
 		{"ssb/nightly", storageSource{kindSlapdScheduledBackup, "nightly"}},
 		{"slapddatabase/demo-db", storageSource{kindSlapdDatabase, "demo-db"}},
@@ -40,7 +48,7 @@ func TestParseStorageSource(t *testing.T) {
 	const wantFromForm = "<kind>/<name>"
 	bad := []struct{ in, wantSubstr string }{
 		{"", "--from is required"},
-		{"demo-backup-1", wantFromForm},
+		{demoBackup, wantFromForm},
 		{"backup/demo-backup-1", "unknown kind"},
 		{"sb/", wantFromForm},
 		{"/demo-backup-1", wantFromForm},
@@ -71,37 +79,37 @@ func TestPlanEndpoint(t *testing.T) {
 	}{
 		{
 			name: "empty means real AWS",
-			raw:  "", ns: "demo",
+			raw:  "", ns: cmdNamespace,
 			want: endpointPlan{},
 		},
 		{
 			name: "external host passes through untouched",
-			raw:  "https://s3.example:9000", ns: "demo",
+			raw:  "https://s3.example:9000", ns: cmdNamespace,
 			want: endpointPlan{URL: "https://s3.example:9000"},
 		},
 		{
 			name: "service DNS needs a forward",
-			raw:  "http://versitygw.slaptain-demo.svc:7480", ns: "demo",
-			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "slaptain-demo", Port: 7480, Scheme: schemeHTTP},
+			raw:  "http://versitygw.slaptain-demo.svc:7480", ns: cmdNamespace,
+			want: endpointPlan{Forward: true, Service: s3Service, Namespace: demoNamespace, Port: 7480, Scheme: schemeHTTP},
 		},
 		{
 			name: "fully qualified service DNS needs a forward",
-			raw:  "http://versitygw.slaptain-demo.svc.cluster.local:7480", ns: "demo",
-			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "slaptain-demo", Port: 7480, Scheme: schemeHTTP},
+			raw:  "http://versitygw.slaptain-demo.svc.cluster.local:7480", ns: cmdNamespace,
+			want: endpointPlan{Forward: true, Service: s3Service, Namespace: demoNamespace, Port: 7480, Scheme: schemeHTTP},
 		},
 		{
 			name: "bare single label is in the target namespace",
-			raw:  "http://versitygw:7480", ns: "demo",
-			want: endpointPlan{Forward: true, Service: "versitygw", Namespace: "demo", Port: 7480, Scheme: schemeHTTP},
+			raw:  "http://versitygw:7480", ns: cmdNamespace,
+			want: endpointPlan{Forward: true, Service: s3Service, Namespace: cmdNamespace, Port: 7480, Scheme: schemeHTTP},
 		},
 		{
 			name: "no port defaults to the scheme's port",
-			raw:  "https://rgw.store.svc", ns: "demo",
+			raw:  "https://rgw.store.svc", ns: cmdNamespace,
 			want: endpointPlan{Forward: true, Service: "rgw", Namespace: "store", Port: 443, Scheme: schemeHTTPS},
 		},
 		{
 			name: "two labels without .svc is external",
-			raw:  "https://s3.example.com", ns: "demo",
+			raw:  "https://s3.example.com", ns: cmdNamespace,
 			want: endpointPlan{URL: "https://s3.example.com"},
 		},
 	}
@@ -120,7 +128,7 @@ func TestPlanEndpoint(t *testing.T) {
 	// A bare host with no scheme is not a URL we can act on: we would have to
 	// guess http vs https, and guessing wrong against a real store is a
 	// credential sent in clear.
-	if _, err := planEndpoint("versitygw.slaptain-demo.svc:7480", "demo"); err == nil {
+	if _, err := planEndpoint("versitygw.slaptain-demo.svc:7480", cmdNamespace); err == nil {
 		t.Error("planEndpoint without a scheme: want error, got nil")
 	}
 }

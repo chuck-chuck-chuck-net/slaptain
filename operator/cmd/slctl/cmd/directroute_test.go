@@ -16,9 +16,9 @@ func TestParseDirectMode(t *testing.T) {
 	}{
 		{name: "default is auto", flag: false, env: "", want: directAuto},
 		{name: "--direct forces always", flag: true, env: "", want: directAlways},
-		{name: "--direct wins over env never", flag: true, env: "never", want: directAlways},
+		{name: "--direct wins over env never", flag: true, env: directNever, want: directAlways},
 		{name: "env always", flag: false, env: "always", want: directAlways},
-		{name: "env never", flag: false, env: "never", want: directNever},
+		{name: "env never", flag: false, env: directNever, want: directNever},
 		{name: "env auto", flag: false, env: "auto", want: directAuto},
 		{name: "env 1 means always", flag: false, env: "1", want: directAlways},
 		{name: "env true means always", flag: false, env: "true", want: directAlways},

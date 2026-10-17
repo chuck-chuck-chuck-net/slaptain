@@ -7,6 +7,7 @@ import (
 )
 
 const (
+	mirrorRepo  = "registry.example:5000/slaptain/slapd"
 	slapdRepo   = "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd"
 	toolkitRepo = "ghcr.io/chuck-chuck-chuck-net/slaptain/slapd-toolkit"
 )
@@ -20,8 +21,8 @@ func TestSplitImageRef(t *testing.T) {
 	}{
 		{"repo:tag", slapdRepo + ":v0.0.1", slapdRepo, "v0.0.1"},
 		{"no tag", slapdRepo, slapdRepo, ""},
-		{"registry port preserved", "registry.example:5000/slaptain/slapd:v1", "registry.example:5000/slaptain/slapd", "v1"},
-		{"registry port, no tag", "registry.example:5000/slaptain/slapd", "registry.example:5000/slaptain/slapd", ""},
+		{"registry port preserved", mirrorRepo + ":v1", mirrorRepo, "v1"},
+		{"registry port, no tag", mirrorRepo, mirrorRepo, ""},
 		{"digest yields no tag", slapdRepo + "@sha256:abc", slapdRepo, ""},
 		{"empty", "", "", ""},
 	}
@@ -47,38 +48,38 @@ func TestToolkitImageFor(t *testing.T) {
 	}{
 		{
 			name:      "derives from running slapd image, keeps tag",
-			pod:       podWith(corev1.Container{Name: "slapd", Image: slapdRepo + ":v0.0.1"}),
-			container: "slapd",
+			pod:       podWith(corev1.Container{Name: slapdContainer, Image: slapdRepo + ":v0.0.1"}),
+			container: slapdContainer,
 			want:      toolkitRepo + ":v0.0.1",
 		},
 		{
 			name: "operator-defaulted image (real tag, not :latest)",
 			pod: podWith(corev1.Container{Name: "init", Image: "x"},
-				corev1.Container{Name: "slapd", Image: slapdRepo + ":2026-07-14"}),
-			container: "slapd",
+				corev1.Container{Name: slapdContainer, Image: slapdRepo + ":2026-07-14"}),
+			container: slapdContainer,
 			want:      toolkitRepo + ":2026-07-14",
 		},
 		{
 			name:      "private mirror follows the pod image",
-			pod:       podWith(corev1.Container{Name: "slapd", Image: "registry.example:5000/mirror/slaptain/slapd:v2"}),
-			container: "slapd",
+			pod:       podWith(corev1.Container{Name: slapdContainer, Image: "registry.example:5000/mirror/slaptain/slapd:v2"}),
+			container: slapdContainer,
 			want:      "registry.example:5000/mirror/slaptain/slapd-toolkit:v2",
 		},
 		{
 			name:      "untagged pod image falls back to latest tag",
-			pod:       podWith(corev1.Container{Name: "slapd", Image: slapdRepo}),
-			container: "slapd",
+			pod:       podWith(corev1.Container{Name: slapdContainer, Image: slapdRepo}),
+			container: slapdContainer,
 			want:      toolkitRepo + ":latest",
 		},
 		{
 			name:      "non-conventional repo falls back to canonical toolkit",
-			pod:       podWith(corev1.Container{Name: "slapd", Image: "example.com/weird/openldap:v1"}),
-			container: "slapd",
+			pod:       podWith(corev1.Container{Name: slapdContainer, Image: "example.com/weird/openldap:v1"}),
+			container: slapdContainer,
 			want:      toolkitRepo + ":v1",
 		},
 		{
 			name:      "container not found falls back to first container",
-			pod:       podWith(corev1.Container{Name: "slapd", Image: slapdRepo + ":v3"}),
+			pod:       podWith(corev1.Container{Name: slapdContainer, Image: slapdRepo + ":v3"}),
 			container: "does-not-exist",
 			want:      toolkitRepo + ":v3",
 		},
