@@ -568,53 +568,8 @@ func gatherPodState(
 // ── Consistency checks ────────────────────────────────────────────────────────
 
 func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods []podState) []checkResult {
-	var checks []checkResult
-	check := func(name, status, detail string) {
-		checks = append(checks, checkResult{Name: name, Status: status, Detail: detail})
-	}
-
-	// ── RW replica count ──
-	if sc.Status.ReadyReplicas == sc.Spec.Replicas {
-		check("rw-replica-count", checkPass,
-			fmt.Sprintf("%d/%d ready", sc.Status.ReadyReplicas, sc.Spec.Replicas))
-	} else {
-		check("rw-replica-count", checkFail,
-			fmt.Sprintf("%d/%d ready (want %d)", sc.Status.ReadyReplicas, sc.Status.Replicas, sc.Spec.Replicas))
-	}
-
-	// ── RO replica count ──
-	if sc.Spec.ReadReplicas > 0 {
-		if sc.Status.ReadOnlyReadyReplicas == sc.Spec.ReadReplicas {
-			check("ro-replica-count", checkPass,
-				fmt.Sprintf("%d/%d ready", sc.Status.ReadOnlyReadyReplicas, sc.Spec.ReadReplicas))
-		} else {
-			check("ro-replica-count", checkFail,
-				fmt.Sprintf("%d/%d ready (want %d)",
-					sc.Status.ReadOnlyReadyReplicas, sc.Status.ReadOnlyReplicas, sc.Spec.ReadReplicas))
-		}
-	}
-
-	// ── Pod readiness ──
-	allReady := true
-	var notReady []string
-	for _, ps := range append(rwPods, roPods...) {
-		if !ps.ready {
-			allReady = false
-			notReady = append(notReady, ps.name)
-		}
-	}
-	if allReady {
-		check("pod-readiness", checkPass, "all pods running and ready")
-	} else {
-		check("pod-readiness", checkFail, fmt.Sprintf("not ready: %s", strings.Join(notReady, ", ")))
-	}
-
-	// ── Bootstrap (inferred from phase) ──
-	if sc.Status.Phase == ldapv1alpha1.PhaseRunning {
-		check("bootstrap", checkPass, "cluster phase is Running")
-	} else {
-		check("bootstrap", checkWarn, fmt.Sprintf("cluster phase is %s", sc.Status.Phase))
-	}
+	checks := replicaCountChecks(sc)
+	checks = append(checks, podReadinessCheck(rwPods, roPods), bootstrapCheck(sc))
 
 	// Remaining checks require replication
 	if !sc.Spec.Replication.Enabled {
@@ -655,9 +610,88 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 	checks = append(checks, checkCSNConvergence(csnReadings))
 
 	// ── syncRepl stanza count ──
-	// Each ExternalPeer contributes 1 stanza (URI mode) or min(replicasPerPeer,
-	// len(addresses)) stanzas in podAddresses / discovery modes.
-	externalStanzaCount := 0
+	expectedRW := int(sc.Spec.Replicas-1) + expectedExternalStanzas(sc)
+	expectedRO := int(sc.Spec.Replicas)
+
+	// The four checks below judge PER DATABASE (syncreplcheck.go). They used to
+	// read whichever data DB came first out of cn=config and report its verdict
+	// as the pod's — so on a two-database cluster they covered db1 and were
+	// blind to db2, rid-uniqueness most damagingly of all, since a RID
+	// collision is BETWEEN databases by nature.
+	// Ahead of every check that reads cn=config, because it explains them.
+	checks = append(checks, checkConfigReadable(configReadFailures(rwPods, roPods)))
+
+	readings := syncreplReadings(rwPods, roPods)
+	checks = append(checks, checkSyncreplStanzaCount(dbs, readings, expectedRW, expectedRO))
+	checks = append(checks, checkSyncreplSkipSelf(readings, sc.Name+"-headless"))
+	if sc.Spec.Replicas > 1 {
+		checks = append(checks, checkMultiProviderPerDB(dbs, readings))
+	}
+	checks = append(checks, checkRIDUniqueness(readings))
+
+	if len(sc.Spec.Replication.ExternalPeers) > 0 {
+		checks = append(checks, externalPeerChecks(sc)...)
+		checks = append(checks, externalStanzaCheck(sc, dbs, rwPods))
+		if c, ok := crossSiteCSNCheck(sc); ok {
+			checks = append(checks, c)
+		}
+	}
+
+	return checks
+}
+
+// replicaCountChecks compares ready replicas with the spec, for the RW fleet
+// and — when there is one — the read-only fleet.
+func replicaCountChecks(sc *ldapv1alpha1.SlapdCluster) []checkResult {
+	var checks []checkResult
+	if sc.Status.ReadyReplicas == sc.Spec.Replicas {
+		checks = append(checks, checkResult{Name: "rw-replica-count", Status: checkPass,
+			Detail: fmt.Sprintf("%d/%d ready", sc.Status.ReadyReplicas, sc.Spec.Replicas)})
+	} else {
+		checks = append(checks, checkResult{Name: "rw-replica-count", Status: checkFail,
+			Detail: fmt.Sprintf("%d/%d ready (want %d)", sc.Status.ReadyReplicas, sc.Status.Replicas, sc.Spec.Replicas)})
+	}
+	if sc.Spec.ReadReplicas > 0 {
+		if sc.Status.ReadOnlyReadyReplicas == sc.Spec.ReadReplicas {
+			checks = append(checks, checkResult{Name: "ro-replica-count", Status: checkPass,
+				Detail: fmt.Sprintf("%d/%d ready", sc.Status.ReadOnlyReadyReplicas, sc.Spec.ReadReplicas)})
+		} else {
+			checks = append(checks, checkResult{Name: "ro-replica-count", Status: checkFail,
+				Detail: fmt.Sprintf("%d/%d ready (want %d)",
+					sc.Status.ReadOnlyReadyReplicas, sc.Status.ReadOnlyReplicas, sc.Spec.ReadReplicas)})
+		}
+	}
+	return checks
+}
+
+// podReadinessCheck names every pod, RW or RO, that is not running and ready.
+func podReadinessCheck(rwPods, roPods []podState) checkResult {
+	var notReady []string
+	for _, ps := range append(rwPods, roPods...) {
+		if !ps.ready {
+			notReady = append(notReady, ps.name)
+		}
+	}
+	if len(notReady) == 0 {
+		return checkResult{Name: "pod-readiness", Status: checkPass, Detail: "all pods running and ready"}
+	}
+	return checkResult{Name: "pod-readiness", Status: checkFail,
+		Detail: fmt.Sprintf("not ready: %s", strings.Join(notReady, ", "))}
+}
+
+// bootstrapCheck infers bootstrap completion from the cluster phase.
+func bootstrapCheck(sc *ldapv1alpha1.SlapdCluster) checkResult {
+	if sc.Status.Phase == ldapv1alpha1.PhaseRunning {
+		return checkResult{Name: "bootstrap", Status: checkPass, Detail: "cluster phase is Running"}
+	}
+	return checkResult{Name: "bootstrap", Status: checkWarn, Detail: fmt.Sprintf("cluster phase is %s", sc.Status.Phase)}
+}
+
+// expectedExternalStanzas is how many cross-site stanzas each RW pod should
+// carry per database: one per URI-mode ExternalPeer, and min(replicasPerPeer,
+// len(addresses)) per podAddresses or discovery peer.
+func expectedExternalStanzas(sc *ldapv1alpha1.SlapdCluster) int {
+	n := 0
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		var addrCount int
 		if ep.Discovery != nil {
@@ -670,7 +704,7 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		} else if len(ep.PodAddresses) > 0 {
 			addrCount = len(ep.PodAddresses)
 		} else {
-			externalStanzaCount++
+			n++
 			continue
 		}
 		if addrCount == 0 {
@@ -680,235 +714,230 @@ func runChecks(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods, roPods [
 		if ep.ReplicasPerPeer != nil && int(*ep.ReplicasPerPeer) > 1 {
 			rpp = int(*ep.ReplicasPerPeer)
 		}
-		if rpp > addrCount {
-			rpp = addrCount
-		}
-		externalStanzaCount += rpp
+		n += min(rpp, addrCount)
 	}
-	expectedRW := int(sc.Spec.Replicas-1) + externalStanzaCount
-	expectedRO := int(sc.Spec.Replicas)
+	return n
+}
 
-	// The four checks below judge PER DATABASE (syncreplcheck.go). They used to
-	// read whichever data DB came first out of cn=config and report its verdict
-	// as the pod's — so on a two-database cluster they covered db1 and were
-	// blind to db2, rid-uniqueness most damagingly of all, since a RID
-	// collision is BETWEEN databases by nature.
-	// Ahead of every check that reads cn=config, because it explains them.
-	var configFailures []configReadFailure
+// configReadFailures lists the reachable pods whose cn=config could not be read.
+func configReadFailures(rwPods, roPods []podState) []configReadFailure {
+	var failures []configReadFailure
 	for _, ps := range append(append([]podState{}, rwPods...), roPods...) {
 		if ps.err == "" && ps.configError != "" {
-			configFailures = append(configFailures, configReadFailure{Pod: ps.name, Err: ps.configError})
+			failures = append(failures, configReadFailure{Pod: ps.name, Err: ps.configError})
 		}
 	}
-	checks = append(checks, checkConfigReadable(configFailures))
+	return failures
+}
 
-	readings := syncreplReadings(rwPods, roPods)
-	checks = append(checks, checkSyncreplStanzaCount(dbs, readings, expectedRW, expectedRO))
-	checks = append(checks, checkSyncreplSkipSelf(readings, sc.Name+"-headless"))
-	if sc.Spec.Replicas > 1 {
-		checks = append(checks, checkMultiProviderPerDB(dbs, readings))
-	}
-	checks = append(checks, checkRIDUniqueness(readings))
+// externalPeersCheck is the name the external peer connectivity checks report under.
+const externalPeersCheck = "external-peers"
 
-	// ── External peer connectivity ──
-	if len(sc.Spec.Replication.ExternalPeers) > 0 {
-		// Peers using podAddresses or discovery are on a Multus replication
-		// network that the operator (and slctl) cannot reach directly.
-		// Only check URI-based peers for connectivity.
-		var uriPeerCount, multusPeerCount, discoveryPeerCount int
-		for _, ep := range sc.Spec.Replication.ExternalPeers {
-			if ep.Discovery != nil {
-				discoveryPeerCount++
-			} else if len(ep.PodAddresses) > 0 {
-				multusPeerCount++
-			} else if ep.URI != "" {
-				uriPeerCount++
-			}
-		}
-
-		if uriPeerCount > 0 {
-			epOK := true
-			var epIssues []string
-			for _, ep := range sc.Status.ExternalPeerStatuses {
-				if len(ep.DiscoveredProviders) > 0 {
-					continue // discovery peer — skip connectivity check
-				}
-				if !ep.Connected {
-					epOK = false
-					detail := ep.Name + ": disconnected"
-					if ep.LastError != "" {
-						detail += " (" + ep.LastError + ")"
-					}
-					epIssues = append(epIssues, detail)
-				}
-			}
-			if epOK {
-				check("external-peers", checkPass,
-					fmt.Sprintf("all %d URI peers connected", uriPeerCount))
-			} else {
-				check("external-peers", checkFail, strings.Join(epIssues, "; "))
-			}
-		}
-		if discoveryPeerCount > 0 {
-			// Report discovery peer status: count discovered addresses.
-			var details []string
-			for _, ep := range sc.Spec.Replication.ExternalPeers {
-				if ep.Discovery == nil {
-					continue
-				}
-				for _, eps := range sc.Status.ExternalPeerStatuses {
-					if eps.Name == ep.Name {
-						if len(eps.DiscoveredProviders) > 0 {
-							details = append(details, fmt.Sprintf("%s: pod(s) %s discovered",
-								ep.Name, providerOrdinalList(eps.DiscoveredProviders)))
-						} else {
-							details = append(details, fmt.Sprintf("%s: no providers discovered",
-								ep.Name))
-						}
-						break
-					}
-				}
-			}
-			// Do not name a transport here: peer discovery is used by BOTH
-			// pod-routed (ADR-016) and multus (ADR-007), and which one is in
-			// play is spec.replication.network.mode, not the peer shape. This
-			// line used to claim "Multus" for every discovery peer, which was
-			// simply wrong on a pod-routed mesh.
-			check("external-peers", checkPass,
-				fmt.Sprintf("all %d peers resolved by discovery (%s)",
-					discoveryPeerCount, strings.Join(details, ", ")))
-		}
-		if multusPeerCount > 0 && uriPeerCount == 0 && discoveryPeerCount == 0 {
-			check("external-peers", checkPass,
-				fmt.Sprintf("all %d external peers use Multus podAddresses (connectivity not testable from operator)",
-					multusPeerCount))
-		}
-
-		// ── External peer syncrepl stanzas present on each RW pod ──
-		// For each ExternalPeer, check that at least one stanza references its
-		// URI (single-endpoint), podAddresses (static Multus), or
-		// DiscoveredProviders (discovery mode).
-		epStanzaOK := true
-		epStanzaEvaluated := false
-		var epStanzaIssues []string
-		for _, ep := range sc.Spec.Replication.ExternalPeers {
-			// Build the set of strings to search for in syncrepl stanzas.
-			var needles []string
-			if ep.Discovery != nil {
-				// Discovery mode: use resolved addresses from status.
-				for _, eps := range sc.Status.ExternalPeerStatuses {
-					if eps.Name == ep.Name {
-						needles = providerAddressList(eps.DiscoveredProviders)
-						break
-					}
-				}
-			} else if len(ep.PodAddresses) > 0 {
-				needles = ep.PodAddresses
-			} else if ep.URI != "" {
-				needles = []string{ep.URI}
-			}
-
-			// Per database: a peer is reached from EVERY replicated database,
-			// each with its own stanza (its own ridSegment, its own logbase —
-			// ADR-003, ADR-019 R9). Reading one database's stanzas here meant a
-			// database whose cross-site wiring was missing entirely reported
-			// clean as long as another database's was present.
-			for _, ps := range rwPods {
-				// Same rule as everywhere else here: no readable cn=config is
-				// no evidence, not a missing stanza.
-				if ps.err != "" || ps.configError != "" {
-					continue
-				}
-				epStanzaEvaluated = true
-				bySuffix := ps.syncReplBySuffix()
-				for _, db := range replicatedDBs(dbs) {
-					found := false
-					for _, sr := range bySuffix[db.Suffix] {
-						for _, needle := range needles {
-							if strings.Contains(sr, needle) {
-								found = true
-								break
-							}
-						}
-						if found {
-							break
-						}
-					}
-					if !found {
-						epStanzaOK = false
-						epStanzaIssues = append(epStanzaIssues,
-							fmt.Sprintf("%s/%s: missing stanza for %s", ps.name, db.Suffix, ep.Name))
-					}
-				}
-			}
-		}
-		if !epStanzaEvaluated {
-			checks = append(checks, notEvaluated("external-syncrepl"))
-		} else if epStanzaOK {
-			check("external-syncrepl", checkPass,
-				fmt.Sprintf("every replicated database on every RW pod has stanzas for all %d external peers",
-					len(sc.Spec.Replication.ExternalPeers)))
-		} else {
-			check("external-syncrepl", checkFail, strings.Join(epStanzaIssues, "; "))
-		}
-
-		// ── Cross-site CSN convergence (from operator status) ──
-		csnOK := true
-		var csnIssues []string
-		anyCSNData := false
-		for _, eps := range sc.Status.ExternalPeerStatuses {
-			switch eps.ReplicationState {
-			case ldapv1alpha1.ReplicationSynced:
-				anyCSNData = true
-			case ldapv1alpha1.ReplicationLagging:
-				anyCSNData = true
-				csnOK = false
-				detail := eps.Name + ": Lagging"
-				if eps.LagSeconds != "" {
-					detail += fmt.Sprintf(" (%ss)", eps.LagSeconds)
-				}
-				csnIssues = append(csnIssues, detail)
-			case ldapv1alpha1.ReplicationPartiallyVerified:
-				// The peer answered, and everything that could be read is
-				// current — but at least one database yielded no evidence.
-				// Surfaced rather than swallowed: a state nobody renders is a
-				// state that silently reads as healthy.
-				anyCSNData = true
-				csnOK = false
-				detail := eps.Name + ": PartiallyVerified"
-				if eps.LastError != "" {
-					detail += " (" + eps.LastError + ")"
-				}
-				csnIssues = append(csnIssues, detail)
-			case ldapv1alpha1.ReplicationUnreachable:
-				anyCSNData = true
-				csnOK = false
-				csnIssues = append(csnIssues, eps.Name+": Unreachable")
-			}
-		}
-		if anyCSNData {
-			if csnOK {
-				check("cross-site-csn", checkPass, "all external peers report Synced")
-			} else {
-				// Use "warn" for Lagging (data is flowing, just delayed) and
-				// "fail" for Unreachable (can't reach remote pods).
-				hasUnreachable := false
-				for _, issue := range csnIssues {
-					if strings.Contains(issue, string(ldapv1alpha1.ReplicationUnreachable)) {
-						hasUnreachable = true
-						break
-					}
-				}
-				if hasUnreachable {
-					check("cross-site-csn", checkFail, strings.Join(csnIssues, "; "))
-				} else {
-					check("cross-site-csn", checkWarn, strings.Join(csnIssues, "; "))
-				}
-			}
+// externalPeerChecks reports external peer connectivity. Peers using
+// podAddresses or discovery are on a replication network that the operator
+// (and slctl) cannot reach directly, so only URI-based peers are checked for
+// connectivity; discovery peers report what was discovered.
+func externalPeerChecks(sc *ldapv1alpha1.SlapdCluster) []checkResult {
+	var uriPeerCount, multusPeerCount, discoveryPeerCount int
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		if ep.Discovery != nil {
+			discoveryPeerCount++
+		} else if len(ep.PodAddresses) > 0 {
+			multusPeerCount++
+		} else if ep.URI != "" {
+			uriPeerCount++
 		}
 	}
 
+	var checks []checkResult
+	if uriPeerCount > 0 {
+		checks = append(checks, uriPeerConnectivityCheck(sc, uriPeerCount))
+	}
+	if discoveryPeerCount > 0 {
+		checks = append(checks, discoveryPeersCheck(sc, discoveryPeerCount))
+	}
+	if multusPeerCount > 0 && uriPeerCount == 0 && discoveryPeerCount == 0 {
+		checks = append(checks, checkResult{Name: externalPeersCheck, Status: checkPass,
+			Detail: fmt.Sprintf("all %d external peers use Multus podAddresses (connectivity not testable from operator)",
+				multusPeerCount)})
+	}
 	return checks
+}
+
+// uriPeerConnectivityCheck reports every URI peer the operator saw disconnected.
+func uriPeerConnectivityCheck(sc *ldapv1alpha1.SlapdCluster, uriPeerCount int) checkResult {
+	var epIssues []string
+	for _, ep := range sc.Status.ExternalPeerStatuses {
+		if len(ep.DiscoveredProviders) > 0 {
+			continue // discovery peer — skip connectivity check
+		}
+		if !ep.Connected {
+			detail := ep.Name + ": disconnected"
+			if ep.LastError != "" {
+				detail += " (" + ep.LastError + ")"
+			}
+			epIssues = append(epIssues, detail)
+		}
+	}
+	if len(epIssues) == 0 {
+		return checkResult{Name: externalPeersCheck, Status: checkPass,
+			Detail: fmt.Sprintf("all %d URI peers connected", uriPeerCount)}
+	}
+	return checkResult{Name: externalPeersCheck, Status: checkFail, Detail: strings.Join(epIssues, "; ")}
+}
+
+// discoveryPeersCheck reports, per discovery peer, which remote pods were found.
+func discoveryPeersCheck(sc *ldapv1alpha1.SlapdCluster, discoveryPeerCount int) checkResult {
+	var details []string
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		if ep.Discovery == nil {
+			continue
+		}
+		for _, eps := range sc.Status.ExternalPeerStatuses {
+			if eps.Name == ep.Name {
+				if len(eps.DiscoveredProviders) > 0 {
+					details = append(details, fmt.Sprintf("%s: pod(s) %s discovered",
+						ep.Name, providerOrdinalList(eps.DiscoveredProviders)))
+				} else {
+					details = append(details, fmt.Sprintf("%s: no providers discovered",
+						ep.Name))
+				}
+				break
+			}
+		}
+	}
+	// Do not name a transport here: peer discovery is used by BOTH
+	// pod-routed (ADR-016) and multus (ADR-007), and which one is in
+	// play is spec.replication.network.mode, not the peer shape. This
+	// line used to claim "Multus" for every discovery peer, which was
+	// simply wrong on a pod-routed mesh.
+	return checkResult{Name: externalPeersCheck, Status: checkPass,
+		Detail: fmt.Sprintf("all %d peers resolved by discovery (%s)",
+			discoveryPeerCount, strings.Join(details, ", "))}
+}
+
+// externalPeerNeedlesFor is what a stanza must contain to point at ep: its
+// URI (single-endpoint), its podAddresses (static Multus), or its
+// DiscoveredProviders (discovery mode, from status).
+func externalPeerNeedlesFor(sc *ldapv1alpha1.SlapdCluster, ep ldapv1alpha1.ExternalPeer) []string {
+	if ep.Discovery != nil {
+		for _, eps := range sc.Status.ExternalPeerStatuses {
+			if eps.Name == ep.Name {
+				return providerAddressList(eps.DiscoveredProviders)
+			}
+		}
+		return nil
+	}
+	if len(ep.PodAddresses) > 0 {
+		return ep.PodAddresses
+	}
+	if ep.URI != "" {
+		return []string{ep.URI}
+	}
+	return nil
+}
+
+// externalStanzaCheck verifies that, on each RW pod, every replicated database
+// carries at least one stanza for every ExternalPeer.
+func externalStanzaCheck(sc *ldapv1alpha1.SlapdCluster, dbs []dbIdentity, rwPods []podState) checkResult {
+	evaluated := false
+	var issues []string
+	for _, ep := range sc.Spec.Replication.ExternalPeers {
+		needles := externalPeerNeedlesFor(sc, ep)
+
+		// Per database: a peer is reached from EVERY replicated database,
+		// each with its own stanza (its own ridSegment, its own logbase —
+		// ADR-003, ADR-019 R9). Reading one database's stanzas here meant a
+		// database whose cross-site wiring was missing entirely reported
+		// clean as long as another database's was present.
+		for _, ps := range rwPods {
+			// Same rule as everywhere else here: no readable cn=config is
+			// no evidence, not a missing stanza.
+			if ps.err != "" || ps.configError != "" {
+				continue
+			}
+			evaluated = true
+			bySuffix := ps.syncReplBySuffix()
+			for _, db := range replicatedDBs(dbs) {
+				if !anyStanzaContains(bySuffix[db.Suffix], needles) {
+					issues = append(issues,
+						fmt.Sprintf("%s/%s: missing stanza for %s", ps.name, db.Suffix, ep.Name))
+				}
+			}
+		}
+	}
+	switch {
+	case !evaluated:
+		return notEvaluated("external-syncrepl")
+	case len(issues) == 0:
+		return checkResult{Name: "external-syncrepl", Status: checkPass,
+			Detail: fmt.Sprintf("every replicated database on every RW pod has stanzas for all %d external peers",
+				len(sc.Spec.Replication.ExternalPeers))}
+	default:
+		return checkResult{Name: "external-syncrepl", Status: checkFail, Detail: strings.Join(issues, "; ")}
+	}
+}
+
+// anyStanzaContains reports whether any stanza contains any needle.
+func anyStanzaContains(stanzas, needles []string) bool {
+	for _, sr := range stanzas {
+		for _, needle := range needles {
+			if strings.Contains(sr, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// crossSiteCSNCheck summarises the operator's per-peer CSN verdicts. ok is
+// false when no peer has reported one yet, and then there is no check to show.
+// Lagging (data is flowing, just delayed) and PartiallyVerified warn;
+// Unreachable (can't reach remote pods) fails.
+func crossSiteCSNCheck(sc *ldapv1alpha1.SlapdCluster) (c checkResult, ok bool) {
+	var csnIssues []string
+	anyCSNData := false
+	for _, eps := range sc.Status.ExternalPeerStatuses {
+		switch eps.ReplicationState {
+		case ldapv1alpha1.ReplicationSynced:
+			anyCSNData = true
+		case ldapv1alpha1.ReplicationLagging:
+			anyCSNData = true
+			detail := eps.Name + ": Lagging"
+			if eps.LagSeconds != "" {
+				detail += fmt.Sprintf(" (%ss)", eps.LagSeconds)
+			}
+			csnIssues = append(csnIssues, detail)
+		case ldapv1alpha1.ReplicationPartiallyVerified:
+			// The peer answered, and everything that could be read is
+			// current — but at least one database yielded no evidence.
+			// Surfaced rather than swallowed: a state nobody renders is a
+			// state that silently reads as healthy.
+			anyCSNData = true
+			detail := eps.Name + ": PartiallyVerified"
+			if eps.LastError != "" {
+				detail += " (" + eps.LastError + ")"
+			}
+			csnIssues = append(csnIssues, detail)
+		case ldapv1alpha1.ReplicationUnreachable:
+			anyCSNData = true
+			csnIssues = append(csnIssues, eps.Name+": Unreachable")
+		}
+	}
+	if !anyCSNData {
+		return checkResult{}, false
+	}
+	if len(csnIssues) == 0 {
+		return checkResult{Name: "cross-site-csn", Status: checkPass, Detail: "all external peers report Synced"}, true
+	}
+	status := checkWarn
+	for _, issue := range csnIssues {
+		if strings.Contains(issue, string(ldapv1alpha1.ReplicationUnreachable)) {
+			status = checkFail
+			break
+		}
+	}
+	return checkResult{Name: "cross-site-csn", Status: status, Detail: strings.Join(csnIssues, "; ")}, true
 }
 
 // ── Output ────────────────────────────────────────────────────────────────────
