@@ -301,7 +301,7 @@ func ensureMonitorDatabase(ctx context.Context, conn *ldap.Conn, host string) er
 		// entryAlreadyExists (slapd assigns the {N}, so the DN never collides)
 		// but with 80 "only one monitor database allowed". So a failed ADD is
 		// judged by looking: if a monitor database now exists, the goal is met.
-		if err := conn.Add(monitorDBAddRequest()); err != nil {
+		if err := guardedAdd(conn, monitorDBAddRequest()); err != nil {
 			if dn, _, ferr := findMonitorDB(conn); ferr != nil || dn == "" {
 				return fmt.Errorf("add monitor database at %s: %w", host, err)
 			}
@@ -311,7 +311,7 @@ func ensureMonitorDatabase(ctx context.Context, conn *ldap.Conn, host string) er
 		log.Info("aligning the monitor database ACL", "host", host, "dn", dbDN, "from", acl)
 		mod := ldap.NewModifyRequest(dbDN, nil)
 		mod.Replace("olcAccess", []string{monitorDBACL})
-		if err := conn.Modify(mod); err != nil {
+		if err := guardedModify(conn, mod); err != nil {
 			return fmt.Errorf("set olcAccess on %s at %s: %w", dbDN, host, err)
 		}
 	}

@@ -26,6 +26,13 @@
         }
       },
       {
+        "name": "startup-config",
+        "configMap": {
+          "name": "slapd-startup-config",
+          "optional": true
+        }
+      },
+      {
         "name": "tls",
         "secret": {
           "secretName": "slapd-tls"
@@ -73,6 +80,10 @@
             "value": "/etc/slaptain/database-dirs"
           },
           {
+            "name": "STARTUP_CONFIG_PATH",
+            "value": "/etc/slaptain/startup-config"
+          },
+          {
             "name": "LDAP_TLS_CACERT_PATH",
             "value": "/etc/openldap/tls/ca.crt"
           },
@@ -111,6 +122,11 @@
             "name": "database-dirs",
             "readOnly": true,
             "mountPath": "/etc/slaptain/database-dirs"
+          },
+          {
+            "name": "startup-config",
+            "readOnly": true,
+            "mountPath": "/etc/slaptain/startup-config"
           },
           {
             "name": "accesslog",
