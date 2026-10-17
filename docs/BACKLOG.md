@@ -180,6 +180,54 @@ providers — no crash captured, matching the accesslog hang where slapd stops
 answering and readiness fails. The same oversized cycle produced 255 s of
 replication lag. Whatever schedules purges must not let one get large.
 
+## `olcAccessLogPurgeBatch` paces the purge, and we have never set it
+
+OpenLDAP 2.7 carries a knob that attacks the stall above at its cause rather
+than moving it: `olcAccessLogPurgeBatch` (`OLcfgOvAt:4.8`, SINGLE-VALUE
+integer, "Pause purge task after every N entries have been purged"). The purge
+loop reads it as `li_yield_factor` and, after every N deletes, sleeps for the
+measured mean duration of one delete. Overhead is therefore about `1/N`, so
+**small N paces hard** — N=1 runs the purge at roughly half speed, N=100 barely
+touches it — and because the sleep is derived from measured elapsed time it
+scales itself to how slow deletes are on that storage.
+
+It defaults to 0, meaning off: no sleeping, just a `thread_yield()` after each
+delete. That is what every slaptain cluster runs today. The operator never sets
+it, there is no spec field for it, and it appears in neither the man page nor
+`CHANGES`.
+
+Safe to converge live: the set and delete paths are a plain integer assignment,
+with no task manipulation and no free, so none of ADR-024's live-modify hazards
+apply. If adopted it is an ADR-024 R1 tunable wanting a `SlapdDatabase` field.
+
+**2.7-only.** 2.6's purge loop has no such setting and paces not at all — it
+calls `ldap_pvt_thread_pool_pausewait()` in the same position, but that yields
+to a thread-pool pause wanting quiescence, not to client work. So "unpaced" is
+not even the same loop in the two versions, which is worth knowing before any
+measured purge figure is carried across a major version.
+
+**Blocked, on upstream rather than on us.** Measuring it needs a read-heavy
+load against 2.7.x, and 2.7.x frees a shared `entryUUID` buffer from an
+unlocked path (ITS#10597): every client search that completes inside a write's
+window frees that write's copy, which under a read-dominated profile is
+continuous. `master` fixes it structurally by moving the value into a
+per-operation structure; no release carries that yet, and a backport is a
+refactor of how the value threads through the response callback rather than a
+cherry-pick. So the measurement costs a custom image built from an unreleased
+tree — and would measure a slapd nobody deploys.
+
+Setting `olcAccessLogOld` is **not** a way around it. It would take a branch
+that skips the shared buffer, but only for deletes and modifies — adds are not
+in that branch and still populate it — and it would break sourcing the session
+log from the accesslog (ADR-034): syncprov requires `reqEntryUUID` on those
+entries and fails with `LDAP_CONSTRAINT_VIOLATION` without it. The two are
+coupled on 2.7.x and cannot both be had; one attribute selects between them.
+
+Pick this up when a release carries the ITS#10597 fix. Full reasoning, the
+measured prior results and the alternative it competes with (a rotating write
+target, which needs none of this and works on either version) are in
+[ADR-037](adrs/adr-037-purge-off-the-write-path.md), option A.
+
 ## The operator writes and checks `{SSHA}` verifiers — move them to a KDF
 
 Three places hash or verify a password as `{SSHA}` (salted SHA-1), and CodeQL
