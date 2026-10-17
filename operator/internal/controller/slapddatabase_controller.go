@@ -455,7 +455,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//     all-empty reading is a data-loss alert rather than a database still
 	//     waiting for its first replication. One-way — nothing clears it, and
 	//     nothing on the write path reads it (see seedNeeded).
-	dataPresent, observed := r.evaluateDataPresent(sc, sd, rootPW)
+	dataPresent, observed := r.evaluateDataPresent(ctx, sc, sd, rootPW)
 	setCondition(&sd.Status.Conditions, dataPresent)
 	if observed {
 		sd.Status.DataObserved = true
@@ -632,7 +632,7 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
-	defer conn.Close()
+	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind("cn=admin,cn=config", configPW); err != nil {
@@ -2096,17 +2096,17 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 		conn.SetTimeout(ldapRequestTimeout)
 
 		if err := conn.Bind(rootDN, rootPW); err != nil {
-			conn.Close()
+			closeConn(ctx, conn)
 			continue
 		}
 
 		exists, err := ldapEntryExists(conn, replDN)
 		if err != nil {
-			conn.Close()
+			closeConn(ctx, conn)
 			continue
 		}
 		if exists {
-			conn.Close()
+			closeConn(ctx, conn)
 			log.V(1).Info("replication user already exists", "dn", replDN)
 			return nil
 		}
@@ -2114,7 +2114,7 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 		// Create the replication bind user.
 		replHash, err := generateSSHAHash(replPassword)
 		if err != nil {
-			conn.Close()
+			closeConn(ctx, conn)
 			return fmt.Errorf("hash replication password: %w", err)
 		}
 
@@ -2124,14 +2124,14 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 		addReq.Attribute("description", []string{"Syncrepl bind account"})
 		addReq.Attribute("userPassword", []string{replHash})
 		if err := conn.Add(addReq); err != nil {
-			conn.Close()
+			closeConn(ctx, conn)
 			if ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return nil
 			}
 			return fmt.Errorf("add replication user %s: %w", replDN, err)
 		}
 
-		conn.Close()
+		closeConn(ctx, conn)
 		log.Info("created replication user", "dn", replDN)
 		return nil
 	}
@@ -2199,7 +2199,7 @@ func (r *SlapdDatabaseReconciler) applySeedData(
 	if err != nil {
 		return false, fmt.Errorf("dial pod-0 (%s): %w", addr, err)
 	}
-	defer conn.Close()
+	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind(rootDN, rootPW); err != nil {
@@ -2315,6 +2315,7 @@ func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 // Aggregation is the pure aggregateDataPresent; observed=true reports that the
 // root entry was seen on at least one pod this pass, for the caller's latch.
 func (r *SlapdDatabaseReconciler) evaluateDataPresent(
+	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	rootPW string,
@@ -2345,7 +2346,7 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 		}
 		conn.SetTimeout(ldapRequestTimeout)
 		if err := conn.Bind(rootDN, rootPW); err != nil {
-			conn.Close()
+			closeConn(ctx, conn)
 			results = append(results, podPresence{pod: pod, readOnly: t.readOnly})
 			continue
 		}
@@ -2353,7 +2354,7 @@ func (r *SlapdDatabaseReconciler) evaluateDataPresent(
 		// slapd's frontend — which is exactly what a glue is. The shared probe
 		// asks again with ManageDsaIT to say so positively (ADR-025).
 		obs := suffixprobe.Probe(conn, sd.Spec.Suffix)
-		conn.Close()
+		closeConn(ctx, conn)
 		results = append(results, podPresence{
 			pod:      pod,
 			readOnly: t.readOnly,
@@ -3159,7 +3160,7 @@ func (r *SlapdDatabaseReconciler) applySyncreplToPod(
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
-	defer conn.Close()
+	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind("cn=admin,cn=config", configPW); err != nil {
@@ -3370,7 +3371,7 @@ func (r *SlapdDatabaseReconciler) deleteDatabaseFromPod(
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
 	if err := conn.Bind("cn=admin,cn=config", configPW); err != nil {

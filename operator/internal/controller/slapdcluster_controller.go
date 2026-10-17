@@ -401,7 +401,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		} else if len(ep.PodAddresses) > 0 {
 			// Static podAddresses: addresses are in the spec directly.
 		} else if ep.URI != "" {
-			if err := testExternalPeerConnectivity(ep.URI); err != nil {
+			if err := testExternalPeerConnectivity(ctx, ep.URI); err != nil {
 				status.LastError = err.Error()
 			}
 		}
@@ -1337,7 +1337,7 @@ func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
 		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s", sc.Name, i, headlessSvc, sc.Namespace, r.ClusterDomain)
 		podName := fmt.Sprintf("%s-%d", sc.Name, i)
 		for _, db := range dbInfos {
-			csns, err := queryContextCSN(host, port, tlsEnabled, db.suffix, db.bindDNs, db.bindPW)
+			csns, err := queryContextCSN(ctx, host, port, tlsEnabled, db.suffix, db.bindDNs, db.bindPW)
 			if err != nil {
 				log.V(1).Info("local CSN query failed", "pod", host, "suffix", db.suffix, "err", err)
 				readings = append(readings, csnReading{
@@ -1434,7 +1434,7 @@ func (r *SlapdClusterReconciler) checkPeerCSNConvergence(
 		// peer's state on behalf of the others.
 		var readings []csnReading
 		for _, db := range dbInfos {
-			csns, err := queryContextCSNFromURI(ep.URI, db.suffix, db.bindDNs, db.bindPW)
+			csns, err := queryContextCSNFromURI(ctx, ep.URI, db.suffix, db.bindDNs, db.bindPW)
 			if err != nil {
 				log.V(1).Info("remote CSN query failed (URI)", "peer", ep.Name,
 					"suffix", db.suffix, "err", err)
@@ -1461,7 +1461,7 @@ func (r *SlapdClusterReconciler) checkPeerCSNConvergence(
 	var readings []csnReading
 	for _, addr := range addrs {
 		for _, db := range dbInfos {
-			csns, err := queryContextCSN(addr, port, tlsEnabled, db.suffix, db.bindDNs, db.bindPW)
+			csns, err := queryContextCSN(ctx, addr, port, tlsEnabled, db.suffix, db.bindDNs, db.bindPW)
 			if err != nil {
 				log.V(1).Info("remote CSN query failed", "peer", ep.Name, "addr", addr,
 					"suffix", db.suffix, "err", err)
@@ -1685,7 +1685,7 @@ func generatePassword(n int) (string, error) {
 
 // testExternalPeerConnectivity attempts a TLS/TCP connection to the external peer URI
 // to check basic network reachability. Returns nil on success.
-func testExternalPeerConnectivity(uri string) error {
+func testExternalPeerConnectivity(ctx context.Context, uri string) error {
 	addr := uri
 	useTLS := false
 	if after, ok := strings.CutPrefix(uri, "ldaps://"); ok {
@@ -1704,14 +1704,14 @@ func testExternalPeerConnectivity(uri string) error {
 		if err != nil {
 			return err
 		}
-		conn.Close()
+		closeConn(ctx, conn)
 		return nil
 	}
 	conn, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		return err
 	}
-	conn.Close()
+	closeConn(ctx, conn)
 	return nil
 }
 

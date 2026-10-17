@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -33,20 +34,20 @@ import (
 // first (required when ACLs deny anonymous access to the suffix). Otherwise
 // uses an anonymous connection.
 // Returns the raw CSN strings (one per serverID that has written to this replica).
-func queryContextCSN(host string, port int32, tlsEnabled bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
+func queryContextCSN(ctx context.Context, host string, port int32, tlsEnabled bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	scheme := schemeLDAP
 	if tlsEnabled {
 		scheme = schemeLDAPS
 	}
 	uri := fmt.Sprintf("%s://%s:%d", scheme, host, port)
-	return doCSNQuery(uri, tlsEnabled, suffix, bindDNs, bindPW)
+	return doCSNQuery(ctx, uri, tlsEnabled, suffix, bindDNs, bindPW)
 }
 
 // queryContextCSNFromURI connects to an LDAP URI (ldap:// or ldaps://) and reads contextCSN.
 // Used for URI-mode external peers where the full URI is already available.
-func queryContextCSNFromURI(uri, suffix string, bindDNs []string, bindPW string) ([]string, error) {
+func queryContextCSNFromURI(ctx context.Context, uri, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	useTLS := strings.HasPrefix(uri, "ldaps://")
-	return doCSNQuery(uri, useTLS, suffix, bindDNs, bindPW)
+	return doCSNQuery(ctx, uri, useTLS, suffix, bindDNs, bindPW)
 }
 
 // doCSNQuery is the shared implementation for contextCSN queries.
@@ -59,7 +60,7 @@ func queryContextCSNFromURI(uri, suffix string, bindDNs []string, bindPW string)
 // whole migration window. A rejected bind is the only thing that advances to
 // the next candidate; a dial or search failure is returned as-is, because
 // retrying a different DN against a server that never answered proves nothing.
-func doCSNQuery(uri string, useTLS bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
+func doCSNQuery(ctx context.Context, uri string, useTLS bool, suffix string, bindDNs []string, bindPW string) ([]string, error) {
 	dialOpts := []ldap.DialOpt{
 		ldap.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}),
 	}
@@ -73,7 +74,7 @@ func doCSNQuery(uri string, useTLS bool, suffix string, bindDNs []string, bindPW
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", uri, err)
 	}
-	defer conn.Close()
+	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 
 	if bindPW != "" {

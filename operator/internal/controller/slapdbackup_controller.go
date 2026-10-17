@@ -357,7 +357,7 @@ func (r *SlapdBackupReconciler) probeSourceSuffix(ctx context.Context, ns string
 	if err != nil {
 		return suffixProbeError, err.Error()
 	}
-	defer conn.Close()
+	defer closeConn(ctx, conn)
 	conn.SetTimeout(ldapRequestTimeout)
 	// Same candidate order as the CSN queries (csnBindDNs): the node-local
 	// identity first, the legacy one as the fallback that keeps this working
@@ -394,7 +394,7 @@ func (r *SlapdBackupReconciler) readSourceContextCSN(ctx context.Context, ns str
 	if err != nil {
 		return nil, err
 	}
-	return queryContextCSN(host, port, tlsEnabled, sd.Spec.Suffix,
+	return queryContextCSN(ctx, host, port, tlsEnabled, sd.Spec.Suffix,
 		csnBindDNs(sd.Name, sd.Spec.Suffix), bindPW)
 }
 
