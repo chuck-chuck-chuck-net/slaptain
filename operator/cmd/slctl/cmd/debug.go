@@ -28,6 +28,9 @@ var (
 // and packet capture (NET_ADMIN/NET_RAW).
 var debugFullCaps = []string{"SYS_PTRACE", "SYS_ADMIN", "NET_ADMIN", "NET_RAW"}
 
+// slapdContainer is the slapd pod's main container, the default debug target.
+const slapdContainer = "slapd"
+
 // slapdDataVolumes are the slapd PVC/emptyDir volume names worth mounting into a
 // reduced-privilege debug container, in mount order. Only those present on the
 // pod are mounted (RO replicas have no accesslog; a non-replicated cluster none).
@@ -427,7 +430,7 @@ func init() {
 	debugCmd.Flags().StringVar(&debugImage, "image", "", "debug container image (default: derived slapd-toolkit image)")
 	debugCmd.Flags().StringVar(&debugPullPolicy, "image-pull-policy", "IfNotPresent",
 		"image pull policy for the debug container")
-	debugCmd.Flags().StringVar(&debugTarget, "target", "slapd", "container whose process namespace to share")
+	debugCmd.Flags().StringVar(&debugTarget, "target", slapdContainer, "container whose process namespace to share")
 	debugCmd.Flags().BoolVar(&debugNoPrivileged, "no-privileged", false,
 		"never escalate to privileged; use the read-only-mount mode even where privileged is allowed")
 	rootCmd.AddCommand(debugCmd)

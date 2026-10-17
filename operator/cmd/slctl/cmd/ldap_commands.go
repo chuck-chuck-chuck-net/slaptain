@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -82,7 +83,9 @@ func splitOwnFlags(raw []string, stringFlags map[string]*string, boolFlags map[s
 				continue
 			}
 			if dst, ok := boolFlags[name]; ok {
-				*dst = tok[eq+1:] == "true"
+				// Any spelling pflag takes for a boolean; anything else is false.
+				v, err := strconv.ParseBool(tok[eq+1:])
+				*dst = err == nil && v
 				continue
 			}
 			passthrough = append(passthrough, tok)
@@ -120,7 +123,7 @@ func runLDAPUtil(tool string, raw []string) error {
 	}
 
 	var f ldapTargetFlags
-	f.as = "admin" // default
+	f.as = identAdmin // default
 	extraArgs := splitLDAPArgs(raw, &f)
 
 	ctx := context.Background()

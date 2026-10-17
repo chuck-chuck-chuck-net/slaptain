@@ -16,6 +16,16 @@ import (
 	k8scli "github.com/chuck-chuck-chuck-net/slaptain/operator/internal/cli/k8s"
 )
 
+// The bind identities --as accepts by name; anything else is a literal DN.
+const (
+	identAdmin       = "admin"
+	identConfig      = "config"
+	identReplication = "replication"
+)
+
+// configAdminDN is the cn=config rootDN the config identity binds as.
+const configAdminDN = "cn=admin,cn=config"
+
 // ldapTargetFlags holds the flags shared by `slctl ldap*` wrappers.
 type ldapTargetFlags struct {
 	cluster   string
@@ -239,9 +249,9 @@ func bindNeedsDatabase(f *ldapTargetFlags) bool {
 		return false
 	}
 	switch f.as {
-	case "config":
+	case identConfig:
 		return false
-	case "admin", "", "replication":
+	case identAdmin, "", identReplication:
 		return true
 	}
 	// A literal DN stands on its own unless it is one of the short forms
@@ -269,7 +279,7 @@ func resolveBind(
 	}
 
 	switch f.as {
-	case "admin", "":
+	case identAdmin, "":
 		dn := db.Spec.RootDN
 		if dn == "" {
 			dn = "cn=admin," + suffix
@@ -279,13 +289,13 @@ func resolveBind(
 			return "", "", fmt.Errorf("read admin password: %w", err)
 		}
 		return dn, pw, nil
-	case "config":
+	case identConfig:
 		pw, err := readSecretKey(ctx, coreClient, ns, sc.Name+"-config-password", "root-password")
 		if err != nil {
 			return "", "", fmt.Errorf("read config password: %w", err)
 		}
-		return "cn=admin,cn=config", pw, nil
-	case "replication":
+		return configAdminDN, pw, nil
+	case identReplication:
 		pw, err := readSecretKey(ctx, coreClient, ns, dbCredentialsSecret(db), "replication-password")
 		if err != nil {
 			return "", "", fmt.Errorf("read replication password: %w", err)

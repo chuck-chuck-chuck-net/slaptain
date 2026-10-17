@@ -39,6 +39,9 @@ const (
 	directDialTimout = 300 * time.Millisecond
 )
 
+// defaultRouteDst is how `ip -j route` spells the default route's destination.
+const defaultRouteDst = "default"
+
 // parseDirectMode resolves the direct-pod-IP mode from the --direct flag and
 // the SLCTL_DIRECT_POD_IPS env var. The flag wins; unrecognized env values
 // fall back to auto.
@@ -78,7 +81,7 @@ func routeCovers(routesJSON []byte, ip netip.Addr) (bool, string, error) {
 	bestDst := ""
 	bestForwards := false
 	for _, r := range routes {
-		if r.Dst == "default" || r.Dst == "" {
+		if r.Dst == defaultRouteDst || r.Dst == "" {
 			continue
 		}
 		prefix, err := netip.ParsePrefix(r.Dst)
