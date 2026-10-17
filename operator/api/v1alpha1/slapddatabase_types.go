@@ -119,6 +119,13 @@ type DatabaseReplicationConfig struct {
 	// When true, the accesslog overlay is added to this database and syncrepl stanzas
 	// use syncdata=accesslog. When false, plain syncrepl (full entry sync) is used.
 	//
+	// Delta-syncrepl is the only mode slaptain validates (ADR-038). Setting this to
+	// false is a migration-interop escape hatch — it lets a cluster impersonate a
+	// legacy plain-syncrepl provider for the ADR-011 migration lane — and is not a
+	// supported deployment mode: plain syncrepl resolves conflicting writes at
+	// entry level (last writer wins, the older modification dropped whole) where
+	// delta-syncrepl merges per attribute.
+	//
 	// Tristate (*bool): nil falls back to the default (true). An explicit
 	// false must round-trip from kubectl through the API server unchanged,
 	// which a plain bool + omitempty + kubebuilder:default does NOT guarantee

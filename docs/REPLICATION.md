@@ -222,17 +222,27 @@ network latency and the initial sync volume.
 
 ## Plain syncrepl vs delta-syncrepl
 
-Slaptain uses **delta-syncrepl** (changes sent as diffs via the accesslog). The alternative
-is **plain syncrepl** (full entry sent on every modification). The trade-offs:
+Slaptain replicates with **delta-syncrepl** (changes sent as diffs via the accesslog) on
+every pod, read-write and read-only, in-cluster and cross-site. That is the only mode the
+project validates — **ADR-038** records the decision, the alternatives considered, and the
+two measurements that would reopen it. The alternative, **plain syncrepl** (the full entry
+sent on every modification), appears in slaptain in one place: `deltaSync: false` lets a
+cluster impersonate a legacy plain-syncrepl provider for the migration lane (ADR-011), and
+`externalPeers[].syncMode: plain` consumes from a real one.
+
+How the two compare:
 
 | | Plain syncrepl | Delta-syncrepl (slaptain) |
 |---|---|---|
 | Bandwidth | Full entry per change (wasteful for large entries with small modifications) | Only the diff (attribute-level changes) |
 | Infrastructure | No accesslog DB needed | Requires accesslog DB + overlay + syncprov on accesslog |
 | Accesslog management | N/A | Must configure purge interval to prevent unbounded growth |
-| Failure recovery | Full refresh on any gap | Falls back to full refresh only if accesslog is purged past consumer's CSN |
+| Failure recovery | Sessionlog if the gap fits in it, otherwise a present phase over the whole DIT | Replay from the accesslog if the gap fits in it, otherwise a full refresh |
+| Conflicting writes | Entry-level last-writer-wins: the older modification is dropped whole | The provider merges per attribute, reading its own accesslog |
 | Complexity | Simpler | More moving parts |
 
-Delta-syncrepl is the better choice for environments with large entries and frequent small
-modifications (e.g., updating a single attribute on a user entry). Plain syncrepl is simpler
-and may be sufficient for small directories with infrequent changes.
+The bandwidth row is the one the OpenLDAP guides lead with; the conflicting-writes row is
+the one that decides it for a multi-master mesh, where two sites can modify one entry inside
+a single replication window. Delta's cost is everything the accesslog brings with it — a
+third PVC, a purge to schedule (ADR-037), and the refresh-storm class documented in
+`docs/ITS-9398-STORM-SIGNATURE.md`.
