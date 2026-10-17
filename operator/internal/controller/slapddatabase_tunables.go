@@ -291,7 +291,7 @@ func planIndices(current, want []string) []string {
 		if len(fields) > 1 {
 			attrList = strings.Join(fields[:len(fields)-1], "")
 		}
-		for _, a := range strings.Split(attrList, ",") {
+		for a := range strings.SplitSeq(attrList, ",") {
 			if a = strings.TrimSpace(a); a != "" {
 				indexed[strings.ToLower(a)] = true
 			}
@@ -693,7 +693,7 @@ func splitIndexValue(v string) (attrs []string, types string) {
 		attrList = strings.Join(fields[:len(fields)-1], "")
 		types = fields[len(fields)-1]
 	}
-	for _, a := range strings.Split(attrList, ",") {
+	for a := range strings.SplitSeq(attrList, ",") {
 		if a = strings.TrimSpace(a); a != "" {
 			attrs = append(attrs, a)
 		}

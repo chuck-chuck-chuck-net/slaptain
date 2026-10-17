@@ -1077,8 +1077,8 @@ func aclsMatch(current, desired []string) bool {
 	for i, c := range current {
 		bare := c
 		if len(c) > 0 && c[0] == '{' {
-			if idx := strings.Index(c, "}"); idx >= 0 {
-				bare = c[idx+1:]
+			if _, after, ok := strings.Cut(c, "}"); ok {
+				bare = after
 			}
 		}
 		if bare != desired[i] {
@@ -3099,7 +3099,7 @@ func buildDatabaseSyncReplRO(
 			` syncdata=accesslog`
 	}
 
-	for i := int32(0); i < rwReplicas; i++ {
+	for i := range rwReplicas {
 		// The same number the RW pods hold for this provider: an RO pod
 		// consumes from the same providers and is never one itself, so its
 		// caller passes a nil selfOrdinal and nothing is skipped (ADR-031
@@ -3236,8 +3236,8 @@ func parseSyncreplByRID(stanzas []string) map[string]string {
 	for _, s := range stanzas {
 		bare := s
 		if len(s) > 0 && s[0] == '{' {
-			if idx := strings.Index(s, "}"); idx >= 0 {
-				bare = s[idx+1:]
+			if _, after, ok := strings.Cut(s, "}"); ok {
+				bare = after
 			}
 		}
 		bare = strings.TrimSpace(bare)

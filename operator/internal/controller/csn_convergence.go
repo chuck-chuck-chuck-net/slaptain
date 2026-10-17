@@ -229,10 +229,9 @@ func evaluatePeerConvergence(
 			}
 			continue
 		}
-		lag := localNewest[suffix].Sub(remote)
-		if lag < 0 {
-			lag = 0 // remote is ahead — clocks, or it received a write first
-		}
+		lag := max(localNewest[suffix].Sub(remote),
+			// remote is ahead — clocks, or it received a write first
+			0)
 		if lag > threshold {
 			lagging = true
 			if lag > maxLag {

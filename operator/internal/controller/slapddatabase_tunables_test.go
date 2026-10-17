@@ -16,7 +16,8 @@ import (
 // Red-first: written against a stub file that returns zero values for all of
 // them, observed failing, then implemented.
 
-func ptrStr(s string) *string { return &s }
+//go:fix inline
+func ptrStr(s string) *string { return new(s) }
 
 func dbWith(f func(*ldapv1alpha1.SlapdDatabaseSpec)) *ldapv1alpha1.SlapdDatabase {
 	sd := &ldapv1alpha1.SlapdDatabase{}
@@ -270,8 +271,8 @@ func TestDesiredSearchLimits(t *testing.T) {
 		wantWrite bool
 	}{
 		{"unset → slaptain's unlimited, not slapd's 500/3600", nil, nil, "unlimited", "unlimited", true},
-		{"explicit numbers are honoured", ptrStr("500"), ptrStr("3600"), "500", "3600", true},
-		{"explicit unlimited", ptrStr("unlimited"), ptrStr("unlimited"), "unlimited", "unlimited", true},
+		{"explicit numbers are honoured", new("500"), new("3600"), "500", "3600", true},
+		{"explicit unlimited", new("unlimited"), new("unlimited"), "unlimited", "unlimited", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

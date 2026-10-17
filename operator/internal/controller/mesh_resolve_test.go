@@ -19,6 +19,7 @@ package controller
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
@@ -475,7 +476,8 @@ func fmtWiring(w *meshWiring) string {
 	if w == nil {
 		return "<nil>"
 	}
-	s := "base=" + itoa(int(w.ServerIDBase))
+	var s strings.Builder
+	s.WriteString("base=" + itoa(int(w.ServerIDBase)))
 	for _, p := range w.ExternalPeers {
 		// siteIndex is rendered because it is a RID coordinate (ADR-031
 		// decision 4): a peer whose index is wrong looks identical to a
@@ -486,18 +488,18 @@ func fmtWiring(w *meshWiring) string {
 		if p.SiteIndex != nil {
 			idx = itoa(int(*p.SiteIndex))
 		}
-		s += " peer{" + p.Name + " siteIndex=" + idx + " ca=" + p.TLSSecretName
+		s.WriteString(" peer{" + p.Name + " siteIndex=" + idx + " ca=" + p.TLSSecretName)
 		if p.Discovery != nil {
-			s += " kubeconfig=" + p.Discovery.KubeconfigSecret.Name
+			s.WriteString(" kubeconfig=" + p.Discovery.KubeconfigSecret.Name)
 		}
-		s += "}"
+		s.WriteString("}")
 	}
 	if w.Network != nil {
-		s += " net=" + w.Network.Mode + "/" + w.Network.MultusNetwork
+		s.WriteString(" net=" + w.Network.Mode + "/" + w.Network.MultusNetwork)
 	} else {
-		s += " net=<nil>"
+		s.WriteString(" net=<nil>")
 	}
-	return s
+	return s.String()
 }
 
 func itoa(i int) string {

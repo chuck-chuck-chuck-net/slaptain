@@ -91,7 +91,7 @@ func evaluatePodsResponsive(readings []csnReading, replicas int32) podsResponsiv
 	}
 
 	var silent []string
-	for i := int32(0); i < replicas; i++ {
+	for i := range replicas {
 		pod := fmt.Sprintf("%s-%d", podBaseName(readings), i)
 		if ok, seen := answered[pod]; seen && ok {
 			continue

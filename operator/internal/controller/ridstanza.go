@@ -79,7 +79,7 @@ func inClusterStanzaRIDs(layout ridcoord.Layout, segment, replicas int32, selfOr
 	}
 
 	rids := make(map[int32]int32, replicas)
-	for ordinal := int32(0); ordinal < replicas; ordinal++ {
+	for ordinal := range replicas {
 		if selfOrdinal != nil && *selfOrdinal == ordinal {
 			continue
 		}

@@ -22,7 +22,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -220,8 +219,8 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 			},
 		},
 		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: ptr.To(dirJobTTL),
-			BackoffLimit:            ptr.To(int32(2)),
+			TTLSecondsAfterFinished: new(dirJobTTL),
+			BackoffLimit:            new(int32(2)),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
@@ -234,9 +233,9 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 						Command:         []string{"bash", "-c", "set -eux; mkdir -p " + strings.Join(quoted, " ")},
 						VolumeMounts:    mounts,
 						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: ptr.To(false),
+							AllowPrivilegeEscalation: new(false),
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-							ReadOnlyRootFilesystem:   ptr.To(true),
+							ReadOnlyRootFilesystem:   new(true),
 						},
 					}},
 					Volumes: volumes,

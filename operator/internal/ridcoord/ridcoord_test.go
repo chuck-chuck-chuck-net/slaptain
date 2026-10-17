@@ -130,7 +130,7 @@ func assertRoundTrip(t *testing.T, l Layout) {
 	c := wantMaxSegments(l)
 	seen := 0
 
-	for segment := int32(0); segment < c; segment++ {
+	for segment := range c {
 		for ordinal := int32(0); ordinal < l.PodsPerSite; ordinal++ {
 			rid, err := l.Local(segment, ordinal)
 			if err != nil {
@@ -211,7 +211,7 @@ func TestNeverProducesZeroRID(t *testing.T) {
 	for _, l := range admissibleLayouts {
 		t.Run(fmt.Sprintf("P%d_S%d", l.PodsPerSite, l.MaxSites), func(t *testing.T) {
 			c := wantMaxSegments(l)
-			for segment := int32(0); segment < c; segment++ {
+			for segment := range c {
 				for ordinal := int32(0); ordinal < l.PodsPerSite; ordinal++ {
 					if rid, err := l.Local(segment, ordinal); err != nil || rid == 0 {
 						t.Fatalf("Local(segment=%d, ordinal=%d) at %+v = (%d, %v), want a non-zero RID and no error",
@@ -276,7 +276,7 @@ func TestLocalAndRemoteNeverCollide(t *testing.T) {
 				seen[rid] = o
 			}
 			c := wantMaxSegments(l)
-			for segment := int32(0); segment < c; segment++ {
+			for segment := range c {
 				for ordinal := int32(0); ordinal < l.PodsPerSite; ordinal++ {
 					rid, err := l.Local(segment, ordinal)
 					if err != nil {

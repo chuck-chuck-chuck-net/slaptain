@@ -156,7 +156,7 @@ func TestBuildDatabaseSyncRepl_DiagonalFanout(t *testing.T) {
 	// second link to the same site would break.
 	t.Run("RIDs unique within each pod's stanzas", func(t *testing.T) {
 		peers := mkPeer(1)
-		for ord := int32(0); ord < replicas; ord++ {
+		for ord := range replicas {
 			rids := extractRIDs(build(ord, peers))
 			seen := map[string]bool{}
 			for _, r := range rids {
