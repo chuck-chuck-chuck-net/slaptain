@@ -40,8 +40,10 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "list across all namespaces")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output in JSON format")
 
-	rootCmd.RegisterFlagCompletionFunc("namespace", completeNamespaces)
-	rootCmd.RegisterFlagCompletionFunc("context", completeContexts)
+	// Registration fails only for a flag name that does not exist — a
+	// programming error, which this surfaces at startup (and in every test run).
+	cobra.CheckErr(rootCmd.RegisterFlagCompletionFunc("namespace", completeNamespaces))
+	cobra.CheckErr(rootCmd.RegisterFlagCompletionFunc("context", completeContexts))
 }
 
 // initClient creates k8s clients and resolves the target namespace.

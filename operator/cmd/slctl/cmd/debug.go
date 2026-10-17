@@ -181,7 +181,7 @@ func runDebug(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(custom)
+	defer removeDebugProfile(custom)
 
 	// Default to an interactive bash. The slapd-toolkit image is based on the
 	// python image, whose default entrypoint is a Python REPL — not a debug shell.
@@ -400,15 +400,20 @@ func writeCustom(sctx debugSecurityContext, mounts []debugVolumeMount) (string, 
 		return "", fmt.Errorf("create debug profile: %w", err)
 	}
 	if _, err := f.Write(payload); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", fmt.Errorf("write debug profile: %w", err)
+		return "", errors.Join(fmt.Errorf("write debug profile: %w", err), f.Close(), os.Remove(f.Name()))
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
-		return "", err
+		return "", errors.Join(err, os.Remove(f.Name()))
 	}
 	return f.Name(), nil
+}
+
+// removeDebugProfile deletes the temporary --custom profile. A deferred cleanup
+// has nowhere to return an error to, so a failure is reported, not swallowed.
+func removeDebugProfile(path string) {
+	if err := os.Remove(path); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ could not remove the temporary debug profile %s: %v\n", path, err)
+	}
 }
 
 func init() {

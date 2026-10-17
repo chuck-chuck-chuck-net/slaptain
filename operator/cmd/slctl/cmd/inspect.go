@@ -179,7 +179,10 @@ func runInspect(cmd *cobra.Command, args []string) error {
 	for i, key := range targets {
 		sc := &ldapv1alpha1.SlapdCluster{}
 		if err := k8sClient.Get(ctx, key, sc); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error fetching %s/%s: %v\n", key.Namespace, key.Name, err)
+			if _, werr := fmt.Fprintf(cmd.ErrOrStderr(), "Error fetching %s/%s: %v\n",
+				key.Namespace, key.Name, err); werr != nil {
+				return werr
+			}
 			continue
 		}
 
@@ -198,7 +201,9 @@ func runInspect(cmd *cobra.Command, args []string) error {
 		// checks (ADR-019): which databases exist, and which use delta-syncrepl.
 		dbs, err := clusterDatabases(ctx, k8sClient, sc)
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
+			if _, werr := fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err); werr != nil {
+				return werr
+			}
 		}
 
 		result := inspectAndVerify(ctx, coreClient, config, sc, dbs, configPW, peers)
@@ -382,6 +387,15 @@ func gatherPodStateWithTimeout(ctx context.Context, coreClient kubernetes.Interf
 	}
 }
 
+// closeLDAP ends a session whose reads are complete. The observations are
+// already in hand, so a failed close changes no verdict; it is reported on
+// stderr (never stdout, which may carry --json) rather than swallowed.
+func closeLDAP(conn *ldap.Conn, what string) {
+	if err := conn.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ close %s: %v\n", what, err)
+	}
+}
+
 func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config *rest.Config, sc *ldapv1alpha1.SlapdCluster, podName, configPW string) podState {
 	ps := podState{name: podName}
 
@@ -423,7 +437,7 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 		ps.err = fmt.Sprintf("LDAP dial: %v", err)
 		return ps
 	}
-	defer conn.Close()
+	defer closeLDAP(conn, "LDAP session to "+podName)
 
 	// rootDSE (anonymous)
 	rootDSE, err := conn.Search(ldap.NewSearchRequest(
@@ -477,7 +491,7 @@ func gatherPodState(ctx context.Context, coreClient kubernetes.Interface, config
 		if err != nil {
 			ps.configError = fmt.Sprintf("dial for cn=config: %v", err)
 		} else {
-			defer configConn.Close()
+			defer closeLDAP(configConn, "cn=config session to "+podName)
 			if err := configConn.Bind("cn=admin,cn=config", configPW); err != nil {
 				ps.configError = fmt.Sprintf("cn=config bind failed: %v", err)
 			} else {

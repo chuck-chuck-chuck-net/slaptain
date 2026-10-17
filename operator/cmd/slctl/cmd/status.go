@@ -80,7 +80,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	for i, key := range targets {
 		sc := &ldapv1alpha1.SlapdCluster{}
 		if err := k8sClient.Get(ctx, key, sc); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error fetching %s/%s: %v\n", key.Namespace, key.Name, err)
+			if _, werr := fmt.Fprintf(cmd.ErrOrStderr(), "Error fetching %s/%s: %v\n",
+				key.Namespace, key.Name, err); werr != nil {
+				return werr
+			}
 			continue
 		}
 
