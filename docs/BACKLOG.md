@@ -23,10 +23,10 @@ JSON as the typed object — so the field set recorded for each field manager is
 unchanged, as are `FieldOwner` and `ForceOwnership` (both option types implement
 `ApplyToApply` / `ApplyToSubResourceApply` identically).
 
-**Still open:** the broader pre-existing lint debt this entry always excluded —
-errcheck 40, lll 31, modernize 15, goconst 13, prealloc 13, gocyclo 9, unused 4,
-unparam 2, revive 1 (uncapped counts, unchanged by this change). Worth a separate
-sweep.
+The broader pre-existing lint debt this entry always excluded is paid down too
+(2026-10-17, #17): the operator module is at zero golangci-lint findings under an
+unchanged `.golangci.yml`, so the CI gate's whole-module fallback (taken when a PR
+diff is too large for the API) no longer fails on debt a PR did not add.
 
 ## ~~Three paths hand `Replace("olcSyncRepl")` a short set with no error~~ — DONE (2026-10-05, ADR-031 M4b)
 
@@ -94,6 +94,39 @@ above is unchanged: `syncreplMatch` and `applySyncreplToPod` still have no
 tests, so the atomic `Replace` remains guarded by prose.
 
 ---
+
+## The operator writes and checks `{SSHA}` verifiers — move them to a KDF
+
+Three places hash or verify a password as `{SSHA}` (salted SHA-1), and CodeQL
+reports each as `go/weak-sensitive-data-hashing` (high):
+
+- `generateSSHAHash` (`internal/controller/slapddatabase_controller.go`) — every
+  verifier the operator writes: the data database's `olcRootPW`, the legacy
+  `cn=replication,<suffix>` entry and the node-local identity (ADR-027);
+- `sshaMatches` (`internal/controller/authdb.go`) — checks the node-local
+  identity's stored verifier against the Secret to decide whether to rewrite it;
+- `internal/backup/s3.go` — the restore preflight checks the replication password
+  against the `replication-pw-hash` a backup stored in its object metadata.
+
+`{SSHA}` is not wrong today: it is a scheme slapd verifies natively and the
+documented default of `spec.ldap.passwordHash` (ADR-024), and the secrets the
+operator generates are 24 to 32 random bytes, far beyond any brute force. It is
+weak for a password a person chose, which ADR-027 rotation now allows.
+
+The forward fix is a key-derivation scheme slapd can verify. `{ARGON2}` is the
+obvious candidate: the 2.7.1 images already ship slapd's `argon2` module (core
+since 2.7), and `golang.org/x/crypto/argon2` produces the verifier. To decide:
+
+- module loading: `argon2` must be loaded on every pod before any verifier in
+  that scheme is written, including RO pods and the `-ol26` pair (check which
+  argon2 module, if any, its Debian 2.6 build carries);
+- backups: artifacts taken before the change carry an `{SSHA}` hash, so the
+  preflight must keep verifying both schemes;
+- the default: whether `spec.ldap.passwordHash` follows, an ADR-024 amendment.
+  `docs/TUNING.md` still says slaptain does not ship an argon2 module; that is
+  out of date for the 2.7.1 images.
+
+The CodeQL alerts stay open until the scheme changes; they are not dismissed.
 
 ## `ensureServerIDs` will renumber a live pod if the derivation ever moves again
 
