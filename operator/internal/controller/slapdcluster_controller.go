@@ -174,7 +174,6 @@ func stripImageTag(imageRef string) string {
 
 func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	_ = log // used in discovery status reporting
 
 	// 1. Fetch the SlapdCluster resource.
 	sc := &ldapv1alpha1.SlapdCluster{}
@@ -272,19 +271,9 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, fmt.Errorf("reconcileStatefulSet: %w", err)
 	}
 
-	// 5a. Reconcile read-only headless Service.
-	if err := r.reconcileReadOnlyHeadlessService(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileReadOnlyHeadlessService: %w", err)
-	}
-
-	// 5b. Reconcile read-only ClusterIP Service.
-	if err := r.reconcileReadOnlyService(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileReadOnlyService: %w", err)
-	}
-
-	// 5c. Reconcile read-only StatefulSet.
-	if err := r.reconcileReadOnlyStatefulSet(ctx, sc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcileReadOnlyStatefulSet: %w", err)
+	// 5a-5c. Reconcile the read-only fleet.
+	if err := r.reconcileReadOnlyFleet(ctx, sc); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// NOTE: Steps 6-7b (bootstrap, ACLs, schemas, replication) have been removed
@@ -330,39 +319,10 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	sc.Status.ReplicationMode = mode
 
-	// Read-only StatefulSet status (informational only — does not affect phase).
-	if sc.Spec.ReadReplicas > 0 {
-		roSts := &appsv1.StatefulSet{}
-		roKey := client.ObjectKey{Name: sc.Name + "-readonly", Namespace: sc.Namespace}
-		if err := r.Get(ctx, roKey, roSts); err != nil {
-			if !errors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("get read-only StatefulSet: %w", err)
-			}
-		} else {
-			sc.Status.ReadOnlyReplicas = roSts.Status.Replicas
-			sc.Status.ReadOnlyReadyReplicas = roSts.Status.ReadyReplicas
-		}
-	} else {
-		sc.Status.ReadOnlyReplicas = 0
-		sc.Status.ReadOnlyReadyReplicas = 0
+	if err := r.observeReadOnlyStatus(ctx, sc); err != nil {
+		return ctrl.Result{}, err
 	}
-
-	// Discover replication network IPs from Multus annotations (multus mode only;
-	// pod-routed uses primary pod IPs discovered per-peer and headless DNS in-cluster).
-	sc.Status.ReplicationNetworkIPs = nil
-	if sc.NetworkMode() == ldapv1alpha1.NetworkModeMultus {
-		podList := &corev1.PodList{}
-		if err := r.List(ctx, podList,
-			client.InNamespace(sc.Namespace),
-			client.MatchingLabels(map[string]string{
-				labelName:     appName,
-				labelInstance: sc.Name,
-			}),
-		); err == nil {
-			sc.Status.ReplicationNetworkIPs = discoverReplicationNetworkIPs(
-				podList.Items, sc.Spec.Replication.Network.MultusNetwork)
-		}
-	}
+	r.observeReplicationNetworkIPs(ctx, sc)
 
 	// Local CSN convergence check + gather local newest CSN for cross-site comparison.
 	// Uses the replication bind DN/password since ACLs may deny anonymous access.
@@ -383,7 +343,112 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		localNewest = r.checkLocalCSNConvergence(ctx, sc, dbInfos)
 	}
 
-	// External peer status: discovery, connectivity, and CSN convergence.
+	r.observeExternalPeers(ctx, sc, dbInfos, localNewest)
+	setReadyPhase(sc, ready, desired)
+
+	// Replication mode wiring conditions (ADR-010). These are informational
+	// handoffs to the human operating the cross-cluster migration; slaptain
+	// cannot autonomously verify that the external peer (typically a legacy
+	// prod cluster) has performed the reciprocal configuration. The conditions
+	// surface in `kubectl describe slapdcluster` to make the handoff explicit.
+	emitWiringConditions(sc)
+
+	// The mesh verdict on the success path. The failure path returned long
+	// before here, having set the same condition with its own reason.
+	meshResolveCondition(sc, nil)
+
+	// SSA patch on the status subresource: no resourceVersion check, no conflict possible.
+	if err := r.applyStatus(ctx, sc); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Requeue until fully Running.
+	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Periodic requeue for CSN convergence monitoring when replication is active.
+	// Without this, CSN checks only run on resource changes and go stale once
+	// the cluster stabilises.
+	if sc.Spec.Replication.Enabled {
+		return ctrl.Result{RequeueAfter: csnCheckInterval}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// reconcileReadOnlyFleet runs steps 5a-5c: the read-only headless Service, the
+// read-only ClusterIP Service and the read-only StatefulSet, in that order.
+func (r *SlapdClusterReconciler) reconcileReadOnlyFleet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	// 5a. Reconcile read-only headless Service.
+	if err := r.reconcileReadOnlyHeadlessService(ctx, sc); err != nil {
+		return fmt.Errorf("reconcileReadOnlyHeadlessService: %w", err)
+	}
+
+	// 5b. Reconcile read-only ClusterIP Service.
+	if err := r.reconcileReadOnlyService(ctx, sc); err != nil {
+		return fmt.Errorf("reconcileReadOnlyService: %w", err)
+	}
+
+	// 5c. Reconcile read-only StatefulSet.
+	if err := r.reconcileReadOnlyStatefulSet(ctx, sc); err != nil {
+		return fmt.Errorf("reconcileReadOnlyStatefulSet: %w", err)
+	}
+	return nil
+}
+
+// observeReadOnlyStatus copies the read-only StatefulSet's replica counts into
+// status (informational only — does not affect phase). A read-only StatefulSet
+// that does not exist yet leaves the counts as they were.
+func (r *SlapdClusterReconciler) observeReadOnlyStatus(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
+	if sc.Spec.ReadReplicas <= 0 {
+		sc.Status.ReadOnlyReplicas = 0
+		sc.Status.ReadOnlyReadyReplicas = 0
+		return nil
+	}
+	roSts := &appsv1.StatefulSet{}
+	roKey := client.ObjectKey{Name: sc.Name + "-readonly", Namespace: sc.Namespace}
+	if err := r.Get(ctx, roKey, roSts); err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("get read-only StatefulSet: %w", err)
+		}
+		return nil
+	}
+	sc.Status.ReadOnlyReplicas = roSts.Status.Replicas
+	sc.Status.ReadOnlyReadyReplicas = roSts.Status.ReadyReplicas
+	return nil
+}
+
+// observeReplicationNetworkIPs discovers replication network IPs from Multus
+// annotations (multus mode only; pod-routed uses primary pod IPs discovered
+// per-peer and headless DNS in-cluster). A failed pod list leaves them empty.
+func (r *SlapdClusterReconciler) observeReplicationNetworkIPs(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) {
+	sc.Status.ReplicationNetworkIPs = nil
+	if sc.NetworkMode() != ldapv1alpha1.NetworkModeMultus {
+		return
+	}
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(sc.Namespace),
+		client.MatchingLabels(map[string]string{
+			labelName:     appName,
+			labelInstance: sc.Name,
+		}),
+	); err == nil {
+		sc.Status.ReplicationNetworkIPs = discoverReplicationNetworkIPs(
+			podList.Items, sc.Spec.Replication.Network.MultusNetwork)
+	}
+}
+
+// observeExternalPeers rebuilds status.externalPeerStatuses: per peer,
+// discovery or connectivity, then CSN convergence against localNewest.
+func (r *SlapdClusterReconciler) observeExternalPeers(
+	ctx context.Context,
+	sc *ldapv1alpha1.SlapdCluster,
+	dbInfos []databaseCSNInfo,
+	localNewest map[string]time.Time,
+) {
+	log := logf.FromContext(ctx)
 	sc.Status.ExternalPeerStatuses = nil
 	for _, ep := range sc.Spec.Replication.ExternalPeers {
 		status := ldapv1alpha1.ExternalPeerStatus{
@@ -416,7 +481,10 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 		sc.Status.ExternalPeerStatuses = append(sc.Status.ExternalPeerStatuses, status)
 	}
+}
 
+// setReadyPhase sets status.phase and the Ready condition from the ready count.
+func setReadyPhase(sc *ldapv1alpha1.SlapdCluster, ready, desired int32) {
 	switch {
 	case ready == 0:
 		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping
@@ -441,36 +509,6 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		LastTransitionTime: metav1.Now(),
 		ObservedGeneration: sc.Generation,
 	})
-
-	// Replication mode wiring conditions (ADR-010). These are informational
-	// handoffs to the human operating the cross-cluster migration; slaptain
-	// cannot autonomously verify that the external peer (typically a legacy
-	// prod cluster) has performed the reciprocal configuration. The conditions
-	// surface in `kubectl describe slapdcluster` to make the handoff explicit.
-	emitWiringConditions(sc)
-
-	// The mesh verdict on the success path. The failure path returned long
-	// before here, having set the same condition with its own reason.
-	meshResolveCondition(sc, nil)
-
-	// SSA patch on the status subresource: no resourceVersion check, no conflict possible.
-	if err := r.applyStatus(ctx, sc); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Requeue until fully Running.
-	if sc.Status.Phase != ldapv1alpha1.PhaseRunning {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
-	}
-
-	// Periodic requeue for CSN convergence monitoring when replication is active.
-	// Without this, CSN checks only run on resource changes and go stale once
-	// the cluster stabilises.
-	if sc.Spec.Replication.Enabled {
-		return ctrl.Result{RequeueAfter: csnCheckInterval}, nil
-	}
-
-	return ctrl.Result{}, nil
 }
 
 // reconcileSecret creates the cn=config admin credential secret (create-only):
