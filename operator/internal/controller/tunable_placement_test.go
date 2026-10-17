@@ -19,16 +19,16 @@ func TestGlobalTunableEntry(t *testing.T) {
 		want string
 	}{
 		// slapd says: the frontend, not the global entry.
-		{"olcPasswordHash", "olcDatabase={-1}frontend,cn=config"},
+		{attrOlcPasswordHash, "olcDatabase={-1}frontend,cn=config"},
 
 		// The rest are genuinely global and slapd accepts them there.
-		{"olcToolThreads", "cn=config"},
-		{"olcTLSProtocolMin", "cn=config"},
-		{"olcTLSCipherSuite", "cn=config"},
+		{"olcToolThreads", configDN},
+		{"olcTLSProtocolMin", configDN},
+		{"olcTLSCipherSuite", configDN},
 
 		// An attribute nobody has placed yet must default to the global entry
 		// rather than silently landing in the frontend.
-		{"olcSomethingElse", "cn=config"},
+		{"olcSomethingElse", configDN},
 	}
 	for _, tc := range tests {
 		t.Run(tc.attr, func(t *testing.T) {

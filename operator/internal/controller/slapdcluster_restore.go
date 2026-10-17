@@ -69,7 +69,7 @@ func (r *SlapdClusterReconciler) databaseReplPassword(ctx context.Context, sd *l
 		}
 		return "", fmt.Errorf("read credentials secret %q: %w", name, err)
 	}
-	return string(secret.Data["replication-password"]), nil
+	return string(secret.Data[secretKeyReplicationPassword]), nil
 }
 
 // reconcileRestore drives the bootstrapFrom restore state machine (ADR-014). It
@@ -575,8 +575,8 @@ func (r *SlapdClusterReconciler) markRestored(ctx context.Context, sc *ldapv1alp
 	for _, name := range dbNames {
 		patch := &ldapv1alpha1.SlapdDatabase{
 			TypeMeta: metav1.TypeMeta{
-				APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
-				Kind:       "SlapdDatabase",
+				APIVersion: ldapv1alpha1.GroupVersion.String(),
+				Kind:       kindSlapdDatabase,
 			},
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sc.Namespace},
 		}
@@ -599,7 +599,7 @@ func (r *SlapdClusterReconciler) markRestored(ctx context.Context, sc *ldapv1alp
 func (r *SlapdClusterReconciler) applyStatus(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	statusPatch := &ldapv1alpha1.SlapdCluster{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
+			APIVersion: ldapv1alpha1.GroupVersion.String(),
 			Kind:       "SlapdCluster",
 		},
 		ObjectMeta: metav1.ObjectMeta{

@@ -252,7 +252,7 @@ func (r *SlapdScheduledBackupReconciler) patchStatus(ctx context.Context, ssb *l
 
 	statusPatch := &ldapv1alpha1.SlapdScheduledBackup{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
+			APIVersion: ldapv1alpha1.GroupVersion.String(),
 			Kind:       "SlapdScheduledBackup",
 		},
 		ObjectMeta: metav1.ObjectMeta{

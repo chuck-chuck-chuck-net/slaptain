@@ -35,6 +35,13 @@ const backupSourceConvergedCondition = "SourceConverged"
 // replicationConvergedCondition is the SlapdCluster condition this consumes.
 const replicationConvergedCondition = "ReplicationConverged"
 
+// Reasons of the SourceConverged condition for a source whose convergence the
+// cluster cannot speak to.
+const (
+	reasonNotReplicated       = "NotReplicated"
+	reasonNoConvergenceSignal = "NoConvergenceSignal"
+)
+
 // backupSourcePod names the pod a backup's artifact is read from. The backup Job
 // mounts pod-0's config/data PVCs and (by default) pins itself to pod-0's node,
 // so pod-0 is the source by construction — see buildBackupJob, which this must
@@ -92,14 +99,14 @@ func sourceConvergedCondition(sc *ldapv1alpha1.SlapdCluster, generation int64, n
 
 	if !isReplicationParticipant(sc) {
 		cond.Status = metav1.ConditionTrue
-		cond.Reason = "NotReplicated"
+		cond.Reason = reasonNotReplicated
 		cond.Message = fmt.Sprintf(
 			"SlapdCluster %s is not replicated; the backup source is the only writable copy", sc.Name)
 		return cond
 	}
 
 	cond.Status = metav1.ConditionUnknown
-	cond.Reason = "NoConvergenceSignal"
+	cond.Reason = reasonNoConvergenceSignal
 	cond.Message = fmt.Sprintf(
 		"SlapdCluster %s is a replication participant but reports no %s condition yet; "+
 			"convergence of the backup source is unknown",
@@ -156,7 +163,7 @@ func sourceSuffixHealthyCondition(outcome suffixProbeOutcome, detail string, gen
 		cond.Message = withDetail("the source pod's suffix entry is a real entry, visible to ordinary searches")
 	case suffixProbeGlue:
 		cond.Status = metav1.ConditionFalse
-		cond.Reason = "GlueSuffix"
+		cond.Reason = reasonGlueSuffix
 		cond.Message = withDetail("the source pod's suffix entry is a hidden GLUE entry " +
 			"(multi-site seed race, ADR-025) — this artifact will FAIL restore preflight; " +
 			"take the backup from a pod whose suffix entry is real")

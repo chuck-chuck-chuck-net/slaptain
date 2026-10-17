@@ -222,7 +222,7 @@ func (r *SlapdDatabaseReconciler) ensureAuthIdentity(
 
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-		1, 0, false, "(objectClass=*)", []string{"userPassword"}, nil,
+		1, 0, false, "(objectClass=*)", []string{attrUserPassword}, nil,
 	))
 	if err != nil {
 		if !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {

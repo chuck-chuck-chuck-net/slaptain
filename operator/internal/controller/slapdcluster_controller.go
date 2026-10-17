@@ -355,8 +355,8 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err := r.List(ctx, podList,
 			client.InNamespace(sc.Namespace),
 			client.MatchingLabels(map[string]string{
-				"app.kubernetes.io/name":     "slapd",
-				"app.kubernetes.io/instance": sc.Name,
+				labelName:     appName,
+				labelInstance: sc.Name,
 			}),
 		); err == nil {
 			sc.Status.ReplicationNetworkIPs = discoverReplicationNetworkIPs(
@@ -434,7 +434,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		readyReason = "AllReplicasReady"
 	}
 	setCondition(&sc.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReady,
 		Status:             readyStatus,
 		Reason:             readyReason,
 		Message:            readyMsg,
@@ -503,7 +503,7 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 		ObjectMeta: metav1.ObjectMeta{Name: cfgName, Namespace: sc.Namespace},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"root-password": rootPW,
+			secretKeyRootPassword: rootPW,
 		},
 	}
 	if err := controllerutil.SetControllerReference(sc, cfgSecret, r.Scheme); err != nil {
@@ -530,7 +530,7 @@ func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, s
 // so the Service's shape is unit-testable without a client.
 func (r *SlapdClusterReconciler) headlessService(sc *ldapv1alpha1.SlapdCluster) *corev1.Service {
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-headless",
 			Namespace: sc.Namespace,
@@ -559,13 +559,13 @@ func (r *SlapdClusterReconciler) headlessService(sc *ldapv1alpha1.SlapdCluster) 
 			Selector:                 selectorLabels(sc.Name),
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "ldap",
+					Name:       portNameLDAP,
 					Port:       ldapContainerPort,
 					TargetPort: intstr.FromString("ldap"),
 					Protocol:   corev1.ProtocolTCP,
 				},
 				{
-					Name:       "ldaps",
+					Name:       portNameLDAPS,
 					Port:       ldapsContainerPort,
 					TargetPort: intstr.FromString("ldaps"),
 					Protocol:   corev1.ProtocolTCP,
@@ -604,7 +604,7 @@ func (r *SlapdClusterReconciler) clusterIPService(sc *ldapv1alpha1.SlapdCluster)
 	}
 
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sc.Name,
 			Namespace:   sc.Namespace,
@@ -618,13 +618,13 @@ func (r *SlapdClusterReconciler) clusterIPService(sc *ldapv1alpha1.SlapdCluster)
 			ExternalTrafficPolicy:    sc.Spec.Service.ExternalTrafficPolicy,
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "ldap",
+					Name:       portNameLDAP,
 					Port:       ldapPort,
 					TargetPort: intstr.FromString("ldap"),
 					Protocol:   corev1.ProtocolTCP,
 				},
 				{
-					Name:       "ldaps",
+					Name:       portNameLDAPS,
 					Port:       ldapsPort,
 					TargetPort: intstr.FromString("ldaps"),
 					Protocol:   corev1.ProtocolTCP,
@@ -637,7 +637,7 @@ func (r *SlapdClusterReconciler) clusterIPService(sc *ldapv1alpha1.SlapdCluster)
 // reconcileStatefulSet applies the StatefulSet via SSA.
 func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	sts := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
+		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name,
 			Namespace: sc.Namespace,
@@ -716,7 +716,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyHeadlessService(ctx context.Co
 // readOnlyHeadlessService builds the read-only headless Service.
 func (r *SlapdClusterReconciler) readOnlyHeadlessService(sc *ldapv1alpha1.SlapdCluster) *corev1.Service {
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly-headless",
 			Namespace: sc.Namespace,
@@ -745,13 +745,13 @@ func (r *SlapdClusterReconciler) readOnlyHeadlessService(sc *ldapv1alpha1.SlapdC
 			Selector:                 readOnlySelectorLabels(sc.Name),
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "ldap",
+					Name:       portNameLDAP,
 					Port:       ldapContainerPort,
 					TargetPort: intstr.FromString("ldap"),
 					Protocol:   corev1.ProtocolTCP,
 				},
 				{
-					Name:       "ldaps",
+					Name:       portNameLDAPS,
 					Port:       ldapsContainerPort,
 					TargetPort: intstr.FromString("ldaps"),
 					Protocol:   corev1.ProtocolTCP,
@@ -794,7 +794,7 @@ func (r *SlapdClusterReconciler) readOnlyService(sc *ldapv1alpha1.SlapdCluster) 
 	}
 
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly",
 			Namespace: sc.Namespace,
@@ -804,13 +804,13 @@ func (r *SlapdClusterReconciler) readOnlyService(sc *ldapv1alpha1.SlapdCluster) 
 			Selector: readOnlySelectorLabels(sc.Name),
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "ldap",
+					Name:       portNameLDAP,
 					Port:       ldapPort,
 					TargetPort: intstr.FromString("ldap"),
 					Protocol:   corev1.ProtocolTCP,
 				},
 				{
-					Name:       "ldaps",
+					Name:       portNameLDAPS,
 					Port:       ldapsPort,
 					TargetPort: intstr.FromString("ldaps"),
 					Protocol:   corev1.ProtocolTCP,
@@ -827,7 +827,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 		return nil
 	}
 	sts := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
+		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly",
 			Namespace: sc.Namespace,
@@ -852,16 +852,16 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 // cn=config infrastructure (modules, TLS). Data databases, schemas, ACLs, and
 // replication are managed by SlapdDatabase and SlapdSchema controllers.
 func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdCluster, readOnly bool) appsv1.StatefulSetSpec {
-	var labels map[string]string
+	var podLabels map[string]string
 	var replicas int32
 	var serviceName string
 
 	if readOnly {
-		labels = readOnlySelectorLabels(sc.Name)
+		podLabels = readOnlySelectorLabels(sc.Name)
 		replicas = sc.Spec.ReadReplicas
 		serviceName = sc.Name + "-readonly-headless"
 	} else {
-		labels = selectorLabels(sc.Name)
+		podLabels = selectorLabels(sc.Name)
 		replicas = sc.Spec.Replicas
 		if replicas == 0 {
 			replicas = 1
@@ -989,7 +989,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 
 	if sc.Spec.LDAP.TLS.Enabled {
 		volumes = append(volumes, corev1.Volume{
-			Name: "tls",
+			Name: volumeTLS,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: sc.Spec.LDAP.TLS.SecretName,
@@ -1030,13 +1030,13 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: configSecretName},
-					Key:                  "root-password",
+					Key:                  secretKeyRootPassword,
 				},
 			},
 		},
 		{Name: "LDAP_TLS_ENABLED", Value: strconv.FormatBool(sc.Spec.LDAP.TLS.Enabled)},
-		{Name: "CONFIG_DIR", Value: "/config"},
-		{Name: "DATA_DIR", Value: "/data"},
+		{Name: "CONFIG_DIR", Value: configMountPath},
+		{Name: "DATA_DIR", Value: dataMountPath},
 		{Name: "ACCESSLOG_DIR", Value: ldapv1alpha1.AccesslogRoot},
 		// DATABASE_DIRS is deliberately absent: the directory lists arrive as
 		// files under DATABASE_DIRS_PATH, off the pod template (ADR-013
@@ -1066,15 +1066,15 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 
 	if readOnly {
 		initEnv = append(initEnv,
-			corev1.EnvVar{Name: "LDAP_READONLY_REPLICA", Value: "true"},
-			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "LDAP_READONLY_REPLICA", Value: envTrue},
+			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: envTrue},
 		)
 	} else if replicationActive {
 		// Load syncprov + accesslog modules regardless of mode (peer or
 		// consumer-only) so promotion / runtime overlay-add succeeds without
 		// a pod restart. Modules can only be loaded at slapd startup.
 		initEnv = append(initEnv,
-			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "LDAP_REPLICATION_ENABLED", Value: envTrue},
 		)
 	}
 
@@ -1107,8 +1107,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 
 	initMounts := []corev1.VolumeMount{
-		{Name: "config", MountPath: "/config"},
-		{Name: "data", MountPath: "/data"},
+		{Name: volumeConfig, MountPath: configMountPath},
+		{Name: volumeData, MountPath: dataMountPath},
 		{Name: "tmp", MountPath: "/tmp"},
 		// Not subPath-mounted: a subPath projection is frozen at pod start and
 		// never updated, and while the init container reads it only at start
@@ -1118,13 +1118,13 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	}
 	if accesslogMountNeeded && !readOnly {
 		initMounts = append(initMounts, corev1.VolumeMount{
-			Name:      "accesslog",
+			Name:      volumeAccesslog,
 			MountPath: ldapv1alpha1.AccesslogRoot,
 		})
 	}
 	if sc.Spec.LDAP.TLS.Enabled {
 		initMounts = append(initMounts, corev1.VolumeMount{
-			Name:      "tls",
+			Name:      volumeTLS,
 			MountPath: "/etc/openldap/tls",
 			ReadOnly:  true,
 		})
@@ -1141,7 +1141,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		AllowPrivilegeEscalation: &initFalse,
 		ReadOnlyRootFilesystem:   &initTrue,
 		Capabilities: &corev1.Capabilities{
-			Drop: []corev1.Capability{"ALL"},
+			Drop: []corev1.Capability{capabilityAll},
 		},
 	}
 
@@ -1156,19 +1156,19 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 
 	// ── Main container ────────────────────────────────────────────────────────
 	mainMounts := []corev1.VolumeMount{
-		{Name: "config", MountPath: "/config"},
-		{Name: "data", MountPath: "/data"},
+		{Name: volumeConfig, MountPath: configMountPath},
+		{Name: volumeData, MountPath: dataMountPath},
 		{Name: "run", MountPath: "/run/openldap"},
 	}
 	if accesslogMountNeeded && !readOnly {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
-			Name:      "accesslog",
+			Name:      volumeAccesslog,
 			MountPath: ldapv1alpha1.AccesslogRoot,
 		})
 	}
 	if sc.Spec.LDAP.TLS.Enabled {
 		mainMounts = append(mainMounts, corev1.VolumeMount{
-			Name:      "tls",
+			Name:      volumeTLS,
 			MountPath: "/etc/openldap/tls",
 			ReadOnly:  true,
 		})
@@ -1194,14 +1194,14 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		AllowPrivilegeEscalation: &falseVal,
 		ReadOnlyRootFilesystem:   &trueVal,
 		Capabilities: &corev1.Capabilities{
-			Drop: []corev1.Capability{"ALL"},
+			Drop: []corev1.Capability{capabilityAll},
 		},
 	}
 
 	mainImage := r.imageRef(sc.Spec.Images.Slapd, defaultDataPlaneRepo(r.OperatorImage, "slapd"))
 
 	mainContainer := corev1.Container{
-		Name:            "slapd",
+		Name:            slapdContainerName,
 		Image:           mainImage,
 		ImagePullPolicy: sc.Spec.Images.Slapd.PullPolicy,
 		Args: []string{
@@ -1213,8 +1213,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		ReadinessProbe: slapdReadinessProbe(),
 		// No livenessProbe, deliberately — see slapdProbeCommand.
 		Ports: []corev1.ContainerPort{
-			{Name: "ldap", ContainerPort: ldapContainerPort, Protocol: corev1.ProtocolTCP},
-			{Name: "ldaps", ContainerPort: ldapsContainerPort, Protocol: corev1.ProtocolTCP},
+			{Name: portNameLDAP, ContainerPort: ldapContainerPort, Protocol: corev1.ProtocolTCP},
+			{Name: portNameLDAPS, ContainerPort: ldapsContainerPort, Protocol: corev1.ProtocolTCP},
 		},
 		VolumeMounts:    mainMounts,
 		SecurityContext: mainSecCtx,
@@ -1225,11 +1225,11 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		ServiceName: serviceName,
 		Replicas:    &replicas,
 		Selector: &metav1.LabelSelector{
-			MatchLabels: labels,
+			MatchLabels: podLabels,
 		},
 		Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
-				Labels:      labels,
+				Labels:      podLabels,
 				Annotations: buildMultusAnnotations(sc),
 			},
 			Spec: corev1.PodSpec{
@@ -1258,7 +1258,7 @@ func (r *SlapdClusterReconciler) getConfigPassword(ctx context.Context, sc *ldap
 	}, secret); err != nil {
 		return "", fmt.Errorf("read config password secret %s: %w", secretName, err)
 	}
-	pw := string(secret.Data["root-password"])
+	pw := string(secret.Data[secretKeyRootPassword])
 	if pw == "" {
 		return "", fmt.Errorf("secret %s is missing root-password key", secretName)
 	}
@@ -1304,7 +1304,7 @@ func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv
 		if err := r.Get(ctx, client.ObjectKey{
 			Name: secretName, Namespace: sc.Namespace,
 		}, secret); err == nil {
-			info.bindPW = string(secret.Data["replication-password"])
+			info.bindPW = string(secret.Data[secretKeyReplicationPassword])
 		}
 		log.V(1).Info("CSN query credentials",
 			"db", db.Name, "suffix", db.Spec.Suffix,
@@ -1381,7 +1381,7 @@ func (r *SlapdClusterReconciler) checkLocalCSNConvergence(
 	verdict := evaluateLocalConvergence(readings, sc.Spec.Replicas)
 	if !verdict.Silent {
 		setCondition(&sc.Status.Conditions, metav1.Condition{
-			Type:               "ReplicationConverged",
+			Type:               replicationConvergedCondition,
 			Status:             verdict.Status,
 			Reason:             verdict.Reason,
 			Message:            verdict.Message,
@@ -1570,16 +1570,16 @@ func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // selectorLabels returns the standard pod selector labels.
 func selectorLabels(name string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":     "slapd",
-		"app.kubernetes.io/instance": name,
+		labelName:     appName,
+		labelInstance: name,
 	}
 }
 
 // readOnlySelectorLabels returns the pod selector labels for read-only replicas.
 func readOnlySelectorLabels(name string) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":     "slapd",
-		"app.kubernetes.io/instance": name + "-readonly",
+		labelName:     appName,
+		labelInstance: name + "-readonly",
 	}
 }
 
@@ -1627,7 +1627,7 @@ func emitWiringConditions(sc *ldapv1alpha1.SlapdCluster) {
 			peerCond.Status = metav1.ConditionTrue
 			peerCond.Reason = "PeerModeActive"
 			peerCond.Message = "External cluster(s) must add reciprocal syncrepl stanzas pointing at this slaptain cluster, and add slaptain's ServerIDs to their olcServerID list, for bidirectional replication to begin. See ADR-010 §promotion."
-		case "consumer-only":
+		case replicationModeConsumerOnly:
 			demoteCond.Status = metav1.ConditionTrue
 			demoteCond.Reason = "ConsumerOnlyModeActive"
 			demoteCond.Message = "Before transitioning back to peer (or decommissioning this cluster), the external cluster(s) should drop syncrepl stanzas pointing at slaptain to avoid log spam from failed pulls. Informational only — not a transition gate."
@@ -1837,8 +1837,8 @@ func (r *SlapdClusterReconciler) discoverRemotePeerProviders(
 
 	// List pods on the remote cluster matching the remote SlapdCluster's labels.
 	labelSelector := labels.SelectorFromSet(map[string]string{
-		"app.kubernetes.io/name":     "slapd",
-		"app.kubernetes.io/instance": remoteCluster,
+		labelName:     appName,
+		labelInstance: remoteCluster,
 	}).String()
 
 	podList, err := remoteClient.CoreV1().Pods(remoteNS).List(ctx, metav1.ListOptions{

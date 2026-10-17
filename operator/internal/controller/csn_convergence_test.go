@@ -84,7 +84,7 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			},
 			replicas:   3,
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "CSNsMatch",
+			wantReason: reasonCSNsMatch,
 			wantMsgHas: []string{"2 databases"},
 		},
 		{
@@ -98,7 +98,7 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			},
 			replicas:   2,
 			wantStatus: metav1.ConditionTrue,
-			wantReason: "CSNsMatch",
+			wantReason: reasonCSNsMatch,
 		},
 		{
 			// Real divergence must still be caught — and must name WHICH
@@ -112,7 +112,7 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			},
 			replicas:   2,
 			wantStatus: metav1.ConditionFalse,
-			wantReason: "CSNsDiverged",
+			wantReason: reasonCSNsDiverged,
 			wantMsgHas: []string{sfxA},
 		},
 		{
@@ -126,7 +126,7 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			},
 			replicas:   2,
 			wantStatus: metav1.ConditionFalse,
-			wantReason: "CSNsDiverged",
+			wantReason: reasonCSNsDiverged,
 			wantMsgHas: []string{sfxA},
 		},
 		{
@@ -142,7 +142,7 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			},
 			replicas:   3,
 			wantStatus: metav1.ConditionUnknown,
-			wantReason: "CSNQueriesIncomplete",
+			wantReason: reasonCSNQueriesIncomplete,
 			wantMsgHas: []string{"slapd-2", sfxA},
 		},
 		{
@@ -156,7 +156,7 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			},
 			replicas:   3,
 			wantStatus: metav1.ConditionFalse,
-			wantReason: "CSNsDiverged",
+			wantReason: reasonCSNsDiverged,
 			wantMsgHas: []string{sfxA},
 		},
 		{
@@ -170,7 +170,7 @@ func TestEvaluateLocalConvergence(t *testing.T) {
 			},
 			replicas:   2,
 			wantStatus: metav1.ConditionUnknown,
-			wantReason: "CSNQueriesIncomplete",
+			wantReason: reasonCSNQueriesIncomplete,
 		},
 		{
 			// Nothing was asked at all — no databases, no pods. There is
@@ -360,7 +360,7 @@ func TestEvaluatePeerConvergence(t *testing.T) {
 
 func mustCSNTime(t *testing.T, csns []string) time.Time {
 	t.Helper()
-	ts, _, err := newestCSN(csns)
+	ts, err := newestCSN(csns)
 	if err != nil {
 		t.Fatalf("newestCSN(%v): %v", csns, err)
 	}

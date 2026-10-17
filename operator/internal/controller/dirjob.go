@@ -201,10 +201,10 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 	}
 
 	volumes := []corev1.Volume{pvcVolume("data", "data-"+podName)}
-	mounts := []corev1.VolumeMount{{Name: "data", MountPath: "/data"}}
+	mounts := []corev1.VolumeMount{{Name: volumeData, MountPath: dataMountPath}}
 	if !readOnly && sc.NeedsAccesslogVolume() {
 		volumes = append(volumes, pvcVolume("accesslog", "accesslog-"+podName))
-		mounts = append(mounts, corev1.VolumeMount{Name: "accesslog", MountPath: ldapv1alpha1.AccesslogRoot})
+		mounts = append(mounts, corev1.VolumeMount{Name: volumeAccesslog, MountPath: ldapv1alpha1.AccesslogRoot})
 	}
 
 	job := &batchv1.Job{
@@ -212,10 +212,10 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 			Name:      jobName,
 			Namespace: sc.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":      "slapd",
-				"app.kubernetes.io/instance":  sc.Name,
-				"app.kubernetes.io/component": "database-dirs",
-				dirJobLabel:                   podName,
+				labelName:      appName,
+				labelInstance:  sc.Name,
+				labelComponent: "database-dirs",
+				dirJobLabel:    podName,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -230,11 +230,11 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 						Name:            "mkdir",
 						Image:           r.imageRef(sc.Spec.Images.Init, defaultDataPlaneRepo(r.OperatorImage, "slapd-init")),
 						ImagePullPolicy: sc.Spec.Images.Init.PullPolicy,
-						Command:         []string{"bash", "-c", "set -eux; mkdir -p " + strings.Join(quoted, " ")},
+						Command:         []string{jobShell, "-c", "set -eux; mkdir -p " + strings.Join(quoted, " ")},
 						VolumeMounts:    mounts,
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: new(false),
-							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
 							ReadOnlyRootFilesystem:   new(true),
 						},
 					}},

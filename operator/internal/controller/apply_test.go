@@ -52,7 +52,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 			},
 			Spec: corev1.ServiceSpec{
 				ClusterIP: corev1.ClusterIPNone,
-				Selector:  map[string]string{"app.kubernetes.io/name": "slapd"},
+				Selector:  map[string]string{labelName: appName},
 				Ports: []corev1.ServicePort{{
 					Name:       "ldap",
 					Port:       1024,
@@ -62,7 +62,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 			},
 		},
 		"StatefulSet": &appsv1.StatefulSet{
-			TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "StatefulSet"},
+			TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: "StatefulSet"},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "slapd",
 				Namespace: "slaptain-testing",
@@ -95,9 +95,9 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 			sc.Status.ReadyReplicas = 3
 			sc.Status.Replicas = 3
 			sc.Status.Conditions = []metav1.Condition{{
-				Type:               "ReplicationConverged",
+				Type:               replicationConvergedCondition,
 				Status:             metav1.ConditionTrue,
-				Reason:             "CSNsMatch",
+				Reason:             reasonCSNsMatch,
 				Message:            "all databases converged",
 				LastTransitionTime: metav1.Date(2026, 9, 14, 12, 0, 0, 0, metav1.Now().Location()),
 			}}
@@ -107,7 +107,7 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 			sd := &ldapv1alpha1.SlapdDatabase{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
-					Kind:       "SlapdDatabase",
+					Kind:       kindSlapdDatabase,
 				},
 				ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "slaptain-testing"},
 			}

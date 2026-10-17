@@ -153,10 +153,10 @@ func (r *SlapdSchemaReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// 7. Update status.
 	allApplied := len(failedPods) == 0
-	reason := "Applied"
+	reason := reasonApplied
 	msg := fmt.Sprintf("Schema applied to %d pods", len(appliedPods))
 	if !allApplied {
-		reason = "PartiallyApplied"
+		reason = reasonPartiallyApplied
 		msg = fmt.Sprintf("Schema applied to %d pods, failed on %d pods",
 			len(appliedPods), len(failedPods))
 	}
@@ -283,7 +283,7 @@ func (r *SlapdSchemaReconciler) getConfigPassword(ctx context.Context, sc *ldapv
 	}, secret); err != nil {
 		return "", fmt.Errorf("read config password secret %s: %w", secretName, err)
 	}
-	pw := string(secret.Data["root-password"])
+	pw := string(secret.Data[secretKeyRootPassword])
 	if pw == "" {
 		return "", fmt.Errorf("secret %s is missing root-password key", secretName)
 	}
@@ -312,7 +312,7 @@ func (r *SlapdSchemaReconciler) setStatus(
 		condStatus = metav1.ConditionTrue
 	}
 	setCondition(&ss.Status.Conditions, metav1.Condition{
-		Type:               "Applied",
+		Type:               conditionApplied,
 		Status:             condStatus,
 		Reason:             reason,
 		Message:            message,
@@ -322,7 +322,7 @@ func (r *SlapdSchemaReconciler) setStatus(
 
 	statusPatch := &ldapv1alpha1.SlapdSchema{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
+			APIVersion: ldapv1alpha1.GroupVersion.String(),
 			Kind:       "SlapdSchema",
 		},
 		ObjectMeta: metav1.ObjectMeta{

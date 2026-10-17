@@ -24,7 +24,7 @@ func newRestoreJobFixture(target restorePodTarget) (string, *ldapv1alpha1.SlapdD
 	job := buildRestoreJob(sc, sd, st, "demo/key.ldif.gz", "init:img", "op:img", target)
 	// The main container is "restore" (loadData) or "wipe" (RO).
 	for _, c := range job.Spec.Template.Spec.Containers {
-		if c.Name == "restore" || c.Name == "wipe" {
+		if c.Name == restoreContainerName || c.Name == "wipe" {
 			return c.Command[len(c.Command)-1], sd
 		}
 	}

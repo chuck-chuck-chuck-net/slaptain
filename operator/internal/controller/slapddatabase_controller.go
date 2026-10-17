@@ -455,7 +455,7 @@ func (r *SlapdDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	//     all-empty reading is a data-loss alert rather than a database still
 	//     waiting for its first replication. One-way — nothing clears it, and
 	//     nothing on the write path reads it (see seedNeeded).
-	dataPresent, observed := r.evaluateDataPresent(ctx, sc, sd, rootPW)
+	dataPresent, observed := r.evaluateDataPresent(sc, sd, rootPW)
 	setCondition(&sd.Status.Conditions, dataPresent)
 	if observed {
 		sd.Status.DataObserved = true
@@ -495,10 +495,10 @@ func (r *SlapdDatabaseReconciler) reconcileCredentials(
 		if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, existing); err != nil {
 			return fmt.Errorf("read user-provided credentials Secret %s: %w", secretName, err)
 		}
-		if len(existing.Data["root-password"]) == 0 {
+		if len(existing.Data[secretKeyRootPassword]) == 0 {
 			return fmt.Errorf("user-provided credentials Secret %s is missing required key \"root-password\"", secretName)
 		}
-		if sc.NeedsAccesslog() && len(existing.Data["replication-password"]) == 0 {
+		if sc.NeedsAccesslog() && len(existing.Data[secretKeyReplicationPassword]) == 0 {
 			return fmt.Errorf(
 				"user-provided credentials Secret %s is missing key \"replication-password\" "+
 					"but the cluster needs it (replication.enabled=true with "+
@@ -530,8 +530,8 @@ func (r *SlapdDatabaseReconciler) reconcileCredentials(
 		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: sd.Namespace},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"root-password":        rootPW,
-			"replication-password": replPW,
+			secretKeyRootPassword:        rootPW,
+			secretKeyReplicationPassword: replPW,
 		},
 	}
 	// No SetControllerReference — the secret should survive CR deletion
@@ -552,7 +552,7 @@ func (r *SlapdDatabaseReconciler) getDatabaseRootPassword(ctx context.Context, s
 	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, secret); err != nil {
 		return "", fmt.Errorf("read database credentials secret %s: %w", secretName, err)
 	}
-	pw := string(secret.Data["root-password"])
+	pw := string(secret.Data[secretKeyRootPassword])
 	if pw == "" {
 		return "", fmt.Errorf("secret %s is missing root-password key", secretName)
 	}
@@ -565,7 +565,7 @@ func (r *SlapdDatabaseReconciler) getDatabaseReplPassword(ctx context.Context, s
 	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, secret); err != nil {
 		return "", fmt.Errorf("read database credentials secret %s: %w", secretName, err)
 	}
-	return string(secret.Data["replication-password"]), nil
+	return string(secret.Data[secretKeyReplicationPassword]), nil
 }
 
 func (r *SlapdDatabaseReconciler) getClusterConfigPassword(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) (string, error) {
@@ -577,7 +577,7 @@ func (r *SlapdDatabaseReconciler) getClusterConfigPassword(ctx context.Context, 
 	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sc.Namespace}, secret); err != nil {
 		return "", fmt.Errorf("read config password secret %s: %w", secretName, err)
 	}
-	pw := string(secret.Data["root-password"])
+	pw := string(secret.Data[secretKeyRootPassword])
 	if pw == "" {
 		return "", fmt.Errorf("secret %s is missing root-password key", secretName)
 	}
@@ -914,9 +914,9 @@ func (r *SlapdDatabaseReconciler) ensureReadOnly(
 	}
 
 	current := sr.Entries[0].GetEqualFoldAttributeValue("olcReadOnly")
-	desiredStr := "FALSE"
+	desiredStr := olcFalse
 	if desired {
-		desiredStr = "TRUE"
+		desiredStr = olcTrue
 	}
 	// slapd normalizes missing → FALSE for boolean attributes; treat the two
 	// as equivalent so we don't write FALSE on every reconcile.
@@ -964,8 +964,8 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 	dn := "olcDatabase=mdb,cn=config"
 
 	addReq := ldap.NewAddRequest(dn, nil)
-	addReq.Attribute("objectClass", []string{"olcDatabaseConfig", "olcMdbConfig"})
-	addReq.Attribute("olcDatabase", []string{"mdb"})
+	addReq.Attribute("objectClass", []string{ocDatabaseConfig, ocMdbConfig})
+	addReq.Attribute("olcDatabase", []string{backendMDB})
 	addReq.Attribute("olcSuffix", []string{sd.Spec.Suffix})
 	addReq.Attribute("olcRootDN", []string{rootDN})
 	addReq.Attribute("olcRootPW", []string{rootPWHash})
@@ -981,7 +981,7 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 	addReq.Attribute("olcDbMaxSize", []string{strconv.FormatInt(maxSize, 10)})
 
 	if desiredNoSync(sd, sc) {
-		addReq.Attribute("olcDbNoSync", []string{"TRUE"})
+		addReq.Attribute("olcDbNoSync", []string{olcTrue})
 	}
 	if v, write := desiredCheckpoint(sd); write {
 		addReq.Attribute("olcDbCheckpoint", []string{v})
@@ -1012,7 +1012,7 @@ func (r *SlapdDatabaseReconciler) createDatabase(
 	// rejects client writes while still accepting syncrepl updates from
 	// externalPeers. See ADR-010.
 	if sc.IsConsumerOnly() {
-		addReq.Attribute("olcReadOnly", []string{"TRUE"})
+		addReq.Attribute("olcReadOnly", []string{olcTrue})
 	}
 
 	if err := conn.Add(addReq); err != nil {
@@ -1047,7 +1047,7 @@ func (r *SlapdDatabaseReconciler) applyACLs(
 	// Read current olcAccess.
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dataDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-		1, 0, false, "(objectClass=*)", []string{"olcAccess"}, nil,
+		1, 0, false, "(objectClass=*)", []string{attrOlcAccess}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("read olcAccess: %w", err)
@@ -1143,9 +1143,9 @@ func dataDBOverlays(conn *ldap.Conn, dataDN string) (hasAccesslog, hasSyncprov b
 	for _, entry := range sr.Entries {
 		for _, ov := range entry.GetEqualFoldAttributeValues("olcOverlay") {
 			switch stripOrderingPrefix(ov) {
-			case "accesslog":
+			case overlayAccesslog:
 				hasAccesslog = true
-			case "syncprov":
+			case overlaySyncprov:
 				hasSyncprov = true
 			}
 		}
@@ -1190,8 +1190,8 @@ func (r *SlapdDatabaseReconciler) ensureSyncProvOverlay(
 		log.Info("adding syncprov overlay to data database", "host", host, "dataDN", dataDN)
 		syncprovDN := "olcOverlay=syncprov," + dataDN
 		addReq := ldap.NewAddRequest(syncprovDN, nil)
-		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
-		addReq.Attribute("olcOverlay", []string{"syncprov"})
+		addReq.Attribute("objectClass", []string{ocOverlayConfig, ocSyncProvConfig})
+		addReq.Attribute("olcOverlay", []string{overlaySyncprov})
 		if checkpoint := desiredSyncprovCheckpoint(sd); checkpoint != "" {
 			addReq.Attribute("olcSpCheckpoint", []string{checkpoint})
 		}
@@ -1379,11 +1379,11 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogOverlay(
 		log.Info("adding accesslog overlay to data database", "host", host, "dataDN", dataDN)
 		accesslogDN := "olcOverlay=accesslog," + dataDN
 		addReq := ldap.NewAddRequest(accesslogDN, nil)
-		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcAccessLogConfig"})
-		addReq.Attribute("olcOverlay", []string{"accesslog"})
+		addReq.Attribute("objectClass", []string{ocOverlayConfig, ocAccessLogConfig})
+		addReq.Attribute("olcOverlay", []string{overlayAccesslog})
 		addReq.Attribute("olcAccessLogDB", []string{ldapv1alpha1.AccesslogSuffix(sd.Name)})
 		addReq.Attribute("olcAccessLogOps", []string{"writes"})
-		addReq.Attribute("olcAccessLogSuccess", []string{"TRUE"})
+		addReq.Attribute("olcAccessLogSuccess", []string{olcTrue})
 		if purge != "" {
 			addReq.Attribute("olcAccessLogPurge", []string{purge})
 		}
@@ -1700,8 +1700,8 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		}
 		log.Info("creating accesslog DB", "host", host, "suffix", logSuffix)
 		addReq := ldap.NewAddRequest("olcDatabase=mdb,cn=config", nil)
-		addReq.Attribute("objectClass", []string{"olcDatabaseConfig", "olcMdbConfig"})
-		addReq.Attribute("olcDatabase", []string{"mdb"})
+		addReq.Attribute("objectClass", []string{ocDatabaseConfig, ocMdbConfig})
+		addReq.Attribute("olcDatabase", []string{backendMDB})
 		addReq.Attribute("olcSuffix", []string{logSuffix})
 		addReq.Attribute("olcRootDN", []string{"cn=admin,cn=config"})
 		// back-mdb does not create olcDbDirectory; /accesslog/<db> is
@@ -1722,7 +1722,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 		// on one and not the other buys nothing — on its own, longer checkpoint
 		// interval (defaultAccesslogCheckpoint).
 		if desiredNoSync(sd, sc) {
-			addReq.Attribute("olcDbNoSync", []string{"TRUE"})
+			addReq.Attribute("olcDbNoSync", []string{olcTrue})
 		}
 		addReq.Attribute("olcDbCheckpoint", []string{defaultAccesslogCheckpoint})
 		if err := conn.Add(addReq); err != nil {
@@ -1782,7 +1782,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	// what must not be there, and deciding whether syncprov still needs adding.
 	childSR, err := conn.Search(ldap.NewSearchRequest(
 		dbDN, ldap.ScopeSingleLevel, ldap.NeverDerefAliases,
-		0, 0, false, "(objectClass=*)", []string{"objectClass"}, nil,
+		0, 0, false, "(objectClass=*)", []string{attrObjectClass}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("search children of accesslog DB %s: %w", dbDN, err)
@@ -1818,10 +1818,10 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 	if !hasSyncprov {
 		log.Info("adding syncprov overlay to accesslog DB", "host", host, "suffix", logSuffix)
 		addReq := ldap.NewAddRequest("olcOverlay=syncprov,"+dbDN, nil)
-		addReq.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
-		addReq.Attribute("olcOverlay", []string{"syncprov"})
-		addReq.Attribute("olcSpNoPresent", []string{"TRUE"})
-		addReq.Attribute("olcSpReloadHint", []string{"TRUE"})
+		addReq.Attribute("objectClass", []string{ocOverlayConfig, ocSyncProvConfig})
+		addReq.Attribute("olcOverlay", []string{overlaySyncprov})
+		addReq.Attribute("olcSpNoPresent", []string{olcTrue})
+		addReq.Attribute("olcSpReloadHint", []string{olcTrue})
 		if err := conn.Add(addReq); err != nil {
 			if !ldap.IsErrorWithCode(err, ldap.LDAPResultEntryAlreadyExists) {
 				return fmt.Errorf("add syncprov overlay to accesslog DB: %w", err)
@@ -1849,7 +1849,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogDB(
 // nothing and is dropped. It is not removed from DBs that already have it
 // (harmless, and a Replace would force a needless reindex).
 var accesslogIndexAttrs = []string{
-	"entryCSN", "objectClass", "reqEnd", "reqResult", "reqStart", "reqDN",
+	attrEntryCSN, attrObjectClass, "reqEnd", "reqResult", "reqStart", "reqDN",
 }
 
 // planAccesslogIndices returns the olcDbIndex values to ADD so that an accesslog
@@ -1909,7 +1909,7 @@ func (r *SlapdDatabaseReconciler) ensureAccesslogACL(
 
 	sr, err := conn.Search(ldap.NewSearchRequest(
 		dbDN, ldap.ScopeBaseObject, ldap.NeverDerefAliases,
-		1, 0, false, "(objectClass=*)", []string{"olcAccess"}, nil,
+		1, 0, false, "(objectClass=*)", []string{attrOlcAccess}, nil,
 	))
 	if err != nil {
 		return fmt.Errorf("read olcAccess on %s: %w", dbDN, err)
@@ -2119,7 +2119,7 @@ func (r *SlapdDatabaseReconciler) ensureReplicationUser(
 		}
 
 		addReq := ldap.NewAddRequest(replDN, nil)
-		addReq.Attribute("objectClass", []string{"simpleSecurityObject", "organizationalRole"})
+		addReq.Attribute("objectClass", []string{ocSimpleSecurityObject, ocOrganizationalRole})
 		addReq.Attribute("cn", []string{"replication"})
 		addReq.Attribute("description", []string{"Syncrepl bind account"})
 		addReq.Attribute("userPassword", []string{replHash})
@@ -2243,7 +2243,7 @@ func (r *SlapdDatabaseReconciler) applySeedData(
 func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 	res, err := conn.Search(ldap.NewSearchRequest(
 		suffix, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 0, 5, false,
-		"(objectClass=*)", []string{"entryCSN"}, nil,
+		"(objectClass=*)", []string{attrEntryCSN}, nil,
 	))
 	if err != nil || len(res.Entries) == 0 {
 		return "", false
@@ -2315,7 +2315,6 @@ func suffixEntryCSN(conn *ldap.Conn, suffix string) (string, bool) {
 // Aggregation is the pure aggregateDataPresent; observed=true reports that the
 // root entry was seen on at least one pod this pass, for the caller's latch.
 func (r *SlapdDatabaseReconciler) evaluateDataPresent(
-	ctx context.Context,
 	sc *ldapv1alpha1.SlapdCluster,
 	sd *ldapv1alpha1.SlapdDatabase,
 	rootPW string,
@@ -2578,7 +2577,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			}
 			password = string(secret.Data["password"])
 			if password == "" {
-				password = string(secret.Data["replication-password"])
+				password = string(secret.Data[secretKeyReplicationPassword])
 			}
 		}
 
@@ -2624,9 +2623,9 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			if port == 0 {
 				port = 1025
 			}
-			scheme := "ldaps"
+			scheme := schemeLDAPS
 			if !tlsEnabled {
-				scheme = "ldap"
+				scheme = schemeLDAP
 				if port == 1025 {
 					port = 1024
 				}
@@ -2702,9 +2701,9 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	// each pod independently consumes from externalPeers, the data DB is
 	// olcReadOnly=TRUE, and slapd does not advertise as a write source.
 	consumerOnly := sc.IsConsumerOnly()
-	multiProvider := "TRUE"
+	multiProvider := olcTrue
 	if consumerOnly {
-		multiProvider = "FALSE"
+		multiProvider = olcFalse
 	}
 
 	// The in-cluster providers this cluster has, as a RID set. Consumer-only
@@ -2907,11 +2906,11 @@ func buildDatabaseSyncRepl(
 ) ([]string, error) {
 	var stanzas []string
 
-	peerScheme := "ldap"
+	peerScheme := schemeLDAP
 	peerPort := int32(1024)
 	tlsOpt := ""
 	if tlsEnabled {
-		peerScheme = "ldaps"
+		peerScheme = schemeLDAPS
 		peerPort = 1025
 		tlsOpt = " tls_cacert=/etc/openldap/tls/ca.crt"
 	}
@@ -2972,7 +2971,7 @@ func buildDatabaseSyncRepl(
 		if ip, ok := replNetIPs[peerPodName]; ok {
 			peerHost = ip
 			if tlsEnabled {
-				peerTLSOpt += " tls_reqcert=allow"
+				peerTLSOpt += tlsReqcertAllow
 			}
 		}
 		providerURI := fmt.Sprintf("%s://%s:%d", peerScheme, peerHost, peerPort)
@@ -3039,7 +3038,7 @@ func buildDatabaseSyncRepl(
 		epTLSOpt := baseTLSOpt
 		// IP-based provider URIs won't match DNS SANs → relax hostname verification.
 		if net.ParseIP(strings.Split(strings.TrimPrefix(strings.TrimPrefix(uri, "ldaps://"), "ldap://"), ":")[0]) != nil {
-			epTLSOpt += " tls_reqcert=allow"
+			epTLSOpt += tlsReqcertAllow
 		}
 
 		stanza := fmt.Sprintf("rid=%s provider=%s"+
@@ -3074,11 +3073,11 @@ func buildDatabaseSyncReplRO(
 ) ([]string, error) {
 	var stanzas []string
 
-	peerScheme := "ldap"
+	peerScheme := schemeLDAP
 	peerPort := int32(1024)
 	tlsOpt := ""
 	if tlsEnabled {
-		peerScheme = "ldaps"
+		peerScheme = schemeLDAPS
 		peerPort = 1025
 		tlsOpt = " tls_cacert=/etc/openldap/tls/ca.crt"
 	}
@@ -3121,7 +3120,7 @@ func buildDatabaseSyncReplRO(
 		if ip, ok := replNetIPs[peerPodName]; ok {
 			peerHost = ip
 			if tlsEnabled {
-				peerTLSOpt += " tls_reqcert=allow"
+				peerTLSOpt += tlsReqcertAllow
 			}
 		}
 		providerURI := fmt.Sprintf("%s://%s:%d", peerScheme, peerHost, peerPort)
@@ -3489,7 +3488,7 @@ func (r *SlapdDatabaseReconciler) setStatus(
 		condStatus = metav1.ConditionTrue
 	}
 	setCondition(&sd.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReady,
 		Status:             condStatus,
 		Reason:             reason,
 		Message:            message,
@@ -3499,8 +3498,8 @@ func (r *SlapdDatabaseReconciler) setStatus(
 
 	statusPatch := &ldapv1alpha1.SlapdDatabase{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
-			Kind:       "SlapdDatabase",
+			APIVersion: ldapv1alpha1.GroupVersion.String(),
+			Kind:       kindSlapdDatabase,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sd.Name,

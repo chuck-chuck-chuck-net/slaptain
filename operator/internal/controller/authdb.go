@@ -51,7 +51,7 @@ import (
 func authDBACLs() []string {
 	return []string{
 		`to attrs=userPassword by anonymous auth by * none`,
-		`to * by * none`,
+		aclDenyAll,
 	}
 }
 
@@ -67,9 +67,9 @@ func authDBACLs() []string {
 // placement changed, which is the whole of ADR-027.
 func desiredAuthIdentityAttrs(dbName, hash string) map[string][]string {
 	return map[string][]string{
-		"objectClass":  {"simpleSecurityObject", "organizationalRole"},
-		"cn":           {ldapv1alpha1.AuthIdentityCN(dbName)},
-		"userPassword": {hash},
+		attrObjectClass:  {ocSimpleSecurityObject, ocOrganizationalRole},
+		"cn":             {ldapv1alpha1.AuthIdentityCN(dbName)},
+		attrUserPassword: {hash},
 		"description": {
 			"Syncrepl bind identity for SlapdDatabase " + dbName + " (ADR-027)",
 		},

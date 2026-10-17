@@ -81,7 +81,7 @@ func newRIDFixture(ctx context.Context) *ridFixture {
 	// running here.
 	Expect(k8sClient.Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: f.cluster + "-config-password", Namespace: f.ns},
-		StringData: map[string]string{"root-password": "not-a-real-password"},
+		StringData: map[string]string{secretKeyRootPassword: "not-a-real-password"},
 	})).To(Succeed())
 
 	sc := &ldapv1alpha1.SlapdCluster{
@@ -330,7 +330,7 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 // sits NEXT TO a healthy Ready, which is what makes it unreadable.
 func readyStatus(sd *ldapv1alpha1.SlapdDatabase) string {
 	for i := range sd.Status.Conditions {
-		if sd.Status.Conditions[i].Type == "Ready" {
+		if sd.Status.Conditions[i].Type == conditionReady {
 			return fmt.Sprintf("%s/%s", sd.Status.Conditions[i].Status, sd.Status.Conditions[i].Reason)
 		}
 	}

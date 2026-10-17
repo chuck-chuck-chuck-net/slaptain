@@ -30,7 +30,7 @@ import (
 func TestAuthDBACLs(t *testing.T) {
 	want := []string{
 		`to attrs=userPassword by anonymous auth by * none`,
-		`to * by * none`,
+		aclDenyAll,
 	}
 	got := authDBACLs()
 	if !reflect.DeepEqual(got, want) {
@@ -46,11 +46,11 @@ func TestAuthDBACLsOrderIsLoadBearing(t *testing.T) {
 	// olcAccess is evaluated in order and the first matching `to` clause wins.
 	// A catch-all `to *` placed first would shadow the userPassword rule and
 	// make every bind fail — the database would be inert in the wrong direction.
-	if got[len(got)-1] != `to * by * none` {
+	if got[len(got)-1] != aclDenyAll {
 		t.Errorf("the catch-all must be LAST, got %q as the final rule", got[len(got)-1])
 	}
 	for i, rule := range got[:len(got)-1] {
-		if rule == `to * by * none` {
+		if rule == aclDenyAll {
 			t.Errorf("catch-all found at index %d, shadowing %d later rule(s)", i, len(got)-1-i)
 		}
 	}
@@ -66,10 +66,10 @@ func TestDesiredAuthIdentityAttrs(t *testing.T) {
 	got := desiredAuthIdentityAttrs("example-db", "{SSHA}deadbeef")
 
 	want := map[string][]string{
-		"objectClass":  {"simpleSecurityObject", "organizationalRole"},
-		"cn":           {"repl-example-db"},
-		"userPassword": {"{SSHA}deadbeef"},
-		"description":  {"Syncrepl bind identity for SlapdDatabase example-db (ADR-027)"},
+		attrObjectClass:  {ocSimpleSecurityObject, ocOrganizationalRole},
+		"cn":             {"repl-example-db"},
+		attrUserPassword: {"{SSHA}deadbeef"},
+		"description":    {"Syncrepl bind identity for SlapdDatabase example-db (ADR-027)"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("desiredAuthIdentityAttrs() =\n  %#v\nwant\n  %#v", got, want)

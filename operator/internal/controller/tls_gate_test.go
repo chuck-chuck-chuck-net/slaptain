@@ -1,6 +1,10 @@
 package controller
 
-import "testing"
+import (
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+)
 
 // The gate decides on evidence it was handed, so the decision is pure and the
 // only thing the controller adds is the Get. Every row here is a state a real
@@ -38,7 +42,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 			enabled:    true,
 			secretName: "slapd-tls",
 			found:      true,
-			data:       map[string][]byte{"tls.crt": []byte("x"), "tls.key": []byte("y")},
+			data:       map[string][]byte{corev1.TLSCertKey: []byte("x"), corev1.TLSPrivateKeyKey: []byte("y")},
 			wantReady:  true,
 			wantReason: reasonTLSReady,
 		},
@@ -47,7 +51,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 			enabled:    true,
 			secretName: "slapd-tls",
 			found:      true,
-			data:       map[string][]byte{"tls.crt": []byte("x"), "tls.key": []byte("y")},
+			data:       map[string][]byte{corev1.TLSCertKey: []byte("x"), corev1.TLSPrivateKeyKey: []byte("y")},
 			wantReady:  true,
 			wantReason: reasonTLSReady,
 		},
@@ -73,7 +77,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 			enabled:    true,
 			secretName: "slapd-tls",
 			found:      true,
-			data:       map[string][]byte{"tls.key": []byte("y")},
+			data:       map[string][]byte{corev1.TLSPrivateKeyKey: []byte("y")},
 			wantReady:  false,
 			wantReason: reasonTLSSecretIncomplete,
 		},
@@ -82,7 +86,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 			enabled:    true,
 			secretName: "slapd-tls",
 			found:      true,
-			data:       map[string][]byte{"tls.crt": []byte("x")},
+			data:       map[string][]byte{corev1.TLSCertKey: []byte("x")},
 			wantReady:  false,
 			wantReason: reasonTLSSecretIncomplete,
 		},
@@ -91,7 +95,7 @@ func TestEvaluateTLSSecret(t *testing.T) {
 			enabled:    true,
 			secretName: "slapd-tls",
 			found:      true,
-			data:       map[string][]byte{"tls.crt": []byte("x"), "tls.key": []byte("")},
+			data:       map[string][]byte{corev1.TLSCertKey: []byte("x"), corev1.TLSPrivateKeyKey: []byte("")},
 			wantReady:  false,
 			wantReason: reasonTLSSecretIncomplete,
 		},

@@ -60,55 +60,55 @@ func TestAggregateDataPresentReadOnly(t *testing.T) {
 		{"RO pod hides the entry while every RW pod has it", []podPresence{
 			rw("slapd-0", true, true), rw("slapd-1", true, true),
 			ro("slapd-readonly-0", true, false),
-		}, true, metav1.ConditionFalse, "DataMissingOnReadOnlyPods", "slapd-readonly-0"},
+		}, true, metav1.ConditionFalse, reasonDataMissingOnReadOnlyPods, "slapd-readonly-0"},
 
 		// A glue is corruption, not a sync stage: the same reason regardless of
 		// the pod's role, naming the RO pod.
 		{"glue on an RO pod is the glue reason", []podPresence{
 			rw("slapd-0", true, true), gluedRO("slapd-readonly-0"),
-		}, true, metav1.ConditionFalse, "GlueSuffix", "slapd-readonly-0"},
+		}, true, metav1.ConditionFalse, reasonGlueSuffix, "slapd-readonly-0"},
 
 		// Positive control: a writable pod's divergence keeps the RW reason and
 		// is not softened by a healthy RO fleet.
 		{"RW divergence with the RO fleet healthy keeps the RW reason", []podPresence{
 			rw("slapd-0", true, false), rw("slapd-1", true, true),
 			ro("slapd-readonly-0", true, true),
-		}, true, metav1.ConditionFalse, "DataMissingOnPods", "slapd-0"},
+		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
 
 		// Every RW pod hiding it while only the RO fleet still shows it is still
 		// the RW alert — an RO sighting is not an excuse.
 		{"every RW pod hides it, RO still has it", []podPresence{
 			rw("slapd-0", true, false), rw("slapd-1", true, false),
 			ro("slapd-readonly-0", true, true),
-		}, true, metav1.ConditionFalse, "DataMissingOnPods", "slapd-0"},
+		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
 
 		// Unreachable is never evidence: an RO pod that could not be dialled
 		// must not manufacture a verdict in either direction.
 		{"RO pod unreachable, every RW pod present", []podPresence{
 			rw("slapd-0", true, true), rw("slapd-1", true, true),
 			ro("slapd-readonly-0", false, false),
-		}, true, metav1.ConditionTrue, "RootEntryVisible", "slapd-readonly-0"},
+		}, true, metav1.ConditionTrue, reasonRootEntryVisible, "slapd-readonly-0"},
 
 		{"RO pod unreachable, RW divergence", []podPresence{
 			rw("slapd-0", true, false), rw("slapd-1", true, true),
 			ro("slapd-readonly-0", false, false),
-		}, true, metav1.ConditionFalse, "DataMissingOnPods", "slapd-0"},
+		}, true, metav1.ConditionFalse, reasonDataMissingOnPods, "slapd-0"},
 
 		// Nothing visible anywhere: an RO pod's absence adds no new verdict, the
 		// knownPopulated axis still decides. A never-populated peer site bringing
 		// up an RO replica must not read as loss.
 		{"RO absent and RW unreachable on a never-populated database", []podPresence{
 			rw("slapd-0", false, false), ro("slapd-readonly-0", true, false),
-		}, false, metav1.ConditionUnknown, "NoDataYet", ""},
+		}, false, metav1.ConditionUnknown, reasonNoDataYet, ""},
 
 		{"RO absent and RW unreachable on a populated database", []podPresence{
 			rw("slapd-0", false, false), ro("slapd-readonly-0", true, false),
-		}, true, metav1.ConditionFalse, "DataMissing", ""},
+		}, true, metav1.ConditionFalse, reasonDataMissing, ""},
 
 		{"healthy fleet including RO is True", []podPresence{
 			rw("slapd-0", true, true), rw("slapd-1", true, true),
 			ro("slapd-readonly-0", true, true),
-		}, true, metav1.ConditionTrue, "RootEntryVisible", "read-only"},
+		}, true, metav1.ConditionTrue, reasonRootEntryVisible, "read-only"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

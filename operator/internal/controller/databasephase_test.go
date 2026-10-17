@@ -53,7 +53,7 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 			name:       "a clean pass is Running",
 			applied:    []string{"slapd-0", "slapd-1"},
 			wantPhase:  ldapv1alpha1.DatabasePhaseRunning,
-			wantReason: "Applied",
+			wantReason: reasonApplied,
 			why:        "every pod took the database and nothing was withheld",
 		},
 		{
@@ -62,7 +62,7 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 			failed:      []string{"slapd-1"},
 			pendingWork: true,
 			wantPhase:   ldapv1alpha1.DatabasePhaseDegraded,
-			wantReason:  "PartiallyApplied",
+			wantReason:  reasonPartiallyApplied,
 			why:         "the generic wait-and-retry state",
 		},
 		{
@@ -89,7 +89,7 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 			failed:     []string{"slapd-0", "slapd-1"},
 			refusal:    refusal,
 			wantPhase:  ldapv1alpha1.DatabasePhaseError,
-			wantReason: "NoPodsReachable",
+			wantReason: reasonNoPodsReachable,
 			why: "a database no pod answers on has a louder problem than its spec, and the refusal " +
 				"would send a human to edit a CR that may be fine",
 		},
@@ -98,7 +98,7 @@ func TestDatabasePhasePrecedence(t *testing.T) {
 			failed:      []string{"slapd-0"},
 			pendingWork: true,
 			wantPhase:   ldapv1alpha1.DatabasePhaseError,
-			wantReason:  "NoPodsReachable",
+			wantReason:  reasonNoPodsReachable,
 			why:         "unchanged from before the lift — the regression guard for the ranking above it",
 		},
 	} {

@@ -62,21 +62,21 @@ func buildBackupJob(sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase
 	dataPVC := "data-" + sc.Name + "-0"
 
 	noEsc := false
-	dropAll := &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
+	dropAll := &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}}
 
 	// slapcat (-F) loads the entire cn=config, which on a replicated cluster
 	// references the accesslog DB's olcDbDirectory (/accesslog). That path must
 	// exist or slapcat aborts at config-load ("bad configuration directory"),
 	// even though we only dump the data DB. Mount the accesslog PVC when present.
 	mounts := mountsWithAccesslog(sc, []corev1.VolumeMount{
-		{Name: "config", MountPath: "/config", ReadOnly: true},
-		{Name: "data", MountPath: "/data"},
-		{Name: "staging", MountPath: backupStagingPath},
+		{Name: volumeConfig, MountPath: configMountPath, ReadOnly: true},
+		{Name: volumeData, MountPath: dataMountPath},
+		{Name: volumeStaging, MountPath: backupStagingPath},
 	})
 	volumes := volumesWithAccesslog(sc, []corev1.Volume{
 		pvcVolume("config", configPVC),
 		pvcVolume("data", dataPVC),
-		{Name: "staging", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: volumeStaging, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	})
 
 	// slapcat → gzip into staging. bash + pipefail so a slapcat failure isn't
@@ -90,7 +90,7 @@ func buildBackupJob(sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase
 		// password hash as object metadata for restore-time verification (ADR-014
 		// amendment). The targeted slapcat is reliable regardless of where the
 		// entry sits in the full dump.
-		Command: []string{"bash", "-c", `set -eo pipefail
+		Command: []string{jobShell, "-c", `set -eo pipefail
 slapcat -F /config/slapd.d -b "$SUFFIX" | gzip -c > ` + backupDumpFile + `
 slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEntryFile},
 		Env:             []corev1.EnvVar{{Name: "SUFFIX", Value: sd.Spec.Suffix}},
@@ -125,7 +125,7 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 			{Name: "AWS_SECRET_ACCESS_KEY", ValueFrom: secretRef("secret-access-key")},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "staging", MountPath: backupStagingPath, ReadOnly: true},
+			{Name: volumeStaging, MountPath: backupStagingPath, ReadOnly: true},
 		},
 		SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: &noEsc, Capabilities: dropAll},
 	}
@@ -137,9 +137,9 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 			Name:      sb.Name + "-backup",
 			Namespace: sb.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":            "slapd",
-				"app.kubernetes.io/instance":        sc.Name,
-				"app.kubernetes.io/component":       "backup",
+				labelName:                           appName,
+				labelInstance:                       sc.Name,
+				labelComponent:                      "backup",
 				"ldap.chuck-chuck-chuck.net/backup": sb.Name,
 			},
 		},
@@ -172,7 +172,7 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 			PodAffinity: &corev1.PodAffinity{
 				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
 					LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-						"app.kubernetes.io/instance":         sc.Name,
+						labelInstance:                        sc.Name,
 						"statefulset.kubernetes.io/pod-name": sc.Name + "-0",
 					}},
 					TopologyKey: "kubernetes.io/hostname",
@@ -198,7 +198,7 @@ func pvcVolume(name, claim string) corev1.Volume {
 // so that path must exist even when only the data DB is dumped/loaded.
 func mountsWithAccesslog(sc *ldapv1alpha1.SlapdCluster, base []corev1.VolumeMount) []corev1.VolumeMount {
 	if sc.NeedsAccesslogVolume() {
-		base = append(base, corev1.VolumeMount{Name: "accesslog", MountPath: ldapv1alpha1.AccesslogRoot})
+		base = append(base, corev1.VolumeMount{Name: volumeAccesslog, MountPath: ldapv1alpha1.AccesslogRoot})
 	}
 	return base
 }

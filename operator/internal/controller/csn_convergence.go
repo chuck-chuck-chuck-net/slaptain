@@ -27,6 +27,13 @@ import (
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
+// Reasons of the ReplicationConverged condition (ADR-008 amendment 2026-09-14).
+const (
+	reasonCSNsMatch            = "CSNsMatch"
+	reasonCSNsDiverged         = "CSNsDiverged"
+	reasonCSNQueriesIncomplete = "CSNQueriesIncomplete"
+)
+
 // csnReading is one contextCSN query result: what was asked (which pod or
 // remote address, which database suffix) and what came back — the CSN vector,
 // or the error that prevented reading it. A failed read is a reading too: it
@@ -107,7 +114,7 @@ func evaluateLocalConvergence(readings []csnReading, replicas int32) localVerdic
 			continue
 		}
 		setsBySuffix[r.Suffix] = append(setsBySuffix[r.Suffix], r.CSNs)
-		t, _, err := newestCSN(r.CSNs)
+		t, err := newestCSN(r.CSNs)
 		if err != nil {
 			continue
 		}
@@ -138,18 +145,18 @@ func evaluateLocalConvergence(readings []csnReading, replicas int32) localVerdic
 				len(unreadable), summarizeList(unreadable, 4))
 		}
 		v.Status = metav1.ConditionFalse
-		v.Reason = "CSNsDiverged"
+		v.Reason = reasonCSNsDiverged
 		v.Message = msg
 	case len(unreadable) > 0:
 		v.Status = metav1.ConditionUnknown
-		v.Reason = "CSNQueriesIncomplete"
+		v.Reason = reasonCSNQueriesIncomplete
 		v.Message = fmt.Sprintf(
 			"could not read contextCSN for %d of %d (pod, database) pairs: %s — "+
 				"no divergence observed on what could be read, which is not evidence of convergence",
 			len(unreadable), len(readings), summarizeList(unreadable, 4))
 	default:
 		v.Status = metav1.ConditionTrue
-		v.Reason = "CSNsMatch"
+		v.Reason = reasonCSNsMatch
 		v.Message = fmt.Sprintf("all %d pods report identical contextCSN for each of %d databases",
 			replicas, len(suffixes))
 	}
@@ -199,7 +206,7 @@ func evaluatePeerConvergence(
 			continue
 		}
 		verified[r.Suffix] = true
-		if t, _, err := newestCSN(r.CSNs); err == nil && t.After(remoteNewest[r.Suffix]) {
+		if t, err := newestCSN(r.CSNs); err == nil && t.After(remoteNewest[r.Suffix]) {
 			remoteNewest[r.Suffix] = t
 		}
 	}

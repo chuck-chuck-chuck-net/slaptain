@@ -39,6 +39,12 @@ import (
 
 const podsResponsiveCondition = "PodsResponsive"
 
+// Reasons of the PodsResponsive condition.
+const (
+	reasonAllPodsAnswering = "AllPodsAnswering"
+	reasonPodsNotAnswering = "PodsNotAnswering"
+)
+
 // podsResponsiveVerdict is what one pass of readings says about reachability.
 type podsResponsiveVerdict struct {
 	Status  metav1.ConditionStatus
@@ -107,13 +113,13 @@ func evaluatePodsResponsive(readings []csnReading, replicas int32) podsResponsiv
 	if len(silent) == 0 {
 		return podsResponsiveVerdict{
 			Status:  metav1.ConditionTrue,
-			Reason:  "AllPodsAnswering",
+			Reason:  reasonAllPodsAnswering,
 			Message: fmt.Sprintf("all %d read-write pods answered LDAP", replicas),
 		}
 	}
 	return podsResponsiveVerdict{
 		Status: metav1.ConditionFalse,
-		Reason: "PodsNotAnswering",
+		Reason: reasonPodsNotAnswering,
 		Message: fmt.Sprintf("%d of %d read-write pods did not answer LDAP: %s",
 			len(silent), replicas, strings.Join(silent, "; ")),
 	}

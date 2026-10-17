@@ -81,7 +81,7 @@ func evaluateTLSSecret(enabled bool, secretName string, found bool, data map[str
 	}
 
 	var missing []string
-	for _, key := range []string{"tls.crt", "tls.key"} {
+	for _, key := range []string{corev1.TLSCertKey, corev1.TLSPrivateKeyKey} {
 		if len(data[key]) == 0 {
 			missing = append(missing, key)
 		}

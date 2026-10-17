@@ -152,7 +152,7 @@ func TestJudgeClusterFleetRefusesConsumerOnlyWithReadReplicas(t *testing.T) {
 		if v.Reason != reasonConsumerOnlyReadReplicas {
 			t.Errorf("reason = %q, want %q", v.Reason, reasonConsumerOnlyReadReplicas)
 		}
-		for _, want := range []string{"consumer-only", "readReplicas"} {
+		for _, want := range []string{replicationModeConsumerOnly, "readReplicas"} {
 			if !strings.Contains(v.Message, want) {
 				t.Errorf("message %q does not name %q", v.Message, want)
 			}
