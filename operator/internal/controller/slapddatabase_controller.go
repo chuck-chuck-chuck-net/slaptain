@@ -2642,51 +2642,22 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			return true, nil, nil
 		}
 
-		tlsCACertPath := ""
-		if ep.TLSSecretName != "" {
-			tlsCACertPath = "/etc/openldap/tls/peers/" + ep.Name + "/ca.crt"
-		}
-
-		password := ""
-		if ep.BindPasswordSecretName != "" {
-			secret := &corev1.Secret{}
-			if err := r.Get(ctx, client.ObjectKey{
-				Name: ep.BindPasswordSecretName, Namespace: sc.Namespace,
-			}, secret); err != nil {
-				// NOT a skip. The credential is unknown, and a stanza set
-				// built without this peer is a deletion of its links on every
-				// pod. The outcome is recorded and judged after the loop,
-				// which withholds the whole pass.
-				outcome.SecretErr = err
-				outcomes = append(outcomes, outcome)
-				continue
-			}
-			password = string(secret.Data["password"])
-			if password == "" {
-				password = string(secret.Data[secretKeyReplicationPassword])
-			}
+		password, err := r.externalPeerPassword(ctx, sc.Namespace, ep.BindPasswordSecretName)
+		if err != nil {
+			// NOT a skip. The credential is unknown, and a stanza set
+			// built without this peer is a deletion of its links on every
+			// pod. The outcome is recorded and judged after the loop,
+			// which withholds the whole pass.
+			outcome.SecretErr = err
+			outcomes = append(outcomes, outcome)
+			continue
 		}
 
 		// Determine this peer's providers. Every mode produces the same type
 		// (ADR-031): discovery parses the remote pods' ordinals, podAddresses
 		// takes list position as the ordinal, and a uri peer is one provider at
 		// ordinal 0 — built below, where the URI is used verbatim.
-		var providers []ldapv1alpha1.DiscoveredProvider
-		if ep.Discovery != nil {
-			for _, ps := range sc.Status.ExternalPeerStatuses {
-				if ps.Name == ep.Name {
-					providers = ps.DiscoveredProviders
-					break
-				}
-			}
-			// An empty provider list is deliberately NOT skipped here: it
-			// falls through to the address count below, where
-			// judgePeerResolutions turns it into a withhold naming this peer.
-			// M1 publishes an unparseable remote pod name and a duplicate
-			// remote ordinal as exactly this state.
-		} else {
-			providers = providersFromPodAddresses(ep.PodAddresses)
-		}
+		providers := externalPeerProviders(sc, &ep)
 		// The addresses, in provider order. Selection downstream is the
 		// diagonal `(ordinal + k) % len(URIs)`, so the order of this slice is
 		// the order of the providers it came from — ascending by ordinal for a
@@ -2699,29 +2670,8 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 		bindDN, bindPassword := externalBindIdentity(
 			ep.BindDN, ep.BindPasswordSecretName, password, sd.Name, replPassword)
 
-		// The peer's addresses, as the URIs a stanza would carry. A uri-mode
-		// peer contributes exactly one, verbatim; a podAddresses or discovery
-		// peer contributes one per provider, with this cluster's scheme and
-		// port.
-		var uris []string
-		if len(podAddrs) > 0 {
-			port := ep.Port
-			if port == 0 {
-				port = 1025
-			}
-			scheme := schemeLDAPS
-			if !tlsEnabled {
-				scheme = schemeLDAP
-				if port == 1025 {
-					port = 1024
-				}
-			}
-			uris = make([]string, len(podAddrs))
-			for i, addr := range podAddrs {
-				uris[i] = fmt.Sprintf("%s://%s:%d", scheme, addr, port)
-			}
-		} else {
-			uris = providerAddresses(providersFromURI(ep.URI))
+		uris := externalPeerURIs(&ep, podAddrs, tlsEnabled)
+		if len(podAddrs) == 0 {
 			// A uri peer is one provider, so the fan-out does not apply.
 			rpp = 1
 		}
@@ -2741,7 +2691,7 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 			ReplicasPerPeer: rpp,
 			BindDN:          bindDN,
 			Password:        bindPassword,
-			TLSCACertPath:   tlsCACertPath,
+			TLSCACertPath:   externalPeerCACertPath(&ep),
 			PlainSyncRepl:   ep.SyncMode == "plain",
 		})
 	}
@@ -2906,6 +2856,77 @@ func (r *SlapdDatabaseReconciler) reconcileReplication(
 	}
 
 	return skipped, nil, nil
+}
+
+// externalPeerPassword reads an external peer's bind password from the Secret
+// it names: the "password" key, else replication-password. No Secret named is
+// no password; a named Secret that cannot be read is an error.
+func (r *SlapdDatabaseReconciler) externalPeerPassword(ctx context.Context, ns, secretName string) (string, error) {
+	if secretName == "" {
+		return "", nil
+	}
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, secret); err != nil {
+		return "", err
+	}
+	password := string(secret.Data["password"])
+	if password == "" {
+		password = string(secret.Data[secretKeyReplicationPassword])
+	}
+	return password, nil
+}
+
+// externalPeerProviders is an external peer's providers: as discovered (from
+// status) for a discovery peer, by list position for a podAddresses peer.
+func externalPeerProviders(sc *ldapv1alpha1.SlapdCluster, ep *ldapv1alpha1.ExternalPeer) []ldapv1alpha1.DiscoveredProvider {
+	if ep.Discovery == nil {
+		return providersFromPodAddresses(ep.PodAddresses)
+	}
+	for _, ps := range sc.Status.ExternalPeerStatuses {
+		if ps.Name == ep.Name {
+			return ps.DiscoveredProviders
+		}
+	}
+	// An empty provider list is deliberately NOT an error: it falls through
+	// to the address count, where judgePeerResolutions turns it into a
+	// withhold naming this peer. M1 publishes an unparseable remote pod name
+	// and a duplicate remote ordinal as exactly this state.
+	return nil
+}
+
+// externalPeerURIs is the peer's addresses as the URIs a stanza would carry.
+// A uri-mode peer (no podAddrs) contributes exactly one, verbatim; a
+// podAddresses or discovery peer contributes one per provider, with this
+// cluster's scheme and port.
+func externalPeerURIs(ep *ldapv1alpha1.ExternalPeer, podAddrs []string, tlsEnabled bool) []string {
+	if len(podAddrs) == 0 {
+		return providerAddresses(providersFromURI(ep.URI))
+	}
+	port := ep.Port
+	if port == 0 {
+		port = 1025
+	}
+	scheme := schemeLDAPS
+	if !tlsEnabled {
+		scheme = schemeLDAP
+		if port == 1025 {
+			port = 1024
+		}
+	}
+	uris := make([]string, len(podAddrs))
+	for i, addr := range podAddrs {
+		uris[i] = fmt.Sprintf("%s://%s:%d", scheme, addr, port)
+	}
+	return uris
+}
+
+// externalPeerCACertPath is where a peer's CA is mounted, or "" when the peer
+// names no TLS Secret.
+func externalPeerCACertPath(ep *ldapv1alpha1.ExternalPeer) string {
+	if ep.TLSSecretName == "" {
+		return ""
+	}
+	return "/etc/openldap/tls/peers/" + ep.Name + "/ca.crt"
 }
 
 // externalBindIdentity returns the bind DN and password an external peer's
