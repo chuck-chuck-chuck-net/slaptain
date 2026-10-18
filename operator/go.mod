@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.4.16
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/go-ldap/ldap/v3 v3.4.15
-	github.com/onsi/ginkgo/v2 v2.33.0
+	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/prometheus/client_golang v1.24.0
 	github.com/robfig/cron/v3 v3.0.1
