@@ -203,10 +203,31 @@ make verify-generated            # checked-in CRDs / RBAC / deepcopy still match
 ```
 
 CI (`.github/workflows/`) runs exactly these gates on every push and pull request:
-`test.yml` (tidy for both modules, `verify-generated`, the envtest unit tests, and a
-compile of the e2e suite), `lint.yml` (golangci-lint over **every** finding in each
-module — both are at zero — plus `helm-lint`), `codeql.yml` and `security.yml`.
+`test.yml` (`make tidy` for all three modules, `verify-generated`, the envtest unit
+tests, and a compile of the e2e suite), `lint.yml` (golangci-lint over **every** finding
+in each module — both are at zero — plus `helm-lint`), `codeql.yml` and `security.yml`.
 The e2e suite itself is not run in CI — it needs a lab cluster (see below).
+
+#### Dependabot and the mirrored module
+
+`tests/e2e` replaces the operator module by path, so its `go.mod` carries the
+operator's whole dependency graph, most of it `// indirect`. Dependabot bumps one
+module's `go.mod` and never touches a requirement that is indirect elsewhere, so a
+bump in `/operator` of anything `tests/e2e` only reaches through the operator
+(prometheus/client_golang was the first, in #25) arrives untidy and fails the tidy
+check — correctly: at that commit the e2e suite does not compile under
+`-mod=readonly`. `dependabot-tidy.yml` finishes the job on every Dependabot PR that
+touches a `go.mod`: it runs `make tidy` and pushes the result onto the PR branch.
+
+One setting decides whether that pushed commit gets CI. A push made with the
+workflow's own `GITHUB_TOKEN` triggers no workflows, by GitHub's design, so the PR
+would sit without checks on its new head. Store a fine-grained token with
+`contents: write` on this repository as a **Dependabot** secret (Settings → Secrets
+and variables → Dependabot, not Actions — a Dependabot-triggered workflow sees only
+those) named `DEPENDABOT_TIDY_TOKEN`, and the push runs CI like any other. Without
+it the workflow still pushes; close and reopen the PR to run the checks. The
+hand-run equivalent is `make tidy` on the branch and a push, and `@dependabot rebase`
+discards the tidy commit, after which the workflow simply runs again.
 
 #### Running the lint gate before the push
 

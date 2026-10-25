@@ -1,0 +1,76 @@
+name: Dependabot tidy
+
+# Dependabot bumps one module's go.mod. tests/e2e replaces the operator module
+# by path, so its go.mod mirrors the operator's dependency graph — and
+# Dependabot never bumps a requirement that is indirect in a module. A bump in
+# /operator of anything tests/e2e reaches only through the operator (#25:
+# prometheus/client_golang) therefore arrives untidy, the e2e suite no longer
+# compiles under -mod=readonly, and test.yml's tidy check fails. That cannot be
+# configured away on the Dependabot side; this workflow finishes the job
+# instead: `make tidy` (the one list of modules, shared with test.yml), then a
+# commit onto the PR branch if anything moved.
+#
+# Whether that commit gets CI is decided by one secret. A push with the
+# workflow's own GITHUB_TOKEN triggers no workflow runs (GitHub's loop guard),
+# so the PR would show no checks on its new head. Store a fine-grained token
+# with `contents: write` on this repository as a DEPENDABOT secret (Settings >
+# Secrets and variables > Dependabot — a Dependabot-triggered run sees only
+# those, never the Actions secrets) named DEPENDABOT_TIDY_TOKEN and the push
+# runs CI like any human's. Without it the push still happens; close and
+# reopen the PR to run the checks.
+#
+# No loop: the push's own `synchronize` event has the token owner as actor,
+# not dependabot[bot], so the `if` below skips it. `@dependabot rebase` drops
+# the tidy commit and this runs again on the recreated branch.
+
+on:
+  pull_request:
+    paths:
+      - '**/go.mod'
+      - '**/go.sum'
+
+permissions:
+  contents: write
+
+jobs:
+  tidy:
+    name: Tidy the mirrored modules
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Clone the PR branch
+        uses: actions/checkout@v7
+        with:
+          # The branch, not the detached merge commit, so the commit can be pushed.
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.DEPENDABOT_TIDY_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: |
+            operator/go.sum
+            exporter/go.sum
+            tests/e2e/go.sum
+
+      - name: Tidy every module
+        run: make tidy
+
+      - name: Commit and push what moved
+        run: |
+          files='operator/go.mod operator/go.sum exporter/go.mod exporter/go.sum tests/e2e/go.mod tests/e2e/go.sum'
+          # shellcheck disable=SC2086
+          if git diff --quiet -- $files; then
+            echo "Every module is tidy; nothing to push."
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          git diff --stat -- $files
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # shellcheck disable=SC2086
+          git add -- $files
+          git commit -m 'build(deps): tidy the modules that mirror this bump' \
+            -m 'tests/e2e replaces the operator module by path, so a bump in operator/go.mod moves its mirrored requirements too. Written by dependabot-tidy.yml.'
+          git push

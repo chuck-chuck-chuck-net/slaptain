@@ -30,11 +30,11 @@ jobs:
             exporter/go.sum
             tests/e2e/go.sum
 
+      # `make tidy` is the one list of modules; dependabot-tidy.yml runs the
+      # same target to finish a Dependabot bump, so the two cannot disagree.
       - name: Check tidy
         run: |
-          for m in operator exporter tests/e2e; do
-            (cd "$m" && go mod tidy)
-          done
+          make tidy
           git diff --exit-code -- operator/go.mod operator/go.sum exporter/go.mod exporter/go.sum tests/e2e/go.mod tests/e2e/go.sum
 
       # Same class of check as `go mod tidy` above: the repo carries generated
