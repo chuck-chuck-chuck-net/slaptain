@@ -1,6 +1,6 @@
 module github.com/chuck-chuck-chuck-net/slaptain/exporter
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/go-ldap/ldap/v3 v3.4.15

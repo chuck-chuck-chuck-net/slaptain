@@ -1,6 +1,6 @@
 module github.com/chuck-chuck-chuck-net/slaptain/tests/e2e
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/chuck-chuck-chuck-net/slaptain/operator v0.0.0-00010101000000-000000000000
