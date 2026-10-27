@@ -11,6 +11,40 @@ would say the same thing, it belongs here and `CHANGELOG.md` points at it.
 
 ---
 
+## Unreleased — the operator caches only labelled objects, and every slapd Pod rolls once
+
+ADR-044.
+The Pod template of every StatefulSet gains two labels,
+`app.kubernetes.io/managed-by: slaptain` and `ldap.chuck-chuck-chuck.net/owned: "true"`,
+so each StatefulSet replaces its Pods once after the operator upgrade.
+Upgrade one site at a time and let each finish rolling.
+
+While a StatefulSet rolls:
+
+- The `<name>-write` Service can move off a Pod that has not been replaced yet,
+  because the operator does not see unlabelled Pods and counts them as not ready.
+  It settles once the roll completes.
+- A backup, restore or mkdir Job that the old operator started
+  reports its failures without Pod detail.
+
+Services, StatefulSets and ConfigMaps get the labels on the first reconcile,
+before anything rolls.
+`<name>-config-password` gets them too, because the cluster owns it.
+Nothing else you created is written to.
+The operator reads every unlabelled Secret it needs straight from the API server,
+which costs one request per read.
+To have such a Secret cached, label it yourself:
+
+```bash
+kubectl -n <namespace> label secret <secret> ldap.chuck-chuck-chuck.net/owned=true
+```
+
+That includes `<database>-credentials`.
+The operator cannot tell one it generated from one `scripts/mesh-share-credentials.sh` created,
+so it labels neither.
+
+---
+
 ## v0.5.0 — the default slapd image becomes PURE, and `spec.images.select` replaces pinning by tag
 
 Two changes to how a cluster gets its data-plane images. The second is the one

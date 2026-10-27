@@ -107,4 +107,42 @@ var _ = Describe("slapd chart", func() {
 			})
 		}
 	})
+
+	// ADR-044: the operator caches these kinds only when they carry the owned
+	// label, so an unlabelled one is invisible to its watches and cached reads.
+	Describe("operator labels", func() {
+		const (
+			managedBy = "app.kubernetes.io/managed-by"
+			owned     = "ldap.chuck-chuck-chuck.net/owned"
+		)
+		expectOperatorLabels := func(what string, labels map[string]string) {
+			Expect(labels).To(HaveKeyWithValue(managedBy, "slaptain"), what)
+			Expect(labels).To(HaveKeyWithValue(owned, "true"), what)
+		}
+
+		It("are on everything the operator generated for the cluster", func(ctx SpecContext) {
+			sts, err := k8sClient.AppsV1().StatefulSets(namespace).Get(ctx, "slapd", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			expectOperatorLabels("StatefulSet slapd", sts.Labels)
+			expectOperatorLabels("StatefulSet slapd pod template", sts.Spec.Template.Labels)
+
+			pod, err := k8sClient.CoreV1().Pods(namespace).Get(ctx, "slapd-0", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			expectOperatorLabels("Pod slapd-0", pod.Labels)
+
+			for _, name := range []string{"slapd", "slapd-headless"} {
+				svc, err := k8sClient.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				expectOperatorLabels("Service "+name, svc.Labels)
+			}
+			for _, name := range []string{"slapd-database-dirs", "slapd-startup-config"} {
+				cm, err := k8sClient.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				expectOperatorLabels("ConfigMap "+name, cm.Labels)
+			}
+			secret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, "slapd-config-password", metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			expectOperatorLabels("Secret slapd-config-password", secret.Labels)
+		})
+	})
 })
