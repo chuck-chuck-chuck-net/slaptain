@@ -153,7 +153,9 @@ for db in "${DATABASES[@]}"; do
             "kubectl --context '$ctx' -n '$NAMESPACE' create secret generic '$secret' \
                 --from-literal=root-password=\"\$ROOT_PW\" \
                 --from-literal=replication-password=\"\$REPL_PW\" \
-                --dry-run=client -o yaml | kubectl --context '$ctx' apply -f - >/dev/null"
+                --dry-run=client -o yaml \
+                | kubectl label --local -f - ldap.chuck-chuck-chuck.net/owned=true -o yaml \
+                | kubectl --context '$ctx' apply -f - >/dev/null"
     done
 done
 
