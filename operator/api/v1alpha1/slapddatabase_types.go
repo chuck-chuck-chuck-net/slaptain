@@ -464,6 +464,29 @@ type AccesslogPurgeConfig struct {
 	Retention *metav1.Duration `json:"retention,omitempty"`
 }
 
+// DatabaseOverlay is one overlay entry under the database's cn=config entry,
+// olcOverlay=<name>,olcDatabase={N}mdb,cn=config.
+//
+// Support tier 2 (ADR-039): the operator writes what is declared and reports
+// a refusal, but validates none of the overlay's semantics, and no overlay
+// beyond syncprov and accesslog is covered by the replication e2e.
+type DatabaseOverlay struct {
+	// name is the olcOverlay value, e.g. "memberof" or "refint".
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]+$`
+	Name string `json:"name"`
+	// objectClass is the overlay's configuration object class besides
+	// olcOverlayConfig, e.g. "olcMemberOf". Leave it unset for an overlay that
+	// has no dynamic configuration of its own.
+	// +optional
+	ObjectClass string `json:"objectClass,omitempty"`
+	// attributes are the overlay's cn=config attributes, e.g.
+	// {"olcRefintAttribute": ["uniqueMember"]}. Each listed attribute is
+	// replaced when its values differ; attributes not listed are left alone.
+	// +optional
+	Attributes map[string][]string `json:"attributes,omitempty"`
+}
+
 // DatabaseSeedConfig defines initial data to populate in the database.
 type DatabaseSeedConfig struct {
 	// entries is a list of LDIF entries to add when the database is first created.
@@ -703,6 +726,16 @@ type SlapdDatabaseSpec struct {
 	// "uid eq,sub". The operator applies these as olcDbIndex entries.
 	// +optional
 	Indices []string `json:"indices,omitempty"`
+	// overlays are further overlays on this database, beyond the syncprov and
+	// accesslog the operator manages itself. Each is added after those, in list
+	// order, and its attributes are converged on every reconcile. Removing an
+	// entry from the list leaves the overlay in place; the module must already be
+	// loaded, e.g. by a moduleload in the slapd-init image's bootstrap snippets.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:XValidation:rule="self.all(o, o.name != 'syncprov' && o.name != 'accesslog')",message="syncprov and accesslog are managed by the operator and cannot be listed in spec.overlays."
+	Overlays []DatabaseOverlay `json:"overlays,omitempty"`
 	// replication holds per-database replication settings. Always required —
 	// every SlapdDatabase must declare its replication intent at the CR level,
 	// even if the parent cluster doesn't replicate. Set replication.enabled=false
