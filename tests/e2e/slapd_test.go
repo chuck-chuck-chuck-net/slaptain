@@ -144,5 +144,15 @@ var _ = Describe("slapd chart", func() {
 			Expect(err).NotTo(HaveOccurred())
 			expectOperatorLabels("Secret slapd-config-password", secret.Labels)
 		})
+
+		// mesh-share-credentials.sh creates <db>-credentials, so the operator
+		// does not manage it; the script marks it for the cache and nothing more.
+		It("put the database credentials Secret in the cache without claiming it", func(ctx SpecContext) {
+			secretName := envOrDefault("DB_CR_NAME", "slapd-db") + "-credentials"
+			secret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(secret.Labels).To(HaveKeyWithValue(owned, "true"))
+			Expect(secret.Labels).NotTo(HaveKeyWithValue(managedBy, "slaptain"))
+		})
 	})
 })
