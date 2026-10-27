@@ -10,7 +10,11 @@ You may obtain a copy of the License at
 
 package controller
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	"maps"
+
+	corev1 "k8s.io/api/core/v1"
+)
 
 // The vocabulary the controllers build objects from: names that must be
 // spelled identically wherever they appear, because a pod template, a Job
@@ -24,7 +28,26 @@ const (
 
 	// appName is the app.kubernetes.io/name of every slaptain-managed pod.
 	appName = "slapd"
+
+	labelManagedBy = "app.kubernetes.io/managed-by"
+	managedBy      = "slaptain"
+
+	// LabelOwned is the operator's cache filter (ADR-044): a Secret, ConfigMap,
+	// Service, StatefulSet, Job or Pod without it is invisible to the cached client.
+	LabelOwned      = "ldap.chuck-chuck-chuck.net/owned"
+	labelOwnedValue = "true"
 )
+
+// withOperatorLabels returns labels plus managed-by and the cache label, for an
+// object the operator creates. Never pass it a selector: StatefulSet selectors
+// are immutable, and a Service needs none of these to find its pods.
+func withOperatorLabels(labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels)+2)
+	maps.Copy(out, labels)
+	out[labelManagedBy] = managedBy
+	out[LabelOwned] = labelOwnedValue
+	return out
+}
 
 // Containers, ports and volumes of the slapd pod — and of the Jobs that mount
 // its PVCs (ADR-018), which must use the same volume names and mount paths.

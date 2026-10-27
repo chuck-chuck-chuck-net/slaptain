@@ -29,6 +29,24 @@ One deliberate exception: for a BREAKING change this file still carries the
 single line that keeps today's behaviour, because a release note that makes a
 reader go somewhere else to learn what to set is a release note that failed.
 
+## Unreleased
+
+### The operator caches only what it labelled (ADR-044)
+
+The operator used to cache every Secret, ConfigMap, Service, StatefulSet, Job and Pod in the cluster.
+On a cluster with 84 namespaces that came to 553Mi against the chart's 128Mi limit,
+and the operator was OOM-killed before it reconciled anything.
+
+Everything the operator creates now carries `app.kubernetes.io/managed-by: slaptain`
+and `ldap.chuck-chuck-chuck.net/owned: "true"`,
+and the cache holds those six kinds only when they carry the second label.
+A Secret you bring is read from the API server instead, and the operator never labels it.
+Add `ldap.chuck-chuck-chuck.net/owned: "true"` to it yourself if you want it cached.
+
+This rolls every slapd Pod once, because the Pod template gains the two labels.
+The upgrade procedure is in `docs/UPGRADING.md`.
+The operator's memory with the filtered cache is not measured yet.
+
 ## v0.5.0
 
 Three defaults move in this release. Two of them change which binary your pods

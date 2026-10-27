@@ -624,7 +624,7 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 	// If auto-generated secret already exists, nothing to do.
 	existing := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Name: cfgName, Namespace: sc.Namespace}, existing); err == nil {
-		return nil
+		return labelOwnedObject(ctx, r.Client, existing, sc)
 	} else if !errors.IsNotFound(err) {
 		return err
 	}
@@ -635,7 +635,7 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 	}
 
 	cfgSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: cfgName, Namespace: sc.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: cfgName, Namespace: sc.Namespace, Labels: withOperatorLabels(nil)},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
 			secretKeyRootPassword: rootPW,
@@ -669,6 +669,7 @@ func (r *SlapdClusterReconciler) headlessService(sc *ldapv1alpha1.SlapdCluster) 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-headless",
 			Namespace: sc.Namespace,
+			Labels:    withOperatorLabels(nil),
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
@@ -747,6 +748,7 @@ func (r *SlapdClusterReconciler) clusterIPService(sc *ldapv1alpha1.SlapdCluster)
 			Name:        sc.Name,
 			Namespace:   sc.Namespace,
 			Annotations: sc.Spec.Service.Annotations,
+			Labels:      withOperatorLabels(nil),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:                     svcType,
@@ -789,6 +791,7 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name,
 			Namespace: sc.Namespace,
+			Labels:    withOperatorLabels(nil),
 		},
 		Spec: r.buildStatefulSetSpec(sc, false, tagSuffix),
 	}
@@ -868,6 +871,7 @@ func (r *SlapdClusterReconciler) readOnlyHeadlessService(sc *ldapv1alpha1.SlapdC
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly-headless",
 			Namespace: sc.Namespace,
+			Labels:    withOperatorLabels(nil),
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
@@ -949,6 +953,7 @@ func (r *SlapdClusterReconciler) readOnlyService(sc *ldapv1alpha1.SlapdCluster) 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly",
 			Namespace: sc.Namespace,
+			Labels:    withOperatorLabels(nil),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     svcType,
@@ -986,6 +991,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly",
 			Namespace: sc.Namespace,
+			Labels:    withOperatorLabels(nil),
 		},
 		Spec: r.buildStatefulSetSpec(sc, true, tagSuffix),
 	}
@@ -1441,7 +1447,7 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		},
 		Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
-				Labels:      podLabels,
+				Labels:      withOperatorLabels(podLabels),
 				Annotations: buildMultusAnnotations(sc),
 			},
 			Spec: corev1.PodSpec{

@@ -207,18 +207,19 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      t.jobName,
 			Namespace: sc.Namespace,
-			Labels: map[string]string{
+			Labels: withOperatorLabels(map[string]string{
 				labelName:                             appName,
 				labelInstance:                         sc.Name,
 				labelComponent:                        restoreComponent,
 				"ldap.chuck-chuck-chuck.net/database": sd.Name,
 				restoreIDLabel:                        sc.Status.Restore.ID,
-			},
+			}),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: withOperatorLabels(nil)},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					SecurityContext:  backupPodSecurityContext(sc),
