@@ -136,12 +136,12 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sb.Name + "-backup",
 			Namespace: sb.Namespace,
-			Labels: map[string]string{
+			Labels: withOperatorLabels(map[string]string{
 				labelName:                           appName,
 				labelInstance:                       sc.Name,
 				labelComponent:                      "backup",
 				"ldap.chuck-chuck-chuck.net/backup": sb.Name,
-			},
+			}),
 		},
 		Spec: batchv1.JobSpec{
 			// ADR-018 R4: backstop only. The SlapdBackup controller reaps this Job
@@ -152,6 +152,7 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 			TTLSecondsAfterFinished: &ttl,
 			BackoffLimit:            &backoff,
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: withOperatorLabels(nil)},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					SecurityContext:  backupPodSecurityContext(sc),

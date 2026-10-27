@@ -2,7 +2,9 @@
   "metadata": {
     "labels": {
       "app.kubernetes.io/instance": "slapd-readonly",
-      "app.kubernetes.io/name": "slapd"
+      "app.kubernetes.io/managed-by": "slaptain",
+      "app.kubernetes.io/name": "slapd",
+      "ldap.chuck-chuck-chuck.net/owned": "true"
     },
     "annotations": {
       "k8s.v1.cni.cncf.io/networks": "infra/replication-net"

@@ -168,6 +168,7 @@ func main() {
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
+		Cache:                  controller.CacheOptions(),
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "7d911751.chuck-chuck-chuck.net",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
@@ -220,8 +221,11 @@ func main() {
 		Databases: databaseObservations,
 	})
 
+	// The cache holds only labelled objects (ADR-044); a Secret the user brought is read from the API.
+	kubeClient := controller.NewCacheFallbackClient(mgr.GetClient(), mgr.GetAPIReader())
+
 	if err := (&controller.SlapdClusterReconciler{
-		Client:          mgr.GetClient(),
+		Client:          kubeClient,
 		Scheme:          mgr.GetScheme(),
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
@@ -233,7 +237,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdSchemaReconciler{
-		Client:        mgr.GetClient(),
+		Client:        kubeClient,
 		Scheme:        mgr.GetScheme(),
 		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr); err != nil {
@@ -241,7 +245,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdDatabaseReconciler{
-		Client:          mgr.GetClient(),
+		Client:          kubeClient,
 		Scheme:          mgr.GetScheme(),
 		ClusterDomain:   clusterDomain,
 		SiteName:        siteName,
@@ -253,7 +257,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdBackupReconciler{
-		Client:          mgr.GetClient(),
+		Client:          kubeClient,
 		Scheme:          mgr.GetScheme(),
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
@@ -264,7 +268,7 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdScheduledBackupReconciler{
-		Client: mgr.GetClient(),
+		Client: kubeClient,
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdScheduledBackup")
