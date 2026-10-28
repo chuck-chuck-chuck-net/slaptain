@@ -15,7 +15,10 @@ import (
 	"fmt"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,9 +45,6 @@ const (
 
 // cacheScopeFixtureCluster is a minimal cluster for building every object the
 // SlapdCluster and SlapdDatabase controllers create.
-
-// cacheScopeFixtureCluster is a minimal cluster for building every object the
-// SlapdCluster and SlapdDatabase controllers create.
 func cacheScopeFixtureCluster() *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "ldap", Namespace: cacheScopeNamespace},
@@ -55,9 +55,6 @@ func cacheScopeFixtureCluster() *ldapv1alpha1.SlapdCluster {
 		},
 	}
 }
-
-// cacheScopeScheme is the core + ldap scheme the builders set owner
-// references against.
 
 // cacheScopeScheme is the core + ldap scheme the builders set owner
 // references against.
@@ -149,11 +146,6 @@ func TestManagedObjectsCarryTheCacheLabel(t *testing.T) {
 		}
 	}
 }
-
-// A Secret the user supplies carries no label of ours, so the filtered cache
-// does not hold it. Every Secret read must therefore go to the API server.
-// The cache here is a client holding NOTHING; the API reader holds the
-// Secrets. A read that consults the cache fails with NotFound.
 
 // A Secret the user supplies carries no label of ours, so the filtered cache
 // does not hold it. Every Secret read must therefore go to the API server.
@@ -262,6 +254,60 @@ func mapBytes(m map[string]string) map[string][]byte {
 // Every kind some controller Owns() or reads through the cache gets an
 // informer, and an unfiltered informer holds the whole cluster's objects of
 // that kind. The option set must name each of them with the selector.
+func TestCacheOptionsFilterEveryCachedKind(t *testing.T) {
+	sel, err := labels.Parse(cacheScopeSelector)
+	if err != nil {
+		t.Fatalf("parse selector: %v", err)
+	}
+	opts := CacheOptions()
+	want := []client.Object{
+		&corev1.Secret{}, &corev1.Service{}, &corev1.Pod{}, &appsv1.StatefulSet{}, &batchv1.Job{},
+	}
+	for _, kind := range want {
+		var found bool
+		for obj, by := range opts.ByObject {
+			if fmt.Sprintf("%T", obj) != fmt.Sprintf("%T", kind) {
+				continue
+			}
+			found = true
+			if by.Label == nil || by.Label.String() != sel.String() {
+				t.Errorf("%T: informer filtered by %v, want %q", kind, by.Label, cacheScopeSelector)
+			}
+		}
+		if !found {
+			t.Errorf("%T: no cache filter — the informer would hold every one in the cluster", kind)
+		}
+	}
+	if opts.DefaultLabelSelector != nil {
+		t.Errorf("a default selector would filter the CRDs too, which carry no label of ours: %v", opts.DefaultLabelSelector)
+	}
+}
+
+// An object created by an operator that predates the label is absent from the
+// filtered cache until this pass's apply labels it. The read must not take
+// that absence for a first create.
+func TestManagedGetAsksTheAPIServerWhenTheCacheSaysNotFound(t *testing.T) {
+	s := cacheScopeScheme(t)
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "ldap", Namespace: cacheScopeNamespace}}
+	sts.Spec.ServiceName = "ldap-headless"
+	cache := fake.NewClientBuilder().WithScheme(s).Build()
+	api := fake.NewClientBuilder().WithScheme(s).WithObjects(sts).Build()
+	key := client.ObjectKeyFromObject(sts)
+
+	got := &appsv1.StatefulSet{}
+	if err := managedGet(context.Background(), cache, api, key, got); err != nil {
+		t.Fatalf("an unlabelled, pre-existing StatefulSet read as missing: %v", err)
+	}
+	if got.Spec.ServiceName != sts.Spec.ServiceName {
+		t.Errorf("read %+v, want the API server's copy", got.Spec)
+	}
+
+	// A genuinely missing object is still NotFound, from the API server.
+	if err := managedGet(context.Background(), cache, api,
+		client.ObjectKey{Name: "nope", Namespace: cacheScopeNamespace}, &appsv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+		t.Errorf("missing object: got %v, want NotFound", err)
+	}
+}
 
 // The config-password Secret is the one Secret the operator watches, so one
 // created before the label must be labelled — and only when it is ours.

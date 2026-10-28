@@ -334,7 +334,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// 8. Observe StatefulSet status → update SlapdCluster status.
 	sts := &appsv1.StatefulSet{}
-	if err := r.Get(ctx, req.NamespacedName, sts); err != nil {
+	if err := r.getManaged(ctx, req.NamespacedName, sts); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get StatefulSet: %w", err)
 	}
 
@@ -475,7 +475,7 @@ func (r *SlapdClusterReconciler) observeReadOnlyStatus(ctx context.Context, sc *
 	}
 	roSts := &appsv1.StatefulSet{}
 	roKey := client.ObjectKey{Name: sc.Name + "-readonly", Namespace: sc.Namespace}
-	if err := r.Get(ctx, roKey, roSts); err != nil {
+	if err := r.getManaged(ctx, roKey, roSts); err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("get read-only StatefulSet: %w", err)
 		}
@@ -884,7 +884,7 @@ func (r *SlapdClusterReconciler) statefulSet(sc *ldapv1alpha1.SlapdCluster, read
 // separate, supported workflow).
 func (r *SlapdClusterReconciler) adoptImmutableSTSFields(ctx context.Context, desired *appsv1.StatefulSet) error {
 	existing := &appsv1.StatefulSet{}
-	err := r.Get(ctx, client.ObjectKey{Name: desired.Name, Namespace: desired.Namespace}, existing)
+	err := r.getManaged(ctx, client.ObjectKey{Name: desired.Name, Namespace: desired.Namespace}, existing)
 	if err != nil {
 		// NotFound = first create, our spec is authoritative for these fields.
 		// Any other error: let the caller propagate; the next reconcile retries.
