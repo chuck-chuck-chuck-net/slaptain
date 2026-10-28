@@ -136,7 +136,7 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sb.Name + "-backup",
 			Namespace: sb.Namespace,
-			Labels: withOperatorLabels(map[string]string{
+			Labels: withOperatorLabels(sc.Name, map[string]string{
 				labelName:                           appName,
 				labelInstance:                       sc.Name,
 				labelComponent:                      "backup",
@@ -152,7 +152,7 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 			TTLSecondsAfterFinished: &ttl,
 			BackoffLimit:            &backoff,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: withOperatorLabels(nil)},
+				ObjectMeta: metav1.ObjectMeta{Labels: withOperatorLabels(sc.Name, nil)},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					SecurityContext:  backupPodSecurityContext(sc),

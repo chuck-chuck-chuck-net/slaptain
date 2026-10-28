@@ -212,7 +212,7 @@ type: kubernetes.io/tls
 metadata:
   name: $secret
   labels:
-    ldap.chuck-chuck-chuck.net/owned: "true"
+    ldap.chuck-chuck-chuck.net/cluster: "$label"
 data:
   ca.crt: $(kctl get cm -n $namespace kube-root-ca.crt -o jsonpath='{.data.ca\.crt}' | base64 -w 0)
   tls.crt: $(kctl get certificatesigningrequest $label-$namespace-csr -o jsonpath='{.status.certificate}')

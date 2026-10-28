@@ -38,10 +38,11 @@ On a cluster with 84 namespaces that came to 553Mi against the chart's 128Mi lim
 and the operator was OOM-killed before it reconciled anything.
 
 Everything the operator creates now carries `app.kubernetes.io/managed-by: slaptain`
-and `ldap.chuck-chuck-chuck.net/owned: "true"`,
+and `ldap.chuck-chuck-chuck.net/cluster: <SlapdCluster name>`,
 and the cache holds those six kinds only when they carry the second label.
 A Secret you bring is read from the API server instead, and the operator never labels it.
-Add `ldap.chuck-chuck-chuck.net/owned: "true"` to it yourself if you want it cached.
+Label it `ldap.chuck-chuck-chuck.net/cluster: <cluster name>` yourself if you want it cached,
+or `multi_cluster` if several clusters use it.
 
 This rolls every slapd Pod once, because the Pod template gains the two labels.
 The upgrade procedure is in `docs/UPGRADING.md`.

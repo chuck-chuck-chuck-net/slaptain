@@ -15,7 +15,7 @@ would say the same thing, it belongs here and `CHANGELOG.md` points at it.
 
 ADR-044.
 The Pod template of every StatefulSet gains two labels,
-`app.kubernetes.io/managed-by: slaptain` and `ldap.chuck-chuck-chuck.net/owned: "true"`,
+`app.kubernetes.io/managed-by: slaptain` and `ldap.chuck-chuck-chuck.net/cluster: <cluster name>`,
 so each StatefulSet replaces its Pods once after the operator upgrade.
 Upgrade one site at a time and let each finish rolling.
 
@@ -36,8 +36,11 @@ which costs one request per read.
 To have such a Secret cached, label it yourself:
 
 ```bash
-kubectl -n <namespace> label secret <secret> ldap.chuck-chuck-chuck.net/owned=true
+kubectl -n <namespace> label secret <secret> ldap.chuck-chuck-chuck.net/cluster=<cluster name>
 ```
+
+Use `multi_cluster` as the value for a Secret several clusters use,
+such as the peer kubeconfigs or a shared S3 Secret.
 
 That includes `<database>-credentials`.
 The operator cannot tell one it generated from one `scripts/mesh-share-credentials.sh` created,

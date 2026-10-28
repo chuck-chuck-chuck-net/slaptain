@@ -219,7 +219,7 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: sc.Namespace,
-			Labels: withOperatorLabels(map[string]string{
+			Labels: withOperatorLabels(sc.Name, map[string]string{
 				labelName:      appName,
 				labelInstance:  sc.Name,
 				labelComponent: "database-dirs",
@@ -230,7 +230,7 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 			TTLSecondsAfterFinished: new(dirJobTTL),
 			BackoffLimit:            new(int32(2)),
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: withOperatorLabels(nil)},
+				ObjectMeta: metav1.ObjectMeta{Labels: withOperatorLabels(sc.Name, nil)},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					SecurityContext:  backupPodSecurityContext(sc),

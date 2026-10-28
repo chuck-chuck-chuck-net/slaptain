@@ -4,7 +4,7 @@
       "app.kubernetes.io/instance": "slapd",
       "app.kubernetes.io/managed-by": "slaptain",
       "app.kubernetes.io/name": "slapd",
-      "ldap.chuck-chuck-chuck.net/owned": "true"
+      "ldap.chuck-chuck-chuck.net/cluster": "slapd"
     },
     "annotations": {
       "k8s.v1.cni.cncf.io/networks": "infra/replication-net"
