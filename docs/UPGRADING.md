@@ -11,6 +11,36 @@ would say the same thing, it belongs here and `CHANGELOG.md` points at it.
 
 ---
 
+## v0.5.1 — the operator's cache is filtered to what it manages (ADR-042)
+
+Nothing to set and nothing rolls. What you will see, once, on the first
+reconcile of each cluster after the upgrade:
+
+- The cluster's Services, StatefulSets and ConfigMaps gain the label
+  `app.kubernetes.io/name: slapd` through their ordinary server-side apply.
+  A StatefulSet's own labels are not part of its pod template, so no pod
+  moves; its UID is unchanged.
+- `<cluster>-config-password` is patched with the same label, and the
+  operator logs `labelled a pre-existing Secret for the operator's cache
+  (ADR-042)`. Only a Secret the operator owns (controller reference) is
+  touched. A `<database>-credentials` Secret is left as it is, whether the
+  operator created it or `scripts/mesh-share-credentials.sh` did.
+- Secrets you supply — TLS, `cnConfigCredentials`, bring-your-own credentials,
+  S3 credentials, kubeconfigs — need no label and get none. They are read
+  from the API server directly now, which also means a rotation is seen on
+  the next pass rather than at informer lag.
+
+If you had raised `resources.limits.memory` on the operator chart to survive
+a large cluster, you can take it back to the default 128Mi: memory now grows
+with your slapd deployments, not with your neighbours'. Watch
+`go_memstats_heap_inuse_bytes` on the operator (`metrics.enabled=true`) for
+a day before you do.
+
+Jobs the operator creates from now on carry the label on their pod template
+as well; a Job still running from before the upgrade does not, and the one
+consequence is that its failure summary falls back to the Job condition alone
+(`job_reap.go`), as it always did when a pod could not be read.
+
 ## v0.5.0 — the default slapd image becomes PURE, and `spec.images.select` replaces pinning by tag
 
 Two changes to how a cluster gets its data-plane images. The second is the one
