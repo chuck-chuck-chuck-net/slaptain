@@ -112,12 +112,12 @@ var _ = Describe("slapd chart", func() {
 	// label, so an unlabelled one is invisible to its watches and cached reads.
 	Describe("operator labels", func() {
 		const (
-			managedBy = "app.kubernetes.io/managed-by"
-			owned     = "ldap.chuck-chuck-chuck.net/owned"
+			managedBy    = "app.kubernetes.io/managed-by"
+			clusterLabel = "ldap.chuck-chuck-chuck.net/cluster"
 		)
 		expectOperatorLabels := func(what string, labels map[string]string) {
 			Expect(labels).To(HaveKeyWithValue(managedBy, "slaptain"), what)
-			Expect(labels).To(HaveKeyWithValue(owned, "true"), what)
+			Expect(labels).To(HaveKeyWithValue(clusterLabel, "slapd"), what)
 		}
 
 		It("are on everything the operator generated for the cluster", func(ctx SpecContext) {
@@ -146,12 +146,13 @@ var _ = Describe("slapd chart", func() {
 		})
 
 		// mesh-share-credentials.sh creates <db>-credentials, so the operator
-		// does not manage it; the script marks it for the cache and nothing more.
+		// does not manage it; the script names the cluster it belongs to, which
+		// also puts it in the operator's cache.
 		It("put the database credentials Secret in the cache without claiming it", func(ctx SpecContext) {
 			secretName := envOrDefault("DB_CR_NAME", "slapd-db") + "-credentials"
 			secret, err := k8sClient.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(secret.Labels).To(HaveKeyWithValue(owned, "true"))
+			Expect(secret.Labels).To(HaveKeyWithValue(clusterLabel, "slapd"))
 			Expect(secret.Labels).NotTo(HaveKeyWithValue(managedBy, "slaptain"))
 		})
 	})

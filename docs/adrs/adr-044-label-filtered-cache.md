@@ -32,17 +32,23 @@ naming a label-scoped cache as the way to make one affordable.
 | Per-namespace caches, or swapping the cache, as namespaces gain CRs | controller-runtime fixes the cache's namespaces at start. A swap has to re-register every `Owns()` handler on the new informers, re-lists every active namespace and fires an Add for every object. A restart does the same thing in fewer lines. |
 | A startup pass labelling existing objects | The fallback read below is needed for user Secrets anyway and covers existing objects too. Server-side apply relabels Services, StatefulSets and ConfigMaps on the first reconcile. |
 | `app.kubernetes.io/managed-by` as the filter | It has one value, and slaptain's charts already set it to `Helm`, which Helm checks before it adopts an object. A chart cannot opt an object into the cache through it. |
+| A boolean cache label beside the cluster label | Two labels that have to agree: an object carrying one and not the other is out of the cache, or claims no owner, without a word. |
+| No value, or a list of clusters, for a shared object | JSON `null` is stored as `""` on create and deletes the label on every patch, which drops the object out of the cache. A label value cannot hold a comma, and a selector cannot match one element of a list. |
 
 ## Decision
 
 1. **Every object the operator creates carries two labels**,
-   `app.kubernetes.io/managed-by: slaptain` and `ldap.chuck-chuck-chuck.net/owned: "true"`,
+   `app.kubernetes.io/managed-by: slaptain` and `ldap.chuck-chuck-chuck.net/cluster: <SlapdCluster name>`,
    through `withOperatorLabels`.
+   The cluster label names the owner, so `kubectl get -l ldap.chuck-chuck-chuck.net/cluster=<name>`
+   lists what belongs to one cluster.
+   A name longer than a label value is cut to 63 characters, without a trailing `-` or `.`.
    That includes the Pod templates of its StatefulSets and Jobs,
    so the Pods are labelled too.
    Selectors stay as they were: a StatefulSet's is immutable,
    and a Service needs neither label to find its Pods.
-2. **The cache filters the six core kinds on `owned=true`**, through `Cache.ByObject`.
+2. **The cache filters the six core kinds on the cluster label being present**,
+   whatever its value, through `Cache.ByObject`.
    The slaptain CR kinds are cached unfiltered:
    a CR the user applied carries no label and must still reconcile.
    `DefaultLabelSelector` is not used, because it would filter the CRs as well.
@@ -56,10 +62,14 @@ naming a label-scoped cache as the way to make one affordable.
    `<db>-credentials` has no controller reference,
    and `scripts/mesh-share-credentials.sh` creates one under the same name,
    so an existing one stays unlabelled; a newly generated one is labelled at creation.
-5. **Anyone may add `owned=true` to an object the operator reads**:
+5. **Anyone may add the cluster label to an object the operator reads**:
    slaptain's scripts, a chart, a user.
-   It puts the object in the cache and claims nothing.
+   It names the cluster the object belongs to and puts it in the cache.
    `managed-by: slaptain` stays reserved for what the operator manages.
+6. **An object several clusters share carries `cluster: multi_cluster`**:
+   the peer kubeconfigs, or S3 credentials two clusters back up with.
+   A cluster name cannot contain `_`, so the value can never name a cluster,
+   and `-l ldap.chuck-chuck-chuck.net/cluster=multi_cluster` lists exactly the shared objects.
 
 ## Consequences
 
@@ -80,6 +90,10 @@ naming a label-scoped cache as the way to make one affordable.
   An object created without it disappears from the cache and its `Owns()` watch.
   `operator_labels_test.go` drives the existing create paths against a fake API server;
   a new path is covered only once it is added there.
+- **Cluster names are not length-checked.** Truncation keeps the label valid,
+  but two names that share their first 63 characters get the same value.
+  The names the operator derives already fail well below 63 characters,
+  so a length rule on `SlapdCluster` would remove the case.
 - **Not measured yet**: the operator's memory with the filtered cache.
   The 553Mi above is the number to compare against.
 

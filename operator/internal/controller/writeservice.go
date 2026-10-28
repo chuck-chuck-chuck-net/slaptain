@@ -227,7 +227,7 @@ func (r *SlapdClusterReconciler) writeService(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      writeServiceName(sc.Name),
 			Namespace: sc.Namespace,
-			Labels:    withOperatorLabels(nil),
+			Labels:    withOperatorLabels(sc.Name, nil),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     svcType,
