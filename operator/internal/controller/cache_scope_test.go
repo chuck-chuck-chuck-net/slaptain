@@ -12,6 +12,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -153,6 +154,114 @@ func TestManagedObjectsCarryTheCacheLabel(t *testing.T) {
 // does not hold it. Every Secret read must therefore go to the API server.
 // The cache here is a client holding NOTHING; the API reader holds the
 // Secrets. A read that consults the cache fails with NotFound.
+
+// A Secret the user supplies carries no label of ours, so the filtered cache
+// does not hold it. Every Secret read must therefore go to the API server.
+// The cache here is a client holding NOTHING; the API reader holds the
+// Secrets. A read that consults the cache fails with NotFound.
+func TestSecretReadsGoToTheAPIServerNotTheCache(t *testing.T) {
+	s := cacheScopeScheme(t)
+	sc := cacheScopeFixtureCluster()
+	sc.Spec.LDAP.TLS = ldapv1alpha1.SlapdTLSConfig{Enabled: true, SecretName: "user-tls"}
+	sc.Spec.LDAP.CnConfigCredentials.SecretName = "user-config"
+	sd := &ldapv1alpha1.SlapdDatabase{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: sc.Namespace},
+		Spec: ldapv1alpha1.SlapdDatabaseSpec{
+			ClusterRef:  sc.Name,
+			Suffix:      sfxA,
+			Credentials: ldapv1alpha1.DatabaseCredentials{SecretName: "user-creds"},
+		},
+	}
+	secret := func(name string, data map[string]string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sc.Namespace},
+			Data:       mapBytes(data),
+		}
+	}
+	apiReader := fake.NewClientBuilder().WithScheme(s).WithObjects(
+		secret("user-tls", map[string]string{"tls.crt": "c", "tls.key": "k"}),
+		secret("user-config", map[string]string{secretKeyRootPassword: "cfg"}),
+		secret("user-creds", map[string]string{secretKeyRootPassword: "root", secretKeyReplicationPassword: "repl"}),
+		secret("user-s3", map[string]string{"access-key-id": "id", "secret-access-key": "sk"}),
+		secret("user-peer", map[string]string{"password": cacheScopePeerPW}),
+	).Build()
+	// The cache: CRs only, no Secret at all.
+	cache := fake.NewClientBuilder().WithScheme(s).WithObjects(sc, sd).WithStatusSubresource(sc, sd).Build()
+
+	cr := &SlapdClusterReconciler{Client: cache, APIReader: apiReader, Scheme: s}
+	dr := &SlapdDatabaseReconciler{Client: cache, APIReader: apiReader, Scheme: s}
+	sr := &SlapdSchemaReconciler{Client: cache, APIReader: apiReader, Scheme: s}
+	br := &SlapdBackupReconciler{Client: cache, APIReader: apiReader, Scheme: s}
+	sbr := &SlapdScheduledBackupReconciler{Client: cache, APIReader: apiReader, Scheme: s}
+	ctx := context.Background()
+
+	reads := map[string]func() (string, error){
+		"cluster: cn=config password": func() (string, error) { return cr.getConfigPassword(ctx, sc) },
+		"cluster: TLS gate": func() (string, error) {
+			ok, err := cr.reconcileTLSGate(ctx, sc)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				return "", fmt.Errorf("TLS gate withheld the StatefulSet: %+v", sc.Status.Conditions)
+			}
+			return "ok", nil
+		},
+		"cluster: CSN credentials": func() (string, error) {
+			infos := cr.listDatabaseInfo(ctx, sc)
+			if len(infos) != 1 || infos[0].bindPW == "" {
+				return "", fmt.Errorf("no replication password read: %+v", infos)
+			}
+			return infos[0].bindPW, nil
+		},
+		"cluster: restore replication password": func() (string, error) { return cr.databaseReplPassword(ctx, sd) },
+		"scheduled backup: S3 credentials": func() (string, error) {
+			cfg, err := sbr.s3Config(ctx, &ldapv1alpha1.SlapdBackup{
+				ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: sc.Namespace},
+				Spec: ldapv1alpha1.SlapdBackupSpec{
+					DatabaseRef: sd.Name,
+					Storage:     ldapv1alpha1.S3StorageSpec{CredentialsSecretName: "user-s3"},
+				},
+			})
+			return cfg.AccessKeyID, err
+		},
+		"database: root password":        func() (string, error) { return dr.getDatabaseRootPassword(ctx, sd) },
+		"database: replication password": func() (string, error) { return dr.getDatabaseReplPassword(ctx, sd) },
+		"database: cn=config password":   func() (string, error) { return dr.getClusterConfigPassword(ctx, sc) },
+		"database: external peer password": func() (string, error) {
+			return dr.externalPeerPassword(ctx, sc.Namespace, "user-peer")
+		},
+		"database: bring-your-own credentials check": func() (string, error) {
+			return "ok", dr.reconcileCredentials(ctx, sd, sc)
+		},
+		"schema: cn=config password": func() (string, error) { return sr.getConfigPassword(ctx, sc) },
+		"backup: replication password": func() (string, error) {
+			return br.replicationPassword(ctx, sc.Namespace, sd)
+		},
+	}
+	for what, read := range reads {
+		got, err := read()
+		if err != nil {
+			t.Errorf("%s: read through the cache, which holds no user Secret: %v", what, err)
+			continue
+		}
+		if got == "" {
+			t.Errorf("%s: read nothing", what)
+		}
+	}
+}
+
+func mapBytes(m map[string]string) map[string][]byte {
+	out := make(map[string][]byte, len(m))
+	for k, v := range m {
+		out[k] = []byte(v)
+	}
+	return out
+}
+
+// Every kind some controller Owns() or reads through the cache gets an
+// informer, and an unfiltered informer holds the whole cluster's objects of
+// that kind. The option set must name each of them with the selector.
 
 // The config-password Secret is the one Secret the operator watches, so one
 // created before the label must be labelled — and only when it is ours.

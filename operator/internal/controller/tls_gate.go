@@ -111,7 +111,7 @@ func (r *SlapdClusterReconciler) reconcileTLSGate(ctx context.Context, sc *ldapv
 	)
 	if sc.Spec.LDAP.TLS.Enabled && sc.Spec.LDAP.TLS.SecretName != "" {
 		secret := &corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{
+		err := r.secrets().Get(ctx, types.NamespacedName{
 			Namespace: sc.Namespace,
 			Name:      sc.Spec.LDAP.TLS.SecretName,
 		}, secret)

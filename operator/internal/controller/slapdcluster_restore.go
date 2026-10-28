@@ -39,7 +39,7 @@ import (
 // s3ConfigFromStorage reads the credentials Secret referenced by an
 // S3StorageSpec and returns a static-credential S3Config for inline
 // operator-side S3 operations (preflight validation, retention deletes).
-func s3ConfigFromStorage(ctx context.Context, c client.Client, ns string, st ldapv1alpha1.S3StorageSpec) (backup.S3Config, error) {
+func s3ConfigFromStorage(ctx context.Context, c client.Reader, ns string, st ldapv1alpha1.S3StorageSpec) (backup.S3Config, error) {
 	secret := &corev1.Secret{}
 	if err := c.Get(ctx, client.ObjectKey{Name: st.CredentialsSecretName, Namespace: ns}, secret); err != nil {
 		return backup.S3Config{}, fmt.Errorf("read S3 credentials secret %q: %w", st.CredentialsSecretName, err)
@@ -63,7 +63,7 @@ func (r *SlapdClusterReconciler) databaseReplPassword(ctx context.Context, sd *l
 		name = sd.Name + "-credentials"
 	}
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sd.Namespace}, secret); err != nil {
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: name, Namespace: sd.Namespace}, secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", nil
 		}
@@ -250,7 +250,7 @@ func (r *SlapdClusterReconciler) reconcileRestorePreflight(ctx context.Context, 
 			rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
 			return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-		cfg, err := s3ConfigFromStorage(ctx, r.Client, sc.Namespace, st)
+		cfg, err := s3ConfigFromStorage(ctx, r.secrets(), sc.Namespace, st)
 		if err != nil {
 			rst.Message = fmt.Sprintf("preflight: %s: %v", name, err)
 			return true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil

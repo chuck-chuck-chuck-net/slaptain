@@ -51,6 +51,11 @@ import (
 // has to own and keep correct on every Secret it cares about, against four
 // lines here. Revisit if the five-minute worst case ever becomes the thing
 // standing between an operator and a credential rotation.
+//
+// ADR-042 narrowed this without dissolving it: the Secret informer IS
+// label-scoped now, and cheap — but it holds only the Secrets the operator
+// labelled, and the rotation that matters here is of a bring-your-own Secret
+// the operator never labels. So a watch would still not see it.
 const databaseResyncInterval = 5 * time.Minute
 
 // databaseRequeueAfter is how long the SlapdDatabase reconcile asks to wait

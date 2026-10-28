@@ -222,6 +222,7 @@ func main() {
 
 	if err := (&controller.SlapdClusterReconciler{
 		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
 		Scheme:          mgr.GetScheme(),
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
@@ -234,6 +235,7 @@ func main() {
 	}
 	if err := (&controller.SlapdSchemaReconciler{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Scheme:        mgr.GetScheme(),
 		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr); err != nil {
@@ -242,6 +244,7 @@ func main() {
 	}
 	if err := (&controller.SlapdDatabaseReconciler{
 		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
 		Scheme:          mgr.GetScheme(),
 		ClusterDomain:   clusterDomain,
 		SiteName:        siteName,
@@ -254,6 +257,7 @@ func main() {
 	}
 	if err := (&controller.SlapdBackupReconciler{
 		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
 		Scheme:          mgr.GetScheme(),
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
@@ -264,8 +268,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdScheduledBackupReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdScheduledBackup")
 		os.Exit(1)

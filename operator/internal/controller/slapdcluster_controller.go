@@ -70,6 +70,11 @@ const (
 type SlapdClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader reads Secrets straight from the API server (ADR-042): a Secret
+	// the user supplied carries no label of ours and is absent from the
+	// filtered cache. Wired from mgr.GetAPIReader(); nil means Client is
+	// already uncached (tests) and is used as is.
+	APIReader client.Reader
 	// DefaultImageTag is the tag substituted into SlapdCluster.spec.images.{slapd,init}
 	// when the user leaves them blank. Wired from the OPERATOR_IMAGE_TAG env in
 	// the operator Deployment (Helm chart injects it from Chart.AppVersion), so
@@ -621,10 +626,15 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 		return nil
 	}
 
-	// If auto-generated secret already exists, nothing to do.
+	// If the auto-generated Secret already exists, nothing to create. One
+	// thing to converge: a Secret created by an operator older than ADR-042
+	// carries no label and is invisible to the filtered informer behind
+	// Owns(&corev1.Secret{}), so a deletion would go unnoticed until some
+	// other event. Label it, once — only when it is ours to label, which the
+	// controller reference says.
 	existing := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: cfgName, Namespace: sc.Namespace}, existing); err == nil {
-		return nil
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: cfgName, Namespace: sc.Namespace}, existing); err == nil {
+		return r.labelOwnedSecret(ctx, sc, existing)
 	} else if !errors.IsNotFound(err) {
 		return err
 	}
@@ -1507,7 +1517,7 @@ func (r *SlapdClusterReconciler) getConfigPassword(ctx context.Context, sc *ldap
 		secretName = sc.Spec.LDAP.CnConfigCredentials.SecretName
 	}
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{
+	if err := r.secrets().Get(ctx, client.ObjectKey{
 		Name: secretName, Namespace: sc.Namespace,
 	}, secret); err != nil {
 		return "", fmt.Errorf("read config password secret %s: %w", secretName, err)
@@ -1561,7 +1571,7 @@ func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv
 			secretName = db.Spec.Credentials.SecretName
 		}
 		secret := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKey{
+		if err := r.secrets().Get(ctx, client.ObjectKey{
 			Name: secretName, Namespace: sc.Namespace,
 		}, secret); err == nil {
 			info.bindPW = string(secret.Data[secretKeyReplicationPassword])
@@ -2064,7 +2074,7 @@ func (r *SlapdClusterReconciler) discoverRemotePeerProviders(
 
 	// Read the kubeconfig Secret.
 	kubeconfigSecret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{
+	if err := r.secrets().Get(ctx, client.ObjectKey{
 		Name:      disc.KubeconfigSecret.Name,
 		Namespace: sc.Namespace,
 	}, kubeconfigSecret); err != nil {

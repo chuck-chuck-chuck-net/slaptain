@@ -14,6 +14,7 @@ import (
 	"maps"
 
 	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // managedLabels is the label set every object the operator creates carries.
@@ -46,3 +47,42 @@ var managedSelector = labels.SelectorFromSet(managedLabels())
 // through the cached client, i.e. the kinds that get an informer at all.
 // ConfigMaps and PersistentVolumeClaims are applied, never read, and have
 // none.
+
+// secretReader is the reader every Secret is read through: the API server
+// directly, so that a Secret the user supplied — which carries no label of
+// ours and is therefore absent from the filtered cache — is found. nil means
+// the client is already uncached (envtest, fake clients) and is used as is.
+func secretReader(apiReader client.Reader, c client.Client) client.Reader {
+	if apiReader != nil {
+		return apiReader
+	}
+	return c
+}
+
+// managedGet reads an object the operator applies — a StatefulSet or a
+// Service — from the cache, and on NotFound asks the API server once before
+// believing it. The second read exists for one case: an object created by an
+// operator that predates managedLabels, which the filtered informer does not
+// hold until this pass's apply labels it. Without it, the pre-apply reads
+// would take an existing object for a first create — the immutable-field
+// adoption would re-assert volumeClaimTemplates against an existing
+// StatefulSet (rejected, so the apply that would have labelled it never
+// lands), and a <cluster>-write Service frozen on one pod would never be
+// widened. In steady state the fallback costs one GET only while an object
+// genuinely does not exist yet.
+
+// secrets is the reader this controller reads Secrets through. See
+// secretReader.
+func (r *SlapdClusterReconciler) secrets() client.Reader { return secretReader(r.APIReader, r.Client) }
+
+func (r *SlapdDatabaseReconciler) secrets() client.Reader { return secretReader(r.APIReader, r.Client) }
+
+func (r *SlapdSchemaReconciler) secrets() client.Reader { return secretReader(r.APIReader, r.Client) }
+
+func (r *SlapdBackupReconciler) secrets() client.Reader { return secretReader(r.APIReader, r.Client) }
+
+func (r *SlapdScheduledBackupReconciler) secrets() client.Reader {
+	return secretReader(r.APIReader, r.Client)
+}
+
+// getManaged is managedGet with this controller's clients.
