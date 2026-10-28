@@ -139,6 +139,7 @@ func (r *SlapdClusterReconciler) reconcileDatabaseDirsConfigMap(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      databaseDirsConfigMapName(sc.Name),
 			Namespace: sc.Namespace,
+			Labels:    managedLabels(),
 		},
 		Data: databaseDirsFor(dbList.Items, sc.Name).configMapData(),
 	}

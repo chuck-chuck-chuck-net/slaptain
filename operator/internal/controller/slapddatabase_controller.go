@@ -665,17 +665,22 @@ func (r *SlapdDatabaseReconciler) reconcileCredentials(
 		return fmt.Errorf("generate replication password: %w", err)
 	}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: sd.Namespace},
+	// No SetControllerReference — the secret should survive CR deletion
+	// when cleanupPolicy=Retain.
+	return r.Create(ctx, credentialsSecret(sd.Namespace, secretName, rootPW, replPW))
+}
+
+// credentialsSecret is the <database>-credentials Secret the operator creates
+// for a database that brought no credentials of its own.
+func credentialsSecret(namespace, name, rootPW, replPW string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: managedLabels()},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
 			secretKeyRootPassword:        rootPW,
 			secretKeyReplicationPassword: replPW,
 		},
 	}
-	// No SetControllerReference — the secret should survive CR deletion
-	// when cleanupPolicy=Retain.
-	return r.Create(ctx, secret)
 }
 
 func (r *SlapdDatabaseReconciler) credentialsSecretName(sd *ldapv1alpha1.SlapdDatabase) string {

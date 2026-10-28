@@ -219,6 +219,7 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 			BackoffLimit:            &backoff,
 			TTLSecondsAfterFinished: &ttl,
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: managedLabels()},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					SecurityContext:  backupPodSecurityContext(sc),
