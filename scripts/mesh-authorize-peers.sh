@@ -332,7 +332,7 @@ current-context: ${remote_ctx}"
         log "[$local_ctx] Creating Secret $secret_name (kubeconfig for $remote_ctx)..."
         render "$local_ctx" -n "$NAMESPACE" create secret generic "$secret_name" \
             --from-literal="kubeconfig=${kubeconfig}" \
-            | kubectl label --local -f - ldap.chuck-chuck-chuck.net/owned=true -o yaml \
+            | kubectl label --local -f - ldap.chuck-chuck-chuck.net/cluster=multi_cluster -o yaml \
             | emit "$local_ctx" "[$local_ctx] Secret $secret_name — how $local_ctx reaches $remote_ctx's API"
 
         # The Secret's payload is the point of this whole script, and base64

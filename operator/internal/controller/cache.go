@@ -20,12 +20,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // labelFilteredKinds are the kinds the cache holds only when labelled
-// LabelOwned (ADR-044). Unfiltered, they are every object of that kind in the
+// LabelCluster (ADR-044). Unfiltered, they are every object of that kind in the
 // cluster, Helm release Secrets included. The slaptain CR kinds stay unfiltered:
 // a user's CR carries no label and must still reconcile.
 var labelFilteredKinds = []client.Object{
@@ -40,10 +41,14 @@ var labelFilteredKinds = []client.Object{
 // CacheOptions restricts the manager's cache to labelled objects of the
 // filtered kinds (ADR-044).
 func CacheOptions() cache.Options {
-	owned := labels.SelectorFromSet(labels.Set{LabelOwned: labelOwnedValue})
+	hasCluster, err := labels.NewRequirement(LabelCluster, selection.Exists, nil)
+	if err != nil {
+		panic(err) // a constant key; only a typo in LabelCluster gets here
+	}
+	labelled := labels.NewSelector().Add(*hasCluster)
 	byObject := make(map[client.Object]cache.ByObject, len(labelFilteredKinds))
 	for _, obj := range labelFilteredKinds {
-		byObject[obj] = cache.ByObject{Label: owned}
+		byObject[obj] = cache.ByObject{Label: labelled}
 	}
 	return cache.Options{ByObject: byObject}
 }
@@ -78,10 +83,10 @@ func (c *cacheFallbackClient) Get(ctx context.Context, key client.ObjectKey, obj
 // created without them, when owner controls it. Without a controller reference
 // the object may be the user's, and the operator does not write to it.
 func labelOwnedObject(ctx context.Context, c client.Client, obj client.Object, owner metav1.Object) error {
-	if !metav1.IsControlledBy(obj, owner) || obj.GetLabels()[LabelOwned] == labelOwnedValue {
+	if !metav1.IsControlledBy(obj, owner) || obj.GetLabels()[LabelCluster] == clusterLabelValue(owner.GetName()) {
 		return nil
 	}
 	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object))
-	obj.SetLabels(withOperatorLabels(obj.GetLabels()))
+	obj.SetLabels(withOperatorLabels(owner.GetName(), obj.GetLabels()))
 	return c.Patch(ctx, obj, patch)
 }

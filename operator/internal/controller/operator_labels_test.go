@@ -13,6 +13,7 @@ package controller
 import (
 	"context"
 	"maps"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -21,6 +22,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -29,7 +31,7 @@ import (
 )
 
 // ADR-044: the manager caches a Secret, ConfigMap, Service, StatefulSet, Job or
-// Pod only when it carries LabelOwned, so an object the operator writes
+// Pod only when it carries LabelCluster, so an object the operator writes
 // without it drops out of every Owns() watch and every cached read. These
 // tests run the real create paths against a fake API server and look at what
 // landed, rather than at the builders, because the sites that write inline
@@ -43,8 +45,8 @@ func assertOperatorLabels(t *testing.T, what string, got map[string]string) {
 	if got[labelManagedBy] != managedBy {
 		t.Errorf("%s: %s = %q, want %q", what, labelManagedBy, got[labelManagedBy], managedBy)
 	}
-	if got[LabelOwned] != "true" {
-		t.Errorf("%s: %s = %q, want \"true\"", what, LabelOwned, got[LabelOwned])
+	if got[LabelCluster] != goldenClusterName {
+		t.Errorf("%s: %s = %q, want %q", what, LabelCluster, got[LabelCluster], goldenClusterName)
 	}
 }
 
@@ -105,8 +107,8 @@ func TestClusterControllerLabelsEverythingItWrites(t *testing.T) {
 	}
 	for _, o := range svcs.Items {
 		assertOperatorLabels(t, "Service "+o.Name, o.Labels)
-		if _, ok := o.Spec.Selector[LabelOwned]; ok {
-			t.Errorf("Service %s: selector carries %s; selectors stay as they were", o.Name, LabelOwned)
+		if _, ok := o.Spec.Selector[LabelCluster]; ok {
+			t.Errorf("Service %s: selector carries %s; selectors stay as they were", o.Name, LabelCluster)
 		}
 	}
 	for _, o := range stss.Items {
@@ -183,7 +185,8 @@ func assertJobLabels(t *testing.T, job *batchv1.Job) {
 // would make every CR a user applied without the label stop reconciling.
 func TestCacheOptionsFilterTheCoreKindsOnly(t *testing.T) {
 	opts := CacheOptions()
-	labelled := labels.Set{LabelOwned: "true"}
+	labelled := labels.Set{LabelCluster: goldenClusterName}
+	shared := labels.Set{LabelCluster: clusterMulti}
 	unlabelled := labels.Set{labelManagedBy: managedBy}
 
 	want := map[string]bool{
@@ -199,8 +202,8 @@ func TestCacheOptionsFilterTheCoreKindsOnly(t *testing.T) {
 			t.Errorf("ByObject filters %s, which is not one of the six core kinds", kind)
 			continue
 		}
-		if by.Label == nil || !by.Label.Matches(labelled) || by.Label.Matches(unlabelled) {
-			t.Errorf("%s: selector %v must match %s=true and nothing without it", kind, by.Label, LabelOwned)
+		if by.Label == nil || !by.Label.Matches(labelled) || !by.Label.Matches(shared) || by.Label.Matches(unlabelled) {
+			t.Errorf("%s: selector %v must match any %s and nothing without it", kind, by.Label, LabelCluster)
 		}
 		delete(want, kind)
 	}
@@ -343,4 +346,24 @@ func typeName(obj client.Object) string {
 		return "*v1.Pod"
 	}
 	return "other"
+}
+
+// A cluster name may be longer than a label value. The label is truncated,
+// and a cut that lands on '-' or '.' must not end the value.
+func TestClusterLabelValueFitsALabel(t *testing.T) {
+	cases := map[string]string{
+		"slapd":                         "slapd",
+		strings.Repeat("a", 70):         strings.Repeat("a", 63),
+		strings.Repeat("a", 62) + "-b":  strings.Repeat("a", 62),
+		strings.Repeat("a", 61) + ".-b": strings.Repeat("a", 61),
+	}
+	for name, want := range cases {
+		got := clusterLabelValue(name)
+		if got != want {
+			t.Errorf("clusterLabelValue(%d chars) = %q, want %q", len(name), got, want)
+		}
+		if errs := validation.IsValidLabelValue(got); len(errs) > 0 {
+			t.Errorf("clusterLabelValue(%d chars) = %q is not a label value: %v", len(name), got, errs)
+		}
+	}
 }

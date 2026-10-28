@@ -40,6 +40,7 @@ REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 
 LAB_FILE="${E2E_CONFIG:-}"
 DIRECTORY_FILE=""
+CLUSTER=""
 NAMESPACE="slaptain"
 DRY_RUN=""
 DATABASES=()
@@ -61,6 +62,9 @@ that is true by construction rather than by remembering.
 Options:
   -f, --file FILE      Directory values file; databases[].name is read from it
       --database NAME  Name a database explicitly (repeatable); skips -f
+      --cluster NAME   SlapdCluster the databases belong to, for the Secrets'
+                       ldap.chuck-chuck-chuck.net/cluster label (default:
+                       cluster.name from -f, else slapd)
   -n, --namespace NS   Namespace on all clusters (default: slaptain)
       --from-lab FILE  Lab file to read (default: \$E2E_CONFIG or lab.yaml)
       --dry-run        Say what would happen; change nothing
@@ -76,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -f|--file)      DIRECTORY_FILE="$2"; shift 2 ;;
         --database)     DATABASES+=("$2"); shift 2 ;;
+        --cluster)      CLUSTER="$2"; shift 2 ;;
         -n|--namespace) NAMESPACE="$2"; shift 2 ;;
         --from-lab)     LAB_FILE="$2"; shift 2 ;;
         --dry-run)      DRY_RUN=1; shift ;;
@@ -94,6 +99,10 @@ if [[ ${#DATABASES[@]} -eq 0 ]]; then
     mapfile -t DATABASES < <(yq -r '.databases[].name // ""' "$DIRECTORY_FILE" | grep -v '^$' || true)
     [[ ${#DATABASES[@]} -eq 0 ]] && die "$DIRECTORY_FILE lists no databases[].name"
 fi
+if [[ -z "$CLUSTER" && -n "$DIRECTORY_FILE" ]]; then
+    CLUSTER=$(yq -r '.cluster.name // ""' "$DIRECTORY_FILE")
+fi
+CLUSTER="${CLUSTER:-slapd}"
 
 count=$(yq -r '.sites | length' "$LAB_FILE")
 [[ "$count" == "null" || "$count" -eq 0 ]] && die "$LAB_FILE declares no sites"
@@ -149,12 +158,12 @@ for db in "${DATABASES[@]}"; do
             continue
         fi
         log "  [$site] creating $secret"
-        env ROOT_PW="$root_pw" REPL_PW="$repl_pw" bash -c \
+        env ROOT_PW="$root_pw" REPL_PW="$repl_pw" CLUSTER="$CLUSTER" bash -c \
             "kubectl --context '$ctx' -n '$NAMESPACE' create secret generic '$secret' \
                 --from-literal=root-password=\"\$ROOT_PW\" \
                 --from-literal=replication-password=\"\$REPL_PW\" \
                 --dry-run=client -o yaml \
-                | kubectl label --local -f - ldap.chuck-chuck-chuck.net/owned=true -o yaml \
+                | kubectl label --local -f - ldap.chuck-chuck-chuck.net/cluster=\"\$CLUSTER\" -o yaml \
                 | kubectl --context '$ctx' apply -f - >/dev/null"
     done
 done

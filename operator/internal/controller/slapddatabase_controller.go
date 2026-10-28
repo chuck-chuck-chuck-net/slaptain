@@ -666,7 +666,7 @@ func (r *SlapdDatabaseReconciler) reconcileCredentials(
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: sd.Namespace, Labels: withOperatorLabels(nil)},
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: sd.Namespace, Labels: withOperatorLabels(sc.Name, nil)},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
 			secretKeyRootPassword:        rootPW,
