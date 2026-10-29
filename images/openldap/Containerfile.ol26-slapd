@@ -1,7 +1,7 @@
 # OpenLDAP 2.6 (Debian trixie package) slapd runtime image — the LEGACY variant.
 #
 # Built as <registry>/slaptain/slapd:<tag>-ol26. The default `slapd:<tag>` image
-# is OpenLDAP 2.7.1 from the vendored packaging fork (images/openldap-deb/).
+# is OpenLDAP 2.7.1 from the vendored packaging fork (images/openldap/).
 # Keep this variant for legacy interop and hot-migration clusters that must run
 # the same 2.6 code as their migration source — see ADR-021 and ADR-011.
 #

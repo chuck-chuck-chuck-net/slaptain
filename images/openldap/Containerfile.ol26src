@@ -1,5 +1,5 @@
 # OpenLDAP 2.6 .deb carrier built from DEBIAN'S OWN SOURCE PACKAGE, plus the
-# local patches in images/openldap-deb/local-patches/. Built and pushed by the
+# local patches in images/openldap/local-patches/. Built and pushed by the
 # *-ol26src targets, which address it at $(IMAGE_TAG)-ol26src and send it
 # wherever REGISTRY points; publishing to the public registry stays CI's job,
 # from main and from release tags.

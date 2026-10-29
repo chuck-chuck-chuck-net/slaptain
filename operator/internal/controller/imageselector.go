@@ -43,7 +43,7 @@ var imageTagSuffixes = map[string]map[string]string{
 	storageFormatLegacy: {
 		// Debian's own 2.6 binary, from its own source package.
 		flavourPure: tagSuffixOL26,
-		// Debian's 2.6 source plus images/openldap-deb/local-patches/.
+		// Debian's 2.6 source plus images/openldap/local-patches/.
 		flavourSlaptain: tagSuffixOL26Src,
 	},
 }
