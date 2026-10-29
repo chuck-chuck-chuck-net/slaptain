@@ -56,15 +56,24 @@ ARG BUILD_VARIANT
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# This stage never ships, so it keeps downloaded packages for the apt cache
+# mounts below, which spare a re-run step the download.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=private \
+    apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
+        ccache \
         curl \
         devscripts \
         equivs \
         fakeroot \
         quilt \
-    && rm -rf /var/lib/apt/lists/*
+    # apt may set up ccache before gcc, leaving no /usr/lib/ccache/cc for the libtool compiles.
+    && update-ccache-symlinks && test -L /usr/lib/ccache/cc
 
 WORKDIR /build
 
@@ -169,9 +178,10 @@ the pure revision — fix debian/changelog or this rule" >&2; exit 1; \
 
 # apt-get update again: the stage above dropped the package lists, and
 # mk-build-deps needs them to resolve the build dependencies.
-RUN apt-get update \
-    && mk-build-deps -i -r -t 'apt-get -y --no-install-recommends' debian/control \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=private \
+    apt-get update \
+    && mk-build-deps -i -r -t 'apt-get -y --no-install-recommends' debian/control
 
 # DFSG_NONFREE=1: we build the pristine upstream tarball, so debian/rules must
 # skip both its DFSG-freeness assertion and its schema substitution (which
@@ -180,7 +190,11 @@ RUN apt-get update \
 # Note there is deliberately NO DPKG_GENSYMBOLS_CHECK_LEVEL override here: the
 # 2.6 -> 2.7 libldap ABI delta is recorded in debian/libldap2.symbols, so an
 # unexpected symbol change fails the build instead of being papered over.
-RUN set -eux; \
+RUN --mount=type=cache,target=/root/.cache/ccache,id=openldap-ccache \
+    set -eux; \
+    # ccache keeps object files across builds on the cache mount, so a packaging
+    # or patch edit recompiles only what it changed.
+    export PATH="/usr/lib/ccache:$PATH" CCACHE_DIR=/root/.cache/ccache; \
     export DFSG_NONFREE=1; \
     if [ "${RUN_UPSTREAM_TESTS}" = "1" ]; then check=""; else check="nocheck"; fi; \
     opts="${check} parallel=$(nproc)"; \
@@ -208,7 +222,8 @@ RUN set -eux; \
       *) echo "BUILD_VARIANT must be release, debug or asan (got '${BUILD_VARIANT}')" >&2; exit 1 ;; \
     esac; \
     export DEB_BUILD_OPTIONS="${opts}"; \
-    dpkg-buildpackage -us -uc -b
+    dpkg-buildpackage -us -uc -b; \
+    ccache --show-stats
 
 # ── version/flavour agreement gate ──────────────────────────────────────────
 # The build has just decided two things from one argument: which patches went
@@ -408,13 +423,21 @@ FROM debian:trixie-slim AS debs-debian-src-build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# This stage never ships, so it keeps downloaded packages for the apt cache
+# mounts below, which spare a re-run step the download.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
 # deb822 sources: add deb-src so `apt-get source` has something to fetch.
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=private \
+    set -eux; \
     sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        build-essential ca-certificates devscripts equivs fakeroot quilt; \
-    rm -rf /var/lib/apt/lists/*
+        build-essential ca-certificates ccache devscripts equivs fakeroot quilt; \
+    # apt may set up ccache before gcc, leaving no /usr/lib/ccache/cc for the libtool compiles.
+    update-ccache-symlinks; test -L /usr/lib/ccache/cc
 
 WORKDIR /build
 
@@ -423,8 +446,9 @@ ARG OPENLDAP_OL26_VERSION=2.6.10+dfsg-1
 # Pinned for the same reason the binary pair is (ADR-040 decision 1): an
 # unpinned `apt-get source` fetches whatever the archive serves today, so the
 # patches below would be applied to a moving target.
-RUN apt-get update && apt-get source slapd="${OPENLDAP_OL26_VERSION}" \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=private \
+    apt-get update && apt-get source slapd="${OPENLDAP_OL26_VERSION}"
 
 COPY local-patches /build/local-patches
 
@@ -446,16 +470,22 @@ RUN set -eux; \
     dch --local '+slaptainphase' --distribution UNRELEASED \
         'Add the accesslog logpurge phase parameter (local patch).'
 
-RUN set -eux; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=private \
+    set -eux; \
     cd openldap-*/; \
     apt-get update; \
-    mk-build-deps -i -r -t 'apt-get -y --no-install-recommends' debian/control; \
-    rm -rf /var/lib/apt/lists/*
+    mk-build-deps -i -r -t 'apt-get -y --no-install-recommends' debian/control
 
-RUN set -eux; \
+RUN --mount=type=cache,target=/root/.cache/ccache,id=openldap-ccache \
+    set -eux; \
+    # ccache keeps object files across builds on the cache mount, so a packaging
+    # or patch edit recompiles only what it changed.
+    export PATH="/usr/lib/ccache:$PATH" CCACHE_DIR=/root/.cache/ccache; \
     cd openldap-*/; \
     export DEB_BUILD_OPTIONS="nocheck parallel=$(nproc)"; \
-    dpkg-buildpackage -us -uc -b
+    dpkg-buildpackage -us -uc -b; \
+    ccache --show-stats
 
 FROM scratch AS debs-debian-src
 COPY --from=debs-debian-src-build /build/*.deb /debs/
@@ -467,6 +497,11 @@ FROM debian:trixie-slim AS slapd-build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# This stage never ships, so it keeps downloaded packages for the apt cache
+# mounts below, which spare a re-run step the download.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+
 COPY --from=debs /debs /debs
 
 # Install the forked 2.7.1 packages instead of Debian's 2.6 slapd. apt resolves
@@ -476,15 +511,16 @@ COPY --from=debs /debs /debs
 # slappasswd: those are sanitized binaries too, and ASan's default exitcode=23
 # on a leak report turns slapd's package configuration into a failed build.
 # Exit-time allocations in a one-shot tool are not what we are hunting.
-RUN ASAN_OPTIONS=detect_leaks=0 \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=private \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=private \
+    ASAN_OPTIONS=detect_leaks=0 \
     apt-get update && ASAN_OPTIONS=detect_leaks=0 \
     apt-get install -y --no-install-recommends \
         /debs/libldap-common_*.deb \
         /debs/libldap2_*.deb \
         /debs/slapd_*.deb \
         /debs/ldap-utils_*.deb \
-        dpkg-dev \
-    && rm -rf /var/lib/apt/lists/*
+        dpkg-dev
 
 # Debug variants: unpack the detached debug info into /usr/lib/debug. dpkg,
 # not apt — a -dbgsym package Depends on an exact binary version that is not in
