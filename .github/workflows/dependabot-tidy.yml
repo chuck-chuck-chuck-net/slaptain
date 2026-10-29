@@ -35,7 +35,7 @@ permissions:
 jobs:
   tidy:
     name: Tidy the mirrored modules
-    runs-on: namespace-profile-yo-lo
+    runs-on: namespace-profile-2x8
     if: github.actor == 'dependabot[bot]'
     steps:
       - name: Clone the PR branch

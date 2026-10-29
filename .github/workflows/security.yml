@@ -21,7 +21,7 @@ concurrency:
 jobs:
   govulncheck:
     name: Go vulnerability check
-    runs-on: namespace-profile-yo-lo
+    runs-on: namespace-profile-2x8
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -58,7 +58,7 @@ jobs:
 
   trivy:
     name: Trivy filesystem scan
-    runs-on: namespace-profile-yo-lo
+    runs-on: namespace-profile-1x2
     steps:
       - name: Checkout
         uses: actions/checkout@v7

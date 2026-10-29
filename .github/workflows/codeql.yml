@@ -23,7 +23,7 @@ jobs:
     name: Analyze
     # Measured: 1.6 of 4 cores on average, near 4 only for ~40 s of queries;
     # 8x16 finished 10 s sooner, so the extra 4 vCPU of quota bought little.
-    runs-on: namespace-profile-yo-lo
+    runs-on: namespace-profile-4x8
     steps:
       - name: Checkout
         uses: actions/checkout@v7
