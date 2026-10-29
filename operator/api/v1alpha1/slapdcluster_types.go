@@ -992,6 +992,106 @@ type SlapdClusterSpec struct {
 	// negative. User guide: docs/PURGE-ROTATION.md.
 	// +optional
 	Rotation SlapdRotationConfig `json:"rotation,omitempty"`
+	// placement decides which nodes this cluster's pods may land on, and how
+	// evenly they are spread across them (ADR-043). It applies to BOTH pod
+	// templates — the read-write fleet and, when readReplicas > 0, the
+	// read-only one.
+	//
+	// Every field here is the raw Kubernetes type, passed to the pod template
+	// verbatim; the operator adds nothing of its own except ONE default
+	// topology spread constraint per fleet, described on
+	// topologySpreadConstraints below.
+	//
+	// Why this matters more here than for a typical workload: the PVCs are
+	// ReadWriteOnce and, on local storage with volumeBindingMode
+	// WaitForFirstConsumer, the volume binds wherever the pod first lands and
+	// pins the pod to that node for the life of the PVC. The FIRST scheduling
+	// decision is the only one — a bad spread is not something the next
+	// reschedule fixes, it is corrected only by deleting that pod's PVCs and
+	// rebuilding it from replication.
+	// +optional
+	Placement PlacementConfig `json:"placement,omitempty"`
+}
+
+// PlacementConfig carries the pod-placement fields slaptain passes through to
+// both StatefulSet pod templates (ADR-043).
+//
+// It is one block named for what it contains, rather than the more common
+// layout that files most knobs under `affinity` and leaves spread constraints
+// beside it: topology spread constraints are not affinity, and nothing forces
+// us to inherit that shape.
+//
+// Everything here renders nothing when unset — with one deliberate exception,
+// the generated default spread constraint. See topologySpreadConstraints.
+type PlacementConfig struct {
+	// topologySpreadConstraints spreads this fleet's pods across topology
+	// domains. Passed to the pod template verbatim.
+	//
+	// UNSET MEANS ONE GENERATED CONSTRAINT, NOT NONE. When this list is
+	// absent the operator writes exactly one constraint for this fleet:
+	// maxSkew 1, topologyKey kubernetes.io/hostname, whenUnsatisfiable
+	// ScheduleAnyway, and a labelSelector matching this cluster's pods of
+	// THIS fleet only (app.kubernetes.io/instance = <cluster> for the
+	// read-write pods, <cluster>-readonly for the read-only ones). Writers
+	// are then spread evenly among themselves and readers among themselves;
+	// one combined group across both fleets would permit every writer to
+	// share a node while the per-node totals still looked even.
+	//
+	// A list you supply REPLACES the generated constraint entirely — it is
+	// never merged into yours. The API rejects two constraints on one pod
+	// sharing a {topologyKey, whenUnsatisfiable} pair and ignores
+	// labelSelector when deciding that, so a merge would make your own
+	// hostname constraint unschedulable from a value you cannot see. Setting
+	// this to an explicit empty list ([]) is how you ask for NO spread
+	// constraint at all.
+	//
+	// CAUTION on whenUnsatisfiable: DoNotSchedule can strand a pod
+	// permanently on this workload, and the reason is the storage. Once a
+	// pod's PV is bound, its node affinity forces that pod onto one node; if
+	// a hard spread constraint says that node would exceed the skew, the pod
+	// stays Pending and no rescheduling can resolve it, because the only node
+	// it may use is the one being refused. The generated default is
+	// ScheduleAnyway for exactly this reason. Prefer ScheduleAnyway unless
+	// you know your volumes can move.
+	//
+	// matchLabelKeys is deliberately not something slaptain sets: it solves a
+	// rolling-update skew problem keyed on pod-template-hash, which belongs
+	// to Deployments. A StatefulSet pod keeps its identity and its PVC across
+	// an update.
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+	// nodeSelector restricts this cluster's pods to nodes carrying all of
+	// these labels. Passed to the pod template verbatim. The simplest of the
+	// node-selection fields and the hardest: a pod whose selector matches no
+	// node stays Pending.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// nodeAffinity expresses richer node selection than nodeSelector —
+	// required and preferred terms, set-based operators.
+	//
+	// This is the NODE half of the Kubernetes affinity struct only. The pod
+	// half (podAffinity / podAntiAffinity) is deliberately not exposed: it is
+	// reserved for the operator, because separating the read-write fleet from
+	// the read-only one — which topology spread constraints cannot express at
+	// all — would have to be operator-generated pod anti-affinity. Exposing
+	// the whole struct today would cost either an API break later or a
+	// fragile merge of your terms with ours. If you need pod anti-affinity
+	// now, say so rather than working around it.
+	// +optional
+	NodeAffinity *corev1.NodeAffinity `json:"nodeAffinity,omitempty"`
+	// tolerations let this cluster's pods schedule onto nodes carrying
+	// matching taints. Passed to the pod template verbatim. A toleration
+	// removes a node's veto; it does not attract a pod to that node — pair it
+	// with nodeSelector or nodeAffinity when you mean "run there, and only
+	// there".
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+	// priorityClassName names an existing PriorityClass, which decides this
+	// cluster's scheduling precedence and what it may preempt. Passed to the
+	// pod template verbatim. A name that does not resolve is rejected at pod
+	// admission, so the pods never appear at all.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 }
 
 // SlapdAccesslogPurgeConfig is form A of the purge schedule: one interval for

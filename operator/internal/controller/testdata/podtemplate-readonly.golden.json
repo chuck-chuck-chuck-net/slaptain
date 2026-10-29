@@ -244,6 +244,19 @@
       {
         "name": "regcred"
       }
+    ],
+    "topologySpreadConstraints": [
+      {
+        "maxSkew": 1,
+        "topologyKey": "kubernetes.io/hostname",
+        "whenUnsatisfiable": "ScheduleAnyway",
+        "labelSelector": {
+          "matchLabels": {
+            "app.kubernetes.io/instance": "slapd-readonly",
+            "app.kubernetes.io/name": "slapd"
+          }
+        }
+      }
     ]
   }
 }

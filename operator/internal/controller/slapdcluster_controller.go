@@ -1458,6 +1458,14 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 				InitContainers:   []corev1.Container{initContainer},
 				Containers:       []corev1.Container{mainContainer},
 				Volumes:          volumes,
+				// Placement (ADR-043). Four pass-throughs that render
+				// nothing when unset, and one constraint the operator
+				// generates per fleet when the user declared none.
+				NodeSelector:              sc.Spec.Placement.NodeSelector,
+				Affinity:                  placementNodeAffinity(sc),
+				Tolerations:               sc.Spec.Placement.Tolerations,
+				PriorityClassName:         sc.Spec.Placement.PriorityClassName,
+				TopologySpreadConstraints: spreadConstraintsFor(sc, readOnly),
 			},
 		},
 		VolumeClaimTemplates: volumeClaimTemplates,
