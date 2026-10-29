@@ -3,7 +3,7 @@
 # EXPORTER_GIT_TAG) and tests/e2e.sh call this — the rule must never fork
 # between them.
 #
-# Usage: image-tag.sh [main|exporter]     (default: main)
+# Usage: image-tag.sh [main|exporter] [--image]     (default: main)
 #
 # Two version lines live in this repository (docs/VERSIONING.md):
 #   main      git tags vX.Y.Z           — operator, slapd, slapd-init, toolkit, charts
@@ -19,6 +19,8 @@
 #
 # The printed value is what HEAD IS; the callers turn it into how the image is
 # ADDRESSED (strip `v` / `exporter/v` from a version tag, prefix sha- otherwise).
+# --image prints that addressed form instead, for callers with no Makefile to
+# do it (docker-bake.hcl in CI): v0.2.1 -> 0.2.1, 09ecf10 -> sha-09ecf10.
 #
 # The dirty suffix is a content hash of `git diff HEAD`, not a bare "-dirty":
 # a bare suffix aliases EVERY dirty state of one commit to the same tag, so a
@@ -32,21 +34,38 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-case "${1:-main}" in
-    main)     match='v*' ;;
-    exporter) match='exporter/v*' ;;
-    *)        echo "usage: $0 [main|exporter]" >&2; exit 2 ;;
+stream=main image=
+for arg in "$@"; do
+    case "$arg" in
+        main|exporter) stream=$arg ;;
+        --image)       image=1 ;;
+        *)             echo "usage: $0 [main|exporter] [--image]" >&2; exit 2 ;;
+    esac
+done
+
+case "$stream" in
+    main)     match='v*';          prefix='v' ;;
+    exporter) match='exporter/v*'; prefix='exporter/v' ;;
 esac
 
 if exact=$(git describe --tags --exact-match --match "$match" 2>/dev/null) && [[ -n "$exact" ]]; then
-    echo "$exact"
-    exit 0
+    tag=$exact
+else
+    hash=$(git rev-parse --short HEAD)
+    if git diff --quiet HEAD 2>/dev/null; then
+        tag=$hash
+    else
+        state=$(git diff HEAD | sha256sum | cut -c1-8)
+        tag="${hash}-dirty-${state}"
+    fi
 fi
 
-hash=$(git rev-parse --short HEAD)
-if git diff --quiet HEAD 2>/dev/null; then
-    echo "$hash"
+# Same version-tag test as the Makefile's IS_VERSION_TAG: a prefix match, so an
+# rc (v0.2.1-rc1) is addressed like any other tagged build.
+if [[ -z "$image" ]]; then
+    echo "$tag"
+elif [[ "$tag" =~ ^${prefix}[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    echo "${tag#"$prefix"}"
 else
-    state=$(git diff HEAD | sha256sum | cut -c1-8)
-    echo "${hash}-dirty-${state}"
+    echo "sha-${tag}"
 fi
