@@ -15,6 +15,8 @@ permissions:
 jobs:
   analyze:
     name: Analyze
+    # Measured: 1.6 of 4 cores on average, near 4 only for ~40 s of queries;
+    # 8x16 finished 10 s sooner, so the extra 4 vCPU of quota bought little.
     runs-on: namespace-profile-yo-lo
     steps:
       - name: Checkout
@@ -42,5 +44,10 @@ jobs:
       - name: Autobuild
         uses: github/codeql-action/autobuild@v4
 
+      # The database upload only feeds variant analysis, and waiting for
+      # processing only reports what the Security tab shows anyway.
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4
+        with:
+          upload-database: false
+          wait-for-processing: false
