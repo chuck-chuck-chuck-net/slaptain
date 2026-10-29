@@ -12,11 +12,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
-  # under its own.
-  REGISTRY: ghcr.io/${{ github.repository_owner }}
-
 jobs:
   images:
     name: Build and push images
@@ -37,6 +32,11 @@ jobs:
       # Makefile drives podman for that, which ubuntu-latest ships.
       - name: Show the tag the Makefile derived
         run: make show-tag
+
+      # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
+      # under its own, lowercased because OCI repository names must be.
+      - name: Point REGISTRY at the repository owner
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
       - name: Log in to GHCR
         env:
