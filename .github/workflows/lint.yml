@@ -28,7 +28,12 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.module }}/go.mod
-          cache-dependency-path: ${{ matrix.module }}/go.sum
+          cache: false
+
+      - name: Go cache on the Namespace cache volume
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: go
 
       # `version` is the same pin as GOLANGCI_LINT_VERSION in operator/Makefile;
       # move them together, so `make -C operator lint` and CI judge by the same

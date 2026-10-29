@@ -25,10 +25,14 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
-          cache-dependency-path: |
-            operator/go.sum
-            exporter/go.sum
-            tests/e2e/go.sum
+          cache: false
+
+      # The volume is mounted, not downloaded and extracted like the GitHub cache,
+      # and needs cache volumes enabled on the runner profile.
+      - name: Go cache on the Namespace cache volume
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: go
 
       # `make tidy` is the one list of modules; dependabot-tidy.yml runs the
       # same target to finish a Dependabot bump, so the two cannot disagree.

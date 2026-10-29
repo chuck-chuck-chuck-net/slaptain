@@ -24,9 +24,12 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
-          cache-dependency-path: |
-            operator/go.sum
-            tests/e2e/go.sum
+          cache: false
+
+      - name: Go cache on the Namespace cache volume
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: go
 
       # Go has no "none" build mode ("Go does not support the none build
       # mode", CodeQL 2.27). The Go autobuilder finds every go.mod in the tree
