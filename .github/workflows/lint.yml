@@ -12,30 +12,38 @@ permissions:
 
 jobs:
   lint:
-    name: golangci-lint (${{ matrix.module }})
+    name: golangci-lint
     runs-on: namespace-profile-yo-lo
-    strategy:
-      fail-fast: false
-      matrix:
-        # The Go modules that ship code; each carries its own .golangci.yml
-        # (identical today). tests/e2e is compiled by the test workflow.
-        module: [operator, exporter]
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
 
+      # The modules that ship code declare the same Go version; the operator's is used here.
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: ${{ matrix.module }}/go.mod
+          go-version-file: operator/go.mod
           cache: false
 
-      - name: Go cache on the Namespace cache volume
+      # The volume's golangci-lint mode asks the binary where its cache lives,
+      # so the binary has to be on PATH before the volume is mounted.
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          install-only: true
+          skip-cache: true
+
+      # golangci-lint keeps its analysis cache on the volume too. The action's own cache is
+      # skipped: it saves nothing once its key hits, so it stayed at whatever the first run wrote.
+      - name: Go and golangci-lint caches on the Namespace cache volume
         uses: namespacelabs/nscloud-cache-action@v1
         with:
-          cache: go
+          cache: |
+            go
+            golangci-lint
 
-      # `version` is the same pin as GOLANGCI_LINT_VERSION in operator/Makefile;
+      # `version` (here and in the install step) is the same pin as GOLANGCI_LINT_VERSION in operator/Makefile;
       # move them together, so `make -C operator lint` and CI judge by the same
       # rules. (It has to be a release whose Go is at least the module's go.mod,
       # or it dies on the export-data version before any linter runs — the
@@ -46,11 +54,23 @@ jobs:
       # entry in docs/BACKLOG.md). The earlier only-new-issues mode read the PR
       # diff through the API, which refuses diffs over 20,000 lines, and then
       # fell back to linting everything anyway.
-      - name: Run linter
+      #
+      # Each module carries its own .golangci.yml (identical today). tests/e2e
+      # is compiled by the test workflow.
+      - name: Lint the operator
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
-          working-directory: ${{ matrix.module }}
+          working-directory: operator
+          skip-cache: true
+
+      - name: Lint the exporter
+        if: ${{ !cancelled() }}
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: exporter
+          skip-cache: true
 
   chart:
     name: Helm charts
