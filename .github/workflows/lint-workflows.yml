@@ -14,7 +14,7 @@ permissions:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-yo-lo
     steps:
       - name: Checkout
         uses: actions/checkout@v7

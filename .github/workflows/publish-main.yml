@@ -20,7 +20,7 @@ env:
 jobs:
   images:
     name: Build and push images
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-yo-lo
     timeout-minutes: 120
     steps:
       - name: Checkout
