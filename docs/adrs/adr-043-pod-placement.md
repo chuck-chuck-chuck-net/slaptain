@@ -188,6 +188,43 @@ defect.
 else in `spec.placement` renders nothing when absent, as `spec.resources` and
 `spec.imagePullSecrets` already do.
 
+## Amendment, 2026-10-29: absent and empty are different answers
+
+Decision 3 said the default is generated "when `spec.placement` says nothing
+about it" and left the empty list unconsidered. The implementation had to
+decide, and chose:
+
+- **`topologySpreadConstraints` absent (nil)** — said nothing. The default is
+  generated.
+- **`topologySpreadConstraints: []`** — said *none*. No constraint is written,
+  and this is the only way to switch the generated default off.
+
+Accepted, and it is the honest reading of "replace, never merge": an explicit
+empty list *is* a statement about spread constraints, and without it a user who
+wants no constraint at all has no way to say so — they would have to supply a
+constraint they did not want in order to displace one they did not ask for.
+
+It costs nothing. JSON `[]` decodes to a non-nil zero-length slice and an
+absent key decodes to nil, so the two are already distinguishable after
+decoding; the predicate is `!= nil`, not `len() > 0`. The distinction is
+pinned by a test case, and that test was mutation-checked by swapping the
+predicate to `len() > 0` and observing exactly that case go red.
+
+Two smaller implementation facts worth recording, neither a design change:
+`spec.placement` is a value struct rather than a pointer (the nil/empty
+distinction lives on the slice, so a pointer buys nothing), and an unset
+`nodeAffinity` renders no `affinity` field at all rather than an empty one —
+without which every existing pod would roll for a structurally empty value.
+
+### Still open, deliberately
+
+**Nothing in the CR reports what placement resolved to.** A user cannot tell
+from `SlapdCluster` whether their list replaced the default or the default is
+in force; they have to read the StatefulSet. Noted during implementation, not
+built, and recorded here rather than in the code so it is costed as a design
+question — a status field is persisted state, and this ADR has not argued that
+it earns itself.
+
 ## Related
 
 - `docs/BACKLOG.md`, "slapd pods cannot be spread across nodes" — the
