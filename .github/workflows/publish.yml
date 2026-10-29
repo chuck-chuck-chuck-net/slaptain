@@ -9,11 +9,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
-  # under its own.
-  REGISTRY: ghcr.io/${{ github.repository_owner }}
-
 jobs:
   images:
     name: Build and push images
@@ -37,6 +32,11 @@ jobs:
             echo "Makefile derived image tag '${got}', expected '${want}'. Is ${GITHUB_REF_NAME} visible in the checkout?"
             exit 1
           fi
+
+      # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
+      # under its own, lowercased because OCI repository names must be.
+      - name: Point REGISTRY at the repository owner
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
       - name: Log in to GHCR
         env:
@@ -83,6 +83,11 @@ jobs:
       # surfaces at `helm install` time, i.e. on the user's cluster.
       - name: Lint and render the charts
         run: make helm-lint
+
+      # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
+      # under its own, lowercased because OCI repository names must be.
+      - name: Point REGISTRY at the repository owner
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
       - name: Log in to GHCR
         env:
@@ -208,7 +213,7 @@ jobs:
             echo "::warning::no CHANGELOG.md section for ${GITHUB_REF_NAME}; release notes carry boilerplate only"
           fi
           sed -i \
-            -e "s|__OWNER__|${OWNER}|g" \
+            -e "s|__OWNER__|${OWNER,,}|g" \
             -e "s|__REPO__|${REPO}|g" \
             -e "s|__TAG__|${GITHUB_REF_NAME}|g" \
             -e "s|__VERSION__|${version}|g" \
