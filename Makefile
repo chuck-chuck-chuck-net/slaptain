@@ -1051,7 +1051,7 @@ monitoring-prometheus: ## Port-forward Prometheus to http://localhost:9090
 ## cn=config converger (ADR-034). Standard library only and no container, so it
 ## runs anywhere python3 does; the fixtures are real `slapcat -n 0` output.
 test-init:
-	cd images/slapd-init && python3 -m unittest discover -s . -p 'test_*.py' -v
+	cd images/openldap/init && python3 -m unittest discover -s . -p 'test_*.py' -v
 
 show-tag: ## Print the git tags and the image/chart tags derived from them
 	@echo "git:    $(GIT_TAG)"

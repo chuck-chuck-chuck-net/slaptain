@@ -171,7 +171,7 @@ func TestResolveImageRefWithSelector(t *testing.T) {
 // Reading a repository file from a unit test is already how the CRD rule tests
 // guard controller-gen's output; same reasoning, same shape.
 func TestSuffixTableAgreesWithTheBuiltOpenLDAPVersion(t *testing.T) {
-	const changelog = "../../../images/openldap-deb/debian/changelog"
+	const changelog = "../../../images/openldap/debian/changelog"
 	raw, err := os.ReadFile(changelog)
 	if err != nil {
 		t.Fatalf("read %s: %v", changelog, err)

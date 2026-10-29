@@ -172,7 +172,7 @@ type SlapdImageSelector struct {
 	// pure is upstream OpenLDAP as our packaging builds it, with none of our
 	// patches, and is the default: nobody has to run a patched slapd in
 	// production to use slaptain. slaptain is the patched line; each patch has
-	// a stated reason in images/openldap-deb/debian/changelog, and the package
+	// a stated reason in images/openldap/debian/changelog, and the package
 	// revision says which you are running (`slapd -VV` reports +pure<N> or
 	// +slaptain<N>).
 	//

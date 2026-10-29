@@ -33,15 +33,13 @@ updates:
     schedule:
       interval: weekly
 
-  # Dependabot matches Containerfile* as well as Dockerfile*, so the plain and
-  # the .ol26 variants in one directory are both covered.
+  # Dependabot matches Containerfile* as well as Dockerfile*, so every
+  # Containerfile in images/openldap is covered.
   - package-ecosystem: docker
     directories:
       - /images/operator
-      - /images/slapd
-      - /images/slapd-init
+      - /images/openldap
       - /images/slapd-toolkit
-      - /images/openldap-deb
     schedule:
       interval: weekly
     groups:

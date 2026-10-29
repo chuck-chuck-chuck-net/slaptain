@@ -1,5 +1,5 @@
 # EXPERIMENTAL: upstream OpenLDAP 2.6.16 under DEBIAN SID's packaging, plus the
-# local patches in images/openldap-deb/local-patches/. Internal use only —
+# local patches in images/openldap/local-patches/. Internal use only —
 # never in all/push, never in a chart, and deliberately not a select.flavour
 # cell (docs/OPENLDAP-VERSIONS.md says why).
 #
