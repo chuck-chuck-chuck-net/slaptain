@@ -13,7 +13,7 @@ permissions:
 jobs:
   test:
     name: Run on Ubuntu
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-yo-lo
     steps:
       - name: Clone the code
         uses: actions/checkout@v7

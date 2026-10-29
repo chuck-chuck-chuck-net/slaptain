@@ -15,7 +15,7 @@ permissions:
 jobs:
   govulncheck:
     name: Go vulnerability check (${{ matrix.module }})
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-yo-lo
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +39,7 @@ jobs:
 
   trivy:
     name: Trivy filesystem scan
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-yo-lo
     steps:
       - name: Checkout
         uses: actions/checkout@v7

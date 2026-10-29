@@ -13,7 +13,7 @@ permissions:
 jobs:
   lint:
     name: golangci-lint (${{ matrix.module }})
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-yo-lo
     strategy:
       fail-fast: false
       matrix:
@@ -49,7 +49,7 @@ jobs:
 
   chart:
     name: Helm charts
-    runs-on: ubuntu-latest
+    runs-on: namespace-profile-yo-lo
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
