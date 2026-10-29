@@ -18,22 +18,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # Every image name and tag comes from the Makefile (GIT_TAG → IMAGE_TAG,
-      # docs/VERSIONING.md): v0.3.0 is addressed as :0.3.0, the chart version
-      # and appVersion are the same string, and `image.tag | default
-      # .Chart.AppVersion` resolves by construction. CI reuses that rule rather
-      # than re-deriving it, and checks the Makefile actually saw the tag —
-      # otherwise it would silently publish the release as sha-<hash>.
-      - name: Verify the Makefile sees the release tag
+      # v0.3.0 is addressed as :0.3.0, the chart version and appVersion are the
+      # same string, and `image.tag | default .Chart.AppVersion` resolves by
+      # construction (docs/VERSIONING.md). Check the tag script actually saw the
+      # tag, otherwise the release would silently publish as sha-<hash>.
+      - name: Verify the tag script sees the release tag
         run: |
           want="${GITHUB_REF_NAME#v}"
-          got="$(make -s show-tag | awk '/^image:/ {print $2}')"
+          got="$(scripts/image-tag.sh main --image)"
           if [ "$got" != "$want" ]; then
-            echo "Makefile derived image tag '${got}', expected '${want}'. Is ${GITHUB_REF_NAME} visible in the checkout?"
+            echo "image-tag.sh derived image tag '${got}', expected '${want}'. Is ${GITHUB_REF_NAME} visible in the checkout?"
             exit 1
           fi
 
-      # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
+      # Every image name and tag comes from scripts/bake-vars.sh, which derives
+      # them the way the Makefile does (docs/VERSIONING.md).
+      - name: Derive the image tags
+        run: scripts/bake-vars.sh | tee -a "$GITHUB_ENV"
+
+      # The bake file defaults REGISTRY to the upstream owner; a fork publishes
       # under its own, lowercased because OCI repository names must be.
       - name: Point REGISTRY at the repository owner
         run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
@@ -41,13 +44,13 @@ jobs:
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      # The 2.7 slapd pair, the legacy -ol26 2.6 pair (ADR-021), the toolkit
-      # and the operator. The OpenLDAP .deb carrier is built once for the two
-      # 2.7 images and never pushed.
-      - name: Build and push the six images
-        run: make push
+      # docker-bake.hcl lists all eleven images. buildx on a Namespace runner
+      # already builds on Namespace's remote builders, whose cache outlives the
+      # run; docker/setup-buildx-action would replace them with a local builder.
+      - name: Build and push the images
+        run: docker buildx bake --push
 
   charts:
     name: Push Helm charts

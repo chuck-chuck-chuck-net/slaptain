@@ -21,19 +21,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # Every image name and tag comes from the Makefile (GIT_TAG → IMAGE_TAG,
-      # docs/VERSIONING.md), so CI reuses it instead of re-deriving the rule
-      # with docker/metadata-action. Off a version tag that is sha-<short
-      # hash> — the same spelling metadata-action's type=sha publishes for the
-      # sibling project, so `make`, tests/e2e.sh and CI agree on the name.
-      #
-      # `make push` builds the OpenLDAP 2.7.1 .deb carrier once and feeds it
-      # to both 2.7 images from local storage (it is never pushed); the
-      # Makefile drives podman for that, which ubuntu-latest ships.
-      - name: Show the tag the Makefile derived
-        run: make show-tag
+      # Every image name and tag comes from scripts/bake-vars.sh, which derives
+      # them the way the Makefile does (docs/VERSIONING.md).
+      - name: Derive the image tags
+        run: scripts/bake-vars.sh | tee -a "$GITHUB_ENV"
 
-      # The Makefile defaults REGISTRY to the upstream owner; a fork publishes
+      # The bake file defaults REGISTRY to the upstream owner; a fork publishes
       # under its own, lowercased because OCI repository names must be.
       - name: Point REGISTRY at the repository owner
         run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
@@ -41,7 +34,10 @@ jobs:
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      - name: Build and push the six images
-        run: make push
+      # docker-bake.hcl lists all eleven images. buildx on a Namespace runner
+      # already builds on Namespace's remote builders, whose cache outlives the
+      # run; docker/setup-buildx-action would replace them with a local builder.
+      - name: Build and push the images
+        run: docker buildx bake --push
