@@ -15,7 +15,7 @@ permissions:
 jobs:
   images:
     name: Build and push images
-    runs-on: namespace-profile-yo-lo
+    runs-on: namespace-profile-2x4
     timeout-minutes: 120
     steps:
       - name: Checkout

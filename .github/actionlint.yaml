@@ -1,3 +1,6 @@
 self-hosted-runner:
   labels:
-    - namespace-profile-yo-lo
+    - namespace-profile-4x8
+    - namespace-profile-2x8
+    - namespace-profile-2x4
+    - namespace-profile-1x2

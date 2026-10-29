@@ -20,7 +20,7 @@ concurrency:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: namespace-profile-yo-lo
+    runs-on: namespace-profile-1x2
     steps:
       - name: Checkout
         uses: actions/checkout@v7
