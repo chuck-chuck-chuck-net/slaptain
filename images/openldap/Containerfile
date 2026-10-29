@@ -1,12 +1,23 @@
-# OpenLDAP 2.7.1 Debian packages, built from pristine upstream sources with the
-# vendored packaging fork in ./debian (see README.md and ADR-021).
+# OpenLDAP images: slapd and slapd-init, and the Debian packages both install.
 #
-# This image is a *build artifact carrier*, not a runtime image: the final stage
-# is `scratch` holding nothing but /debs. Both images/slapd/Containerfile and
-# images/slapd-init/Containerfile consume it via
-#   COPY --from=${OPENLDAP_DEB_IMAGE} /debs /debs
-# so the package build runs ONCE per tag and feeds both. It is never pushed to a
-# registry — `make build-openldap-deb` tags it under localhost/.
+# Build one image with --target and two arguments; docker-bake.hcl at the
+# repository root lists every combination CI publishes:
+#
+#   --target slapd | slapd-init
+#   OPENLDAP_SOURCE=fork        OpenLDAP 2.7.1 from the vendored packaging fork in
+#                               ./debian (README.md, ADR-021); SLAPTAIN_PATCHES=0|1
+#                               picks pure or patched (ADR-040 decision 2)
+#   OPENLDAP_SOURCE=debian-src  Debian's 2.6 source package plus ./local-patches
+#                               (the -ol26src pair)
+#
+# The package build is a stage, not an image of its own. Both targets copy /debs
+# from the same stage, so with the same arguments it runs once for both, in one
+# bake run or from the layer cache of a later build. The -ol26 pair installs
+# Debian's binary packages instead and keeps its own Containerfile.ol26-*.
+#
+# Paths, UID/GID and the ENTRYPOINT are identical to the ol26 variant: the
+# runtime contract (/usr/sbin/slapd, /usr/lib/ldap, /etc/ldap/schema, 1024:1024)
+# is what bootstrap.sh and the operator depend on, not the slapd version.
 #
 # BUILD_VARIANT selects what comes out (see docs/DEBUG-IMAGES.md):
 #
@@ -26,8 +37,11 @@
 # hardlinks inside override_dh_strip. The package then builds, installs, and has
 # no slapadd — which surfaces as a postinst failure three images downstream.
 
-# ── Package build stage ─────────────────────────────────────────────────────
-FROM debian:trixie-slim AS deb-build
+ARG BUILD_VARIANT=release
+ARG OPENLDAP_SOURCE=fork
+
+# ── Package build: the 2.7.1 fork ───────────────────────────────────────────
+FROM debian:trixie-slim AS debs-fork-build
 
 ARG OPENLDAP_VERSION=2.7.2
 # sha256 of the upstream release tarball. A mismatch fails the build — this is
@@ -38,7 +52,7 @@ ARG OPENLDAP_URL=https://www.openldap.org/software/download/OpenLDAP/openldap-re
 # working loopback/krb5 setup). Set to 1 to run it — see README.md.
 ARG RUN_UPSTREAM_TESTS=0
 # release | debug | asan — see the header. Anything else fails the build.
-ARG BUILD_VARIANT=release
+ARG BUILD_VARIANT
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -375,6 +389,279 @@ RUN set -eux; \
     fi; \
     ls -la /debs
 
-# ── Artifact carrier ────────────────────────────────────────────────────────
-FROM scratch
-COPY --from=deb-build /debs /debs
+FROM scratch AS debs-fork
+COPY --from=debs-fork-build /debs /debs
+
+# ── Package build: Debian's 2.6 source with the local patches ───────────────
+# OpenLDAP 2.6 .deb packages built from DEBIAN'S OWN SOURCE PACKAGE, plus the
+# local patches in ./local-patches.
+#
+# Why not the fork stage above (the 2.7.1 path): that packaging is our fork, rebased
+# onto pristine upstream 2.7.1, and several of its patches no longer apply to a
+# 2.6 tree (getaddrinfo-is-threadsafe is the first to fail). Debian's trixie
+# source package IS 2.6.10 and carries a patch series that applies to it, so
+# starting there costs one `apt-get source` and leaves exactly one delta: ours.
+#
+# The result is the stock `-ol26` slapd plus the local patches and nothing else,
+# which is what makes it usable as a measurement arm against that image.
+FROM debian:trixie-slim AS debs-debian-src-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# deb822 sources: add deb-src so `apt-get source` has something to fetch.
+RUN set -eux; \
+    sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential ca-certificates devscripts equivs fakeroot quilt; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Debian's 2.6 source package, integrity-checked by apt against the archive.
+ARG OPENLDAP_OL26_VERSION=2.6.10+dfsg-1
+# Pinned for the same reason the binary pair is (ADR-040 decision 1): an
+# unpinned `apt-get source` fetches whatever the archive serves today, so the
+# patches below would be applied to a moving target.
+RUN apt-get update && apt-get source slapd="${OPENLDAP_OL26_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY local-patches /build/local-patches
+
+# Appended to Debian's series, so their patches apply first and ours last.
+# Pushing the whole series and popping it again fails the build here rather
+# than halfway through dpkg-buildpackage if a patch does not apply.
+RUN set -eux; \
+    cd openldap-*/; \
+    for p in /build/local-patches/*.patch; do \
+        cp "$p" debian/patches/; \
+        basename "$p" >> debian/patches/series; \
+    done; \
+    QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null push -a; \
+    QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null pop -a
+
+# A distinct version, so a built package can never be mistaken for Debian's.
+RUN set -eux; \
+    cd openldap-*/; \
+    dch --local '+slaptainphase' --distribution UNRELEASED \
+        'Add the accesslog logpurge phase parameter (local patch).'
+
+RUN set -eux; \
+    cd openldap-*/; \
+    apt-get update; \
+    mk-build-deps -i -r -t 'apt-get -y --no-install-recommends' debian/control; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    cd openldap-*/; \
+    export DEB_BUILD_OPTIONS="nocheck parallel=$(nproc)"; \
+    dpkg-buildpackage -us -uc -b
+
+FROM scratch AS debs-debian-src
+COPY --from=debs-debian-src-build /build/*.deb /debs/
+
+FROM debs-${OPENLDAP_SOURCE} AS debs
+
+# ── Build / gather stage ────────────────────────────────────────────────────
+FROM debian:trixie-slim AS slapd-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY --from=debs /debs /debs
+
+# Install the forked 2.7.1 packages instead of Debian's 2.6 slapd. apt resolves
+# their dependencies from the archive; the .deb paths must be absolute for apt
+# to treat them as local files rather than package names.
+# ASAN_OPTIONS here is for the asan variant's postinst, which runs slapadd and
+# slappasswd: those are sanitized binaries too, and ASan's default exitcode=23
+# on a leak report turns slapd's package configuration into a failed build.
+# Exit-time allocations in a one-shot tool are not what we are hunting.
+RUN ASAN_OPTIONS=detect_leaks=0 \
+    apt-get update && ASAN_OPTIONS=detect_leaks=0 \
+    apt-get install -y --no-install-recommends \
+        /debs/libldap-common_*.deb \
+        /debs/libldap2_*.deb \
+        /debs/slapd_*.deb \
+        /debs/ldap-utils_*.deb \
+        dpkg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Debug variants: unpack the detached debug info into /usr/lib/debug. dpkg,
+# not apt — a -dbgsym package Depends on an exact binary version that is not in
+# any archive, and `dpkg -i` is the right tool for a package with no dependency
+# question to answer.
+ARG BUILD_VARIANT
+RUN set -eux; \
+    if [ "${BUILD_VARIANT}" != "release" ]; then \
+        dpkg -i /debs/*-dbgsym_*.*deb; \
+        test -d /usr/lib/debug/.build-id; \
+    fi; \
+    rm -rf /debs
+
+# Assemble a staging root for the distroless runtime.
+# NOTE: do NOT pre-create /staging/usr/lib/ldap here — cp -r creates it
+# correctly only when the destination does not yet exist.  If the dir exists
+# beforehand, cp -r would nest the source inside it (ldap/ldap/back_mdb.so).
+RUN install -d \
+      /staging/usr/sbin \
+      /staging/usr/bin \
+      /staging/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH) \
+      /staging/etc/ldap \
+      /staging/ldap-config \
+      /staging/ldap-data \
+      /staging/tmp
+
+# Binary
+RUN cp /usr/sbin/slapd /staging/usr/sbin/
+
+# ldapwhoami — the readiness probe (ADR-030).
+#
+# The one LDAP client this image carries, and it is here because kubelet offers
+# HTTPGet, TCPSocket or Exec and slapd speaks no HTTP. TCPSocket is proven
+# insufficient: the pod that froze for 874 s accepted connections throughout and
+# answered nothing, holding readyReplicas the whole time.
+#
+# ldapwhoami rather than ldapsearch: WhoAmI is an extended operation that reads
+# no entry, so the probe cannot be broken by a user's ACLs — "does slapd answer
+# at all" stays independent of "may this identity read anything". It comes from
+# the same package build as slapd itself, so client and server can never drift.
+#
+# This is NOT a general-purpose toolkit: debugging belongs in slapd-toolkit
+# (slctl debug attaches it as an ephemeral container). One binary, one purpose.
+RUN cp /usr/bin/ldapwhoami /staging/usr/bin/
+
+# Schema files (referenced by bootstrap-generated config)
+RUN cp -r /etc/ldap/schema /staging/etc/ldap/schema
+
+# Dynamic backend/overlay modules
+# (later: compile these in statically and drop this directory entirely)
+RUN cp -r /usr/lib/ldap /staging/usr/lib/ldap
+
+# Shared libs required by slapd and its loadable modules.
+# Using ldd instead of globs: trixie ships libldap.so.2 / liblber.so.2
+# (not libldap-2.5.so.* as on bookworm), so name-based globs are fragile.
+RUN set -e; arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
+    # Collect all .so paths from slapd and every loadable module, then copy
+    # both the real file and any SONAME symlink for each dependency.
+    { ldd /usr/sbin/slapd; ldd /usr/bin/ldapwhoami; \
+      for mod in /usr/lib/ldap/*.so; do ldd "$mod" 2>/dev/null; done; \
+    } | awk '/=>/ { print $3 }' | sort -u | \
+    while read lib; do \
+        real=$(readlink -f "$lib") || continue; \
+        cp "$real" /staging/usr/lib/$arch/ 2>/dev/null || true; \
+        [ "$lib" != "$real" ] && cp -P "$lib" /staging/usr/lib/$arch/ 2>/dev/null || true; \
+    done; \
+    # SASL plugin directory (loaded at runtime, not via ldd)
+    cp -r /usr/lib/$arch/sasl2 /staging/usr/lib/$arch/ 2>/dev/null || true; \
+    # libgcc_s.so.1 is dlopen'd lazily by glibc for pthread_exit stack
+    # unwinding — it never appears in ldd output, so copy it explicitly.
+    cp -a /usr/lib/$arch/libgcc_s.so.1 /staging/usr/lib/$arch/
+
+# Debug variants: the detached debug info, and a check that the sanitizer
+# runtime actually made it in.
+#
+# /usr/lib/debug/.build-id is where libasan's built-in symbolizer looks (it is
+# libbacktrace underneath, and follows the build-id link the same way gdb does).
+# That symbolizer runs IN PROCESS, which is what makes a symbolised report
+# possible at all here: distroless has no shell and no llvm-symbolizer, and
+# there is nowhere to install one from at runtime.
+#
+# libasan.so.8 is a DT_NEEDED of an ASan-linked slapd, so the ldd loop above
+# already staged it. Assert it rather than trust it — a missing sanitizer
+# runtime does not degrade the image, it stops the container from starting, and
+# there is no shell in there to find that out from.
+RUN set -eux; \
+    arch=$(dpkg-architecture -qDEB_HOST_MULTIARCH); \
+    if [ "${BUILD_VARIANT}" != "release" ]; then \
+        install -d /staging/usr/lib/debug; \
+        cp -a /usr/lib/debug/.build-id /staging/usr/lib/debug/; \
+    fi; \
+    if [ "${BUILD_VARIANT}" = "asan" ]; then \
+        ldd /usr/sbin/slapd | grep -q libasan; \
+        ls /staging/usr/lib/$arch/libasan.so.*; \
+    fi
+
+# Minimal /etc/passwd and /etc/group — distroless/base only ships root+nobody
+RUN printf \
+      'root:x:0:0:root:/root:/sbin/nologin\nopenldap:x:1024:1024:OpenLDAP:/nonexistent:/sbin/nologin\n' \
+      > /staging/etc/passwd && \
+    printf 'root:x:0:\nopenldap:x:1024:\n' > /staging/etc/group
+
+# ── Runtime stage ───────────────────────────────────────────────────────────
+FROM gcr.io/distroless/base-debian13 AS runtime-base
+
+COPY --from=slapd-build /staging/ /
+
+# /ldap-config and /ldap-data are populated by the init container
+VOLUME ["/ldap-config", "/ldap-data"]
+
+USER 1024:1024
+
+EXPOSE 1024 1025
+
+# Chart overrides args; -F points to config written by the init container
+ENTRYPOINT ["/usr/sbin/slapd"]
+
+# ── Variant environments ────────────────────────────────────────────────────
+# The operator sets no env on the slapd container and there is no shell to set
+# any from, so whatever a debug run needs has to be baked in here. That is why
+# these are separate images rather than one image plus a runtime flag.
+
+FROM runtime-base AS runtime-release
+
+FROM runtime-base AS runtime-debug
+# glibc's own heap diagnostics, turned up. MALLOC_PERTURB_ fills freed memory
+# with a byte pattern, so a use-after-free reads garbage rather than plausible
+# data and fails nearer its cause; MALLOC_CHECK_=3 makes the allocator abort on
+# the first inconsistency it notices instead of carrying on; dropping the tcache
+# removes the per-thread free list that "unaligned tcache chunk" implicates, so
+# the failure moves if that path is involved and stays put if it is not.
+#
+# Note what this costs: the binaries are release-identical, but these three
+# variables are not behaviour-neutral. The image trades a faithful reproduction
+# for an earlier, louder one.
+ENV MALLOC_PERTURB_=165 \
+    MALLOC_CHECK_=3 \
+    GLIBC_TUNABLES=glibc.malloc.tcache_count=0
+
+FROM runtime-base AS runtime-asan
+# detect_leaks=0: slapd holds allocations to exit by design, and a leak report
+#   at shutdown buries the report we are here for.
+# abort_on_error=1: die on the report, so kubelet records the restart and the
+#   three stacks are in `kubectl logs --previous`.
+# malloc_context_size=30: deep enough to see which syncprov path allocated the
+#   chunk, not just the wrapper that called malloc.
+# allocator_may_return_null=1: without it an allocation ASan cannot satisfy is a
+#   hard abort, which reads like a finding and is a memory limit.
+ENV ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:print_stacktrace=1:malloc_context_size=30:allocator_may_return_null=1"
+
+FROM runtime-${BUILD_VARIANT} AS slapd
+
+# ── slapd-init ──────────────────────────────────────────────────────────────
+# Same packages as slapd, from the same package build stage: the init container
+# runs slapadd/slaptest against the config and data volumes that slapd then
+# opens, so the two images must carry the same OpenLDAP version.
+FROM debian:trixie-slim AS slapd-init
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY --from=debs /debs /debs
+
+# slapd + ldap-utils from the local 2.7.1 packages (apt pulls their archive
+# dependencies); python3 for bootstrap.sh's LDIF handling.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        /debs/libldap-common_*.deb \
+        /debs/libldap2_*.deb \
+        /debs/slapd_*.deb \
+        /debs/ldap-utils_*.deb \
+        python3 \
+    && rm -rf /var/lib/apt/lists/* /debs
+
+RUN groupmod -g 1024 openldap && \
+    usermod -u 1024 -g 1024 openldap
+
+COPY init/bootstrap.sh /usr/local/bin/bootstrap.sh
+COPY init/startup_config.py /usr/local/bin/startup_config.py
+
+USER 1024:1024
+ENTRYPOINT ["/usr/local/bin/bootstrap.sh"]
