@@ -107,7 +107,24 @@ func templateDiff(a, b corev1.PodTemplateSpec) []string {
 		return m
 	}
 
+	// Pod-level placement (ADR-043). Everything else here is keyed on a
+	// container or a volume, so a placement field that silently varied with
+	// the replica count — a generated spread constraint that learned to read
+	// spec.replicas, say — would satisfy every assertion in this file and be
+	// caught only by the golden templates, which render ONE fixed cluster and
+	// so cannot see a dependency on a number at all.
+	placementMap := func(p corev1.PodTemplateSpec) map[string]string {
+		return map[string]string{
+			"nodeSelector":              fmt.Sprintf("%v", p.Spec.NodeSelector),
+			"affinity":                  fmt.Sprintf("%v", p.Spec.Affinity),
+			"tolerations":               fmt.Sprintf("%v", p.Spec.Tolerations),
+			"priorityClassName":         p.Spec.PriorityClassName,
+			"topologySpreadConstraints": fmt.Sprintf("%v", p.Spec.TopologySpreadConstraints),
+		}
+	}
+
 	keyDiff("volume", "<pod>", volumeMap(a), volumeMap(b))
+	keyDiff("placement", "<pod>", placementMap(a), placementMap(b))
 
 	for _, set := range []struct{ x, y []corev1.Container }{
 		{a.Spec.InitContainers, b.Spec.InitContainers},
