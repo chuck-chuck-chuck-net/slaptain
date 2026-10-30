@@ -273,6 +273,58 @@ cluster:
   #  enabled: true
   #  resources: {}    # the exporter sidecar's own; no default, unset declares nothing
 
+  # -- spec.placement (ADR-043): where this cluster's pods are allowed to land.
+  # Every key is a raw Kubernetes pod-spec field, passed through verbatim to
+  # both the read-write and the read-only pod template.
+  #
+  # It matters more here than for a typical workload: the PVCs are
+  # ReadWriteOnce and, on local storage with WaitForFirstConsumer, the volume
+  # binds wherever the pod first lands and pins the pod to that node for the
+  # life of the PVC. The FIRST scheduling decision is the only one.
+  #
+  # THIS FILE IS APPLIED IDENTICALLY AT EVERY SITE (ADR-028 §5), and that is
+  # the point of the chart rather than a convenience. So select on labels every
+  # site carries. A nodeSelector or nodeAffinity naming one site's node, rack
+  # or zone is wrong at the others, and nothing here or in the operator will
+  # say so — the sites will simply differ. If one site genuinely needs its own
+  # placement, that is a per-site values override, taken deliberately.
+  #
+  # Leaving this empty is the normal case, and it is site-safe by construction:
+  # the operator then generates ONE spread constraint per fleet (maxSkew 1 over
+  # kubernetes.io/hostname, ScheduleAnyway, selecting that fleet of this
+  # cluster alone), which names no site. See docs/PLACEMENT.md.
+  placement: {}
+  #  # Setting this REPLACES the generated default entirely — never merged. An
+  #  # explicit empty list ([]) is how you ask for NO spread constraint at all;
+  #  # leaving the key out is how you keep the operator's.
+  #  #
+  #  # Prefer whenUnsatisfiable: ScheduleAnyway. DoNotSchedule can strand a pod
+  #  # permanently here: once its PV is bound the pod may use exactly one node,
+  #  # and a hard constraint refusing that node leaves it Pending forever.
+  #  topologySpreadConstraints:
+  #    - maxSkew: 1
+  #      topologyKey: topology.kubernetes.io/zone
+  #      whenUnsatisfiable: ScheduleAnyway
+  #      labelSelector:
+  #        matchLabels:
+  #          app.kubernetes.io/instance: ldap
+  #  nodeSelector:
+  #    node-role.kubernetes.io/ldap: ""
+  #  # The NODE half of the affinity struct only; the pod half is reserved for
+  #  # the operator (ADR-043 decision 2).
+  #  nodeAffinity:
+  #    requiredDuringSchedulingIgnoredDuringExecution:
+  #      nodeSelectorTerms:
+  #        - matchExpressions:
+  #            - key: node-role.kubernetes.io/ldap
+  #              operator: Exists
+  #  tolerations:
+  #    - key: dedicated
+  #      operator: Equal
+  #      value: ldap
+  #      effect: NoSchedule
+  #  priorityClassName: system-cluster-critical
+
   # -- EXPERIMENTAL (ADR-039 tier 2). Off by default, and the project does not
   # yet assert it is fit for production: what is missing is operating
   # experience, not code. It is implemented, measured and honestly reported —

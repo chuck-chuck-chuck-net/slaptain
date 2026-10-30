@@ -204,17 +204,38 @@ empty list *is* a statement about spread constraints, and without it a user who
 wants no constraint at all has no way to say so — they would have to supply a
 constraint they did not want in order to displace one they did not ask for.
 
-It costs nothing. JSON `[]` decodes to a non-nil zero-length slice and an
-absent key decodes to nil, so the two are already distinguishable after
-decoding; the predicate is `!= nil`, not `len() > 0`. The distinction is
-pinned by a test case, and that test was mutation-checked by swapping the
-predicate to `len() > 0` and observing exactly that case go red.
+It is nearly free, but not free, and the first version of this paragraph got
+the price wrong. It said JSON `[]` decodes to a non-nil zero-length slice and
+an absent key decodes to nil, so the two are "already distinguishable after
+decoding" — true, and **not sufficient**. Decoding keeps the distinction;
+**encoding loses it**. `omitempty` drops a zero-length slice exactly as
+readily as a nil one, so with a plain `[]T` any client doing Get → modify →
+Update marshals the user's `[]` away and the generated default silently comes
+back. The user-facing paths — `kubectl`, Helm, a YAML apply — send the bytes
+as written and never saw it; a typed Go client could not express the opt-out
+at all.
 
-Two smaller implementation facts worth recording, neither a design change:
-`spec.placement` is a value struct rather than a pointer (the nil/empty
-distinction lives on the slice, so a pointer buys nothing), and an unset
+So the field is **`*[]corev1.TopologySpreadConstraint`**: a nil pointer is
+omitted, a pointer to an empty slice marshals as `[]`, and the distinction
+survives the round trip rather than surviving by luck of the path taken. Same
+reasoning and the same shape as `SlapdBackup.podAffinity`'s `*bool`, which
+carries the identical note for the identical reason. The predicate is a
+nil-**pointer** check, never `len() > 0`. The rendered CRD schema is
+unchanged — `*[]T` and `[]T` produce the same OpenAPI — so this is a Go-side
+correction with no stored-object migration.
+
+Both halves are pinned by tests. The decode/predicate half was
+mutation-checked by swapping the predicate to `len() > 0` and observing
+exactly that case go red (and again, later, against a live three-pod cluster
+through the e2e). The encode half is a marshal/unmarshal round trip observed
+red before the pointer landed, with the empty list arriving as `{}` on the
+wire.
+
+One smaller implementation fact worth recording, not a design change: an unset
 `nodeAffinity` renders no `affinity` field at all rather than an empty one —
 without which every existing pod would roll for a structurally empty value.
+(`spec.placement` itself stays a value struct; the nil/empty distinction it
+needs lives on the slice, which now has its own pointer.)
 
 ### Still open, deliberately
 

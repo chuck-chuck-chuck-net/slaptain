@@ -44,3 +44,29 @@ the sidecar no command and no arguments, so any `slapd-exporter` image works.
 The sidecar is only half of it: nothing scrapes it until this site's operator
 chart has `slapdPodMonitor.enabled=true` and a Prometheus Operator is installed
 (`docs/MONITORING.md`, "Install").
+
+## Placement (ADR-043)
+
+Where this cluster's pods are allowed to land. Every key is a raw Kubernetes
+pod-spec field, rendered verbatim into `spec.placement` and applied by the
+operator to **both** pod templates, read-write and read-only.
+
+Unset is the normal setting, and it is not "no constraint": the operator
+generates one spread constraint per fleet — `maxSkew: 1` over
+`kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting that
+fleet of this cluster alone. Writers spread among writers and readers among
+readers. The reasoning, the sizing and what to do when it is not enough are in
+`docs/PLACEMENT.md`.
+
+| Value | Default | Renders | Notes |
+|---|---|---|---|
+| `placement.topologySpreadConstraints` | unset | `spec.placement.topologySpreadConstraints` | A list **replaces** the generated default; it is never merged into it. An explicit `[]` is the only way to ask for no constraint at all — the chart tells the two apart, so `[]` renders as `[]` rather than disappearing. Prefer `ScheduleAnyway`: `DoNotSchedule` can strand a pod permanently once its PV is bound. |
+| `placement.nodeSelector` | unset | `spec.placement.nodeSelector` | Labels every node must carry. A selector matching no node leaves pods Pending. |
+| `placement.nodeAffinity` | unset | `spec.placement.nodeAffinity` | The **node** half of the affinity struct only. The pod half is reserved for the operator (ADR-043 decision 2). Unset renders no `affinity` field at all, so existing pods do not roll for an empty value. |
+| `placement.tolerations` | unset | `spec.placement.tolerations` | Removes a node's veto; does not attract a pod there. Pair with `nodeSelector`/`nodeAffinity` for "there, and only there". |
+| `placement.priorityClassName` | unset | `spec.placement.priorityClassName` | Names an existing PriorityClass. |
+
+**The release that introduces this rolls both fleets once, and nothing moves.**
+The generated constraint is a pod-template change, so the StatefulSets roll —
+but every pod comes back on the node its PVC already pins it to. See
+`docs/UPGRADING.md`.
