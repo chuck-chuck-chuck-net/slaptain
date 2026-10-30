@@ -57,12 +57,17 @@ func defaultSpreadConstraint(clusterName string, readOnly bool) corev1.TopologyS
 // differently they select. Merging would therefore make a perfectly reasonable
 // user constraint unschedulable from a value the user cannot see.
 //
-// Absent and empty are different answers. A nil list is "said nothing" and
+// Absent and empty are different answers. A nil pointer is "said nothing" and
 // gets the default; an explicit [] is "said none", and is the only way to
 // switch the default off.
+//
+// The field is a POINTER to the slice so that the distinction survives being
+// marshalled, not merely decoded — see the field's own documentation. The
+// predicate here is therefore a nil-POINTER check, never len() > 0: the two
+// are the same question only if the empty list has nothing to say.
 func spreadConstraintsFor(sc *ldapv1alpha1.SlapdCluster, readOnly bool) []corev1.TopologySpreadConstraint {
 	if sc.Spec.Placement.TopologySpreadConstraints != nil {
-		return sc.Spec.Placement.TopologySpreadConstraints
+		return *sc.Spec.Placement.TopologySpreadConstraints
 	}
 	return []corev1.TopologySpreadConstraint{defaultSpreadConstraint(sc.Name, readOnly)}
 }

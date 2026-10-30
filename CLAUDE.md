@@ -65,6 +65,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │   ├── TLS.md                      # Certificates: where they come from, and how clients come to trust them (ADR-029)
 │   ├── TUNING.md                   # Tuning & sizing guide: defaults, placement classes, lab→prod sizing (ADR-024). Owns WHERE each half of olcAccessLogPurge lives and the string→object migration; points at PURGE-ROTATION.md for everything operational
 │   ├── PURGE-ROTATION.md           # USER guide (ADR-037): the client-side precondition FIRST, then how to turn the rotation on, the sizing arithmetic (capacity condition, P = w·n·t/r, the lead window τ < d < t − P and how it closes as the write rate rises), what to observe, and the limits
+│   ├── PLACEMENT.md                # USER guide (ADR-043): where a cluster's pods land. The generated per-fleet spread and why `ScheduleAnyway`; the `DoNotSchedule`-plus-bound-local-PV deadlock; absent (generated default) vs `[]` (none) and why that needs a `*[]T`; and why cross-fleet separation is NOT expressible as a spread, with its `N >= n_w + n_r` bound
 │   ├── DEBUG-IMAGES.md             # slapd:<tag>-debug / -asan: diagnostic image variants for heap corruption
 │   ├── OPENLDAP-VERSIONS.md        # Dual 2.7/2.6 image pairs, tag scheme, 2.6→2.7 migration runbook (ADR-021)
 │   ├── BACKUP-PLAN.md              # ADR-014 implementation breakdown (phases)

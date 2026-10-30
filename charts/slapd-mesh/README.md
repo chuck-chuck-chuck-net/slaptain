@@ -174,6 +174,43 @@ an operator upgrade changes the sidecar only when that release moved. It is not
 pinned in lockstep with `slapd` and `init`; pin it only to run a different
 exporter version.
 
+## Placement (ADR-043)
+
+Where each site's pods are allowed to land. Every key is a raw Kubernetes
+pod-spec field, rendered verbatim into `spec.placement` and applied by the
+operator to **both** pod templates, read-write and read-only.
+
+Unset is the normal setting, and it is not "no constraint": the operator
+generates one spread constraint per fleet — `maxSkew: 1` over
+`kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting that
+fleet of that site's cluster alone. Writers spread among writers and readers
+among readers. Reasoning and sizing: `docs/PLACEMENT.md`.
+
+| Value | Default | Renders | Notes |
+|---|---|---|---|
+| `cluster.placement.topologySpreadConstraints` | unset | `spec.placement.topologySpreadConstraints` | A list **replaces** the generated default; it is never merged. An explicit `[]` is the only way to ask for no constraint at all, and the chart tells it apart from unset. Prefer `ScheduleAnyway`: `DoNotSchedule` can strand a pod permanently once its PV is bound. |
+| `cluster.placement.nodeSelector` | unset | `spec.placement.nodeSelector` | Labels every node must carry. **Site-specific by nature — see below.** |
+| `cluster.placement.nodeAffinity` | unset | `spec.placement.nodeAffinity` | The **node** half of the affinity struct only; the pod half is reserved for the operator. **Site-specific by nature — see below.** |
+| `cluster.placement.tolerations` | unset | `spec.placement.tolerations` | Removes a node's veto; does not attract a pod there. |
+| `cluster.placement.priorityClassName` | unset | `spec.placement.priorityClassName` | Names an existing PriorityClass — which must exist at every site. |
+
+**This file is applied identically at every site**, which is the point of the
+chart rather than a convenience (ADR-028 §5), and the placement pass-throughs
+are the one place in this block where a site can leak in. A
+`nodeSelector: {kubernetes.io/hostname: node-a}`, a zone, a rack or a
+PriorityClass that exists at one site is wrong at the others — and nothing here
+or in the operator will say so: the sites will simply differ. Select on labels
+every site carries. If one site genuinely needs its own placement, that is a
+per-site values override, taken deliberately.
+
+The generated default is site-safe by construction: it names no node, only
+`kubernetes.io/hostname` as a topology key and the cluster's own fleet labels,
+which every site has.
+
+**The release that introduces this rolls both fleets once at every site, and
+nothing moves** — each pod returns to the node its PVC already pins it to. See
+`docs/UPGRADING.md`.
+
 ## What it does not do
 
 - **It does not bootstrap trust.** Cross-site trust is pairwise and circular —

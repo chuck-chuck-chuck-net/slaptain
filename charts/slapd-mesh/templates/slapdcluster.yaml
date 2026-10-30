@@ -128,6 +128,60 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 
+  {{- /* spec.placement (ADR-043). Where this cluster's pods are allowed to
+         land. Raw Kubernetes types, passed through verbatim.
+
+         This file is applied IDENTICALLY at every site (ADR-028 §5), which
+         makes the pass-through keys the one place in this block where a site
+         can leak in: a nodeSelector or a nodeAffinity naming a node, a rack or
+         a zone that exists at one site is wrong at the others, and nothing
+         here or in the operator will say so. Select on labels every site
+         carries. The generated default is safe by construction — it selects on
+         kubernetes.io/hostname and on the cluster's own fleet labels, which
+         every site has.
+
+         topologySpreadConstraints is the one key that is NOT written with the
+         usual `with`, and the reason is semantic rather than stylistic. The
+         operator distinguishes three states, not two: absent means "said
+         nothing" and gets the operator's generated per-fleet spread; an
+         explicit [] means "said none" and is the ONLY way to switch that
+         default off. `with` treats an empty list exactly like an absent one,
+         so it would silently drop a user's [] and hand them back the default
+         they had just turned off — with no error anywhere to notice it by.
+
+         kindIs "slice" is what tells the three apart: an absent key and an
+         explicitly null one are both "invalid" and render nothing (null reads
+         as absent, which is also how the API server stores it), while [] and
+         a populated list are both slices and are rendered as written. */}}
+  {{- $placement := .Values.cluster.placement | default dict }}
+  {{- $spread := $placement.topologySpreadConstraints }}
+  {{- if or (kindIs "slice" $spread) $placement.nodeSelector $placement.nodeAffinity $placement.tolerations $placement.priorityClassName }}
+  placement:
+    {{- if kindIs "slice" $spread }}
+    {{- if $spread }}
+    topologySpreadConstraints:
+      {{- toYaml $spread | nindent 6 }}
+    {{- else }}
+    topologySpreadConstraints: []
+    {{- end }}
+    {{- end }}
+    {{- with $placement.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $placement.nodeAffinity }}
+    nodeAffinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $placement.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $placement.priorityClassName }}
+    priorityClassName: {{ . | quote }}
+    {{- end }}
+  {{- end }}
+
   {{- /* spec.rotation (ADR-037). Mesh-scoped by construction and it must stay
          that way: the three values below are a schedule shape — a duration and
          a slot count — and none of them names a site, an endpoint or a pod.

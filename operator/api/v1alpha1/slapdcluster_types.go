@@ -1058,8 +1058,15 @@ type PlacementConfig struct {
 	// rolling-update skew problem keyed on pod-template-hash, which belongs
 	// to Deployments. A StatefulSet pod keeps its identity and its PVC across
 	// an update.
+	//
+	// A pointer to the slice (*[]T): an explicit empty list must round-trip
+	// through the API server unchanged, which a plain []T + omitempty does not
+	// guarantee — omitempty drops a zero-length slice as readily as a nil one,
+	// so a client doing Get, modify, Update would turn your [] back into
+	// absence and silently restore the generated default. Same reasoning as
+	// SlapdBackupSpec.podAffinity's *bool. Do not simplify it away.
 	// +optional
-	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+	TopologySpreadConstraints *[]corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 	// nodeSelector restricts this cluster's pods to nodes carrying all of
 	// these labels. Passed to the pod template verbatim. The simplest of the
 	// node-selection fields and the hardest: a pod whose selector matches no

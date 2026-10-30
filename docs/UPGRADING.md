@@ -11,6 +11,67 @@ would say the same thing, it belongs here and `CHANGELOG.md` points at it.
 
 ---
 
+## Unreleased — slapd pods are spread across nodes by default
+
+`spec.placement` arrives (ADR-043), and with it one thing the operator now
+generates for a cluster that says nothing: a single topology spread constraint
+per fleet — `maxSkew: 1` over `kubernetes.io/hostname`,
+`whenUnsatisfiable: ScheduleAnyway`, selecting that fleet of that cluster
+alone. Read-write pods spread among read-write pods, read-only among read-only.
+
+### It rolls both fleets once, and nothing moves
+
+Lead with this, because otherwise it reads as a defect.
+
+The constraint is a pod-template change, so each StatefulSet rolls its pods
+once on the upgrade. **Every pod then comes back on the node it was already
+on.** Its PVC is `ReadWriteOnce` on local storage, the PV's node affinity
+admits exactly one node, and the new constraint is soft — so the scheduler has
+one choice and takes it.
+
+"We added spreading and nothing moved" is the correct outcome. The default
+protects the *next* pod that is created from scratch — a scale-up, a rebuild,
+a fresh cluster. It does not rebalance an existing one, and it cannot: moving
+a pod to another node means deleting its PVCs and refilling it from
+replication, which is the ADR-012 case-2 rebuild and is a deliberate operation,
+not something an upgrade may do to you.
+
+Expect one rolling restart of the read-write StatefulSet and, where
+`readReplicas > 0`, one of the read-only StatefulSet. ADR-035 permits an
+operator upgrade to change the pod template once; this is the release doing it
+on purpose.
+
+### Nothing to set, unless you already manage scheduling yourself
+
+If you place slapd pods through something outside the `SlapdCluster` — a
+mutating webhook, a scheduler plugin, a policy engine — the generated
+constraint is now one more input to that decision. Switch it off explicitly:
+
+```yaml
+spec:
+  placement:
+    topologySpreadConstraints: []     # an EMPTY LIST, not an absent key
+```
+
+The empty list means "no constraint". Leaving the key out means "the operator's
+default" — the two are deliberately different answers, and the Helm charts
+carry the distinction.
+
+### Verifying
+
+Nothing in the CR status reports what placement resolved to. Read the
+StatefulSet:
+
+```bash
+kubectl -n <ns> get statefulset <cluster> \
+  -o jsonpath='{.spec.template.spec.topologySpreadConstraints}' | jq .
+```
+
+Full guide, including what a spread cannot express and why the default is
+`ScheduleAnyway`: [`PLACEMENT.md`](PLACEMENT.md).
+
+---
+
 ## v0.5.0 — the default slapd image becomes PURE, and `spec.images.select` replaces pinning by tag
 
 Two changes to how a cluster gets its data-plane images. The second is the one
