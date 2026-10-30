@@ -347,9 +347,13 @@ func (in *PlacementConfig) DeepCopyInto(out *PlacementConfig) {
 	*out = *in
 	if in.TopologySpreadConstraints != nil {
 		in, out := &in.TopologySpreadConstraints, &out.TopologySpreadConstraints
-		*out = make([]corev1.TopologySpreadConstraint, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
+		*out = new([]corev1.TopologySpreadConstraint)
+		if **in != nil {
+			in, out := *in, *out
+			*out = make([]corev1.TopologySpreadConstraint, len(*in))
+			for i := range *in {
+				(*in)[i].DeepCopyInto(&(*out)[i])
+			}
 		}
 	}
 	if in.NodeSelector != nil {

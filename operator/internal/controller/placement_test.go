@@ -11,7 +11,9 @@ You may obtain a copy of the License at
 package controller
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -125,7 +127,7 @@ func TestSpreadConstraintsFor(t *testing.T) {
 		{
 			name: "a user list replaces the default, it is not merged into",
 			set: func(sc *ldapv1alpha1.SlapdCluster) {
-				sc.Spec.Placement.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{userConstraint}
+				sc.Spec.Placement.TopologySpreadConstraints = &[]corev1.TopologySpreadConstraint{userConstraint}
 			},
 			want: []corev1.TopologySpreadConstraint{userConstraint},
 		},
@@ -133,7 +135,7 @@ func TestSpreadConstraintsFor(t *testing.T) {
 			name:     "a user list replaces the default on the read-only fleet too",
 			readOnly: true,
 			set: func(sc *ldapv1alpha1.SlapdCluster) {
-				sc.Spec.Placement.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{userConstraint}
+				sc.Spec.Placement.TopologySpreadConstraints = &[]corev1.TopologySpreadConstraint{userConstraint}
 			},
 			want: []corev1.TopologySpreadConstraint{userConstraint},
 		},
@@ -143,7 +145,7 @@ func TestSpreadConstraintsFor(t *testing.T) {
 			// and what they said was "none". Absent is nil; empty is not.
 			name: "an explicit empty list means no constraint at all",
 			set: func(sc *ldapv1alpha1.SlapdCluster) {
-				sc.Spec.Placement.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{}
+				sc.Spec.Placement.TopologySpreadConstraints = &[]corev1.TopologySpreadConstraint{}
 			},
 			want: []corev1.TopologySpreadConstraint{},
 		},
@@ -230,7 +232,7 @@ func placementMovesOnlyThePlacementFields(t *testing.T, readOnly bool) {
 
 	sc := goldenCluster()
 	sc.Spec.Placement = ldapv1alpha1.PlacementConfig{
-		TopologySpreadConstraints: userSpread,
+		TopologySpreadConstraints: &userSpread,
 		NodeSelector:              nodeSelector,
 		NodeAffinity:              nodeAffinity,
 		Tolerations:               tolerations,
@@ -277,5 +279,91 @@ func placementMovesOnlyThePlacementFields(t *testing.T, readOnly bool) {
 	if !reflect.DeepEqual(got.ObjectMeta, baseline.ObjectMeta) {
 		t.Errorf("readOnly=%v: pod template metadata changed when spec.placement was set\n got: %+v\nwant: %+v",
 			readOnly, got.ObjectMeta, baseline.ObjectMeta)
+	}
+}
+
+// The nil/empty distinction has to survive a trip through the API server, not
+// just a decode. ADR-043's amendment argued the decode half — JSON [] decodes
+// to a non-nil zero-length slice, an absent key decodes to nil — and stopped
+// there. ENCODING is where it was lost: `omitempty` drops a zero-length slice
+// as readily as a nil one, so a plain []T made the two indistinguishable the
+// moment anything marshalled the spec back. Any Go client doing Get → modify →
+// Update therefore round-tripped a user's [] into absence and silently handed
+// the generated default back.
+//
+// The fix is a POINTER to the slice, which is why that pointer must survive
+// review: nil pointer is omitted, pointer-to-empty marshals as []. The same
+// reasoning and the same shape as SlapdBackup.PodAffinity's *bool.
+//
+// This test is the encode half, stated as the round trip a user actually
+// takes. It was observed red against the plain []T: the "explicit empty list"
+// case came back nil.
+func TestPlacementRoundTripsThroughJSON(t *testing.T) {
+	none := []corev1.TopologySpreadConstraint{}
+	one := []corev1.TopologySpreadConstraint{{
+		MaxSkew:           1,
+		TopologyKey:       corev1.LabelHostname,
+		WhenUnsatisfiable: corev1.ScheduleAnyway,
+	}}
+
+	for _, tc := range []struct {
+		name string
+		set  func(*ldapv1alpha1.PlacementConfig)
+		// wantKey is what the marshalled spec must contain (or not).
+		wantKey bool
+		// want is what spreadConstraintsFor must decide AFTER the round trip.
+		want []corev1.TopologySpreadConstraint
+	}{
+		{
+			name:    "absent stays absent and still generates the default",
+			set:     func(*ldapv1alpha1.PlacementConfig) {},
+			wantKey: false,
+			want:    []corev1.TopologySpreadConstraint{defaultSpreadConstraint(testClusterName, false)},
+		},
+		{
+			name:    "an explicit empty list survives as an empty list",
+			set:     func(p *ldapv1alpha1.PlacementConfig) { p.TopologySpreadConstraints = &none },
+			wantKey: true,
+			want:    []corev1.TopologySpreadConstraint{},
+		},
+		{
+			name:    "a populated list survives as itself",
+			set:     func(p *ldapv1alpha1.PlacementConfig) { p.TopologySpreadConstraints = &one },
+			wantKey: true,
+			want:    one,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := &ldapv1alpha1.SlapdCluster{}
+			sent.Name = testClusterName
+			sent.Namespace = testNamespace
+			tc.set(&sent.Spec.Placement)
+
+			wire, err := json.Marshal(sent.Spec.Placement)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			// The key's presence IS the distinction. Assert it on the wire, so
+			// a failure says "the empty list was dropped at encode" rather than
+			// surfacing three steps later as "the operator ignored my opt-out".
+			if got := strings.Contains(string(wire), "topologySpreadConstraints"); got != tc.wantKey {
+				t.Fatalf("marshalled %s; topologySpreadConstraints present = %v, want %v",
+					wire, got, tc.wantKey)
+			}
+
+			back := &ldapv1alpha1.SlapdCluster{}
+			back.Name = testClusterName
+			back.Namespace = testNamespace
+			if err := json.Unmarshal(wire, &back.Spec.Placement); err != nil {
+				t.Fatalf("unmarshal %s: %v", wire, err)
+			}
+
+			got := spreadConstraintsFor(back, false)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("after the round trip, got %d constraints, want %d (got nil=%v, want nil=%v)\n"+
+					" wire: %s\n  got: %+v\n want: %+v",
+					len(got), len(tc.want), got == nil, tc.want == nil, wire, got, tc.want)
+			}
+		})
 	}
 }
