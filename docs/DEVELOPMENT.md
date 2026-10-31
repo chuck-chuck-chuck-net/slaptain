@@ -64,40 +64,48 @@ the two scenarios that need their own topology.
 ## Building images
 
 ```bash
-make all                     # every image + slctl — and PUBLISHES them, see below
-make push                    # the same thing, said explicitly
-make all DELIVERY=cacheonly  # just prove they build
-make show-tag                # the tag everything will be built and deployed with
+make all          # every image + slctl — builds, publishes nothing
+make push         # build and push
+make show-tag     # the tag everything will be built and deployed with
 ```
 
-**A build publishes.** That is a change from the podman days and it follows
-from the engine: BuildKit has no local image store to leave a result in, so a
-finished image goes to the registry (`DELIVERY=push`, the default), to a
-docker-archive tarball for the node-import path (`DELIVERY=import`), or
-nowhere at all (`DELIVERY=cacheonly`). Set `REGISTRY` to something you can
-write to before running any of this.
+Images are built by **BuildKit**, described by `docker-bake.hcl` and driven by
+`scripts/bake.sh`. The Makefile targets are aliases onto it, and so is every
+pipeline — `make` appears in none of them. That is deliberate: make's defining
+value is rebuilding only what changed, and in CI a fresh checkout makes that
+vacuous (nothing is cached at the make level, so everything rebuilds). What is
+actually incremental is BuildKit's content-addressed cache, a layer below.
+So make keeps the job it is good at, being the thing a human types at, and the
+pipelines need nothing but `buildx` and a shell.
 
-The pushable images are the 2.7 `slapd` / `slapd-init` pairs — `pure` under
+Use the bake targets directly whenever that is easier:
+
+```bash
+scripts/bake.sh images              # build everything, publish nothing
+scripts/bake.sh --push slapd slapd-init
+scripts/bake.sh slapd --print       # what would be built, fully resolved
+```
+
+The published images are the 2.7 `slapd` / `slapd-init` pairs — `pure` under
 the plain tag and `slaptain` under `-ol<version>-slaptain` — the two 2.6 pairs
 (`-ol26`, `-ol26src`), `slapd-toolkit`, `operator` and `slapd-exporter`.
 
-`openldap-deb` is a build *input* rather than a deployable image (`FROM
-scratch`, nothing but `/debs`): both 2.7 Containerfiles consume it via
-`--build-arg OPENLDAP_DEB_IMAGE`, so the package build runs **once per tag**
-and feeds both. It used to live in the local image store under a `localhost/`
-name; it is now addressed in the registry and pushed, because a remote
-BuildKit worker has no local store to resolve a `FROM` against. That is the
-one step `DELIVERY=cacheonly` cannot skip, and the one build-time registry
-dependency this repo has.
+**`openldap-deb` is not an image.** OpenLDAP is compiled once and feeds both
+images of a pair; bake hands the result to each consumer as a *build context*
+(`contexts = { debs = "target:openldap-deb" }`), stitching both into one
+BuildKit graph and passing the layers in-process. It is never named, pushed or
+pulled, it carries no tag, and no output setting can make one escape to a
+registry. "Compile once, feed both" is therefore a property of the graph —
+not of a cache hit, and not of a registry round-trip.
 
-It is stamp-cached like everything else under `.stamps/`, which is why a
-second image build after the first is fast. `RUN_UPSTREAM_TESTS=1` adds
-OpenLDAP's own test suite to that build; it costs tens of minutes and is off
-by default.
+A named context *shadows a build stage of the same name*, which is why the
+Containerfiles need no bake-specific changes: each still declares `ARG
+OPENLDAP_DEB_IMAGE` and `FROM ${OPENLDAP_DEB_IMAGE} AS debs`, and supplying no
+context leaves that stage doing its old job. A bare `buildx build --build-arg
+OPENLDAP_DEB_IMAGE=<ref>` still builds any of them.
 
-Individual targets: `build-init`, `build-slapd`, `build-ol26` (both legacy
-images), `build-toolkit`, `build-operator`, `build-openldap-deb`, `build-slctl`
-(→ `bin/slctl`, plus `install-slctl` for `/usr/local/bin`).
+`RUN_UPSTREAM_TESTS=1` adds OpenLDAP's own test suite to the package build; it
+costs tens of minutes and is off by default.
 
 ### Getting a BuildKit worker
 
@@ -163,10 +171,11 @@ your own registry; images are always `$(REGISTRY)/$(PROJECT)/<image>:$(GIT_TAG)`
 
 ### Delivery: push or import
 
-`DELIVERY=push` (default) pushes to the registry. `DELIVERY=import` has the
-builder write a docker-archive tarball into `.build/` and streams it into every
-node's CRI over SSH — for clusters with no reachable registry. (The carrier is
-still pushed; see above.) `DELIVERY=cacheonly` publishes no image at all.
+`make push` pushes to the registry. `make import` has the builder write a
+docker-archive tarball into `.build/` per image and streams each into every
+node's CRI over SSH — for clusters with no reachable registry; nothing touches
+a registry on that path. `DELIVERY` still selects which of the two `deliver`
+dispatches to.
 
 ```bash
 make import CONTEXT=<context>        # init, slapd, toolkit, operator

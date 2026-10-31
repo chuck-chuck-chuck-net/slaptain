@@ -3,7 +3,14 @@
 # EXPORTER_GIT_TAG) and tests/e2e.sh call this — the rule must never fork
 # between them.
 #
-# Usage: image-tag.sh [main|exporter]     (default: main)
+# Usage: image-tag.sh [--image] [main|exporter]     (default: main)
+#
+# --image prints how the build is ADDRESSED in a registry rather than what it
+# IS: a version tag loses its `v` / `exporter/v` prefix, anything else gains a
+# `sha-` one. That rule used to live in the Makefile, which was fine while
+# `make` was the only thing that built images. It is not any more -- the
+# pipelines drive buildx directly -- and a second copy of it in a workflow is
+# exactly the fork the paragraph below forbids.
 #
 # Two version lines live in this repository (docs/VERSIONING.md):
 #   main      git tags vX.Y.Z           — operator, slapd, slapd-init, toolkit, charts
@@ -32,21 +39,50 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+addressed=0
+if [[ "${1:-}" == "--image" ]]; then
+    addressed=1
+    shift
+fi
+
 case "${1:-main}" in
-    main)     match='v*' ;;
-    exporter) match='exporter/v*' ;;
-    *)        echo "usage: $0 [main|exporter]" >&2; exit 2 ;;
+    main)     match='v*'; strip='v' ;;
+    exporter) match='exporter/v*'; strip='exporter/v' ;;
+    *)        echo "usage: $0 [--image] [main|exporter]" >&2; exit 2 ;;
 esac
 
+# What HEAD is -> how it is addressed. A version tag is addressed by its bare
+# semver, so the chart version, the appVersion and the image tag are one
+# string and `image.tag | default .Chart.AppVersion` is correct by
+# construction. Everything else gets the sha- prefix the sibling project's
+# docker/metadata-action publishes, which also makes a registry listing
+# self-describing: `0.2.0` is a release, `sha-09ecf10` is a build of a commit.
+#
+# The version test is a PREFIX match so a pre-release counts: v0.2.1-rc1 is
+# addressed :0.2.1-rc1, not sha-<hash>. Whether an rc is the headline release
+# is a different question with a different predicate -- see docs/VERSIONING.md
+# trap 2, where reusing one for both is how an rc ends up published under a
+# nonsense tag.
+address() {
+    local what="$1"
+    if [[ $addressed -eq 0 ]]; then
+        echo "$what"
+    elif [[ "$what" =~ ^"$strip"[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+        echo "${what#"$strip"}"
+    else
+        echo "sha-$what"
+    fi
+}
+
 if exact=$(git describe --tags --exact-match --match "$match" 2>/dev/null) && [[ -n "$exact" ]]; then
-    echo "$exact"
+    address "$exact"
     exit 0
 fi
 
 hash=$(git rev-parse --short HEAD)
 if git diff --quiet HEAD 2>/dev/null; then
-    echo "$hash"
+    address "$hash"
 else
     state=$(git diff HEAD | sha256sum | cut -c1-8)
-    echo "${hash}-dirty-${state}"
+    address "${hash}-dirty-${state}"
 fi

@@ -223,7 +223,7 @@ the order they bite, hold for any push made from one:
 2. **Build from a detached checkout at the tag.** The version is derived from
    `git describe`; even one commit past the tag, `make show-tag` yields image
    `sha-<hash>` and chart `0.0.0-<hash>`, and those are what gets published.
-3. **Clear `.stamps` when switching registry.** The stamps are not keyed by
+3. ~~**Clear `.stamps` when switching registry.**~~ Obsolete since the BuildKit rework: there are no stamps. BuildKit's cache is content-addressed and a registry change is part of the key. The original note, for the record — the stamps were not keyed by
    `REGISTRY`, so a lab build makes `make push` skip the rebuild and then fail
    with "image not known" — or, worse, push something stale.
 4. **The exporter has its own version line** (ADR-033). Off an `exporter/vX.Y.Z`
@@ -234,7 +234,7 @@ The sequence that produced v0.4.0:
 
 ```bash
 git checkout v0.4.0                       # detached; 1 and 2 above
-rm -rf .stamps                            # 3
+# (3) no longer needed: no stamps
 make show-tag REGISTRY=ghcr.io/chuck-chuck-chuck-net   # expect v0.4.0 / 0.4.0 / 0.4.0
 env -u REGISTRY make push          REGISTRY=ghcr.io/chuck-chuck-chuck-net
 env -u REGISTRY make charts-package charts-push REGISTRY=ghcr.io/chuck-chuck-chuck-net

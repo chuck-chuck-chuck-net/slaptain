@@ -36,8 +36,10 @@ jobs:
       # 2.7 images. The carrier is pushed too, as a build input: a remote
       # BuildKit worker has no local image store to resolve it from, and one
       # build graph across every substrate is worth more than not publishing it.
-      - name: Show the tag the Makefile derived
-        run: make show-tag
+      - name: Show the tags
+        run: |
+          echo "image tag:    $(scripts/image-tag.sh --image)"
+          echo "exporter tag: $(scripts/image-tag.sh --image exporter)"
 
       # buildx on a GitHub runner is a docker CLI plugin, not a binary on PATH,
       # so the Makefile's BUILDX is pointed at it below. The build itself runs
@@ -54,7 +56,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push the images
-        run: make push
+        run: scripts/bake.sh --push images
         env:
           BUILDX: docker buildx
-          BUILD_CACHE_FLAGS: --cache-from type=gha --cache-to type=gha,mode=max

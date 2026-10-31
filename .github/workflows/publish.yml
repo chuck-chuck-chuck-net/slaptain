@@ -29,12 +29,12 @@ jobs:
       # .Chart.AppVersion` resolves by construction. CI reuses that rule rather
       # than re-deriving it, and checks the Makefile actually saw the tag —
       # otherwise it would silently publish the release as sha-<hash>.
-      - name: Verify the Makefile sees the release tag
+      - name: Verify the derivation sees the release tag
         run: |
           want="${GITHUB_REF_NAME#v}"
-          got="$(make -s show-tag | awk '/^image:/ {print $2}')"
+          got="$(scripts/image-tag.sh --image)"
           if [ "$got" != "$want" ]; then
-            echo "Makefile derived image tag '${got}', expected '${want}'. Is ${GITHUB_REF_NAME} visible in the checkout?"
+            echo "derived image tag '${got}', expected '${want}'. Is ${GITHUB_REF_NAME} visible in the checkout?"
             exit 1
           fi
 
@@ -56,10 +56,9 @@ jobs:
       # toolkit, the operator and the exporter. The OpenLDAP .deb carrier is
       # built once per flavour and pushed as a build input.
       - name: Build and push the images
-        run: make push
+        run: scripts/bake.sh --push images
         env:
           BUILDX: docker buildx
-          BUILD_CACHE_FLAGS: --cache-from type=gha --cache-to type=gha,mode=max
 
   charts:
     name: Push Helm charts

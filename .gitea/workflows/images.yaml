@@ -13,9 +13,17 @@
 # so this file names no host and is identical for anyone who clones the repo
 # and points it at their own forge.
 #
-# Image names and tags come from the Makefile (GIT_TAG -> IMAGE_TAG), the same
-# derivation `make`, tests/e2e.sh and the GitHub workflows use. CI must never
-# re-derive that rule.
+# There is no `make` in this job, deliberately. The build graph is
+# docker-bake.hcl and scripts/bake.sh is the one entry point, used identically
+# here and on a laptop. make's defining value -- rebuilding only what changed
+# -- never applied in CI anyway: a fresh checkout has no stamp files, so
+# everything rebuilt regardless, and what IS incremental here is BuildKit's
+# cache. So the pipeline needs nothing but buildx and a shell, and the runner
+# image needs no `make` installed for our sake.
+#
+# Image names and tags come from scripts/image-tag.sh, the same derivation the
+# Makefile, tests/e2e.sh and the GitHub workflows use. CI must never re-derive
+# that rule.
 name: images
 
 on:
@@ -51,10 +59,6 @@ jobs:
             echo "::error::BUILDKIT_HOST is unset; the runner configuration should provide it"
             fail=1
           fi
-          if ! command -v make >/dev/null; then
-            echo "::error::make is missing from the runner image (add it there: apk add make)"
-            fail=1
-          fi
           exit "$fail"
         env:
           REGISTRY: ${{ vars.REGISTRY }}
@@ -85,32 +89,30 @@ jobs:
           buildx create --driver remote --name ci --use "$BUILDKIT_HOST"
           buildx inspect --bootstrap ci
 
-      - name: Show the tags the Makefile derived
-        run: make show-tag
-        env:
-          REGISTRY: ${{ vars.REGISTRY }}
+      - name: Show the tags
+        run: |
+          echo "image tag:    $(scripts/image-tag.sh --image)"
+          echo "exporter tag: $(scripts/image-tag.sh --image exporter)"
 
       # A release tag must publish under its own version. Off a tag the
-      # Makefile answers sha-<hash>, and without this check a mis-fetched
+      # derivation answers sha-<hash>, and without this check a mis-fetched
       # checkout would publish a release under that instead -- silently.
-      - name: On a version tag, check the Makefile sees it
+      - name: On a version tag, check the derivation sees it
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -eu
           want="${GITHUB_REF_NAME#v}"
-          got="$(make -s show-tag | awk '/^image:/ {print $2}')"
+          got="$(scripts/image-tag.sh --image)"
           if [ "$got" != "$want" ]; then
-            echo "::error::Makefile derived image tag '${got}', expected '${want}'"
+            echo "::error::derived image tag '${got}', expected '${want}'"
             exit 1
           fi
-        env:
-          REGISTRY: ${{ vars.REGISTRY }}
 
       # The build pushes; there is no separate push step (the builder is
       # remote and has nothing to push FROM). Registry-backed cache so a
       # buildkitd PVC wipe does not cost a full OpenLDAP compile.
       - name: Build and push
-        run: make push
+        run: scripts/bake.sh --push images
         env:
           REGISTRY: ${{ vars.REGISTRY }}
           BUILD_CACHE_FLAGS: >-

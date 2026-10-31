@@ -164,8 +164,8 @@ flavours because the packaging is ours either way. A check for the absence of
 ## Building
 
 ```bash
-make build-openldap-deb          # localhost/slaptain/openldap-deb:<tag>, /debs only
-make build-slapd build-init      # both consume it via --build-arg OPENLDAP_DEB_IMAGE
+make build-openldap-deb          # the carrier alone: /debs only, no tag, discarded
+make build-slapd build-init      # bake hands it to both as the `debs` build context
 ```
 
 The artifact-carrier image is `FROM scratch` and **never pushed** — it exists
