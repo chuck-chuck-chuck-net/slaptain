@@ -2,7 +2,30 @@ REGISTRY ?= ghcr.io/chuck-chuck-chuck-net
 PROJECT ?= slaptain
 NAMESPACE ?= slaptain-system
 NAMESPACE_TESTING ?= slaptain-testing
-CONTAINER_ENGINE ?= podman
+# ── Build driver ────────────────────────────────────────────────────────────
+# BuildKit via buildx, on every substrate: a laptop, GitHub Actions, and the
+# internal Gitea runners (buildx standalone against a remote buildkitd -- no
+# docker daemon, verified on an Alpine/musl runner against BuildKit v0.34.1).
+#
+# There is no local image store in the picture any more. A finished image goes
+# straight to a registry, or -- for the node-import path -- to a docker-archive
+# tarball, which is exactly what `podman save` used to produce. That is what
+# makes one build graph work on all three, and it is why the openldap-deb
+# carrier below is registry-addressed rather than `localhost/`.
+#
+# BUILDX_BUILDER names a builder created with `buildx create`; leave it unset
+# to use the current one. CI sets it after pointing a remote driver at the
+# shared buildkitd.
+BUILDX         ?= buildx
+BUILDX_BUILDER ?=
+# Registry-backed layer cache. Off by default (a laptop has the builder's own
+# cache); CI sets it so a cache wipe does not cost a full OpenLDAP compile.
+BUILD_CACHE_FLAGS ?=
+BUILD = $(BUILDX) build $(if $(BUILDX_BUILDER),--builder $(BUILDX_BUILDER),) $(BUILD_CACHE_FLAGS)
+
+# podman is NO LONGER a build tool here. It is still a container RUNTIME for
+# the ITS#9398 reproduction (docs/its9398/) and the exporter's testdata
+# recorder, which run containers rather than build images.
 
 # Image tag: exact git tag if on one, else short commit hash, else — on a
 # dirty tree — <hash>-dirty-<contenthash>. Derived by scripts/image-tag.sh,
@@ -46,6 +69,28 @@ EXPORTER_IMAGE_TAG := $(if $(IS_EXPORTER_VERSION_TAG),$(EXPORTER_GIT_TAG:exporte
 
 # Image delivery: "push" = registry, "import" = direct to k8s node CRI via SSH
 DELIVERY ?= push
+
+# Where a finished image goes, derived from DELIVERY and from the per-target
+# IMAGE_REF each stamp sets below. One recursive variable serves every image:
+# make expands it inside the recipe, where the target-specific IMAGE_REF is in
+# scope.
+#
+#   push       --push, straight from the builder to the registry
+#   import     a docker-archive tarball, which the import rules stream to the
+#              nodes over ssh exactly as `podman save` used to
+#   cacheonly  nothing is published: proves the image builds and stops. For a
+#              PR gate, or a local sanity check. NOT registry-free, though --
+#              the openldap-deb carrier is still pushed, because the 2.7
+#              images resolve it with `FROM` and that reads from a registry.
+#              So it is "publishes no image", not "touches no registry".
+#
+# The openldap-deb carrier overrides this to --push unconditionally: both 2.7
+# images resolve it with `FROM`, which reads from a registry and not from a
+# tarball. That is the one build-time registry dependency this design has.
+COMMA := ,
+BUILD_TARBALL_DIR := .build
+tarball = $(BUILD_TARBALL_DIR)/$(subst :,-,$(subst /,-,$(1))).tar
+BUILD_OUTPUT = $(if $(filter import,$(DELIVERY)),--output type=docker$(COMMA)dest=$(call tarball,$(IMAGE_REF)),$(if $(filter cacheonly,$(DELIVERY)),--output type=cacheonly,--push))
 
 # Kubecontext: pass CONTEXT=<name> to target a specific cluster.
 # Threads --context / --kube-context through all kubectl and helm calls.
@@ -109,7 +154,7 @@ SLAPTAIN_PATCHES ?= 0
 # The PATCHED 2.7 pair, in ADR-040's target scheme with the OpenLDAP component
 # derived: <slaptain>-ol<openldap>-slaptain. The operator reaches it through
 # `spec.images.select.flavour: slaptain`, never by anyone typing this tag.
-OPENLDAP_DEB_IMAGE_SLAPTAIN = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)-slaptain
+OPENLDAP_DEB_IMAGE_SLAPTAIN = $(REGISTRY)/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)-slaptain
 INIT_IMAGE_SLAPTAIN  = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)-slaptain
 SLAPD_IMAGE_SLAPTAIN = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-ol$(OPENLDAP_27_VERSION)-slaptain
 
@@ -154,7 +199,7 @@ OPENLDAP_OL2616_PATCHES     ?= accesslog-purge-phase.patch accesslog-purge-loggi
 OL2616_SUFFIX                = -ol2.6.16-slaptain
 INIT_IMAGE_OL2616   = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)$(OL2616_SUFFIX)
 SLAPD_IMAGE_OL2616  = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)$(OL2616_SUFFIX)
-OPENLDAP_DEB_IMAGE_OL2616 = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)$(OL2616_SUFFIX)
+OPENLDAP_DEB_IMAGE_OL2616 = $(REGISTRY)/$(PROJECT)/openldap-deb:$(IMAGE_TAG)$(OL2616_SUFFIX)
 OL2616_LABELS = --label net.chuck-chuck-chuck.slaptain.local-patches="$(OPENLDAP_OL2616_PATCHES)" \
 		--label net.chuck-chuck-chuck.slaptain.experimental="forward-port, internal use only, not a select.flavour cell" \
 		--label org.opencontainers.image.description="EXPERIMENTAL: upstream OpenLDAP $(OPENLDAP_OL2616_VERSION) with Debian packaging and slaptain local patches"
@@ -185,17 +230,23 @@ SLAPD_TAG_SUFFIX ?=
 SLAPD_IMAGE_DEBUG = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-debug
 SLAPD_IMAGE_ASAN  = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)-asan
 
-# OpenLDAP 2.7.1 .deb build. Local-only image (localhost/ prefix — never pushed):
-# it carries nothing but /debs and is consumed by both the slapd and slapd-init
-# 2.7 Containerfiles, so the package build runs once per tag for both.
-OPENLDAP_DEB_IMAGE = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)
+# OpenLDAP 2.7.1 .deb build. It carries nothing but /debs and is consumed by
+# both the slapd and slapd-init 2.7 Containerfiles, so the package build runs
+# once per tag and feeds both.
+#
+# It IS pushed, unlike before. A carrier in a local image store only works for
+# a builder that has one, and the Gitea runners build against a shared remote
+# buildkitd that does not. Addressing it in the registry is what makes one
+# build graph work on a laptop, on GitHub and there -- and it keeps "build
+# once, feed both" a property of the graph rather than of cache state.
+OPENLDAP_DEB_IMAGE = $(REGISTRY)/$(PROJECT)/openldap-deb:$(IMAGE_TAG)
 # Separate package builds for the debug variants: the compiler flags live in
 # the .debs, so the carrier image cannot be shared with the release build.
-OPENLDAP_DEB_IMAGE_DEBUG = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-debug
-OPENLDAP_DEB_IMAGE_ASAN  = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-asan
+OPENLDAP_DEB_IMAGE_DEBUG = $(REGISTRY)/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-debug
+OPENLDAP_DEB_IMAGE_ASAN  = $(REGISTRY)/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-asan
 # Carrier for the patched 2.6 build. Its own image because the .debs differ:
 # different upstream version, and the local patches are in them.
-OPENLDAP_DEB_IMAGE_OL26SRC = localhost/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol26src
+OPENLDAP_DEB_IMAGE_OL26SRC = $(REGISTRY)/$(PROJECT)/openldap-deb:$(IMAGE_TAG)-ol26src
 # Stamped onto the -ol26src images as a label, derived from the directory so it
 # cannot drift from what was actually applied. `-ol26` and `-ol26src` differ by
 # three characters and only one of them carries patches, so the image says which
@@ -255,15 +306,16 @@ ifeq ($(CRI),crio)
 define do-import
 for node in $(NODE_IPS); do \
 	echo "Importing $(1) to $$node (cri-o)..."; \
-	$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node \
-		'cat > /tmp/_cri_import.tar && sudo skopeo copy docker-archive:/tmp/_cri_import.tar containers-storage:$(1) && rm -f /tmp/_cri_import.tar'; \
+	ssh $(NODE_USER)@$$node \
+		'cat > /tmp/_cri_import.tar && sudo skopeo copy docker-archive:/tmp/_cri_import.tar containers-storage:$(1) && rm -f /tmp/_cri_import.tar' \
+		< $(call tarball,$(1)); \
 done
 endef
 else
 define do-import
 for node in $(NODE_IPS); do \
 	echo "Importing $(1) to $$node (containerd)..."; \
-	$(CONTAINER_ENGINE) save $(1) | ssh $(NODE_USER)@$$node sudo ctr -n k8s.io images import -; \
+	ssh $(NODE_USER)@$$node sudo ctr -n k8s.io images import - < $(call tarball,$(1)); \
 done
 endef
 endif
@@ -281,8 +333,13 @@ endef
 
 .PHONY: all build-slaptain push-slaptain build-openldap-deb build-init build-slapd build-init-ol26 build-slapd-ol26 build-ol26 build-openldap-deb-ol26src build-init-ol26src build-slapd-ol26src build-ol26src build-openldap-deb-ol2616 build-init-ol2616 build-slapd-ol2616 build-ol2616 import-init-ol2616 import-slapd-ol2616 import-ol2616 push-init-ol2616 push-slapd-ol2616 push-ol2616 import-init-ol26src import-slapd-ol26src import-ol26src build-openldap-deb-debug build-slapd-debug build-openldap-deb-asan build-slapd-asan import-slapd-debug import-slapd-asan push-slapd-debug push-slapd-asan build-toolkit build-operator build-exporter build-slctl install-slctl push gencert helm-deploy cluster-helm-install cluster-helm-uninstall mesh-helm-install mesh-helm-uninstall operator-crd-apply operator-helm-install operator-helm-uninstall operator-chart-package operator-chart-push charts-package charts-push test test-uninstall operator-generate operator-manifests operator-sync-crd e2e e2e-run e2e-resilience e2e-external-replication e2e-multisite e2e-multisite-setup e2e-multisite-test e2e-multisite-teardown e2e-migration e2e-migration-setup e2e-migration-test e2e-migration-teardown import import-init import-slapd import-toolkit import-operator import-exporter import-init-ol26 import-slapd-ol26 import-ol26 push-operator deliver deliver-operator deploy-operator clean show-tag helm-lint verify-generated tidy test-init
 
-## all: the seven pushable images plus slctl. build-ol26 is included so a
-## release build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
+## all: every pushable image plus slctl. build-ol26 is included so a release
+## build carries the legacy OpenLDAP 2.6 pair too (ADR-021).
+##
+## NOTE a changed meaning: a build now PUBLISHES, because a BuildKit worker has
+## no local image store to leave the result in. Under the default DELIVERY=push
+## this target pushes. Use DELIVERY=cacheonly to prove the images build without
+## publishing them.
 all: build-init build-slapd build-slaptain build-ol26 build-ol26src build-toolkit build-operator build-exporter build-slctl
 
 ## Stamp-file backed build targets (incremental)
@@ -310,16 +367,31 @@ $(STAMPS)/exporter-tag: FORCE | $(STAMPS)
 # leaves every tag stamp fresh, so nothing rebuilds, so `make push` pushes a
 # name that was never created ("image not known"). Separate from the tag stamp
 # on purpose — only the images whose name carries the prefix depend on it, so a
-# registry switch does not re-run the openldap-deb package build, which is
-# `localhost/`-named and by far the most expensive thing here.
+# registry switch rebuilds the openldap-deb carrier too -- it is now addressed
+# in the registry like everything else, so its NAME moves with REGISTRY and a
+# stale stamp would leave the 2.7 images resolving `FROM` against a tag that
+# was never pushed there.
 $(STAMPS)/registry: FORCE | $(STAMPS)
 	@if [ "$$(cat $@ 2>/dev/null)" != "$(REGISTRY)/$(PROJECT)" ]; then \
 		echo "$(REGISTRY)/$(PROJECT)" > $@; \
 	fi
 
+# Track the DELIVERY mode, because it decides the build's OUTPUT and not just
+# what happens afterwards: under `push` the builder writes to the registry,
+# under `import` it writes a docker-archive tarball. Switching between them
+# with every stamp fresh would otherwise skip the build and then look for a
+# tarball nobody wrote. Same shape as the tag and registry stamps above.
+$(STAMPS)/delivery: FORCE | $(STAMPS)
+	@mkdir -p $(BUILD_TARBALL_DIR)
+	@if [ "$$(cat $@ 2>/dev/null)" != "$(DELIVERY)" ]; then \
+		echo "$(DELIVERY)" > $@; \
+	fi
+
 # OpenLDAP 2.7.1 packages, built once and consumed by both 2.7 images below.
-$(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/openldap-deb: IMAGE_REF = $(OPENLDAP_DEB_IMAGE)
+$(STAMPS)/openldap-deb: BUILD_OUTPUT = --push
+$(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		--build-arg SLAPTAIN_PATCHES=$(SLAPTAIN_PATCHES) \
 		-t $(OPENLDAP_DEB_IMAGE) images/openldap-deb/
@@ -330,21 +402,25 @@ $(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 ## reached through spec.images.select.flavour: slaptain. In `all` and `push`,
 ## because the operator can now resolve to it and an unpublished cell would be
 ## an ImagePullBackOff waiting for whoever selects it.
-$(STAMPS)/openldap-deb-slaptain: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/openldap-deb-slaptain: IMAGE_REF = $(OPENLDAP_DEB_IMAGE_SLAPTAIN)
+$(STAMPS)/openldap-deb-slaptain: BUILD_OUTPUT = --push
+$(STAMPS)/openldap-deb-slaptain: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		--build-arg SLAPTAIN_PATCHES=1 \
 		-t $(OPENLDAP_DEB_IMAGE_SLAPTAIN) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/init-slaptain: $(INIT_SRCS) $(STAMPS)/openldap-deb-slaptain $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/init-slaptain: IMAGE_REF = $(INIT_IMAGE_SLAPTAIN)
+$(STAMPS)/init-slaptain: $(INIT_SRCS) $(STAMPS)/openldap-deb-slaptain $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_SLAPTAIN) \
 		-t $(INIT_IMAGE_SLAPTAIN) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd-slaptain: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-slaptain $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/slapd-slaptain: IMAGE_REF = $(SLAPD_IMAGE_SLAPTAIN)
+$(STAMPS)/slapd-slaptain: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-slaptain $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_SLAPTAIN) \
 		-t $(SLAPD_IMAGE_SLAPTAIN) images/slapd/
 	@touch $@
@@ -355,30 +431,33 @@ build-slaptain: $(STAMPS)/init-slaptain $(STAMPS)/slapd-slaptain
 
 ## push-slaptain: deliver it so an e2e run or a cluster selecting
 ## flavour: slaptain can pull it.
+push-slaptain: DELIVERY := push
 push-slaptain: build-slaptain
-	$(CONTAINER_ENGINE) push $(INIT_IMAGE_SLAPTAIN)
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_SLAPTAIN)
 
-$(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/init: IMAGE_REF = $(INIT_IMAGE)
+$(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE) \
 		-t $(INIT_IMAGE) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/slapd: IMAGE_REF = $(SLAPD_IMAGE)
+$(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE) \
 		-t $(SLAPD_IMAGE) images/slapd/
 	@touch $@
 
-$(STAMPS)/init-ol26: $(INIT_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build -f images/slapd-init/Containerfile.ol26 \
+$(STAMPS)/init-ol26: IMAGE_REF = $(INIT_IMAGE_OL26)
+$(STAMPS)/init-ol26: $(INIT_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd-init/Containerfile.ol26 \
 		--build-arg OPENLDAP_OL26_VERSION=$(OPENLDAP_OL26_VERSION) \
 		-t $(INIT_IMAGE_OL26) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build -f images/slapd/Containerfile.ol26 \
+$(STAMPS)/slapd-ol26: IMAGE_REF = $(SLAPD_IMAGE_OL26)
+$(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd/Containerfile.ol26 \
 		--build-arg OPENLDAP_OL26_VERSION=$(OPENLDAP_OL26_VERSION) \
 		-t $(SLAPD_IMAGE_OL26) images/slapd/
 	@touch $@
@@ -387,8 +466,10 @@ $(STAMPS)/slapd-ol26: $(SLAPD_OL26_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(ST
 # OpenLDAP from source and takes minutes, so it must not re-run per image.
 # OPENLDAP_DEB_SRCS globs the whole directory, so editing a file in
 # local-patches/ rebuilds the .debs and both images below.
-$(STAMPS)/openldap-deb-ol26src: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build -f images/openldap-deb/Containerfile.ol26src \
+$(STAMPS)/openldap-deb-ol26src: IMAGE_REF = $(OPENLDAP_DEB_IMAGE_OL26SRC)
+$(STAMPS)/openldap-deb-ol26src: BUILD_OUTPUT = --push
+$(STAMPS)/openldap-deb-ol26src: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) -f images/openldap-deb/Containerfile.ol26src \
 		--build-arg OPENLDAP_OL26_VERSION=$(OPENLDAP_OL26_VERSION) \
 		-t $(OPENLDAP_DEB_IMAGE_OL26SRC) images/openldap-deb/
 	@touch $@
@@ -396,15 +477,17 @@ $(STAMPS)/openldap-deb-ol26src: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 # Both images consume the .debs through the ordinary (2.7) Containerfiles —
 # those install whatever /debs holds, so they are version-agnostic. The .ol26
 # Containerfiles are NOT used here: they apt-install Debian's binary.
-$(STAMPS)/init-ol26src: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/init-ol26src: IMAGE_REF = $(INIT_IMAGE_OL26SRC)
+$(STAMPS)/init-ol26src: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
 		$(OL26SRC_LABELS) \
 		-t $(INIT_IMAGE_OL26SRC) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/slapd-ol26src: IMAGE_REF = $(SLAPD_IMAGE_OL26SRC)
+$(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
 		$(OL26SRC_LABELS) \
 		-t $(SLAPD_IMAGE_OL26SRC) images/slapd/
@@ -414,8 +497,10 @@ $(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/
 # The ordinary 2.7 Containerfile, pointed at the other release line: same
 # vendored packaging, same gates, three build args. Nothing else depends on
 # these stamps, so the normal loop never pays for them.
-$(STAMPS)/openldap-deb-ol2616: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build -f images/openldap-deb/Containerfile.ol2616 \
+$(STAMPS)/openldap-deb-ol2616: IMAGE_REF = $(OPENLDAP_DEB_IMAGE_OL2616)
+$(STAMPS)/openldap-deb-ol2616: BUILD_OUTPUT = --push
+$(STAMPS)/openldap-deb-ol2616: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) -f images/openldap-deb/Containerfile.ol2616 \
 		--build-arg OPENLDAP_VERSION=$(OPENLDAP_OL2616_VERSION) \
 		--build-arg OPENLDAP_SHA256=$(OPENLDAP_OL2616_SHA256) \
 		--build-arg DEBIAN_PKG_VERSION=$(OPENLDAP_OL2616_DEBIAN_PKG) \
@@ -424,15 +509,17 @@ $(STAMPS)/openldap-deb-ol2616: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
 		-t $(OPENLDAP_DEB_IMAGE_OL2616) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/init-ol2616: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/init-ol2616: IMAGE_REF = $(INIT_IMAGE_OL2616)
+$(STAMPS)/init-ol2616: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL2616) \
 		$(OL2616_LABELS) \
 		-t $(INIT_IMAGE_OL2616) images/slapd-init/
 	@touch $@
 
-$(STAMPS)/slapd-ol2616: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/slapd-ol2616: IMAGE_REF = $(SLAPD_IMAGE_OL2616)
+$(STAMPS)/slapd-ol2616: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL2616) \
 		$(OL2616_LABELS) \
 		-t $(SLAPD_IMAGE_OL2616) images/slapd/
@@ -442,44 +529,53 @@ $(STAMPS)/slapd-ol2616: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/ta
 # Each needs its own package build, so each is a full ~10 min cycle. Nothing
 # else depends on these stamps, so the normal loop never pays for them.
 
-$(STAMPS)/openldap-deb-debug: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/openldap-deb-debug: IMAGE_REF = $(OPENLDAP_DEB_IMAGE_DEBUG)
+$(STAMPS)/openldap-deb-debug: BUILD_OUTPUT = --push
+$(STAMPS)/openldap-deb-debug: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		--build-arg BUILD_VARIANT=debug \
 		-t $(OPENLDAP_DEB_IMAGE_DEBUG) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/slapd-debug: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-debug $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/slapd-debug: IMAGE_REF = $(SLAPD_IMAGE_DEBUG)
+$(STAMPS)/slapd-debug: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-debug $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_DEBUG) \
 		--build-arg BUILD_VARIANT=debug \
 		-t $(SLAPD_IMAGE_DEBUG) images/slapd/
 	@touch $@
 
-$(STAMPS)/openldap-deb-asan: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/openldap-deb-asan: IMAGE_REF = $(OPENLDAP_DEB_IMAGE_ASAN)
+$(STAMPS)/openldap-deb-asan: BUILD_OUTPUT = --push
+$(STAMPS)/openldap-deb-asan: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		--build-arg BUILD_VARIANT=asan \
 		-t $(OPENLDAP_DEB_IMAGE_ASAN) images/openldap-deb/
 	@touch $@
 
-$(STAMPS)/slapd-asan: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-asan $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build \
+$(STAMPS)/slapd-asan: IMAGE_REF = $(SLAPD_IMAGE_ASAN)
+$(STAMPS)/slapd-asan: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-asan $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_ASAN) \
 		--build-arg BUILD_VARIANT=asan \
 		-t $(SLAPD_IMAGE_ASAN) images/slapd/
 	@touch $@
 
-$(STAMPS)/toolkit: $(TOOLKIT_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build -t $(TOOLKIT_IMAGE) images/slapd-toolkit/
+$(STAMPS)/toolkit: IMAGE_REF = $(TOOLKIT_IMAGE)
+$(STAMPS)/toolkit: $(TOOLKIT_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) -t $(TOOLKIT_IMAGE) images/slapd-toolkit/
 	@touch $@
 
-$(STAMPS)/operator: $(OPERATOR_SRCS) $(STAMPS)/tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build -f images/operator/Containerfile -t $(OPERATOR_IMAGE) .
+$(STAMPS)/operator: IMAGE_REF = $(OPERATOR_IMAGE)
+$(STAMPS)/operator: $(OPERATOR_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) -f images/operator/Containerfile -t $(OPERATOR_IMAGE) .
 	@touch $@
 
-$(STAMPS)/exporter: $(EXPORTER_SRCS) $(STAMPS)/exporter-tag $(STAMPS)/registry | $(STAMPS)
-	$(CONTAINER_ENGINE) build -f images/slapd-exporter/Containerfile -t $(EXPORTER_IMAGE) .
+$(STAMPS)/exporter: IMAGE_REF = $(EXPORTER_IMAGE)
+$(STAMPS)/exporter: $(EXPORTER_SRCS) $(STAMPS)/exporter-tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd-exporter/Containerfile -t $(EXPORTER_IMAGE) .
 	@touch $@
 
 ## Phony aliases so `make build-operator` etc. still work
@@ -501,20 +597,23 @@ build-openldap-deb-ol2616: $(STAMPS)/openldap-deb-ol2616
 build-init-ol2616: $(STAMPS)/init-ol2616
 build-slapd-ol2616: $(STAMPS)/slapd-ol2616
 build-ol2616: build-init-ol2616 build-slapd-ol2616
+import-init-ol2616: DELIVERY := import
 import-init-ol2616: build-init-ol2616
 	$(call import-if-needed,$(INIT_IMAGE_OL2616))
+import-slapd-ol2616: DELIVERY := import
 import-slapd-ol2616: build-slapd-ol2616
 	$(call import-if-needed,$(SLAPD_IMAGE_OL2616))
+import-ol2616: DELIVERY := import
 import-ol2616: import-init-ol2616 import-slapd-ol2616
 
 ## push-ol2616: deliver the experimental pair to $(REGISTRY) so a cluster can
 ## pull it. Excluded from the aggregate `push` on purpose — an experimental
 ## forward-port must never ride along with a release — but pushable on its own,
 ## exactly as the debug and asan variants are. Pin BOTH tags when deploying it.
+push-init-ol2616: DELIVERY := push
 push-init-ol2616: build-init-ol2616
-	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL2616)
+push-slapd-ol2616: DELIVERY := push
 push-slapd-ol2616: build-slapd-ol2616
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL2616)
 push-ol2616: push-init-ol2616 push-slapd-ol2616
 build-toolkit: $(STAMPS)/toolkit
 build-operator: $(STAMPS)/operator
@@ -532,81 +631,98 @@ build-slctl:
 install-slctl: build-slctl
 	sudo install -m 0755 bin/slctl /usr/local/bin/slctl
 
-## Push to container registry. Seven images: the 2.7 slapd pair (plain tags), the
-## 2.6 pair (-ol26), toolkit, operator, and the slapd exporter at its own
-## EXPORTER_IMAGE_TAG. The openldap-deb build artifact carrier is local-only and
-## deliberately not pushed.
+## Push every published image to the registry.
+##
+## There is no separate push STEP any more: BuildKit writes straight to the
+## registry, because a remote builder has no local image store to push from.
+## DELIVERY is what selects that output (see BUILD_OUTPUT), so this target
+## sets it rather than appending commands -- and setting it here also moves
+## the delivery stamp, which is what forces a rebuild when the previous run
+## was an `import` and left tarballs instead.
+##
+## Eight images: the pure 2.7 pair (plain tags), the patched 2.7 pair
+## (-ol<version>-slaptain), the 2.6 pairs (-ol26, -ol26src), toolkit, operator,
+## and the exporter at its own EXPORTER_IMAGE_TAG. The openldap-deb carriers
+## are pushed too, as a build input -- see their definition.
+push: DELIVERY := push
 push: build-init build-slapd build-slaptain build-ol26 build-ol26src build-toolkit build-operator build-exporter
-	$(CONTAINER_ENGINE) push $(INIT_IMAGE)
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE)
-	$(CONTAINER_ENGINE) push $(INIT_IMAGE_SLAPTAIN)
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_SLAPTAIN)
-	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL26)
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL26)
-	$(CONTAINER_ENGINE) push $(INIT_IMAGE_OL26SRC)
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_OL26SRC)
-	$(CONTAINER_ENGINE) push $(TOOLKIT_IMAGE)
-	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
-	$(CONTAINER_ENGINE) push $(EXPORTER_IMAGE)
+	@echo "pushed:"
+	@for i in $(INIT_IMAGE) $(SLAPD_IMAGE) $(INIT_IMAGE_SLAPTAIN) $(SLAPD_IMAGE_SLAPTAIN) \
+		  $(INIT_IMAGE_OL26) $(SLAPD_IMAGE_OL26) $(INIT_IMAGE_OL26SRC) $(SLAPD_IMAGE_OL26SRC) \
+		  $(TOOLKIT_IMAGE) $(OPERATOR_IMAGE) $(EXPORTER_IMAGE); do echo "  $$i"; done
 
 ## Import images into k8s node CRI via SSH.
 ## Checks kubectl node image list first — skips import if the tag is already present.
 ## No per-context stamps needed: the content-based tag (:GIT_TAG) is the check.
 
+import-init: DELIVERY := import
 import-init: build-init
 	$(call import-if-needed,$(INIT_IMAGE))
 
+import-slapd: DELIVERY := import
 import-slapd: build-slapd
 	$(call import-if-needed,$(SLAPD_IMAGE))
 
+import-toolkit: DELIVERY := import
 import-toolkit: build-toolkit
 	$(call import-if-needed,$(TOOLKIT_IMAGE))
 
+import-operator: DELIVERY := import
 import-operator: build-operator
 	$(call import-if-needed,$(OPERATOR_IMAGE))
 
+import-exporter: DELIVERY := import
 import-exporter: build-exporter
 	$(call import-if-needed,$(EXPORTER_IMAGE))
 
+import: DELIVERY := import
 import: import-init import-slapd import-toolkit import-operator import-exporter
 
 ## Legacy 2.6 pair — separate aggregate so the normal loop doesn't pay for it.
 ## Use it to run an e2e cycle against -ol26 images (ADR-021).
+import-init-ol26: DELIVERY := import
 import-init-ol26: build-init-ol26
 	$(call import-if-needed,$(INIT_IMAGE_OL26))
 
+import-slapd-ol26: DELIVERY := import
 import-slapd-ol26: build-slapd-ol26
 	$(call import-if-needed,$(SLAPD_IMAGE_OL26))
 
+import-ol26: DELIVERY := import
 import-ol26: import-init-ol26 import-slapd-ol26
 
+import-init-ol26src: DELIVERY := import
 import-init-ol26src: build-init-ol26src
 	$(call import-if-needed,$(INIT_IMAGE_OL26SRC))
 
+import-slapd-ol26src: DELIVERY := import
 import-slapd-ol26src: build-slapd-ol26src
 	$(call import-if-needed,$(SLAPD_IMAGE_OL26SRC))
 
+import-ol26src: DELIVERY := import
 import-ol26src: import-init-ol26src import-slapd-ol26src
 
 ## Debug variants: deliver the one slapd image, leave slapd-init on the plain
 ## tag. Same OpenLDAP version, so the two images still agree on everything the
 ## runtime contract covers.
+import-slapd-debug: DELIVERY := import
 import-slapd-debug: build-slapd-debug
 	$(call import-if-needed,$(SLAPD_IMAGE_DEBUG))
 
+import-slapd-asan: DELIVERY := import
 import-slapd-asan: build-slapd-asan
 	$(call import-if-needed,$(SLAPD_IMAGE_ASAN))
 
+push-slapd-debug: DELIVERY := push
 push-slapd-debug: build-slapd-debug
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_DEBUG)
 
+push-slapd-asan: DELIVERY := push
 push-slapd-asan: build-slapd-asan
-	$(CONTAINER_ENGINE) push $(SLAPD_IMAGE_ASAN)
 
 ## Push a single image (per-image counterparts of the aggregate `push`,
 ## so `deliver-operator` resolves under the default DELIVERY=push).
+push-operator: DELIVERY := push
 push-operator: build-operator
-	$(CONTAINER_ENGINE) push $(OPERATOR_IMAGE)
 
 ## Delivery: dispatch to push or import based on DELIVERY variable
 deliver: $(DELIVERY)
@@ -1061,4 +1177,4 @@ show-tag: ## Print the git tags and the image/chart tags derived from them
 	@echo "exporter image:  $(EXPORTER_IMAGE_TAG)"
 
 clean:
-	rm -rf .stamps .charts bin/ *.tar
+	rm -rf .stamps .charts .build bin/ *.tar

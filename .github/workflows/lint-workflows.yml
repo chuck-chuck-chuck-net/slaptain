@@ -4,9 +4,11 @@ on:
   push:
     paths:
       - .github/workflows/**
+      - .gitea/workflows/**
   pull_request:
     paths:
       - .github/workflows/**
+      - .gitea/workflows/**
 
 permissions:
   contents: read
@@ -24,6 +26,13 @@ jobs:
         run: bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
         shell: bash
 
+      # Both directories. actionlint scans .github/workflows by default; the
+      # Gitea ones have to be named. They are worth linting for a reason the
+      # GitHub ones are not: a forge that cannot parse a workflow SKIPS it
+      # silently -- no run, no error, nothing in the UI -- so a malformed file
+      # there looks exactly like a push that built nothing.
       - name: Check workflow files
-        run: ${{ steps.get_actionlint.outputs.executable }} -color
+        run: |
+          ${{ steps.get_actionlint.outputs.executable }} -color
+          ${{ steps.get_actionlint.outputs.executable }} -color .gitea/workflows/*.yaml
         shell: bash

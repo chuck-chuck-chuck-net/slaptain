@@ -1,0 +1,118 @@
+# Build and push the container images on every push to main and on every
+# release tag of either version line (docs/VERSIONING.md).
+#
+# This file is the second CI substrate. The first is .github/workflows/, which
+# this directory's existence SHADOWS here: a forge that reads .gitea/workflows
+# does not also read .github/workflows, so the GitHub workflows neither run nor
+# need a platform guard. Verified, not assumed -- a probe with a valid workflow
+# in each directory produced runs for this one only.
+#
+# Everything platform-specific is a variable:
+#   REGISTRY       repository variable; where the images go
+#   BUILDKIT_HOST  set by the runner configuration, points at the shared builder
+# so this file names no host and is identical for anyone who clones the repo
+# and points it at their own forge.
+#
+# Image names and tags come from the Makefile (GIT_TAG -> IMAGE_TAG), the same
+# derivation `make`, tests/e2e.sh and the GitHub workflows use. CI must never
+# re-derive that rule.
+name: images
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+      - 'exporter/v*'
+
+jobs:
+  images:
+    runs-on: linux-amd64
+    timeout-minutes: 180
+    steps:
+      # fetch-depth: 0 is load-bearing, not hygiene. scripts/image-tag.sh runs
+      # `git describe --tags --exact-match`; at the default shallow depth no
+      # tag is visible, every build is addressed sha-<hash>, and a release tag
+      # would publish under a name nothing points at.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preflight
+        run: |
+          set -eu
+          fail=0
+          if [ -z "${REGISTRY:-}" ]; then
+            echo "::error::the REGISTRY repository variable is unset; nothing would know where to push"
+            fail=1
+          fi
+          if [ -z "${BUILDKIT_HOST:-}" ]; then
+            echo "::error::BUILDKIT_HOST is unset; the runner configuration should provide it"
+            fail=1
+          fi
+          if ! command -v make >/dev/null; then
+            echo "::error::make is missing from the runner image (add it there: apk add make)"
+            fail=1
+          fi
+          exit "$fail"
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+
+      # Prefer a buildx baked into the runner image; fall back to fetching it
+      # so this workflow runs before that image is rebuilt. The fallback is
+      # ~68 MB per job, which is the reason to bake it in.
+      - name: Set up buildx
+        run: |
+          set -eu
+          if ! command -v buildx >/dev/null; then
+            echo "buildx not in the runner image; fetching ${BUILDX_VERSION} into the tool cache"
+            mkdir -p "${RUNNER_TOOL_CACHE}/buildx"
+            wget -q -O "${RUNNER_TOOL_CACHE}/buildx/buildx" \
+              "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64"
+            chmod +x "${RUNNER_TOOL_CACHE}/buildx/buildx"
+            echo "${RUNNER_TOOL_CACHE}/buildx" >> "$GITHUB_PATH"
+          fi
+        env:
+          BUILDX_VERSION: v0.38.1
+
+      # A remote driver: the build runs in the shared buildkitd, not here.
+      # There is no local image store anywhere in this job, which is exactly
+      # why the Makefile addresses the openldap-deb carrier in the registry.
+      - name: Point buildx at the shared builder
+        run: |
+          set -eu
+          buildx create --driver remote --name ci --use "$BUILDKIT_HOST"
+          buildx inspect --bootstrap ci
+
+      - name: Show the tags the Makefile derived
+        run: make show-tag
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+
+      # A release tag must publish under its own version. Off a tag the
+      # Makefile answers sha-<hash>, and without this check a mis-fetched
+      # checkout would publish a release under that instead -- silently.
+      - name: On a version tag, check the Makefile sees it
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eu
+          want="${GITHUB_REF_NAME#v}"
+          got="$(make -s show-tag | awk '/^image:/ {print $2}')"
+          if [ "$got" != "$want" ]; then
+            echo "::error::Makefile derived image tag '${got}', expected '${want}'"
+            exit 1
+          fi
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+
+      # The build pushes; there is no separate push step (the builder is
+      # remote and has nothing to push FROM). Registry-backed cache so a
+      # buildkitd PVC wipe does not cost a full OpenLDAP compile.
+      - name: Build and push
+        run: make push
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          BUILD_CACHE_FLAGS: >-
+            --cache-from type=registry,ref=${{ vars.REGISTRY }}/slaptain/buildcache
+            --cache-to type=registry,ref=${{ vars.REGISTRY }}/slaptain/buildcache,mode=max

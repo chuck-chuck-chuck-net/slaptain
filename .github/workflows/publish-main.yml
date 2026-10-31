@@ -32,16 +32,29 @@ jobs:
       # hash> — the same spelling metadata-action's type=sha publishes for the
       # sibling project, so `make`, tests/e2e.sh and CI agree on the name.
       #
-      # `make push` builds the OpenLDAP 2.7.1 .deb carrier once and feeds it
-      # to both 2.7 images from local storage (it is never pushed); the
-      # Makefile drives podman for that, which ubuntu-latest ships.
+      # `make push` builds the OpenLDAP .deb carrier once and feeds it to both
+      # 2.7 images. The carrier is pushed too, as a build input: a remote
+      # BuildKit worker has no local image store to resolve it from, and one
+      # build graph across every substrate is worth more than not publishing it.
       - name: Show the tag the Makefile derived
         run: make show-tag
 
-      - name: Log in to GHCR
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      # buildx on a GitHub runner is a docker CLI plugin, not a binary on PATH,
+      # so the Makefile's BUILDX is pointed at it below. The build itself runs
+      # in BuildKit and pushes directly -- there is no local image store and no
+      # separate push step (see the Makefile's build driver block).
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build and push the six images
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the images
         run: make push
+        env:
+          BUILDX: docker buildx
+          BUILD_CACHE_FLAGS: --cache-from type=gha --cache-to type=gha,mode=max

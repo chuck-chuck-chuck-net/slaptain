@@ -12,7 +12,7 @@ does not restate the project's conventions and discipline in full, which live in
 
 | Tool | Why |
 |---|---|
-| `podman` | Image builds. `CONTAINER_ENGINE=docker` switches engines; nothing in the Containerfiles is podman-specific |
+| `buildx` + a BuildKit worker | Image builds. Any worker will do: a local rootless `buildkitd`, Docker's built-in one, or a remote one (`buildx create --driver remote tcp://…`) — the build graph is identical on all three. `BUILDX="docker buildx"` when it is a Docker CLI plugin rather than a binary on `PATH`. podman is no longer a build tool here; it is still a container *runtime* for `docs/its9398/` and the exporter's testdata recorder |
 | Go 1.26.10+ | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
 | Helm 3 | Every deployment path is Helm. There is no kustomize in this repo |
 | `kubectl` | Contexts for each cluster you target |
@@ -64,19 +64,36 @@ the two scenarios that need their own topology.
 ## Building images
 
 ```bash
-make all          # six images + slctl
-make push         # build, then push all six
-make show-tag     # print the tag everything will be built and deployed with
+make all                     # every image + slctl — and PUBLISHES them, see below
+make push                    # the same thing, said explicitly
+make all DELIVERY=cacheonly  # just prove they build
+make show-tag                # the tag everything will be built and deployed with
 ```
 
-The six pushable images are the 2.7.1 `slapd` / `slapd-init` pair, the `-ol26`
-2.6 pair, `slapd-toolkit` and `operator`. A seventh, `openldap-deb`, is
-local-only (`localhost/` prefix, `FROM scratch`, nothing but `/debs`): both 2.7
-Containerfiles consume it via `--build-arg OPENLDAP_DEB_IMAGE`, so the package
-build runs **once per tag** and feeds both. It is stamp-cached like everything
-else under `.stamps/`, which is why a second image build after the first is
-fast. `RUN_UPSTREAM_TESTS=1` adds OpenLDAP's own test suite to that build; it
-costs tens of minutes and is off by default.
+**A build publishes.** That is a change from the podman days and it follows
+from the engine: BuildKit has no local image store to leave a result in, so a
+finished image goes to the registry (`DELIVERY=push`, the default), to a
+docker-archive tarball for the node-import path (`DELIVERY=import`), or
+nowhere at all (`DELIVERY=cacheonly`). Set `REGISTRY` to something you can
+write to before running any of this.
+
+The pushable images are the 2.7 `slapd` / `slapd-init` pairs — `pure` under
+the plain tag and `slaptain` under `-ol<version>-slaptain` — the two 2.6 pairs
+(`-ol26`, `-ol26src`), `slapd-toolkit`, `operator` and `slapd-exporter`.
+
+`openldap-deb` is a build *input* rather than a deployable image (`FROM
+scratch`, nothing but `/debs`): both 2.7 Containerfiles consume it via
+`--build-arg OPENLDAP_DEB_IMAGE`, so the package build runs **once per tag**
+and feeds both. It used to live in the local image store under a `localhost/`
+name; it is now addressed in the registry and pushed, because a remote
+BuildKit worker has no local store to resolve a `FROM` against. That is the
+one step `DELIVERY=cacheonly` cannot skip, and the one build-time registry
+dependency this repo has.
+
+It is stamp-cached like everything else under `.stamps/`, which is why a
+second image build after the first is fast. `RUN_UPSTREAM_TESTS=1` adds
+OpenLDAP's own test suite to that build; it costs tens of minutes and is off
+by default.
 
 Individual targets: `build-init`, `build-slapd`, `build-ol26` (both legacy
 images), `build-toolkit`, `build-operator`, `build-openldap-deb`, `build-slctl`
@@ -118,9 +135,10 @@ your own registry; images are always `$(REGISTRY)/$(PROJECT)/<image>:$(GIT_TAG)`
 
 ### Delivery: push or import
 
-`DELIVERY=push` (default) pushes to the registry. `DELIVERY=import` saves each
-image and loads it into every node's CRI over SSH — for clusters with no
-reachable registry:
+`DELIVERY=push` (default) pushes to the registry. `DELIVERY=import` has the
+builder write a docker-archive tarball into `.build/` and streams it into every
+node's CRI over SSH — for clusters with no reachable registry. (The carrier is
+still pushed; see above.) `DELIVERY=cacheonly` publishes no image at all.
 
 ```bash
 make import CONTEXT=<context>        # init, slapd, toolkit, operator

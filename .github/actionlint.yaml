@@ -1,0 +1,6 @@
+# Runner labels actionlint cannot know about. `linux-amd64` is the label the
+# internal Gitea runners register with; without this, every job in
+# .gitea/workflows/ fails the lint as an unknown runner.
+self-hosted-runner:
+  labels:
+    - linux-amd64
