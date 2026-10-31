@@ -125,6 +125,7 @@ jobs:
         run: scripts/bake.sh --push images
         env:
           REGISTRY: ${{ vars.REGISTRY }}
-          BUILD_CACHE_FLAGS: >-
-            --cache-from type=registry,ref=${{ vars.REGISTRY }}/slaptain/buildcache
-            --cache-to type=registry,ref=${{ vars.REGISTRY }}/slaptain/buildcache,mode=max
+          # Registry-backed cache for the OpenLDAP compiles, one ref per
+          # carrier (docker-bake.hcl). Unset on a laptop, where the local
+          # builder keeps its own.
+          CACHE_REF: ${{ vars.REGISTRY }}/slaptain/buildcache

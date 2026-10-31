@@ -55,6 +55,27 @@ variable "OL2616_PATCHES"     { default = "accesslog-purge-phase.patch accesslog
 # nothing, so a bare `buildx bake` can never push by accident.
 variable "OUTPUT" { default = "type=cacheonly" }
 
+# Registry-backed layer cache, so a builder with a cold or wiped cache does
+# not pay for the OpenLDAP compiles again. Empty = off, which is right for a
+# laptop (its builder keeps its own cache) and is why nothing is cached by
+# accident.
+#
+# Applied to the CARRIERS only, and one ref per carrier. Only applied there
+# because they are the expensive targets -- minutes of compiling against
+# seconds of Go -- and one ref EACH because a shared ref would have each
+# target overwrite the previous one's manifest, leaving a cache that always
+# misses and looks like it is working.
+variable "CACHE_REF" { default = "" }
+
+function "cache_from" {
+  params = [name]
+  result = CACHE_REF == "" ? [] : ["type=registry,ref=${CACHE_REF}:${name}"]
+}
+function "cache_to" {
+  params = [name]
+  result = CACHE_REF == "" ? [] : ["type=registry,ref=${CACHE_REF}:${name},mode=max"]
+}
+
 function "img" {
   params = [name, tag]
   result = "${REGISTRY}/${PROJECT}/${name}:${tag}"
@@ -101,17 +122,23 @@ target "_carrier" {
 target "openldap-deb" {
   inherits = ["_carrier"]
   args     = { SLAPTAIN_PATCHES = "0" }
+  cache-from = cache_from("openldap-deb")
+  cache-to   = cache_to("openldap-deb")
 }
 
 target "openldap-deb-slaptain" {
   inherits = ["_carrier"]
   args     = { SLAPTAIN_PATCHES = "1" }
+  cache-from = cache_from("openldap-deb-slaptain")
+  cache-to   = cache_to("openldap-deb-slaptain")
 }
 
 target "openldap-deb-ol26src" {
   inherits   = ["_carrier"]
   dockerfile = "Containerfile.ol26src"
   args       = { OPENLDAP_OL26_VERSION = OPENLDAP_OL26_VERSION }
+  cache-from = cache_from("openldap-deb-ol26src")
+  cache-to   = cache_to("openldap-deb-ol26src")
 }
 
 target "openldap-deb-ol2616" {
@@ -124,16 +151,22 @@ target "openldap-deb-ol2616" {
     OPENLDAP_PKG_VERSION = OL2616_PKG_VERSION
     SLAPTAIN_PATCH_LIST  = OL2616_PATCHES
   }
+  cache-from = cache_from("openldap-deb-ol2616")
+  cache-to   = cache_to("openldap-deb-ol2616")
 }
 
 target "openldap-deb-debug" {
   inherits = ["_carrier"]
   args     = { BUILD_VARIANT = "debug" }
+  cache-from = cache_from("openldap-deb-debug")
+  cache-to   = cache_to("openldap-deb-debug")
 }
 
 target "openldap-deb-asan" {
   inherits = ["_carrier"]
   args     = { BUILD_VARIANT = "asan" }
+  cache-from = cache_from("openldap-deb-asan")
+  cache-to   = cache_to("openldap-deb-asan")
 }
 
 # ── The 2.7 pairs ───────────────────────────────────────────────────────────
