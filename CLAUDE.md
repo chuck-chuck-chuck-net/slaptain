@@ -117,6 +117,7 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-039-two-tiers-of-support.md
 │       ├── adr-040-data-plane-image-identity.md
 │       ├── adr-041-startup-volume-format-diagnosis.md
+│       ├── adr-043-pod-placement.md
 │       ├── adr-045-data-db-syncprov-checkpoint.md
 │       └── adr-047-ci-architecture.md
 ├── charts/
@@ -784,6 +785,7 @@ one-liner that does not need slctl.
 
 Two traps worth knowing before you conclude it does not work:
 
+- ADR-043: **Placement is the user's, with one default the user does not have to know about** — a three-node site was measured with two of three RW pods on one node and the RO replica sharing a node with a writer, because the operator exposed no placement control at all. Sharper here than for a typical workload: the PVCs are RWO on local storage with `WaitForFirstConsumer`, so the volume binds where the pod first lands and the pod is pinned there for the life of the PVC — **a bad spread is permanent**, and correcting it is ADR-012 case 2. `spec.placement` carries five raw Kubernetes pass-throughs (`topologySpreadConstraints`, `nodeSelector`, `nodeAffinity`, `tolerations`, `priorityClassName`) applied to both pod templates, plus ONE generated constraint PER FLEET when the user declares none (`maxSkew: 1` on `kubernetes.io/hostname`, `ScheduleAnyway`) — per fleet because a combined group lets every writer share a node while the totals look even; `nodeAffinity` rather than the whole `affinity` struct, because the pod half stays reserved for the cross-fleet separation this ADR defers. `ScheduleAnyway` not `DoNotSchedule`: the latter plus a bound local PV deadlocks. The opt-out needs `*[]T`, not `[]T` — `omitempty` drops a zero-length slice as readily as a nil one, so decoding kept the absent-vs-empty distinction while ENCODING collapsed it, and a typed client doing Get/modify/Update silently restored the default it had just been told to drop (same shape as `SlapdBackup.podAffinity`'s `*bool`); Helm's `with` has the identical bug, hence `kindIs "slice"` in both charts. User guide: `docs/PLACEMENT.md` — *Accepted 2026-10-29; validated at the StatefulSet-template level on a single-node cluster, so the deadlock and the one-roll-nothing-moves behaviour stay reasoned*
 - **A stale binary reads as a broken cluster.** `/usr/local/bin/slctl` is whatever was
   installed last, and against newer CRDs it fails with an unmarshal error that looks like
   cluster damage. `make build-slctl` (or `make install-slctl`) first when working on a branch
