@@ -3,6 +3,31 @@
 Cross-cutting cleanup items that aren't tied to the migration plan
 (`docs/MIGRATION-PLAN.md`) or a single ADR. Keep entries small and actionable.
 
+## Build: refuse a builder whose architecture is not the target's
+
+`docker-bake.hcl` pins `PLATFORM = linux/amd64`, which stops BuildKit
+defaulting to the *worker's* native architecture and quietly producing arm64
+images an amd64 cluster cannot run. The pin makes that case correct, not
+legible: on an arm64 machine it silently becomes QEMU emulation, and for the
+OpenLDAP compiles that is slow enough to look like a hang.
+
+The fuller answer is ADR-041's shape — **detect to refuse, not to choose**.
+`buildx inspect` advertises the builder's platforms; comparing them with
+`PLATFORM` gives four answers rather than two, and the detector must be able
+to **exonerate** ("your builder is amd64, the problem is elsewhere"), because
+one that can only accuse eventually accuses wrongly.
+
+Not built because nobody here is on arm64 today, so it is insurance rather
+than a fix. It becomes real the first time someone builds on an Apple Silicon
+laptop, and the symptom then is "the build hangs", which is the worst
+possible first impression of a cold OpenLDAP compile under emulation.
+
+Also unfixed, same family: `scripts/mesh-derive-topology.sh` still calls
+`sha256sum` directly. `scripts/image-tag.sh` grew a `sha256sum`-or-`shasum`
+fallback because it is on the build path; the mesh script is lab tooling that
+already assumes `yq` and `kubectl`, so it was left alone rather than given a
+second copy of the same three lines.
+
 ## ~~Deprecation cleanup: `client.Apply` → `client.Client.Apply()` / `SubResource().Apply()`~~ — DONE (2026-09-14)
 
 All twelve package-level `client.Apply` call sites are migrated to

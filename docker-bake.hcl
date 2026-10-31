@@ -67,6 +67,26 @@ variable "OUTPUT" { default = "type=cacheonly" }
 # misses and looks like it is working.
 variable "CACHE_REF" { default = "" }
 
+# The architecture these images are FOR, which is not the same question as the
+# architecture the builder happens to be. BuildKit defaults to the worker's
+# native platform, so on an arm64 machine -- an Apple Silicon laptop with a
+# local worker, say -- this graph would quietly produce arm64 images that an
+# amd64 cluster cannot run, with no error anywhere until a pod crashloops.
+# Wrong and fast is worse than slow and right.
+#
+# Pinned rather than detected, and the trade is worth stating: on an arm64
+# machine the pin means QEMU emulation, which for the OpenLDAP compiles is
+# slow enough to hurt. That is a condition you can see and reason about; a
+# wrong-architecture image is not. The escape hatch for an arm64 developer is
+# to point at an amd64 builder (scripts/bake.sh honours BUILDX_BUILDER),
+# which is fast AND right.
+#
+# Override deliberately with PLATFORM=linux/arm64 if you mean it. The fuller
+# answer -- a preflight that compares the builder's advertised platforms with
+# this one and REFUSES, able to exonerate as well as accuse -- is ADR-041's
+# shape and is in docs/BACKLOG.md.
+variable "PLATFORM" { default = "linux/amd64" }
+
 function "cache_from" {
   params = [name]
   result = CACHE_REF == "" ? [] : ["type=registry,ref=${CACHE_REF}:${name}"]
@@ -117,6 +137,7 @@ target "_carrier" {
   dockerfile = "Containerfile"
   output     = ["type=cacheonly"]
   args       = { RUN_UPSTREAM_TESTS = RUN_UPSTREAM_TESTS }
+  platforms  = [PLATFORM]
 }
 
 target "openldap-deb" {
@@ -178,12 +199,14 @@ target "_init" {
   context    = "images/slapd-init"
   dockerfile = "Containerfile"
   output     = [OUTPUT]
+  platforms  = [PLATFORM]
 }
 
 target "_slapd" {
   context    = "images/slapd"
   dockerfile = "Containerfile"
   output     = [OUTPUT]
+  platforms  = [PLATFORM]
 }
 
 target "slapd-init" {
@@ -306,6 +329,7 @@ target "toolkit" {
   dockerfile = "Containerfile"
   output     = [OUTPUT]
   tags       = [img("slapd-toolkit", IMAGE_TAG)]
+  platforms  = [PLATFORM]
 }
 
 target "operator" {
@@ -313,6 +337,7 @@ target "operator" {
   dockerfile = "images/operator/Containerfile"
   output     = [OUTPUT]
   tags       = [img("operator", IMAGE_TAG)]
+  platforms  = [PLATFORM]
 }
 
 # Its own version line (ADR-033 decision 4): git tags exporter/vX.Y.Z -> image
@@ -322,4 +347,5 @@ target "exporter" {
   dockerfile = "images/slapd-exporter/Containerfile"
   output     = [OUTPUT]
   tags       = [img("slapd-exporter", EXPORTER_IMAGE_TAG)]
+  platforms  = [PLATFORM]
 }

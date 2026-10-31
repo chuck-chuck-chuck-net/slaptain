@@ -39,6 +39,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# GNU coreutils spells it sha256sum, macOS spells it `shasum -a 256`. This is
+# on the DIRTY-TREE path, which is the everyday developer path rather than an
+# edge case, so assuming the GNU one breaks tag derivation for a whole class
+# of machine on the command they run most.
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum
+    else
+        shasum -a 256
+    fi
+}
+
 addressed=0
 if [[ "${1:-}" == "--image" ]]; then
     addressed=1
@@ -83,6 +95,6 @@ hash=$(git rev-parse --short HEAD)
 if git diff --quiet HEAD 2>/dev/null; then
     address "$hash"
 else
-    state=$(git diff HEAD | sha256sum | cut -c1-8)
+    state=$(git diff HEAD | sha256 | cut -c1-8)
     address "${hash}-dirty-${state}"
 fi

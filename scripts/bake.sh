@@ -86,7 +86,14 @@ case "$mode" in
             exit 1
         fi
         mkdir -p .build
-        mapfile -t targets < <("${BUILDX_CMD[@]}" bake --print "$@" 2>/dev/null \
+        # A read loop rather than mapfile: mapfile is bash 4, and macOS still
+        # ships bash 3.2 as /bin/bash. The shebang saves anyone with a newer
+        # bash on PATH and nobody else, which is not a distinction worth
+        # making for four lines.
+        targets=()
+        while IFS= read -r t; do
+            [[ -n $t ]] && targets+=("$t")
+        done < <("${BUILDX_CMD[@]}" bake --print "$@" 2>/dev/null \
             | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["target"]))')
         if [[ ${#targets[@]} -eq 0 ]]; then
             echo "bake.sh: no targets resolved for: $*" >&2
