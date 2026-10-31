@@ -29,6 +29,40 @@ One deliberate exception: for a BREAKING change this file still carries the
 single line that keeps today's behaviour, because a release note that makes a
 reader go somewhere else to learn what to set is a release note that failed.
 
+## v0.5.1
+
+### The operator's cache holds what it manages, and nothing else (issue #28, ADR-042)
+
+A fix for memory that grew with the size of the Kubernetes cluster rather than
+with the number of slapd deployments. On a shared cluster with 84 namespaces
+the operator was OOM-killed at its 128Mi default while managing one two-pod
+cluster; with the limit raised it sat at 553Mi.
+
+The manager was built without cache options, so every informer behind an
+`Owns()` or a cached `Get` held **every** object of its kind in the cluster —
+every Secret (Helm release records included, a megabyte each), every Pod,
+every Service. Now every core-kind informer is filtered to
+`app.kubernetes.io/name=slapd`, the label the slapd pods have always carried,
+and every object the operator creates carries it too. Secrets are read
+straight from the API server, always, because the Secrets a user supplies —
+TLS, `cnConfigCredentials`, bring-your-own credentials, S3, kubeconfigs — carry
+no label of ours and the operator never labels what it does not own.
+
+Measured on a kind cluster running only the operator, 72 MiB of foreign
+Helm-typed Secrets: heap +97.5 MiB and RSS 51 → 153 MiB before, heap +1.6 MiB
+and RSS 46 → 53 MiB after.
+
+**What it changes for a running cluster:** nothing rolls — the label chosen
+is the one the pods already carry. Services, StatefulSets and ConfigMaps gain
+the label through their next apply; the `<cluster>-config-password` Secret is
+patched once (one log line). The default memory limit stays at 128Mi. See
+`docs/UPGRADING.md`.
+
+**Harness:** `tests/e2e.sh` now installs the operator with
+`metrics.enabled=true`, because the new `cache_scope_test.go` reads the
+operator's own `go_memstats` through the API server's pod proxy to assert
+that a namespace full of foreign Secrets leaves its heap alone.
+
 ## v0.5.0
 
 Three defaults move in this release. Two of them change which binary your pods

@@ -221,7 +221,7 @@ func (r *SlapdClusterReconciler) writeSelectorMoved(
 	ctx context.Context, sc *ldapv1alpha1.SlapdCluster, desired *corev1.Service,
 ) (bool, error) {
 	cur := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKey{Name: desired.Name, Namespace: sc.Namespace}, cur)
+	err := r.getManaged(ctx, client.ObjectKey{Name: desired.Name, Namespace: sc.Namespace}, cur)
 	if errors.IsNotFound(err) {
 		return true, nil
 	}
@@ -277,7 +277,7 @@ func (r *SlapdClusterReconciler) retireWriteService(
 	}
 
 	cur := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, cur)
+	err := r.getManaged(ctx, client.ObjectKey{Name: name, Namespace: sc.Namespace}, cur)
 	if errors.IsNotFound(err) {
 		return nil
 	}

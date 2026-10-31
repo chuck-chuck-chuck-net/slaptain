@@ -111,7 +111,7 @@ func (r *SlapdClusterReconciler) reconcileTLSGate(ctx context.Context, sc *ldapv
 	)
 	if sc.Spec.LDAP.TLS.Enabled && sc.Spec.LDAP.TLS.SecretName != "" {
 		secret := &corev1.Secret{}
-		err := r.Get(ctx, types.NamespacedName{
+		err := r.secrets().Get(ctx, types.NamespacedName{
 			Namespace: sc.Namespace,
 			Name:      sc.Spec.LDAP.TLS.SecretName,
 		}, secret)
@@ -162,7 +162,7 @@ func (r *SlapdClusterReconciler) reconcileTLSGate(ctx context.Context, sc *ldapv
 // TLSReady condition carrying the real news.
 func (r *SlapdClusterReconciler) observeAndApplyTLSBlockedStatus(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	sts := &appsv1.StatefulSet{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: sc.Namespace, Name: sc.Name}, sts)
+	err := r.getManaged(ctx, types.NamespacedName{Namespace: sc.Namespace, Name: sc.Name}, sts)
 	switch {
 	case apierrors.IsNotFound(err):
 		sc.Status.Phase = ldapv1alpha1.PhaseBootstrapping

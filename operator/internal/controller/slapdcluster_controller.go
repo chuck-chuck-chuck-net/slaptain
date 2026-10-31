@@ -70,6 +70,11 @@ const (
 type SlapdClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader reads Secrets straight from the API server (ADR-042): a Secret
+	// the user supplied carries no label of ours and is absent from the
+	// filtered cache. Wired from mgr.GetAPIReader(); nil means Client is
+	// already uncached (tests) and is used as is.
+	APIReader client.Reader
 	// DefaultImageTag is the tag substituted into SlapdCluster.spec.images.{slapd,init}
 	// when the user leaves them blank. Wired from the OPERATOR_IMAGE_TAG env in
 	// the operator Deployment (Helm chart injects it from Chart.AppVersion), so
@@ -329,7 +334,7 @@ func (r *SlapdClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// 8. Observe StatefulSet status → update SlapdCluster status.
 	sts := &appsv1.StatefulSet{}
-	if err := r.Get(ctx, req.NamespacedName, sts); err != nil {
+	if err := r.getManaged(ctx, req.NamespacedName, sts); err != nil {
 		return ctrl.Result{}, fmt.Errorf("get StatefulSet: %w", err)
 	}
 
@@ -470,7 +475,7 @@ func (r *SlapdClusterReconciler) observeReadOnlyStatus(ctx context.Context, sc *
 	}
 	roSts := &appsv1.StatefulSet{}
 	roKey := client.ObjectKey{Name: sc.Name + "-readonly", Namespace: sc.Namespace}
-	if err := r.Get(ctx, roKey, roSts); err != nil {
+	if err := r.getManaged(ctx, roKey, roSts); err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("get read-only StatefulSet: %w", err)
 		}
@@ -621,10 +626,15 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 		return nil
 	}
 
-	// If auto-generated secret already exists, nothing to do.
+	// If the auto-generated Secret already exists, nothing to create. One
+	// thing to converge: a Secret created by an operator older than ADR-042
+	// carries no label and is invisible to the filtered informer behind
+	// Owns(&corev1.Secret{}), so a deletion would go unnoticed until some
+	// other event. Label it, once — only when it is ours to label, which the
+	// controller reference says.
 	existing := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: cfgName, Namespace: sc.Namespace}, existing); err == nil {
-		return nil
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: cfgName, Namespace: sc.Namespace}, existing); err == nil {
+		return r.labelOwnedSecret(ctx, sc, existing)
 	} else if !errors.IsNotFound(err) {
 		return err
 	}
@@ -634,17 +644,48 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 		return fmt.Errorf("generate root password: %w", err)
 	}
 
-	cfgSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: cfgName, Namespace: sc.Namespace},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			secretKeyRootPassword: rootPW,
-		},
-	}
+	cfgSecret := configPasswordSecret(sc, rootPW)
 	if err := controllerutil.SetControllerReference(sc, cfgSecret, r.Scheme); err != nil {
 		return err
 	}
 	return r.Create(ctx, cfgSecret)
+}
+
+// configPasswordSecret is the <name>-config-password Secret the operator
+// creates for a cluster that brought no cn=config credentials of its own.
+func configPasswordSecret(sc *ldapv1alpha1.SlapdCluster, rootPW string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sc.Name + "-config-password",
+			Namespace: sc.Namespace,
+			Labels:    managedLabels(),
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			secretKeyRootPassword: rootPW,
+		},
+	}
+}
+
+// labelOwnedSecret adds managedLabels to a Secret this cluster owns and that
+// lacks them. A Secret the operator did not create (no controller reference —
+// one the user pre-created under the operator's name) is left alone: it is
+// read uncached either way, and it is not ours to label.
+func (r *SlapdClusterReconciler) labelOwnedSecret(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, secret *corev1.Secret) error {
+	if managedSelector.Matches(labels.Set(secret.Labels)) {
+		return nil
+	}
+	if owner := metav1.GetControllerOf(secret); owner == nil || owner.UID != sc.UID {
+		return nil
+	}
+	orig := secret.DeepCopy()
+	secret.Labels = withManagedLabels(secret.Labels)
+	if err := r.Patch(ctx, secret, client.MergeFrom(orig)); err != nil {
+		return fmt.Errorf("label Secret %s for the operator's cache: %w", secret.Name, err)
+	}
+	logf.FromContext(ctx).Info("labelled a pre-existing Secret for the operator's cache (ADR-042)",
+		"secret", secret.Name)
+	return nil
 }
 
 // reconcileHeadlessService applies the headless Service (clusterIP: None) via SSA.
@@ -669,6 +710,7 @@ func (r *SlapdClusterReconciler) headlessService(sc *ldapv1alpha1.SlapdCluster) 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-headless",
 			Namespace: sc.Namespace,
+			Labels:    managedLabels(),
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
@@ -746,6 +788,7 @@ func (r *SlapdClusterReconciler) clusterIPService(sc *ldapv1alpha1.SlapdCluster)
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        sc.Name,
 			Namespace:   sc.Namespace,
+			Labels:      managedLabels(),
 			Annotations: sc.Spec.Service.Annotations,
 		},
 		Spec: corev1.ServiceSpec{
@@ -784,14 +827,7 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 	if err != nil {
 		return err
 	}
-	sts := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name,
-			Namespace: sc.Namespace,
-		},
-		Spec: r.buildStatefulSetSpec(sc, false, tagSuffix),
-	}
+	sts := r.statefulSet(sc, false, tagSuffix)
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
 	}
@@ -803,6 +839,26 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 		return err
 	}
 	return r.Apply(ctx, ac, client.ForceOwnership, client.FieldOwner(fieldManager))
+}
+
+// statefulSet is the StatefulSet object the operator applies for a cluster:
+// the read-write one, or the read-only one. The spec is buildStatefulSetSpec's;
+// this adds the object's own name and labels, so the object's shape is
+// unit-testable without a client.
+func (r *SlapdClusterReconciler) statefulSet(sc *ldapv1alpha1.SlapdCluster, readOnly bool, tagSuffix string) *appsv1.StatefulSet {
+	name := sc.Name
+	if readOnly {
+		name += "-readonly"
+	}
+	return &appsv1.StatefulSet{
+		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: sc.Namespace,
+			Labels:    managedLabels(),
+		},
+		Spec: r.buildStatefulSetSpec(sc, readOnly, tagSuffix),
+	}
 }
 
 // adoptImmutableSTSFields preserves the StatefulSet's immutable fields from
@@ -828,7 +884,7 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 // separate, supported workflow).
 func (r *SlapdClusterReconciler) adoptImmutableSTSFields(ctx context.Context, desired *appsv1.StatefulSet) error {
 	existing := &appsv1.StatefulSet{}
-	err := r.Get(ctx, client.ObjectKey{Name: desired.Name, Namespace: desired.Namespace}, existing)
+	err := r.getManaged(ctx, client.ObjectKey{Name: desired.Name, Namespace: desired.Namespace}, existing)
 	if err != nil {
 		// NotFound = first create, our spec is authoritative for these fields.
 		// Any other error: let the caller propagate; the next reconcile retries.
@@ -868,6 +924,7 @@ func (r *SlapdClusterReconciler) readOnlyHeadlessService(sc *ldapv1alpha1.SlapdC
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly-headless",
 			Namespace: sc.Namespace,
+			Labels:    managedLabels(),
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
@@ -949,6 +1006,7 @@ func (r *SlapdClusterReconciler) readOnlyService(sc *ldapv1alpha1.SlapdCluster) 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sc.Name + "-readonly",
 			Namespace: sc.Namespace,
+			Labels:    managedLabels(),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     svcType,
@@ -981,14 +1039,7 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 	if err != nil {
 		return err
 	}
-	sts := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name + "-readonly",
-			Namespace: sc.Namespace,
-		},
-		Spec: r.buildStatefulSetSpec(sc, true, tagSuffix),
-	}
+	sts := r.statefulSet(sc, true, tagSuffix)
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
 	}
@@ -1466,7 +1517,7 @@ func (r *SlapdClusterReconciler) getConfigPassword(ctx context.Context, sc *ldap
 		secretName = sc.Spec.LDAP.CnConfigCredentials.SecretName
 	}
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{
+	if err := r.secrets().Get(ctx, client.ObjectKey{
 		Name: secretName, Namespace: sc.Namespace,
 	}, secret); err != nil {
 		return "", fmt.Errorf("read config password secret %s: %w", secretName, err)
@@ -1520,7 +1571,7 @@ func (r *SlapdClusterReconciler) listDatabaseInfo(ctx context.Context, sc *ldapv
 			secretName = db.Spec.Credentials.SecretName
 		}
 		secret := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKey{
+		if err := r.secrets().Get(ctx, client.ObjectKey{
 			Name: secretName, Namespace: sc.Namespace,
 		}, secret); err == nil {
 			info.bindPW = string(secret.Data[secretKeyReplicationPassword])
@@ -2023,7 +2074,7 @@ func (r *SlapdClusterReconciler) discoverRemotePeerProviders(
 
 	// Read the kubeconfig Secret.
 	kubeconfigSecret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{
+	if err := r.secrets().Get(ctx, client.ObjectKey{
 		Name:      disc.KubeconfigSecret.Name,
 		Namespace: sc.Namespace,
 	}, kubeconfigSecret); err != nil {

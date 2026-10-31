@@ -170,6 +170,12 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "7d911751.chuck-chuck-chuck.net",
+		// The cache holds what the operator manages and nothing else: every
+		// core-kind informer is filtered to the label the operator stamps on
+		// what it creates. Without this, every Secret, Pod and Service in the
+		// cluster was cached and the operator's memory grew with the cluster
+		// rather than with its own deployments (issue #28, ADR-042).
+		Cache: controller.CacheOptions(),
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -222,6 +228,7 @@ func main() {
 
 	if err := (&controller.SlapdClusterReconciler{
 		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
 		Scheme:          mgr.GetScheme(),
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
@@ -234,6 +241,7 @@ func main() {
 	}
 	if err := (&controller.SlapdSchemaReconciler{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		Scheme:        mgr.GetScheme(),
 		ClusterDomain: clusterDomain,
 	}).SetupWithManager(mgr); err != nil {
@@ -242,6 +250,7 @@ func main() {
 	}
 	if err := (&controller.SlapdDatabaseReconciler{
 		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
 		Scheme:          mgr.GetScheme(),
 		ClusterDomain:   clusterDomain,
 		SiteName:        siteName,
@@ -254,6 +263,7 @@ func main() {
 	}
 	if err := (&controller.SlapdBackupReconciler{
 		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
 		Scheme:          mgr.GetScheme(),
 		DefaultImageTag: os.Getenv("OPERATOR_IMAGE_TAG"),
 		OperatorImage:   os.Getenv("OPERATOR_IMAGE"),
@@ -264,8 +274,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.SlapdScheduledBackupReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SlapdScheduledBackup")
 		os.Exit(1)

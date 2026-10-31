@@ -50,6 +50,11 @@ const (
 type SlapdScheduledBackupReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader reads Secrets straight from the API server (ADR-042): a Secret
+	// the user supplied carries no label of ours and is absent from the
+	// filtered cache. Wired from mgr.GetAPIReader(); nil means Client is
+	// already uncached (tests) and is used as is.
+	APIReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=ldap.chuck-chuck-chuck.net,resources=slapdscheduledbackups,verbs=get;list;watch;create;update;patch;delete
@@ -216,7 +221,7 @@ func (r *SlapdScheduledBackupReconciler) enforceRetention(ctx context.Context, s
 // s3Config builds an S3 config for a backup, reading static credentials from its
 // referenced Secret (keys access-key-id / secret-access-key).
 func (r *SlapdScheduledBackupReconciler) s3Config(ctx context.Context, sb *ldapv1alpha1.SlapdBackup) (backup.S3Config, error) {
-	return s3ConfigFromStorage(ctx, r.Client, sb.Namespace, sb.Spec.Storage)
+	return s3ConfigFromStorage(ctx, r.secrets(), sb.Namespace, sb.Spec.Storage)
 }
 
 // backupTime is the timestamp used to order/age a backup: its completion time

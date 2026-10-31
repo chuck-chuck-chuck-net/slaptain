@@ -232,6 +232,7 @@ three-site run went 104/0 with one pod storming the whole time.
 | Env var | Default | Description |
 |---|---|---|
 | `NAMESPACE_TESTING` | `slaptain-testing` | Testing namespace |
+| `NAMESPACE` | `slaptain-system` | The operator's namespace; `cache_scope_test.go` finds the operator pod there and scrapes its metrics through the pod proxy (the script installs the chart with `metrics.enabled=true` for that) |
 | `E2E_CONFIG` | `<repo-root>/lab.yaml` if present | Lab config file (site inventory, registry, network mode). Env vars win over file values. Schema: `lab.yaml.sample` |
 | `SLAPD_TAG_SUFFIX` | *(empty — OpenLDAP 2.7.1)* | Appended to the slapd/slapd-init image tags only (operator/toolkit untouched). `-ol26` deploys the legacy OpenLDAP 2.6 pair (ADR-011 interop / ADR-021). |
 | `E2E_LABEL_FILTER` | *(unset — full suite)* | Ginkgo label filter to run a subset, e.g. `accesslog`, `sessionlog`, `startup-config`, `resilience` (the dataloss container), `external-replication`. |

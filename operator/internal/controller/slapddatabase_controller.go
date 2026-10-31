@@ -58,6 +58,11 @@ const (
 type SlapdDatabaseReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader reads Secrets straight from the API server (ADR-042): a Secret
+	// the user supplied carries no label of ours and is absent from the
+	// filtered cache. Wired from mgr.GetAPIReader(); nil means Client is
+	// already uncached (tests) and is used as is.
+	APIReader client.Reader
 	// ClusterDomain is the Kubernetes DNS domain used to build pod FQDNs for
 	// per-pod LDAP connections and syncrepl provider URIs. See ADR-015.
 	ClusterDomain string
@@ -631,7 +636,7 @@ func (r *SlapdDatabaseReconciler) reconcileCredentials(
 	// instead.
 	if sd.Spec.Credentials.SecretName != "" {
 		existing := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, existing); err != nil {
+		if err := r.secrets().Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, existing); err != nil {
 			return fmt.Errorf("read user-provided credentials Secret %s: %w", secretName, err)
 		}
 		if len(existing.Data[secretKeyRootPassword]) == 0 {
@@ -647,9 +652,11 @@ func (r *SlapdDatabaseReconciler) reconcileCredentials(
 		return nil
 	}
 
-	// Check if auto-generated secret already exists.
+	// Check if auto-generated secret already exists. Uncached: it may have
+	// been pre-created under our name by the user (scripts/mesh-share-
+	// credentials.sh does exactly that), with no label of ours on it.
 	existing := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, existing); err == nil {
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, existing); err == nil {
 		return nil
 	} else if !errors.IsNotFound(err) {
 		return err
@@ -665,17 +672,22 @@ func (r *SlapdDatabaseReconciler) reconcileCredentials(
 		return fmt.Errorf("generate replication password: %w", err)
 	}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: sd.Namespace},
+	// No SetControllerReference — the secret should survive CR deletion
+	// when cleanupPolicy=Retain.
+	return r.Create(ctx, credentialsSecret(sd.Namespace, secretName, rootPW, replPW))
+}
+
+// credentialsSecret is the <database>-credentials Secret the operator creates
+// for a database that brought no credentials of its own.
+func credentialsSecret(namespace, name, rootPW, replPW string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: managedLabels()},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: map[string]string{
 			secretKeyRootPassword:        rootPW,
 			secretKeyReplicationPassword: replPW,
 		},
 	}
-	// No SetControllerReference — the secret should survive CR deletion
-	// when cleanupPolicy=Retain.
-	return r.Create(ctx, secret)
 }
 
 func (r *SlapdDatabaseReconciler) credentialsSecretName(sd *ldapv1alpha1.SlapdDatabase) string {
@@ -688,7 +700,7 @@ func (r *SlapdDatabaseReconciler) credentialsSecretName(sd *ldapv1alpha1.SlapdDa
 func (r *SlapdDatabaseReconciler) getDatabaseRootPassword(ctx context.Context, sd *ldapv1alpha1.SlapdDatabase) (string, error) {
 	secretName := r.credentialsSecretName(sd)
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, secret); err != nil {
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, secret); err != nil {
 		return "", fmt.Errorf("read database credentials secret %s: %w", secretName, err)
 	}
 	pw := string(secret.Data[secretKeyRootPassword])
@@ -701,7 +713,7 @@ func (r *SlapdDatabaseReconciler) getDatabaseRootPassword(ctx context.Context, s
 func (r *SlapdDatabaseReconciler) getDatabaseReplPassword(ctx context.Context, sd *ldapv1alpha1.SlapdDatabase) (string, error) {
 	secretName := r.credentialsSecretName(sd)
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, secret); err != nil {
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: secretName, Namespace: sd.Namespace}, secret); err != nil {
 		return "", fmt.Errorf("read database credentials secret %s: %w", secretName, err)
 	}
 	return string(secret.Data[secretKeyReplicationPassword]), nil
@@ -713,7 +725,7 @@ func (r *SlapdDatabaseReconciler) getClusterConfigPassword(ctx context.Context, 
 		secretName = sc.Spec.LDAP.CnConfigCredentials.SecretName
 	}
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: sc.Namespace}, secret); err != nil {
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: secretName, Namespace: sc.Namespace}, secret); err != nil {
 		return "", fmt.Errorf("read config password secret %s: %w", secretName, err)
 	}
 	pw := string(secret.Data[secretKeyRootPassword])
@@ -3275,7 +3287,7 @@ func (r *SlapdDatabaseReconciler) externalPeerPassword(ctx context.Context, ns, 
 		return "", nil
 	}
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, secret); err != nil {
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, secret); err != nil {
 		return "", err
 	}
 	password := string(secret.Data["password"])

@@ -190,6 +190,7 @@ func (r *SlapdClusterReconciler) reconcileStartupConfigMap(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      startupConfigMapName(sc.Name),
 			Namespace: sc.Namespace,
+			Labels:    managedLabels(),
 		},
 		Data: startupConfigFor(dbList.Items, sc.Name).configMapData(),
 	}

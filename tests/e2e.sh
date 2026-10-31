@@ -641,6 +641,10 @@ setup_foundation() {
             kctl "$ctx" apply -n "$NAMESPACE_TESTING" -f "$PULL_SECRET_FILE"
         fi
 
+        # metrics.enabled: the cache-scope spec reads the operator's own
+        # go_memstats through the pod proxy to prove its informers hold nothing
+        # foreign (ADR-042, issue #28). Plain HTTP on a lab cluster, as the
+        # chart's values.yaml warns; a production install decides for itself.
         log "[$ctx] Installing operator (tag: $IMAGE_TAG, site: ${SITE_NAMES[$ctx]})..."
         local operator_multus_sets=()
         if [[ -n "$MULTUS_NETWORK" ]]; then
@@ -651,6 +655,7 @@ setup_foundation() {
             --set "image.repository=$REGISTRY/$PROJECT/operator" \
             --set "image.tag=$IMAGE_TAG" \
             --set "siteName=${SITE_NAMES[$ctx]}" \
+            --set metrics.enabled=true \
             "${PULL_SECRET_HELM_ARGS[@]}" \
             "${operator_multus_sets[@]}"
     done
@@ -1092,6 +1097,7 @@ run_tests() {
     # the E2E_NODE_ACCESS_IP override the deployer may have set above.
     local test_env=(
         "KUBECONFIG=$tmp_kubeconfig"
+        "NAMESPACE=$NAMESPACE"
         "NAMESPACE_TESTING=$NAMESPACE_TESTING"
         "LDAP_ADDR=${local_ip}:${NODEPORT_LDAP}"
         "E2E_NODE_IP=${local_ip}"

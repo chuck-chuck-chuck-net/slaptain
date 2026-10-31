@@ -230,6 +230,7 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 			TTLSecondsAfterFinished: new(dirJobTTL),
 			BackoffLimit:            new(int32(2)),
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: managedLabels()},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					SecurityContext:  backupPodSecurityContext(sc),

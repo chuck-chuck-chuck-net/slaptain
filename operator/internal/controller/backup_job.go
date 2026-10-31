@@ -152,6 +152,7 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 			TTLSecondsAfterFinished: &ttl,
 			BackoffLimit:            &backoff,
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: managedLabels()},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					SecurityContext:  backupPodSecurityContext(sc),

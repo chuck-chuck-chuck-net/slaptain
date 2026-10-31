@@ -49,6 +49,11 @@ const (
 type SlapdSchemaReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader reads Secrets straight from the API server (ADR-042): a Secret
+	// the user supplied carries no label of ours and is absent from the
+	// filtered cache. Wired from mgr.GetAPIReader(); nil means Client is
+	// already uncached (tests) and is used as is.
+	APIReader client.Reader
 	// ClusterDomain is the Kubernetes DNS domain used to build pod FQDNs for
 	// per-pod LDAP connections. See ADR-015.
 	ClusterDomain string
@@ -278,7 +283,7 @@ func (r *SlapdSchemaReconciler) getConfigPassword(ctx context.Context, sc *ldapv
 		secretName = sc.Spec.LDAP.CnConfigCredentials.SecretName
 	}
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{
+	if err := r.secrets().Get(ctx, client.ObjectKey{
 		Name: secretName, Namespace: sc.Namespace,
 	}, secret); err != nil {
 		return "", fmt.Errorf("read config password secret %s: %w", secretName, err)

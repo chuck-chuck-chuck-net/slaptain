@@ -48,6 +48,11 @@ const backupFieldManager = "slapdbackup-controller"
 type SlapdBackupReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader reads Secrets straight from the API server (ADR-042): a Secret
+	// the user supplied carries no label of ours and is absent from the
+	// filtered cache. Wired from mgr.GetAPIReader(); nil means Client is
+	// already uncached (tests) and is used as is.
+	APIReader client.Reader
 	// DefaultImageTag resolves the slapd-init image tag when unpinned, mirroring
 	// the SlapdCluster controller.
 	DefaultImageTag string
@@ -234,7 +239,7 @@ func (r *SlapdBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			// Record the artifact size (HEAD the object). Best-effort: a HEAD
 			// failure must not flip a successful backup to Failed, so we log and
 			// leave sizeBytes unset rather than erroring.
-			if cfg, err := s3ConfigFromStorage(ctx, r.Client, sb.Namespace, sb.Spec.Storage); err != nil {
+			if cfg, err := s3ConfigFromStorage(ctx, r.secrets(), sb.Namespace, sb.Spec.Storage); err != nil {
 				log.Info("backup completed but reading S3 credentials for size failed; sizeBytes unset", "err", err)
 			} else if size, err := backup.ObjectSize(ctx, cfg, objectKey); err != nil {
 				log.Info("backup completed but object HEAD failed; sizeBytes unset", "err", err)
@@ -405,7 +410,7 @@ func (r *SlapdBackupReconciler) replicationPassword(ctx context.Context, ns stri
 		secretName = sd.Spec.Credentials.SecretName
 	}
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, secret); err != nil {
+	if err := r.secrets().Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, secret); err != nil {
 		return "", fmt.Errorf("read %s: %w", secretName, err)
 	}
 	pw := string(secret.Data[secretKeyReplicationPassword])
