@@ -28,10 +28,20 @@ name: images
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      # TEMPORARY, for proving the pipeline. Remove once it has run green:
+      # building every branch push means an OpenLDAP compile per branch and a
+      # set of sha-tagged images per branch in the registry.
+      - feat/buildkit-build
     tags:
       - 'v*'
       - 'exporter/v*'
+  # Lets a run be started by hand from the Actions tab. Like GitHub, Gitea
+  # only offers this for workflows present on the DEFAULT branch, so it does
+  # nothing until this file reaches main -- which is exactly why the branch is
+  # listed above for now.
+  workflow_dispatch:
 
 jobs:
   images:
