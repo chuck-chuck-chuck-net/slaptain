@@ -91,11 +91,20 @@ jobs:
           BUILDX_VERSION: v0.38.1
 
       # A remote driver: the build runs in the shared buildkitd, not here.
-      # There is no local image store anywhere in this job, which is exactly
-      # why the Makefile addresses the openldap-deb carrier in the registry.
+      # There is no local image store anywhere in this job, which is why a
+      # carrier is handed between targets as a bake context rather than
+      # through a registry.
+      #
+      # Removed before created, because neither half is optional. In host mode
+      # the job runs INSIDE the runner container and $HOME persists between
+      # jobs, so the second run finds the builder already there and
+      # `buildx create` fails with "existing instance ... but no append mode".
+      # Recreating rather than reusing also means a changed BUILDKIT_HOST
+      # takes effect instead of being shadowed by a stale endpoint.
       - name: Point buildx at the shared builder
         run: |
           set -eu
+          buildx rm ci >/dev/null 2>&1 || true
           buildx create --driver remote --name ci --use "$BUILDKIT_HOST"
           buildx inspect --bootstrap ci
 
