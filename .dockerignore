@@ -1,0 +1,48 @@
+# What NOT to send to the builder.
+#
+# Two images build from the repository ROOT (images/operator, images/slapd-
+# exporter), so without this the whole working tree travels to the worker on
+# every build -- which with a remote BuildKit worker is a network transfer,
+# not a local copy. A developer tree here is multiple GB of build output and
+# tooling state against ~9 MB of tracked source.
+#
+# BuildKit reads .dockerignore ONLY. podman also honoured .containerignore, so
+# a file by that name would be silently ignored now -- the failure mode being
+# a slow build rather than a broken one, which is why it would not get noticed.
+#
+# Keep this an exclude list rather than an allow list: both Containerfiles
+# COPY one module directory each, so anything not excluded costs transfer and
+# nothing else, while an allow list that forgets a new source directory breaks
+# the build.
+
+# Version control and build state
+.git
+.github
+.gitea
+.stamps
+.build
+.charts
+bin/
+dist/
+
+# Agent/editor/tooling state
+.claude
+.idea
+.vscode
+
+# Go build output and module caches that may sit in-tree
+operator/bin/
+exporter/bin/
+**/*.test
+
+# Nothing below is reachable from either Containerfile's COPY, and all of it
+# is large or noisy.
+docs/
+charts/
+monitoring/
+tests/
+images/
+scripts/
+*.log
+*.tar
+*.tgz

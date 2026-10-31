@@ -23,6 +23,13 @@ BUILDX_BUILDER ?=
 BUILD_CACHE_FLAGS ?=
 BUILD = $(BUILDX) build $(if $(BUILDX_BUILDER),--builder $(BUILDX_BUILDER),) $(BUILD_CACHE_FLAGS)
 
+# EVERY build below names its file with -f, including the ones whose file is
+# the plain `Containerfile`. That is not verbosity: BuildKit's dockerfile
+# frontend looks for `Dockerfile` and nothing else, where buildah also
+# accepted `Containerfile` implicitly. Drop the -f and the build fails with
+# "failed to read dockerfile: open Dockerfile: no such file or directory",
+# which reads like a missing file rather than a missing flag.
+
 # podman is NO LONGER a build tool here. It is still a container RUNTIME for
 # the ITS#9398 reproduction (docs/its9398/) and the exporter's testdata
 # recorder, which run containers rather than build images.
@@ -391,7 +398,7 @@ $(STAMPS)/delivery: FORCE | $(STAMPS)
 $(STAMPS)/openldap-deb: IMAGE_REF = $(OPENLDAP_DEB_IMAGE)
 $(STAMPS)/openldap-deb: BUILD_OUTPUT = --push
 $(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/openldap-deb/Containerfile \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		--build-arg SLAPTAIN_PATCHES=$(SLAPTAIN_PATCHES) \
 		-t $(OPENLDAP_DEB_IMAGE) images/openldap-deb/
@@ -405,7 +412,7 @@ $(STAMPS)/openldap-deb: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(
 $(STAMPS)/openldap-deb-slaptain: IMAGE_REF = $(OPENLDAP_DEB_IMAGE_SLAPTAIN)
 $(STAMPS)/openldap-deb-slaptain: BUILD_OUTPUT = --push
 $(STAMPS)/openldap-deb-slaptain: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/openldap-deb/Containerfile \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		--build-arg SLAPTAIN_PATCHES=1 \
 		-t $(OPENLDAP_DEB_IMAGE_SLAPTAIN) images/openldap-deb/
@@ -413,14 +420,14 @@ $(STAMPS)/openldap-deb-slaptain: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/de
 
 $(STAMPS)/init-slaptain: IMAGE_REF = $(INIT_IMAGE_SLAPTAIN)
 $(STAMPS)/init-slaptain: $(INIT_SRCS) $(STAMPS)/openldap-deb-slaptain $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd-init/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_SLAPTAIN) \
 		-t $(INIT_IMAGE_SLAPTAIN) images/slapd-init/
 	@touch $@
 
 $(STAMPS)/slapd-slaptain: IMAGE_REF = $(SLAPD_IMAGE_SLAPTAIN)
 $(STAMPS)/slapd-slaptain: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-slaptain $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_SLAPTAIN) \
 		-t $(SLAPD_IMAGE_SLAPTAIN) images/slapd/
 	@touch $@
@@ -436,14 +443,14 @@ push-slaptain: build-slaptain
 
 $(STAMPS)/init: IMAGE_REF = $(INIT_IMAGE)
 $(STAMPS)/init: $(INIT_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd-init/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE) \
 		-t $(INIT_IMAGE) images/slapd-init/
 	@touch $@
 
 $(STAMPS)/slapd: IMAGE_REF = $(SLAPD_IMAGE)
 $(STAMPS)/slapd: $(SLAPD_SRCS) $(STAMPS)/openldap-deb $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE) \
 		-t $(SLAPD_IMAGE) images/slapd/
 	@touch $@
@@ -479,7 +486,7 @@ $(STAMPS)/openldap-deb-ol26src: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/del
 # Containerfiles are NOT used here: they apt-install Debian's binary.
 $(STAMPS)/init-ol26src: IMAGE_REF = $(INIT_IMAGE_OL26SRC)
 $(STAMPS)/init-ol26src: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd-init/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
 		$(OL26SRC_LABELS) \
 		-t $(INIT_IMAGE_OL26SRC) images/slapd-init/
@@ -487,7 +494,7 @@ $(STAMPS)/init-ol26src: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/ta
 
 $(STAMPS)/slapd-ol26src: IMAGE_REF = $(SLAPD_IMAGE_OL26SRC)
 $(STAMPS)/slapd-ol26src: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol26src $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL26SRC) \
 		$(OL26SRC_LABELS) \
 		-t $(SLAPD_IMAGE_OL26SRC) images/slapd/
@@ -511,7 +518,7 @@ $(STAMPS)/openldap-deb-ol2616: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/deli
 
 $(STAMPS)/init-ol2616: IMAGE_REF = $(INIT_IMAGE_OL2616)
 $(STAMPS)/init-ol2616: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd-init/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL2616) \
 		$(OL2616_LABELS) \
 		-t $(INIT_IMAGE_OL2616) images/slapd-init/
@@ -519,7 +526,7 @@ $(STAMPS)/init-ol2616: $(INIT_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag 
 
 $(STAMPS)/slapd-ol2616: IMAGE_REF = $(SLAPD_IMAGE_OL2616)
 $(STAMPS)/slapd-ol2616: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_OL2616) \
 		$(OL2616_LABELS) \
 		-t $(SLAPD_IMAGE_OL2616) images/slapd/
@@ -532,7 +539,7 @@ $(STAMPS)/slapd-ol2616: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-ol2616 $(STAMPS)/ta
 $(STAMPS)/openldap-deb-debug: IMAGE_REF = $(OPENLDAP_DEB_IMAGE_DEBUG)
 $(STAMPS)/openldap-deb-debug: BUILD_OUTPUT = --push
 $(STAMPS)/openldap-deb-debug: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/openldap-deb/Containerfile \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		--build-arg BUILD_VARIANT=debug \
 		-t $(OPENLDAP_DEB_IMAGE_DEBUG) images/openldap-deb/
@@ -540,7 +547,7 @@ $(STAMPS)/openldap-deb-debug: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/deliv
 
 $(STAMPS)/slapd-debug: IMAGE_REF = $(SLAPD_IMAGE_DEBUG)
 $(STAMPS)/slapd-debug: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-debug $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_DEBUG) \
 		--build-arg BUILD_VARIANT=debug \
 		-t $(SLAPD_IMAGE_DEBUG) images/slapd/
@@ -549,7 +556,7 @@ $(STAMPS)/slapd-debug: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-debug $(STAMPS)/tag 
 $(STAMPS)/openldap-deb-asan: IMAGE_REF = $(OPENLDAP_DEB_IMAGE_ASAN)
 $(STAMPS)/openldap-deb-asan: BUILD_OUTPUT = --push
 $(STAMPS)/openldap-deb-asan: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/openldap-deb/Containerfile \
 		--build-arg RUN_UPSTREAM_TESTS=$(RUN_UPSTREAM_TESTS) \
 		--build-arg BUILD_VARIANT=asan \
 		-t $(OPENLDAP_DEB_IMAGE_ASAN) images/openldap-deb/
@@ -557,7 +564,7 @@ $(STAMPS)/openldap-deb-asan: $(OPENLDAP_DEB_SRCS) $(STAMPS)/tag $(STAMPS)/delive
 
 $(STAMPS)/slapd-asan: IMAGE_REF = $(SLAPD_IMAGE_ASAN)
 $(STAMPS)/slapd-asan: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-asan $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) \
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd/Containerfile \
 		--build-arg OPENLDAP_DEB_IMAGE=$(OPENLDAP_DEB_IMAGE_ASAN) \
 		--build-arg BUILD_VARIANT=asan \
 		-t $(SLAPD_IMAGE_ASAN) images/slapd/
@@ -565,7 +572,7 @@ $(STAMPS)/slapd-asan: $(SLAPD_SRCS) $(STAMPS)/openldap-deb-asan $(STAMPS)/tag $(
 
 $(STAMPS)/toolkit: IMAGE_REF = $(TOOLKIT_IMAGE)
 $(STAMPS)/toolkit: $(TOOLKIT_SRCS) $(STAMPS)/tag $(STAMPS)/delivery $(STAMPS)/registry | $(STAMPS)
-	$(BUILD) $(BUILD_OUTPUT) -t $(TOOLKIT_IMAGE) images/slapd-toolkit/
+	$(BUILD) $(BUILD_OUTPUT) -f images/slapd-toolkit/Containerfile -t $(TOOLKIT_IMAGE) images/slapd-toolkit/
 	@touch $@
 
 $(STAMPS)/operator: IMAGE_REF = $(OPERATOR_IMAGE)

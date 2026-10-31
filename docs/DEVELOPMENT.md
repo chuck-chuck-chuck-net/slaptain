@@ -99,6 +99,34 @@ Individual targets: `build-init`, `build-slapd`, `build-ol26` (both legacy
 images), `build-toolkit`, `build-operator`, `build-openldap-deb`, `build-slctl`
 (→ `bin/slctl`, plus `install-slctl` for `/usr/local/bin`).
 
+### Getting a BuildKit worker
+
+`buildx` is a client; it needs a worker. Any of these, and the build graph is
+identical on all of them:
+
+```bash
+# A worker that is already there
+docker buildx version && export BUILDX="docker buildx"   # Docker ships one
+
+# A local rootless one
+buildkitd --oci-worker-no-process-sandbox &              # or a user systemd unit
+buildx create --driver docker-container --use
+
+# A remote one — the client needs no daemon at all, and the build runs
+# wherever the worker is. Reach it however you normally would (a port-forward
+# into a cluster, an SSH tunnel), then:
+buildx create --driver remote --name remote-bk --use tcp://<host>:1234
+buildx inspect --bootstrap remote-bk
+```
+
+The remote case is worth knowing even on a laptop: the build context is sent
+to the worker, the layers stay there, and nothing has to be installed locally
+beyond the ~68 MB `buildx` binary. It is also exactly what CI does.
+
+`BUILDX_BUILDER=<name>` picks a builder without `--use`; `BUILDX="docker
+buildx"` covers the case where buildx is a Docker CLI plugin rather than a
+binary on `PATH`.
+
 ### The tag
 
 `GIT_TAG` is derived, not configured — by `scripts/image-tag.sh`, the single
