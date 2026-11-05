@@ -90,7 +90,9 @@ ifndef NODE_USER
 endif
 
 # Node IPs: auto-discover from kubectl, override with NODE_IPS="1.2.3.4 5.6.7.8"
-NODE_IPS ?= $(shell $(KUBECTL) get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
+# One address per node: a dual-stack node lists an InternalIP per family, and
+# taking all of them imports every image twice.
+NODE_IPS ?= $(shell $(KUBECTL) get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' | awk '{print $$1}')
 
 INIT_IMAGE       = $(REGISTRY)/$(PROJECT)/slapd-init:$(IMAGE_TAG)
 SLAPD_IMAGE      = $(REGISTRY)/$(PROJECT)/slapd:$(IMAGE_TAG)
