@@ -12,7 +12,7 @@ does not restate the project's conventions and discipline in full, which live in
 
 | Tool | Why |
 |---|---|
-| `podman` | Image builds. `CONTAINER_ENGINE=docker` switches engines; nothing in the Containerfiles is podman-specific |
+| `docker buildx` | Image builds: `docker-bake.hcl` is the build graph, driven by `make` here and by `docker buildx bake` in CI. `BUILDX=buildx` where it is a standalone binary. It needs a BuildKit builder; Docker's default works. podman is only needed to run `docs/its9398/` |
 | Go 1.26.10+ | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
 | Helm 3 | Every deployment path is Helm. There is no kustomize in this repo |
 | `kubectl` | Contexts for each cluster you target |
@@ -42,12 +42,12 @@ Two Go modules, deliberately separate: `operator/`
 operator plus the `slctl` CLI under `cmd/slctl/`, and `tests/e2e/` is its own
 module so the test suite's dependencies never leak into the shipped binary.
 
-`images/` holds five build contexts: `slapd` and `slapd-init` (each with a
-`Containerfile` for OpenLDAP 2.7.1 and a `Containerfile.ol26` for the legacy
-2.6 pair), `slapd-toolkit`, `operator`, and `openldap-deb` — the vendored
-Debian packaging fork that produces the 2.7.1 `.deb` files
-([README](../images/openldap-deb/README.md),
-[ADR-021](adrs/adr-021-openldap-2.7-dual-images.md)).
+`images/` holds four build contexts: `openldap` (the `slapd` and `slapd-init`
+images from one `Containerfile`, plus the legacy 2.6 `Containerfile.ol26-*`
+files and the vendored Debian packaging fork that produces the `.deb` files;
+[README](../images/openldap/README.md),
+[ADR-021](adrs/adr-021-openldap-2.7-dual-images.md)), `slapd-toolkit`,
+`operator` and `slapd-exporter`.
 
 `charts/` holds four: `operator` (the operator itself, with the generated CRDs
 under `crds/`), `slapd` (a `SlapdCluster` CR — one site), `slapd-mesh` (a whole
@@ -64,23 +64,24 @@ the two scenarios that need their own topology.
 ## Building images
 
 ```bash
-make all          # six images + slctl
-make push         # build, then push all six
+make all          # every image + slctl; publishes nothing
+make push         # build, then push every image
 make show-tag     # print the tag everything will be built and deployed with
 ```
 
-The six pushable images are the 2.7.1 `slapd` / `slapd-init` pair, the `-ol26`
-2.6 pair, `slapd-toolkit` and `operator`. A seventh, `openldap-deb`, is
-local-only (`localhost/` prefix, `FROM scratch`, nothing but `/debs`): both 2.7
-Containerfiles consume it via `--build-arg OPENLDAP_DEB_IMAGE`, so the package
-build runs **once per tag** and feeds both. It is stamp-cached like everything
-else under `.stamps/`, which is why a second image build after the first is
-fast. `RUN_UPSTREAM_TESTS=1` adds OpenLDAP's own test suite to that build; it
-costs tens of minutes and is off by default.
+The targets are aliases onto `docker-bake.hcl`, so a laptop and CI build the
+same graph, and each OpenLDAP package set compiles once per run for both
+images that consume it. BuildKit's cache is what makes a second build fast.
+`build-*` builds and discards the result, which checks the gates inside the
+Containerfile. Add `BAKE_FLAGS=--load` to keep an image in the local Docker
+store. `RUN_UPSTREAM_TESTS=1` adds OpenLDAP's own test suite to the package
+build; it costs tens of minutes and is off by default.
 
-Individual targets: `build-init`, `build-slapd`, `build-ol26` (both legacy
-images), `build-toolkit`, `build-operator`, `build-openldap-deb`, `build-slctl`
+Individual targets: `build-init`, `build-slapd` (the pure pair),
+`build-slaptain` (the patched pair), `build-ol26`, `build-ol26src`,
+`build-toolkit`, `build-operator`, `build-exporter`, `build-slctl`
 (→ `bin/slctl`, plus `install-slctl` for `/usr/local/bin`).
+`docker buildx bake --print <target>` shows what one resolves to.
 
 ### The tag
 
