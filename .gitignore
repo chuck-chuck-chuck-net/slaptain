@@ -24,3 +24,4 @@ __pycache__/
 
 # Monitoring: lab-specific scrape targets live outside the repo
 monitoring/*.local.yaml
+.build/
