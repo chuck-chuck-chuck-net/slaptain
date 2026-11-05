@@ -164,12 +164,13 @@ flavours because the packaging is ours either way. A check for the absence of
 ## Building
 
 ```bash
-make build-openldap-deb          # localhost/slaptain/openldap-deb:<tag>, /debs only
-make build-slapd build-init      # both consume it via --build-arg OPENLDAP_DEB_IMAGE
+make build-slapd build-init      # the pure pair
+make build-slaptain              # the patched pair; runs the version and logpurge gates
 ```
 
-The artifact-carrier image is `FROM scratch` and **never pushed** — it exists
-so the package build runs once per tag and feeds both runtime images.
+The package build is a stage of `Containerfile`, so one bake run compiles it
+once and feeds both runtime images. No carrier image exists, and nothing but
+the finished images can be pushed.
 
 `DFSG_NONFREE=1` is exported for the build: we package the pristine upstream
 tarball, so `debian/rules` must skip both its DFSG-freeness assertion and the
@@ -203,7 +204,7 @@ converger.
 Skipped by default (`DEB_BUILD_OPTIONS=nocheck`). Run it with:
 
 ```bash
-make build-openldap-deb RUN_UPSTREAM_TESTS=1
+make build-slapd RUN_UPSTREAM_TESTS=1
 ```
 
 It adds tens of minutes and needs a working loopback plus the Kerberos test
