@@ -4304,8 +4304,9 @@ between this entry and a root cause.
 
 ## The accesslog syncprov checkpoint does not retrofit, and the data DB has no default at all
 
-Two findings from one observation, 2026-10-31. They point in opposite
-directions and only the second is a design question.
+Two findings from one observation, 2026-10-31, pointing in opposite directions.
+Both have since been answered: the first is a diagnosed defect waiting for its
+fix, the second a design question ADR-045 decided.
 
 **Observed.** Two clusters on one lab Kubernetes cluster, same operator build,
 same `SlapdDatabase` shape — one created 2026-10-13 under a pre-0.5.0
@@ -4318,36 +4319,102 @@ operator, one created 2026-10-31 under 0.5.0. Read from `cn=config` on both:
 
 Exactly inverted, and neither CR sets `accesslogSyncprovCheckpoint`.
 
-### 1. Defect candidate: the 0.5.0 default did not reach an existing cluster
+### 1. Defect, diagnosed 2026-11-07: the checkpoint never converges onto an accesslog overlay that already exists
 
-`accesslogSyncprovCheckpoint` defaults to `1 1`
-(`accesslogSyncprovCheckpointDefault`, `slapddatabase_controller.go`), and it
-is the **ITS#9398 mitigation** — the change this release leads with, and the
-one two consecutive clean mesh cycles are attributed to. The newer cluster has
-it. The older one, reconciled by the same operator, does not.
+**Fix this next.** Not urgent to the hour — the one measurement harness that
+trips over it carries a workaround — but every accesslog overlay created before
+the `1 1` default shipped still has no checkpoint, and nothing the operator does
+will ever give it one. That is the ITS#9398 exposure the default exists to
+close, left open on exactly the population the convergence code was written for.
 
-If the default only lands when the accesslog database is **created**, then
-every cluster built before 0.5.0 is in that position: carrying the release's
-central fix in its spec defaults and not on the wire, with nothing reporting
-the discrepancy. That is the whole installed base, not an edge case.
+**Mechanism, source-confirmed.** `ensureAccesslogSyncprovCheckpoint`
+(`slapddatabase_controller.go:2285`) builds the overlay DN as
+`"olcOverlay=syncprov," + dbDN` and base-searches it. slapd assigns an ordering
+index on the ADD and stores the entry as `olcOverlay={0}syncprov,<dbDN>`; it
+accepts the unindexed form as an ADD target and refuses it as a search base,
+answering `No such object (32)` with `matchedDN: <dbDN>`. The handler reads that
+code as *"the overlay is not there yet, the next pass creates it with the
+checkpoint in the ADD"* and returns nil. The function therefore returns success,
+writes nothing and logs nothing, on every accesslog overlay that exists.
 
-**Not diagnosed.** One cluster is an observation, not a root cause, and the
-correlation with age rather than configuration is suggestive and not proof.
-The convergence path has to be read before this is called a defect — and the
-alternative explanation worth excluding first is that something about the
-older cluster's accesslog database (created by an operator that predates the
-field) makes the converger decline rather than never attempt.
+**Measured, 2026-11-07**, on a 2.6 cluster with two providers and four
+consumers. `accesslogSyncprovCheckpoint: "none"` was applied; the CR read back
+`none`, the operator log carried neither `converging accesslog syncprov
+checkpoint` nor `removing accesslog syncprov checkpoint` across the whole
+reconcile window, and the live attribute was unchanged on both providers before
+and after a rolling restart. In the same reconcile the **data** database
+converged and said so (`removing overlay attribute dn=olcOverlay={0}syncprov,…
+attr=olcSpCheckpoint`). Two attributes, two overlays, one reconcile: one
+converged and one silently skipped — which is what pointed at the DN rather than
+at the plumbing. Confirmed directly by two base searches against the same pod:
+the constructed DN refuses, the indexed DN returns the entry.
 
-#### Shape of an investigation (not attempted)
+The rest of the chain is sound and never reached: `noneSentinel` and
+`desiredAccesslogSyncprovCheckpoint` resolve `"none"` to `""`, and
+`planOverlayAttr` maps `want == ""` with a live value to `overlayAttrRemove`.
 
-- Read whether the checkpoint is converged on every reconcile or only on the
-  accesslog database's ADD. The ADR-019 R8 withdrawal is the precedent for why
-  "repair on the condition it repairs" matters here (ADR-026 R3).
-- Then force it: set `accesslogSyncprovCheckpoint: "1 1"` explicitly on the
-  older cluster and watch whether the operator writes it. If an explicit value
-  lands where the default did not, the gap is in the defaulting, not the write.
-- Red first: a test that an accesslog database which predates the field
-  acquires the checkpoint on a later reconcile.
+**Why it stayed invisible.** The ADD at `:2258` uses the same constructed DN and
+works, so a freshly created overlay takes its checkpoint from the creation
+request and looks entirely correct. Only the path for overlays that already
+exist is dead. A reader of the CR cannot tell the difference — the field reads
+as the default, and the default is not in force — and nothing reports it:
+`csn-convergence` stays green, and the storm predicate (`minCSN` above
+`contextCSN`) only becomes visible after an unclean death. The cluster in the
+table above carried `1 1` because its overlay was created afterwards; the bug
+was hidden by the cluster being new. How much of the installed base is affected
+is **not established**: it depends entirely on whether a given overlay predates
+the default.
+
+#### Shape of a fix
+
+Resolve the DN, never construct it — which the data path next door already does
+(`ensureSyncprovTunables`, `:1424-1434`: one-level search for
+`(objectClass=olcSyncProvConfig)`, then `overlayDN := sr.Entries[0].DN`, with a
+comment saying in so many words that the `{N}` prefix is slapd's to assign).
+
+Cheaper here than there: `reconcileAccesslogDB` **already** reads the log DB's
+children one level down (`:2220-2237`) and walks their object classes to compute
+`hasSyncprov`, so the real DN is in hand. Capture it in that loop and pass it in,
+and `ensureAccesslogSyncprovCheckpoint` loses its search, its DN construction and
+its `NoSuchObject` branch together — keeping the "one search, at most one write"
+its own doc comment promises, which a second search would quietly break. The
+empty case becomes "no syncprov child", which is a different fact from "the
+server did not recognise the name I built"; today they are the same code.
+
+Leave the ADD at `:2258` alone. It works, and it is the only reason any cluster
+has a checkpoint at all — but it is the source of the asymmetry that made this
+hard to see, and a comment there naming it is cheap.
+
+**Red first, and a mock will not do it.** A mocked connection answers whatever
+DN it is asked for. The spec has to run against a real slapd whose overlay
+**already exists**: create the overlay, *then* change the desired value, *then*
+assert the live attribute moved. `tests/e2e/sessionlog_test.go:174` already
+asserts every log DB carries an `olcSpCheckpoint` whose ops half is 1 — green,
+and toothless here, because the fixture's overlays were created by the ADD path
+that works. It is the create-and-assert-in-one-pass case, which is exactly the
+case that cannot fail.
+
+**How it was found**, for whoever writes that spec: not by reading the operator.
+A measurement harness put a cluster into a declared posture and verified it by
+two routes that fail differently — the CR read back, and the live `cn=config` on
+every provider. The first passed, the second refused. A CR read-back proves the
+API server took the value and says nothing about whether slapd has it.
+
+**Workaround in force, to be removed by the fix.** The slapload harness writes
+the attribute itself, resolving the overlay DN by search and reading it back off
+every provider. It deliberately leaves the data DB checkpoint and the sessionlog
+alone, which the operator does converge and where a second writer would race it.
+Recorded on that side as a workaround rather than as a design, so that this fix
+deletes it instead of someone finding it years later and wondering why a load
+harness writes server configuration.
+
+**Repairing an already-deployed overlay by hand is not automatically benign.**
+Rewriting `olcAccessLogPurge` on a running server has produced a SIGSEGV in this
+environment (its own entry above), so treat a live `cn=config` write on a
+provider as a hazard: one pod at a time, readiness checked between. With that
+said, writing `olcSpCheckpoint` to the overlay's real DN as the config identity
+was observed once on two providers under load, accepted, with neither pod
+restarting. One observation, not a safety claim.
 
 ### 2. Design question — answered by ADR-045, 2026-11-07
 
@@ -4370,9 +4437,11 @@ The third — the unexplained asymmetry with the accesslog database's `1 1` — 
 an answer, and it is the ADR's central one: `contextCSN` reaches disk by a third
 path the log database structurally lacks, so the two failures differ in kind.
 
-**What stays open here, and blocks ADR-045 R1:** finding 1 above. This default
-reaches existing overlays by the same convergence path the accesslog default
-apparently did not, and nothing yet says why.
+**ADR-045 R1 is not blocked by finding 1.** That defect is the accesslog path
+constructing a DN slapd refuses to search; the data database's checkpoint
+resolves its overlay DN from the server and converges on every reconcile, so a
+`100 10` default reaches existing overlays on existing clusters. The two fixes
+are independent and want separate commits.
 
 ## A hand-applied cluster lands in `StartupConfigConverged=False/RestartRequired` and stays there
 

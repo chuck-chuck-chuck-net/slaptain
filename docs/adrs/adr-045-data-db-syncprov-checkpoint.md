@@ -191,13 +191,25 @@ is a converged attribute, proven live-modifiable before it was converged at all.
 Moving the default later rewrites one value on one entry per pod. There is no
 on-disk format and no roll.
 
-**This default is only as good as the convergence path, which is currently in
-doubt.** `docs/BACKLOG.md` records an accesslog checkpoint default that reached a
-newly created cluster and not an older one, undiagnosed. If that is a defect in
-how a default reaches an *existing* overlay, this ADR inherits it exactly, and
-every cluster predating the change would carry the default in its spec and not on
-the wire — with nothing reporting the discrepancy. Answer that question before
-landing R1, or land this as its second instance.
+**The convergence path was in doubt; it is not any more, and R1 does not
+inherit the defect.** The backlog's accesslog checkpoint — present on a cluster
+created after the default shipped, absent on an older one under the same
+operator — was diagnosed on 2026-11-07.
+`ensureAccesslogSyncprovCheckpoint` constructs the overlay DN as
+`olcOverlay=syncprov,<dbDN>` and base-searches it, while slapd stores the entry
+under the indexed name it assigned on the ADD, `olcOverlay={0}syncprov,…`, and
+answers the constructed form with `No such object`. The function reads that
+refusal as "no overlay yet, the creation request will carry the checkpoint" and
+returns success, so the convergence is dead on every overlay that already
+exists — and only there, which is why a freshly created cluster looks correct.
+
+The data database's checkpoint goes the other way. `ensureSyncprovTunables`
+searches one level under the database for `(objectClass=olcSyncProvConfig)` and
+takes the DN the server gave it (`slapddatabase_controller.go:1424-1434`), on
+every reconcile, whether or not the same pass created the overlay. A `"100 10"`
+default therefore reaches existing overlays on existing clusters. The accesslog
+defect is its own entry in `docs/BACKLOG.md` and its own fix; it does not gate
+this one.
 
 **The window narrows, it does not close.** After an unclean stop a pod still comes
 back behind its own content, by up to `<ops>` writes. Failure modes 1 and 2 above
