@@ -4349,38 +4349,30 @@ field) makes the converger decline rather than never attempt.
 - Red first: a test that an accesslog database which predates the field
   acquires the checkpoint on a later reconcile.
 
-### 2. Design question, and it wants an ADR rather than a patch
+### 2. Design question — answered by ADR-045, 2026-11-07
 
-`syncprovCheckpoint` — the **data** database's — has **no default**, and
-slapd's own default is no checkpointing at all. Verified two ways rather than
-from memory: `slapo-syncprov(5)` states *"Checkpointing is disabled by
-default"*, and `syncprov.c` gates the checkpoint path on
-`if ( si->si_chkops || si->si_chktime )` with both zeroed when the directive is
-absent. The widely-quoted `500 15` is the man page's **example**, not a
-default — which is probably why it reads as one.
+`syncprovCheckpoint` — the **data** database's — has **no default**, and slapd's
+own default is no checkpointing at all. The question was whether slaptain should
+have an opinion here at all. **It should: ADR-045 defaults it to `100 10`.**
 
-So a `SlapdDatabase` that says nothing gets a data database whose
-`contextCSN` reaches disk only on a clean shutdown. After an unclean stop the
-pod returns claiming an older position and replays more from its peers — the
-same mechanic already recorded for log databases in CLAUDE.md's `slctl`
-section.
+Two of the three objections raised here did not survive the research and are
+corrected rather than left standing:
 
-The question is not "should we copy `500 15`". It is whether slaptain should
-have an opinion here at all, and if so what it costs:
+- the write amplification is not ADR-037's. `syncprov_checkpoint` sets
+  `o_dont_replicate = 1` and `accesslog_response` skips such operations
+  (`accesslog.c:1659-1661`), so a data-database checkpoint never reaches the
+  accesslog environment at all;
+- changing the default later is not ADR-040 decision 8's forced migration. The
+  attribute is converged per pod (ADR-024 R4), so a move rewrites one value on
+  one entry per pod.
 
-- we already decided to have one for the **accesslog** database (`1 1`), on
-  ITS#9398 grounds, and that asymmetry is currently unexplained — either the
-  data database wants one for its own reasons or the accesslog one should say
-  why it is special;
-- a checkpoint is a write amplification, and ADR-037's whole subject is that
-  writes to these databases are the scarce resource;
-- ADR-024 would have to place it — converged per pod, or create-only — and
-  changing a default later is the thing ADR-040 decision 8 priced as a forced
-  migration for everyone who said nothing.
+The third — the unexplained asymmetry with the accesslog database's `1 1` — has
+an answer, and it is the ADR's central one: `contextCSN` reaches disk by a third
+path the log database structurally lacks, so the two failures differ in kind.
 
-**Deliberately not fixed inline.** A default that governs durability and write
-amplification across every deployment is an ADR, not a patch applied while
-looking at something else.
+**What stays open here, and blocks ADR-045 R1:** finding 1 above. This default
+reaches existing overlays by the same convergence path the accesslog default
+apparently did not, and nothing yet says why.
 
 ## A hand-applied cluster lands in `StartupConfigConverged=False/RestartRequired` and stays there
 
