@@ -78,3 +78,4 @@ A branch reaches a cluster only through a hand-run `make push`.
 
 - `docs/VERSIONING.md`: the tag rules for `main` and releases, unchanged here.
 - ADR-040: how a data-plane image is named and selected.
+- ADR-047: the CI pipeline that builds these images.
