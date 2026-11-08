@@ -21,7 +21,7 @@
 # permissive question than this build asks. Verified at -F 0 before this file
 # was written: sid's 17 patches apply to 2.6.16, and both local patches apply
 # on top of them.
-FROM debian:trixie-slim AS deb-build
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS deb-build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
