@@ -1,0 +1,58 @@
+name: Publish dev
+
+# Images for a pull request labelled "dev images" (ADR-046), pushed to
+# ghcr.io/<owner>/dev and tagged with the branch name, so every push replaces the
+# last build. Removing the label stops the builds; cleanup-dev.yml deletes the images.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    name: Build and push dev images
+    # A fork's pull request gets a read-only token and could not push. Adding some
+    # other label to a labelled pull request is no reason to rebuild.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'dev images') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'dev images')
+    runs-on: namespace-profile-2x4
+    timeout-minutes: 120
+    # Job-level, so a run whose job is skipped cannot cancel a build in progress.
+    concurrency:
+      group: publish-dev-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # The branch as pushed, not the merge commit GitHub would check out.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Derive the image tags
+        run: scripts/bake-vars.sh | tee -a "$GITHUB_ENV"
+
+      # Later lines in GITHUB_ENV win, so these replace the derived TAG and EXPORTER_TAG.
+      - name: Tag with the branch name, under the dev path
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          slug=$(scripts/branch-slug.sh "$HEAD_REF")
+          {
+            echo "TAG=$slug"
+            echo "EXPORTER_TAG=$slug"
+            echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/dev"
+          } | tee -a "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push the images
+        run: docker buildx bake --push
