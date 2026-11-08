@@ -685,13 +685,18 @@ COPY --from=debs /debs /debs
 
 # slapd + ldap-utils from the local 2.7.1 packages (apt pulls their archive
 # dependencies); python3 for bootstrap.sh's LDIF handling.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# no_configuration stops the postinst writing a sample cn=config with a random
+# olcRootPW; bootstrap.sh builds its own under /config and never read it.
+RUN echo 'slapd slapd/no_configuration boolean true' | debconf-set-selections \
+    && apt-get update && apt-get install -y --no-install-recommends \
         /debs/libldap-common_*.deb \
         /debs/libldap2_*.deb \
         /debs/slapd_*.deb \
         /debs/ldap-utils_*.deb \
         python3 \
-    && rm -rf /var/lib/apt/lists/* /debs
+    && rm -rf /var/lib/apt/lists/* /debs \
+    && test ! -e /etc/ldap/slapd.d/cn=config.ldif \
+    && test ! -e /var/lib/ldap/data.mdb
 
 RUN groupmod -g 1024 openldap && \
     usermod -u 1024 -g 1024 openldap
