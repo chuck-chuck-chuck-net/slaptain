@@ -1,0 +1,89 @@
+name: e2e
+
+# The e2e suite on a single-site kind cluster, against the dev images a pull
+# request's publish-dev run has just pushed (ADR-046). publish-dev.yml calls it
+# once every image job has finished, so the images it pulls are this commit's.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to test, the one the images were built from
+        required: true
+        type: string
+      branch:
+        description: Branch the images are tagged after, as branch-slug.sh spells it
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke specs on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      KUBE_CONTEXT: kind-slaptain
+      # One fast spec while the harness itself is being debugged; widen once it is green.
+      E2E_LABEL_FILTER: sessionlog
+      FAIL_FAST: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Address the dev images
+        env:
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          slug=$(scripts/branch-slug.sh "$BRANCH")
+          {
+            echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/dev"
+            echo "IMAGE_TAG=$slug"
+            echo "EXPORTER_IMAGE_TAG=$slug"
+            echo "E2E_SEED=$(date +%s)"
+          } | tee -a "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: |
+            tests/e2e/go.sum
+            operator/go.sum
+
+      - name: Create the kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: slaptain
+
+      - name: Record the spec-order seed
+        run: echo "Ginkgo seed \`$E2E_SEED\`, replay with \`E2E_SEED=$E2E_SEED\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy the operator and the fixture
+        run: tests/e2e.sh setup "$KUBE_CONTEXT"
+
+      - name: Run the specs
+        run: tests/e2e.sh test "$KUBE_CONTEXT"
+
+      - name: Collect cluster state
+        if: failure()
+        run: |
+          mkdir -p e2e-debug
+          kubectl --context "$KUBE_CONTEXT" get pods -A -o wide > e2e-debug/pods.txt || true
+          kubectl --context "$KUBE_CONTEXT" get events -A --sort-by=.lastTimestamp > e2e-debug/events.txt || true
+          kubectl --context "$KUBE_CONTEXT" -n slaptain-system logs deploy/slaptain --all-containers > e2e-debug/operator.log || true
+          make build-slctl
+          (cd e2e-debug && ../bin/slctl --context "$KUBE_CONTEXT" debug-dump -n slaptain-testing slapd) || true
+          kind export logs --name slaptain e2e-debug/kind || true
+
+      - name: Upload cluster state
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-debug
+          path: e2e-debug/
+          retention-days: 7
