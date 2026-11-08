@@ -1,0 +1,66 @@
+name: Clean up dev images
+
+# Deletes what publish-dev.yml pushed (ADR-046): every dev image older than 7 days,
+# and a pull request's own images once it closes. It names the dev/ packages one by
+# one and never expands a wildcard, so the release packages are out of its reach.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  PACKAGES: >-
+    dev/slaptain/operator,dev/slaptain/slapd,dev/slaptain/slapd-init,dev/slaptain/slapd-toolkit,dev/slaptain/slapd-exporter
+
+jobs:
+  expired:
+    name: Delete dev images older than 7 days
+    if: github.event_name != 'pull_request'
+    runs-on: namespace-profile-1x2
+    steps:
+      - name: Delete
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          packages: ${{ env.PACKAGES }}
+          older-than: 7 days
+          delete-tags: '*'
+          delete-untagged: true
+
+  closed:
+    name: Delete the closed pull request's dev images
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: namespace-profile-1x2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          sparse-checkout: scripts/branch-slug.sh
+          sparse-checkout-cone-mode: false
+
+      # Exactly this branch's tags: the slug itself and the slug with a flavour
+      # suffix (-ol26, -ol26src, -ol<version>-slaptain). A prefix match would also
+      # take the images of a branch whose name starts with this one.
+      - name: Match the branch's tags
+        id: tags
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          slug=$(scripts/branch-slug.sh "$HEAD_REF")
+          echo "regex=^${slug//./\\.}(-ol26|-ol26src|-ol[0-9.]+-slaptain)?\$" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Delete
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          packages: ${{ env.PACKAGES }}
+          delete-tags: ${{ steps.tags.outputs.regex }}
+          use-regex: true
