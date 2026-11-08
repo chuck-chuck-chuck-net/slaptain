@@ -41,7 +41,7 @@ ARG BUILD_VARIANT=release
 ARG OPENLDAP_SOURCE=fork
 
 # ── Package build: the 2.7.1 fork ───────────────────────────────────────────
-FROM debian:trixie-slim AS debs-fork-build
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS debs-fork-build
 
 ARG OPENLDAP_VERSION=2.7.2
 # sha256 of the upstream release tarball. A mismatch fails the build — this is
@@ -419,7 +419,7 @@ COPY --from=debs-fork-build /debs /debs
 #
 # The result is the stock `-ol26` slapd plus the local patches and nothing else,
 # which is what makes it usable as a measurement arm against that image.
-FROM debian:trixie-slim AS debs-debian-src-build
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS debs-debian-src-build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -493,7 +493,7 @@ COPY --from=debs-debian-src-build /build/*.deb /debs/
 FROM debs-${OPENLDAP_SOURCE} AS debs
 
 # ── Build / gather stage ────────────────────────────────────────────────────
-FROM debian:trixie-slim AS slapd-build
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS slapd-build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -624,7 +624,7 @@ RUN printf \
     printf 'root:x:0:\nopenldap:x:1024:\n' > /staging/etc/group
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
-FROM gcr.io/distroless/base-debian13 AS runtime-base
+FROM gcr.io/distroless/base-debian13:latest@sha256:075a33d9c49026ca7ee72738b4c4a1caea55d0f44227356e46a611a211050e20 AS runtime-base
 
 COPY --from=slapd-build /staging/ /
 
@@ -677,7 +677,7 @@ FROM runtime-${BUILD_VARIANT} AS slapd
 # Same packages as slapd, from the same package build stage: the init container
 # runs slapadd/slaptest against the config and data volumes that slapd then
 # opens, so the two images must carry the same OpenLDAP version.
-FROM debian:trixie-slim AS slapd-init
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS slapd-init
 
 ENV DEBIAN_FRONTEND=noninteractive
 

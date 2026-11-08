@@ -35,10 +35,13 @@ updates:
 
   # Dependabot matches Containerfile* as well as Dockerfile*, so every
   # Containerfile in images/openldap is covered.
+  # Every base image is pinned as tag@digest, so this entry is also what moves
+  # the digests; a directory missing here keeps its base image forever.
   - package-ecosystem: docker
     directories:
       - /images/operator
       - /images/openldap
+      - /images/slapd-exporter
       - /images/slapd-toolkit
     schedule:
       interval: weekly

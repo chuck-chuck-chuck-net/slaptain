@@ -1,4 +1,4 @@
-FROM python:3.14-trixie
+FROM python:3.14-trixie@sha256:1cef1664561971647b94fedf437145415991d4feeda09c81df12acfad8829cde
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
