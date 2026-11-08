@@ -25,6 +25,24 @@ variable "OPENLDAP_OL26_VERSION" {
   default = "2.6.10+dfsg-1"
 }
 
+# CI sets GHA_CACHE=1 to keep each published image's layers in the GitHub
+# Actions cache. Outside Actions there is no cache service to reach.
+variable "GHA_CACHE" {
+  default = "0"
+}
+
+function "cache_from" {
+  params = [scope]
+  result = GHA_CACHE == "1" ? ["type=gha,scope=${scope}"] : []
+}
+
+# mode=max keeps the package build stages too, which is where the time goes. A
+# failed cache upload must not fail a build whose images were pushed.
+function "cache_to" {
+  params = [scope]
+  result = GHA_CACHE == "1" ? ["type=gha,scope=${scope},mode=max,ignore-error=true"] : []
+}
+
 function "image" {
   params = [name, tag]
   result = "${REGISTRY}/${PROJECT}/${name}:${tag}"
@@ -76,6 +94,8 @@ target "openldap" {
     "net.chuck-chuck-chuck.slaptain.local-patches" = OL26SRC_PATCHES
     "org.opencontainers.image.description"         = "OpenLDAP 2.6 from Debian source, with slaptain local patches"
   } : {}
+  cache-from = cache_from("${img}-${flavour}")
+  cache-to   = cache_to("${img}-${flavour}")
   tags = [image(img, "${TAG}${{
     pure     = ""
     slaptain = "-ol${OPENLDAP_27_VERSION}-slaptain"
@@ -95,6 +115,8 @@ target "ol26" {
   args = {
     OPENLDAP_OL26_VERSION = OPENLDAP_OL26_VERSION
   }
+  cache-from = cache_from("${img}-ol26")
+  cache-to   = cache_to("${img}-ol26")
   tags = [image(img, "${TAG}-ol26")]
 }
 
@@ -103,6 +125,8 @@ target "toolkit" {
   context    = "images/slapd-toolkit"
   dockerfile = "Containerfile"
   tags       = [image("slapd-toolkit", TAG)]
+  cache-from = cache_from("toolkit")
+  cache-to   = cache_to("toolkit")
 }
 
 target "operator" {
@@ -110,6 +134,8 @@ target "operator" {
   context    = "operator"
   dockerfile = "../images/operator/Containerfile"
   tags       = [image("operator", TAG)]
+  cache-from = cache_from("operator")
+  cache-to   = cache_to("operator")
 }
 
 # Its own version line (ADR-033 decision 4): git tags exporter/vX.Y.Z.
@@ -118,6 +144,8 @@ target "exporter" {
   context    = "exporter"
   dockerfile = "../images/slapd-exporter/Containerfile"
   tags       = [image("slapd-exporter", EXPORTER_TAG)]
+  cache-from = cache_from("exporter")
+  cache-to   = cache_to("exporter")
 }
 
 # ── Local-only builds ───────────────────────────────────────────────────────
