@@ -28,21 +28,18 @@ jobs:
 
       # The modules declare the same Go version, and the toolchain decides
       # which stdlib findings apply, so it comes from go.mod and not 'stable'.
-      # golang/govulncheck-action is not used: its setup-go restored a 400 MB
-      # GitHub cache tarball and it installed govulncheck@latest on every run.
+      # golang/govulncheck-action is not used: it installed govulncheck@latest on every run.
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
-          cache: false
-
-      - name: Go cache on the Namespace cache volume
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: go
+          cache-dependency-path: |
+            operator/go.sum
+            exporter/go.sum
+            tests/e2e/go.sum
 
       # `go run` keeps the built binary in the Go build cache, so a pinned
-      # version compiles once per volume. Every module is scanned even when an
+      # version compiles once per cache. Every module is scanned even when an
       # earlier one has findings.
       - name: Run govulncheck
         env:

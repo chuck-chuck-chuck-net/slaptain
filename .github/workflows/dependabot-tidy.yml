@@ -49,12 +49,10 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
-          cache: false
-
-      - name: Go cache on the Namespace cache volume
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: go
+          cache-dependency-path: |
+            operator/go.sum
+            exporter/go.sum
+            tests/e2e/go.sum
 
       - name: Tidy every module
         run: make tidy
