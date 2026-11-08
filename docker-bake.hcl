@@ -34,6 +34,21 @@ group "default" {
   targets = ["openldap", "ol26", "toolkit", "operator", "exporter"]
 }
 
+# The default group split for CI, one runner each: every OpenLDAP package build
+# runs make -j$(nproc), so three of them on one runner share its cores.
+group "publish-pure" {
+  targets = ["slapd-pure", "slapd-init-pure"]
+}
+group "publish-slaptain" {
+  targets = ["slapd-slaptain", "slapd-init-slaptain"]
+}
+group "publish-ol26src" {
+  targets = ["slapd-ol26src", "slapd-init-ol26src"]
+}
+group "publish-other" {
+  targets = ["ol26", "toolkit", "operator", "exporter"]
+}
+
 target "_common" {
   platforms = ["linux/amd64"]
   attest    = ["type=provenance,disabled=true"]
