@@ -61,7 +61,13 @@ jobs:
       - name: Set up buildx
         uses: docker/setup-buildx-action@v4
 
+      # Hands the cache service's URL and token to the run steps, where the
+      # bake step's gha cache needs them; they are not in a step's environment.
+      - name: Expose the GitHub Actions cache to buildx
+        uses: crazy-max/ghaction-github-runtime@v4
+
       - name: Build and push the images
         env:
           GROUP: ${{ matrix.group }}
+          GHA_CACHE: '1'
         run: docker buildx bake --push "$GROUP"
