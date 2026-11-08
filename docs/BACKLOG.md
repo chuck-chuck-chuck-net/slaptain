@@ -4385,6 +4385,16 @@ Leave the ADD at `:2258` alone. It works, and it is the only reason any cluster
 has a checkpoint at all — but it is the source of the asymmetry that made this
 hard to see, and a comment there naming it is cheap.
 
+**The CRD field doc asserts the thing that does not happen**, and the fix owns
+correcting it. `accesslogSyncprovCheckpoint`'s comment
+(`slapddatabase_types.go:186-189`) reads *"Converged on every reconcile, so the
+default reaches accesslog overlays that already exist — which is every one of
+them, since the attribute has never been written before."* Every clause of that
+is what the field was designed to do and none of it is in force. It is a public
+API doc, and `kubectl explain` is what people read (ADR-039), so it is also one
+more reason the defect reads as healthy: a reader who checks the documentation
+is told the retrofit happened.
+
 **Red first, and a mock will not do it.** A mocked connection answers whatever
 DN it is asked for. The spec has to run against a real slapd whose overlay
 **already exists**: create the overlay, *then* change the desired value, *then*
