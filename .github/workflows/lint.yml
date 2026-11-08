@@ -19,9 +19,7 @@ concurrency:
 jobs:
   lint:
     name: golangci-lint
-    # On 2x8 the operator lint took 182-231 s against 103 s on 4x8; its bursts
-    # use every core, which a 1.7-core average hid.
-    runs-on: namespace-profile-4x8
+    runs-on: ubuntu-latest
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -64,7 +62,7 @@ jobs:
 
   chart:
     name: Helm charts
-    runs-on: namespace-profile-1x2
+    runs-on: ubuntu-latest
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
