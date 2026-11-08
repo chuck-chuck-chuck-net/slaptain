@@ -20,7 +20,7 @@ concurrency:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: namespace-profile-1x2
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7

@@ -23,7 +23,7 @@ jobs:
   expired:
     name: Delete dev images older than 7 days
     if: github.event_name != 'pull_request'
-    runs-on: namespace-profile-1x2
+    runs-on: ubuntu-latest
     steps:
       - name: Delete
         uses: dataaxiom/ghcr-cleanup-action@v1
@@ -38,7 +38,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: namespace-profile-1x2
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
