@@ -181,7 +181,11 @@ fi
 # (09ecf10 -> sha-09ecf10). Mirrors the Makefile exactly — pinning
 # GIT_TAG=v0.2.1 here must reach the same images `make push` produced, and so
 # must an untagged build of the same tree.
-if [[ "$GIT_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+# An IMAGE_TAG from the environment is used verbatim: dev images (ADR-046) are
+# tagged with a branch slug, which no GIT_TAG derives.
+if [[ -n "${IMAGE_TAG:-}" ]]; then
+    :
+elif [[ "$GIT_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
     IMAGE_TAG="${GIT_TAG#v}"
 else
     IMAGE_TAG="sha-${GIT_TAG}"
@@ -195,7 +199,9 @@ fi
 if [[ -z "${EXPORTER_GIT_TAG:-}" ]]; then
     EXPORTER_GIT_TAG="$("$PROJECT_ROOT/scripts/image-tag.sh" exporter)"
 fi
-if [[ "$EXPORTER_GIT_TAG" =~ ^exporter/v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+if [[ -n "${EXPORTER_IMAGE_TAG:-}" ]]; then
+    :
+elif [[ "$EXPORTER_GIT_TAG" =~ ^exporter/v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
     EXPORTER_IMAGE_TAG="${EXPORTER_GIT_TAG#exporter/v}"
 else
     EXPORTER_IMAGE_TAG="sha-${EXPORTER_GIT_TAG}"
@@ -262,6 +268,8 @@ Environment variables (with defaults):
   REGISTRY             = $REGISTRY
   PROJECT              = $PROJECT
   TEST_RESOURCES       = $TEST_RESOURCES  (example or lab)
+  IMAGE_TAG            = $IMAGE_TAG  (set it to address a tag GIT_TAG cannot derive,
+                         such as a dev image's branch slug; EXPORTER_IMAGE_TAG likewise)
 
 Node access (NodePort reachability + cert SAN; defaults to the k8s InternalIP):
   E2E_NODE_ACCESS_IP   = single-site override, e.g. <reachable-node-ip>
