@@ -140,15 +140,48 @@ type DatabaseReplicationConfig struct {
 	// Format: "<ops> <minutes>", e.g. "500 15" means checkpoint the contextCSN
 	// every 500 operations or 15 minutes.
 	//
-	// Empty (or the explicit sentinel "none") means no olcSpCheckpoint at all —
-	// OpenLDAP's own default behaviour. Unlike accesslogPurge this carries no
-	// operator default: an unwritten checkpoint is a performance trade, not a
-	// correctness cliff.
+	// DEFAULTS to "100 10" when unset (ADR-045). That is the ecosystem's value —
+	// Symas's delta-syncrepl article, Ubuntu's server documentation and the
+	// Bitnami image all ship it — and it admits a staleness of at most 100
+	// writes, or the writes of the last 10 minutes of write activity.
+	//
+	// Why a default at all, and the reason is NOT the accesslog checkpoint's:
+	// unset is not "OpenLDAP's behaviour", it is OpenLDAP's behaviour minus the
+	// startup repair upstream assumes is there. The Admin Guide says a database
+	// is scanned at startup for entryCSN values greater than the stored
+	// contextCSN; that scan is FIND_MAXCSN, gated !SLAP_DBCLEAN, and back-mdb
+	// sets that flag unconditionally ("mdb is always clean"), so on the only
+	// backend slaptain ships the scan never runs. Measured on 2.7.2-0+pure1,
+	// single node, SIGKILL and restart: with no checkpoint contextCSN was absent
+	// on disk and REGENERATED AHEAD OF ALL CONTENT; with a checkpoint the stale
+	// on-disk value was served unrepaired. A replicated pod heals itself on its
+	// first inbound cookie — a non-replicated one has no such path and will
+	// discard its own entries when a peer later replays them.
+	//
+	// The explicit sentinel "none" (or an empty field, which means "not filled
+	// in" and takes the default) writes no olcSpCheckpoint at all, restoring
+	// slapd's own behaviour and with it that exposure.
+	//
+	// "1 1" — what the accesslog checkpoint defaults to — is neither forbidden
+	// nor recommended here. It would close the window on the operation itself,
+	// but the residual window above chkops=1 is open by design anyway: a
+	// checkpoint is only tested after a successful write, so the last write
+	// before an idle period is never flushed whatever the value. Closing it on
+	// the data path costs a write amplification NOBODY HAS MEASURED — the
+	// accesslog's "1 1" was bought with a load-harness arm, this would not be.
+	// Whoever needs it measures it first (ADR-039: the default is tier 1, "1 1"
+	// on a data database is neither offered nor measured).
+	//
+	// Cost of the default itself: one suffix-entry modify in the data
+	// environment per <ops> writes — 1 % at 100 — and nothing at all in the
+	// accesslog environment, because syncprov_checkpoint sets o_dont_replicate
+	// and accesslog_response skips such operations. ADR-037's scarce resource is
+	// untouched.
 	//
 	// Converged on every reconcile: a later edit is applied to pods whose
-	// syncprov overlay already exists, and clearing the field removes the
-	// attribute. (It used to be written only when the overlay was first
-	// created, so edits were silently ignored — ADR-024 R4.)
+	// syncprov overlay already exists, and clearing the field restores the
+	// default. (It used to be written only when the overlay was first created,
+	// so edits were silently ignored — ADR-024 R4.)
 	// +optional
 	SyncprovCheckpoint string `json:"syncprovCheckpoint,omitempty"`
 	// accesslogSyncprovCheckpoint sets the syncprov checkpoint on this
