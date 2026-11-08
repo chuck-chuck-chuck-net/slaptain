@@ -156,9 +156,17 @@ on existing clusters.
 on every replicated data database, converged per pod like the value it replaces
 (ADR-024 R1/R4).
 
-**R2. The opt-out stays and keeps its spelling.** `""` or the explicit sentinel
-`"none"` writes no `olcSpCheckpoint` at all, restoring slapd's own behaviour —
-the same two spellings `accesslogSyncprovCheckpoint` already honours.
+**R2. The opt-out is the explicit sentinel, and only the sentinel.** `"none"`
+writes no `olcSpCheckpoint` at all, restoring slapd's own behaviour. An empty or
+whitespace-only field takes the default, because a `string` field cannot tell
+"the user asked for nothing" from "the user wrote nothing" — defaulting a field
+spends its empty value, which is the price of R1 and is what
+`accesslogSyncprovCheckpoint` has done since it was defaulted.
+
+*(This paragraph said `""` was also an opt-out when the ADR was proposed, and
+named the accesslog field as doing the same. Both halves were wrong: that field
+defaults an empty value, and a defaulted field cannot do otherwise. Corrected at
+acceptance, from the implementation.)*
 
 **R3. The justification is not durability tuning.** It is that the absent state
 regenerates `contextCSN` ahead of content on a non-replicated cluster, is never
