@@ -89,7 +89,7 @@ value is rewritten at every pod start, so the way back is a restart.
 | `spec.indices` | none beyond the operator's baseline | converged, **additive only** |
 | `spec.replication.syncprovSessionlog` | 5000 | converged |
 | `spec.replication.syncprovSessionlogSource` | `InMemory` | **startup-only** |
-| `spec.replication.syncprovCheckpoint` | none | converged |
+| `spec.replication.syncprovCheckpoint` | `100 10` | converged |
 | `spec.replication.accesslogPurge.enabled` | `true` | converged |
 | `spec.replication.accesslogPurge.retention` | `168h` (7 days) | converged |
 
@@ -97,11 +97,48 @@ value is rewritten at every pod start, so the way back is a restart.
 operator converts. A value it cannot parse is an error, not a fallback.
 
 `syncprovCheckpoint` and `accesslogPurge` are converged on every reconcile: editing
-either reaches pods whose overlays already exist, and clearing the field removes the
-attribute. Both were verified live-modifiable on a running slapd before being
+either reaches pods whose overlays already exist, and clearing the field restores the
+operator's default. Both were verified live-modifiable on a running slapd before being
 converged at all — replace and delete, no crash, no hang — which is the precondition
 ADR-024 now puts on this class. (They used to be written only at overlay creation,
 so edits were silently ignored; that debt is paid.)
+
+### Both syncprov checkpoints default on, and not to the same value
+
+`syncprovCheckpoint` is the **data** database's `olcSpCheckpoint`;
+`accesslogSyncprovCheckpoint` is the **accesslog** database's. They default to
+`100 10` and `1 1` respectively, and the difference is not taste (ADR-045).
+
+A `contextCSN` reaches disk by three paths: a checkpoint, a clean shutdown, and
+— on a data database only — the pod's own consumer side, which rewrites the whole
+vector on every inbound cookie advance. A log database has no consumer, so for it a
+checkpoint and a clean stop are the only two, and the damage from having neither is
+permanent: that is ITS#9398, which is why its default is as tight as `1 1` can make
+it and why that value is not a dial.
+
+The data database's staleness is bounded and self-healing under replication, so it
+takes the ecosystem's `100 10` rather than paying `1 1` on the hot write path. It is
+still a default rather than nothing, because unset is not slapd's own behaviour: the
+startup scan upstream documents as the repair (`FIND_MAXCSN`) is gated
+`!SLAP_DBCLEAN`, and back-mdb — the only backend slaptain ships — sets that flag
+unconditionally. The scan never runs. Measured on a single node after a `SIGKILL`:
+with no checkpoint `contextCSN` was absent on disk and regenerated at restart *ahead
+of all content*. On a **non-replicated** cluster there is no third path to repair
+that, and such a pod will later discard its own entries when a peer replays them.
+
+Opt out of either with the sentinel:
+
+```yaml
+spec:
+  replication:
+    syncprovCheckpoint: none            # restores slapd's own behaviour
+```
+
+`1 1` on a data database is neither forbidden nor recommended. The window above
+`<ops> = 1` is open by design anyway — checkpoints are only tested after a
+successful write, so the last write before an idle period is never flushed at any
+setting — and closing it costs a write amplification nobody has measured on the data
+path. Whoever needs it measures it first (ADR-039).
 
 ### `olcAccessLogPurge` has three owners, and you set two of them
 

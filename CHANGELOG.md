@@ -48,6 +48,60 @@ This rolls every slapd Pod once, because the Pod template gains the two labels.
 The upgrade procedure is in `docs/UPGRADING.md`.
 The operator's memory with the filtered cache is not measured yet.
 
+## v0.6.0
+
+### The data database gets a syncprov checkpoint — and the reason is not ITS#9398
+
+`olcSpCheckpoint: 100 10` is now written to every replicated **data** database's
+syncprov overlay unless the `SlapdDatabase` declares its own value, and
+converged onto overlays that already exist. v0.5.0 did the same for the
+*accesslog* database at `1 1`; that value is unchanged and this is a different
+attribute on a different overlay.
+
+**Why the absent state was not "OpenLDAP's behaviour".** It was OpenLDAP's
+behaviour minus the startup repair upstream assumes is there. The Admin Guide
+says a database is scanned at startup for `entryCSN` values greater than the
+stored `contextCSN`, and names shortening that scan as a reason to configure a
+checkpoint. That scan is `FIND_MAXCSN`, gated `!SLAP_DBCLEAN(be)`, and
+`back-mdb` sets that flag unconditionally — `/* mdb is always clean */`,
+identical in 2.6.10 and 2.7.1. On the only backend slaptain ships the scan never
+runs. So the documented *cost* of omitting a checkpoint is one we never pay, and
+the undocumented *consequence* — a stale, unrepaired advertised `contextCSN` —
+is one we always do.
+
+**Measured** (single node, `slapd 2.7.2-0+pure1`, back-mdb, `SIGKILL`, restart):
+with no checkpoint `contextCSN` was absent on disk and **regenerated ahead of
+all content**; with a checkpoint the stale on-disk value was served unrepaired
+with entries beyond it. On a two-node mesh the stale own-serverID value
+self-healed on the first outbound refresh — the staleness is itself what makes
+the peer believe it has changes to send. A **non-replicated** cluster has no
+such path at all, and a pod that came back with a regenerated `contextCSN` will
+discard its own entries when a peer later replays them.
+
+**Why `100 10` and not `1 1`.** `1 1` closes the window on the operation itself,
+which is exactly why the accesslog database takes it — there the window is a
+permanent correctness cliff. On the data database it doubles writes into the
+data environment on the hot path, unmeasured; the accesslog's value was bought
+with a load-harness arm and this one would not be. `100 10` is what the
+ecosystem converged on (Symas, Ubuntu, Bitnami). Our own charts and fixtures
+shipped `500 15`, which is the man page's *example* and has no provenance beyond
+that — they no longer set it, so the default is the shape the suite runs.
+
+**Cost:** one suffix-entry modify in the data environment per 100 writes. None
+in the accesslog environment: `syncprov_checkpoint` sets `o_dont_replicate` and
+`accesslog_response` skips such operations, so ADR-037's scarce write path is
+untouched. It is a converged `cn=config` attribute, so it rolls no pod.
+
+**The window narrows, it does not close.** A checkpoint is only tested after a
+successful write, so the last write before an idle period is never flushed at
+any setting. What the default removes outright is the
+regeneration-ahead-of-content case, because a checkpointed database always has a
+`contextCSN` on disk to load.
+
+**To decline it:** `syncprovCheckpoint: none`. See
+[`docs/UPGRADING.md`](docs/UPGRADING.md) for what it does to a mesh you already
+run, and ADR-045 for the full reasoning.
+
 ## v0.5.0
 
 Three defaults move in this release. Two of them change which binary your pods

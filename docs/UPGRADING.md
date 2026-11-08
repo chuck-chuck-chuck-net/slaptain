@@ -105,6 +105,76 @@ kubectl -n <ns> get statefulset <cluster> \
 Full guide, including what a spread cannot express and why the default is
 `ScheduleAnyway`: [`PLACEMENT.md`](PLACEMENT.md).
 
+## v0.6.0 — the data database gets a syncprov checkpoint, and it is on by default
+
+One default moves. Every **replicated data** database whose `SlapdDatabase` does
+not declare `syncprovCheckpoint` gets `olcSpCheckpoint: 100 10` written to its
+syncprov overlay. (The *accesslog* database's checkpoint is a different
+attribute on a different overlay and is unchanged at `1 1`; v0.5.0 covers it.)
+
+### What it does to a running mesh
+
+`olcSpCheckpoint` is a converged `cn=config` attribute, and `cn=config` is
+node-local, so the operator writes it to every pod individually at its next
+reconcile of that database. **No pod is restarted and no StatefulSet is
+rolled** — nothing about a pod template changes. The write is one `modify` per
+pod per database against a live slapd, on a path that was verified
+live-modifiable before this attribute was converged at all.
+
+It reaches overlays that already exist, which on an upgraded cluster is all of
+them: `ensureSyncprovTunables` searches one level under each data database for
+the syncprov overlay and uses the DN the server gives it, on every reconcile,
+whether or not the same pass created the overlay.
+
+A database that **already declares** `syncprovCheckpoint` is untouched — an
+explicit value is used verbatim, as it always was.
+
+### What reports what while it happens
+
+Nothing goes False. There is no condition for this attribute and none is added:
+the write either succeeds, or the database's reconcile fails and says so in the
+operator log and on the usual `SlapdDatabase` conditions, as any `cn=config`
+convergence failure does.
+
+To watch it land:
+
+```bash
+slctl ldapsearch --as config -b cn=config \
+  '(objectClass=olcSyncProvConfig)' olcSpCheckpoint
+```
+
+Run it per pod with `--pod <ordinal>`; it is node-local state, so a value on
+one pod says nothing about the next.
+
+### What it costs
+
+One modify of the suffix entry in the **data** environment per 100 writes — 1 %
+— and nothing at all in the accesslog environment: `syncprov_checkpoint` sets
+`o_dont_replicate`, and `accesslog_response` skips such operations, so the
+journal never sees it and ADR-037's write path is untouched.
+
+### To decline it
+
+```yaml
+spec:
+  replication:
+    syncprovCheckpoint: none
+```
+
+That writes no `olcSpCheckpoint` at all and restores the pre-0.6.0 behaviour.
+Know what you are restoring: without a checkpoint an unclean stop leaves the
+database's `contextCSN` on disk stale, or absent entirely, and the startup
+repair upstream documents for that case does not run on back-mdb —
+`FIND_MAXCSN` is gated `!SLAP_DBCLEAN(be)` and back-mdb sets that flag
+unconditionally. A replicated pod heals itself on its first inbound cookie. A
+**non-replicated** one has no such path: it comes back with a `contextCSN`
+regenerated ahead of its own content, and will discard those entries if a peer
+ever replays them.
+
+Any explicit value is used verbatim. `1 1` — the accesslog database's value —
+is not recommended here and not forbidden; see
+[TUNING.md](TUNING.md#both-syncprov-checkpoints-default-on-and-not-to-the-same-value).
+
 ---
 
 ## v0.5.0 — the default slapd image becomes PURE, and `spec.images.select` replaces pinning by tag
