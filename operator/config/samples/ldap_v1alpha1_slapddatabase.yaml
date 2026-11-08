@@ -59,7 +59,7 @@ spec:
   replication:
     ridSegment: 1
     # deltaSync: true                # default
-    # syncprovCheckpoint: "500 15"   # the DATA db's checkpoint; no default
+    # syncprovCheckpoint: "500 15"   # the DATA db's checkpoint; default "100 10"
     #
     # The ACCESSLOG db's checkpoint, which defaults ON at "1 1" and is the one
     # you should leave alone. A log DB's contextCSN is written only by a

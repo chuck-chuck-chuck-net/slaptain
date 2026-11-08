@@ -303,10 +303,7 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 				conn := dialPodConfigEventually(ctx, pod)
 
 				for _, sd := range dbs {
-					want := strings.TrimSpace(sd.Spec.Replication.SyncprovCheckpoint)
-					if strings.EqualFold(want, "none") {
-						want = ""
-					}
+					want := wantDataCheckpoint(sd)
 
 					dataDB, ok := findMdb(observedMdbDatabases(conn), sd.Spec.Suffix)
 					Expect(ok).To(BeTrue(), "pod %s has no data database %q", pod, sd.Spec.Suffix)
@@ -318,19 +315,45 @@ var _ = Describe("overlay tunables: purge window and checkpoint",
 
 					if want == "" {
 						Expect(values).To(BeEmpty(),
-							"pod %s: %s (db %s) has no syncprovCheckpoint, so it must carry "+
-								"no olcSpCheckpoint", pod, dn, sd.Name)
+							"pod %s: %s (db %s) opts out with syncprovCheckpoint: none, so it "+
+								"must carry no olcSpCheckpoint at all", pod, dn, sd.Name)
 						continue
 					}
 					Expect(values).To(ConsistOf(want),
 						"pod %s: %s (db %s) must carry olcSpCheckpoint %q, converged on every "+
-							"reconcile and not only at overlay creation (ADR-024 R4)",
+							"reconcile and not only at overlay creation (ADR-024 R4). A database "+
+							"that declares NOTHING takes the operator default: unset is not "+
+							"slapd's own behaviour, it is slapd's behaviour minus the startup "+
+							"repair back-mdb never runs, and after an unclean stop such a pod "+
+							"regenerates contextCSN ahead of its own content (ADR-045)",
 						pod, dn, sd.Name, want)
 				}
 				conn.Close()
 			}
 		}, NodeTimeout(6*time.Minute))
 	})
+
+// wantDataCheckpoint mirrors the operator's resolution of the DATA database's
+// syncprov checkpoint (ADR-045 R1/R2). Spelled out here rather than imported,
+// like wantPurgeValue below, so the e2e states the contract instead of
+// restating the code: a default both sides read from one constant could be
+// changed on both sides at once and this spec would never notice.
+//
+// An empty answer means the attribute must be ABSENT, and the ONLY way to get
+// one is the explicit "none" sentinel. A field left unset is a field the user
+// did not fill in and takes the default — which is the shape ADR-045 R5 made
+// the fixtures cover, because it was previously the one shape the suite never
+// ran.
+func wantDataCheckpoint(sd ldapv1alpha1.SlapdDatabase) string {
+	v := strings.TrimSpace(sd.Spec.Replication.SyncprovCheckpoint)
+	if strings.EqualFold(v, "none") {
+		return ""
+	}
+	if v == "" {
+		return "100 10"
+	}
+	return v
+}
 
 // wantPurgeValue mirrors the operator's composition of olcAccessLogPurge from
 // its THREE owners (ADR-024 R6): the database's retention, the cluster's

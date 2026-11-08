@@ -122,7 +122,6 @@ spec:
   replication:
     ridSegment: 1
     deltaSync: true
-    syncprovCheckpoint: "500 15"
 
   # On a multi-site mesh, add `site: <founder>` here: exactly ONE site may apply
   # a seed. Several sites seeding one suffix independently produces a permanent

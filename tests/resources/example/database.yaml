@@ -33,6 +33,9 @@ spec:
   replication:
     ridSegment: 1
     deltaSync: true
+    # Deliberately NOT the operator default ("100 10"): this is the fixture's
+    # coverage of the user-set path, and database2.yaml sets nothing so the
+    # defaulted path is covered too (ADR-045 R5).
     syncprovCheckpoint: "500 15"
     # What this database KEEPS. WHEN the purge runs is the CLUSTER's — the
     # operator's default 24h interval, or SlapdCluster.spec.accesslogPurge /

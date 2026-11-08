@@ -29,7 +29,6 @@ spec:
   replication:
     ridSegment: 1          # unique per database within a cluster
     deltaSync: true
-    syncprovCheckpoint: "500 15"
     # What this database KEEPS. WHEN the purge runs is the cluster's — the
     # operator sweeps every 24h unless SlapdCluster.spec.accesslogPurge or
     # spec.rotation says otherwise (ADR-024 R6).

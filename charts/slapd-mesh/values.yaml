@@ -462,7 +462,6 @@ databases: []
 #      replication:
 #        ridSegment: 0         # unique per database within the mesh; 0 is legal and is the natural first (ADR-031)
 #        deltaSync: true
-#        syncprovCheckpoint: "500 15"
 #        accesslogPurge:                   # what to KEEP; WHEN to purge is the cluster's (ADR-024 R6)
 #          retention: "48h"                # unset → 168h (7 days); enabled: false never purges
 #      seed:

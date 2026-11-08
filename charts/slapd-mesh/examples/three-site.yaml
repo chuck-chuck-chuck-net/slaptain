@@ -67,7 +67,6 @@ databases:
       replication:
         ridSegment: 1
         deltaSync: true
-        syncprovCheckpoint: "500 15"
         accesslogPurge:
           # What this database KEEPS. WHEN the purge runs is the cluster's
           # (cluster.accesslogPurge.interval, or cluster.rotation) — ADR-024 R6.
@@ -124,7 +123,6 @@ databases:
       replication:
         ridSegment: 2
         deltaSync: true
-        syncprovCheckpoint: "500 15"
       indices:
         - "objectClass eq"
         - "uid eq,sub"

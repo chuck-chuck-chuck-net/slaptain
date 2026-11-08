@@ -35,7 +35,10 @@ spec:
   replication:
     ridSegment: 2
     deltaSync: true
-    syncprovCheckpoint: "500 15"
+    # syncprovCheckpoint deliberately left unset: this database is the
+    # fixture's coverage of the operator's default checkpoint ("100 10",
+    # ADR-045). database.yaml declares one, so between the two the e2e
+    # exercises both paths.
     # accesslogPurge deliberately left unset: this database is the fixture's
     # coverage of the operator's default retention (7 days). database.yaml
     # declares one, so between the two the e2e exercises both paths.
