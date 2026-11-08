@@ -97,7 +97,8 @@ The upstream organisation has no Namespace runners activated.
 7. **How do GitHub-hosted runners build fast enough?**
    - One job per OpenLDAP flavour, so each package build gets a runner's 4 vCPU to itself.
    - Each image's layers go to the GitHub Actions cache, in a scope of their own.
-   - ccache is carried from one run to the next.
+     It is the only cache there for now: the repository's 10 GB limit was full,
+     and every other cache returns only with a measured gain.
 8. **Does the e2e suite run in CI?**
    - Not yet. CI now publishes images to a registry any cluster can pull from,
      which is the prerequisite.
@@ -125,7 +126,7 @@ The one-job rows time the build-and-push step;
 the four-job rows time the whole run.
 A `debian/` edit costs more on GitHub-hosted runners
 because each package build there recompiled with an empty ccache (3 hits in 642 calls).
-How much carrying ccache over saves is not measured yet.
+ccache is not carried from one run to the next yet.
 
 **Contributors.**
 Building and publishing needs no local setup.
