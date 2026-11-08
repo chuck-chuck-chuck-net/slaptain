@@ -90,15 +90,27 @@ func sdWithCheckpoint(v string) *ldapv1alpha1.SlapdDatabase {
 	}
 }
 
+// ADR-045: the DATA database's checkpoint defaults to "100 10". Unset is not
+// "slapd's own behaviour" — it is slapd's behaviour minus the startup repair
+// upstream assumes is there, because FIND_MAXCSN is gated !SLAP_DBCLEAN and
+// back-mdb is always clean (syncprov.c:4096, back-mdb/init.c:117). The
+// unflushed contextCSN is then regenerated AHEAD of content on a
+// non-replicated cluster, where no consumer side exists to repair it.
+//
+// Whitespace resolves to the default rather than to "", mirroring
+// desiredAccesslogSyncprovCheckpoint: a field a user left blank in any
+// spelling is a field they did not fill in, and only the explicit sentinel
+// means "I really want none".
 func TestDesiredSyncprovCheckpoint(t *testing.T) {
 	cases := []struct {
 		name  string
 		field string
 		want  string
 	}{
-		{"unset means no checkpoint attribute", "", ""},
-		{"whitespace-only is still unset", "  ", ""},
+		{"unset takes the operator default", "", syncprovCheckpointDefault},
+		{"whitespace-only is still unset", "  ", syncprovCheckpointDefault},
 		{"none opts out explicitly", noneSentinel, ""},
+		{"the sentinel is case-insensitive", "NONE", ""},
 		{"an explicit checkpoint is used verbatim", explicitCheckpoint, explicitCheckpoint},
 		{"an explicit checkpoint is trimmed", " 1000 10 ", "1000 10"},
 	}
@@ -109,6 +121,45 @@ func TestDesiredSyncprovCheckpoint(t *testing.T) {
 				t.Fatalf("desiredSyncprovCheckpoint(%q) = %q, want %q", tc.field, got, tc.want)
 			}
 		})
+	}
+
+	t.Run("a nil database takes the default too", func(t *testing.T) {
+		if got := desiredSyncprovCheckpoint(nil); got != syncprovCheckpointDefault {
+			t.Fatalf("desiredSyncprovCheckpoint(nil) = %q, want %q", got, syncprovCheckpointDefault)
+		}
+	})
+}
+
+// The default's VALUE is pinned once, as a literal, for the reason the
+// accesslog's equivalent is: every other assertion here uses the constant, so
+// a change to it would move both sides together and none of them could catch
+// it. "100 10" is the ecosystem's number (Symas, Ubuntu, Bitnami), not the man
+// page's "500 15" example that reached our own fixtures.
+func TestSyncprovCheckpointDefaultValue(t *testing.T) {
+	if syncprovCheckpointDefault != "100 10" {
+		t.Errorf("syncprovCheckpointDefault = %q, want \"100 10\" (ADR-045 option D)",
+			syncprovCheckpointDefault)
+	}
+}
+
+// The default is worth nothing unless it CONVERGES onto a syncprov overlay
+// that already exists — every overlay on every cluster predating this release
+// is bare, and ensureSyncprovTunables is what reaches them (ADR-024 R4).
+func TestTheDataCheckpointDefaultConvergesOntoAnExistingBareOverlay(t *testing.T) {
+	action, value := planOverlayAttr(nil, desiredSyncprovCheckpoint(nil))
+	if action != overlayAttrSet {
+		t.Fatalf("a bare syncprov overlay must be given the checkpoint, got action %v", action)
+	}
+	if value != syncprovCheckpointDefault {
+		t.Errorf("converged value = %q, want %q", value, syncprovCheckpointDefault)
+	}
+
+	// And the opt-out must REMOVE one that is present, not merely decline to
+	// write one — the sentinel's whole job is restoring slapd's own behaviour.
+	action, _ = planOverlayAttr([]string{syncprovCheckpointDefault},
+		desiredSyncprovCheckpoint(sdWithCheckpoint(noneSentinel)))
+	if action != overlayAttrRemove {
+		t.Errorf("the none sentinel must REMOVE a live checkpoint, got action %v", action)
 	}
 }
 

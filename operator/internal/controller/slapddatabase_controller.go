@@ -4112,27 +4112,74 @@ func (r *SlapdDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // ── Overlay tunables: purge window and checkpoint (ADR-024 R4/R5) ───────────
 
 // noneSentinel is the explicit opt-out spelling shared by the string-valued
-// tunables that the operator defaults (keepalive): "" means "no opinion, use
-// the operator default", "none" means "I really want none".
+// tunables that the operator defaults — keepalive, and since ADR-045 both
+// syncprov checkpoints: "" means "no opinion, use the operator default",
+// "none" means "I really want none".
 //
 // accesslogPurge no longer uses it: the purge directive was decomposed into
 // typed fields (ADR-024 R6), and `enabled: false` is the opt-out a boolean can
 // state without a sentinel.
 const noneSentinel = "none"
 
+// syncprovCheckpointDefault is the checkpoint the operator writes to every
+// replicated DATA database's syncprov overlay unless told otherwise (ADR-045).
+//
+// "100 10" is the ecosystem's number — Symas's delta-syncrepl article, Ubuntu's
+// server documentation and the Bitnami image all ship it — and not the man
+// page's "500 15" example, which has no provenance beyond being an example and
+// is how "500 15" reached our own charts and fixtures. It admits a staleness of
+// up to 100 writes, or the writes of the last 10 minutes of write activity: a
+// replay nobody notices at any size we target.
+//
+// Not "1 1", which is what the ACCESSLOG database takes: si_chkops = 1 closes
+// the window completely, but on the data database it doubles writes into the
+// data environment, on the hot path, unmeasured. The accesslog's value was
+// bought with a load-harness arm; this one would not be (ADR-045 R4).
+const syncprovCheckpointDefault = "100 10"
+
 // desiredSyncprovCheckpoint resolves spec.replication.syncprovCheckpoint.
-// Unlike the purge window this has NO operator default: an unwritten
-// olcSpCheckpoint means slapd's own contextCSN checkpointing behaviour, which
-// is a performance trade rather than a correctness cliff. Unset and the "none"
-// sentinel both mean "no attribute", which the convergence step removes if one
-// is present.
+//
+// Defaults ON (ADR-045), and the reason is NOT the accesslog's ITS#9398 one,
+// which does not apply here. A data database's contextCSN reaches disk by three
+// paths, not two: a checkpoint, a clean shutdown, and the pod's own CONSUMER
+// side — syncrepl_updateCookie modifies the whole vector on every cookie
+// advance, having refreshed it from syncprov's live values. So the absent state
+// is self-healing on a replicated cluster, which is exactly why it reads as a
+// mere performance trade and is not one:
+//
+//   - upstream's documented repair, the startup scan for entryCSN values
+//     greater than the stored contextCSN, is FIND_MAXCSN, gated
+//     "si_ctxcsn && !SLAP_DBCLEAN(be)" (syncprov.c:4096) — and back-mdb sets
+//     that flag unconditionally ("mdb is always clean", back-mdb/init.c:117),
+//     identical in 2.6.10 and 2.7.1. On the only backend we ship the scan never
+//     runs, so the documented COST of omitting a checkpoint is one we never pay
+//     and the undocumented CONSEQUENCE — a stale, unrepaired advertised
+//     contextCSN — is one we always do.
+//   - a cluster with no replication has no third path at all. Measured on
+//     2.7.2-0+pure1: after a SIGKILL with no checkpoint, contextCSN was absent
+//     on disk and regenerated at restart AHEAD of all content. Such a pod then
+//     discards its own entries when a peer replays them — ADR-036's hole,
+//     reached without any PVC loss.
+//
+// The window narrows, it does not close: a checkpoint is only tested after a
+// successful write, so the last write before an idle period is never flushed.
+// What the default removes outright is the regeneration-ahead-of-content case,
+// because a checkpointed database always has a contextCSN on disk to load.
+//
+// The opt-out keeps its spelling: the explicit "none" sentinel writes no
+// attribute at all, and the convergence step removes one that is present. An
+// empty or whitespace-only field is a field the user did not fill in and takes
+// the default, as on the accesslog side.
 func desiredSyncprovCheckpoint(sd *ldapv1alpha1.SlapdDatabase) string {
 	if sd == nil {
-		return ""
+		return syncprovCheckpointDefault
 	}
 	v := strings.TrimSpace(sd.Spec.Replication.SyncprovCheckpoint)
 	if strings.EqualFold(v, noneSentinel) {
 		return ""
+	}
+	if v == "" {
+		return syncprovCheckpointDefault
 	}
 	return v
 }
@@ -4248,13 +4295,15 @@ const accesslogSyncprovCheckpointDefault = "1 1"
 // desiredAccesslogSyncprovCheckpoint resolves
 // spec.replication.accesslogSyncprovCheckpoint.
 //
-// The opposite default to desiredSyncprovCheckpoint, which is NOT an
-// inconsistency: an unwritten checkpoint on a DATA DB is a performance trade,
-// while on a LOG DB it is the storm precondition. The sentinel still opts out
-// entirely, because a user who has measured the write cost and prefers the
-// exposure is making a choice the operator should not override — ADR-024's
-// rule that a field which cannot be honoured is reported, never ignored, cuts
-// both ways.
+// A HIGHER default than desiredSyncprovCheckpoint's, which is NOT an
+// inconsistency: both databases now checkpoint, but an unwritten checkpoint on
+// a LOG DB is the ITS#9398 storm precondition, permanent because a log
+// database has no consumer side to repair it (ADR-045), where a DATA DB's
+// staleness is bounded and self-healing under replication. The sentinel still
+// opts out entirely, because a user who has measured the write cost and
+// prefers the exposure is making a choice the operator should not override —
+// ADR-024's rule that a field which cannot be honoured is reported, never
+// ignored, cuts both ways.
 func desiredAccesslogSyncprovCheckpoint(sd *ldapv1alpha1.SlapdDatabase) string {
 	if sd == nil {
 		return accesslogSyncprovCheckpointDefault

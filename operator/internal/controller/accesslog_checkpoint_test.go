@@ -7,10 +7,9 @@ import (
 )
 
 // The accesslog DB's syncprov checkpoint is the ITS#9398 storm precondition's
-// only known cure (docs/ITS-9398-REPRODUCTION.md §Controls). Unlike the data
-// DB's checkpoint — which has NO operator default because an unwritten value is
-// a performance trade — this one defaults ON, because its absence is the
-// correctness cliff.
+// only known cure (docs/ITS-9398-REPRODUCTION.md §Controls). Both checkpoints
+// default on since ADR-045; this one defaults TIGHTER, because its absence is a
+// permanent correctness cliff where the data DB's is bounded and self-healing.
 //
 // The value is not a dial. `chkops = 1` is load-bearing: in accesslog_response
 // the log entry is added BEFORE minCSN is modified, so si_chkops=1 checkpoints
@@ -44,16 +43,24 @@ func TestDesiredAccesslogSyncprovCheckpoint(t *testing.T) {
 	}
 }
 
-// The default must differ from the data DB's, which has none. Pinning that
+// Both default on, and they must not default to the SAME value. Pinning that
 // here because the two are one `grep olcSpCheckpoint` apart and the reason they
-// differ is not visible at either call site.
+// differ is not visible at either call site: the log DB needs chkops = 1 to
+// close the ITS#9398 window on the logging operation itself, while the data DB
+// would pay that on the hot write path for a staleness that is bounded and
+// self-healing (ADR-045 R4).
 func TestTheTwoCheckpointsDefaultDifferently(t *testing.T) {
 	sd := &ldapv1alpha1.SlapdDatabase{}
-	if got := desiredSyncprovCheckpoint(sd); got != "" {
-		t.Errorf("the DATA DB checkpoint must stay undefaulted, got %q", got)
+	data := desiredSyncprovCheckpoint(sd)
+	accesslog := desiredAccesslogSyncprovCheckpoint(sd)
+	if data == "" {
+		t.Error("the DATA DB checkpoint must default ON — unset regenerates contextCSN ahead of content (ADR-045)")
 	}
-	if got := desiredAccesslogSyncprovCheckpoint(sd); got == "" {
+	if accesslog == "" {
 		t.Error("the ACCESSLOG checkpoint must default ON — its absence is the ITS#9398 precondition")
+	}
+	if data == accesslog {
+		t.Errorf("both checkpoints default to %q; the log DB's chkops=1 is not a value the data DB's hot path should pay", data)
 	}
 }
 
