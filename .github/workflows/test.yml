@@ -31,10 +31,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
-          cache-dependency-path: |
-            operator/go.sum
-            exporter/go.sum
-            tests/e2e/go.sum
+          cache: false
 
       # `make tidy` is the one list of modules; dependabot-tidy.yml runs the
       # same target to finish a Dependabot bump, so the two cannot disagree.

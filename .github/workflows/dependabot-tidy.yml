@@ -49,10 +49,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
-          cache-dependency-path: |
-            operator/go.sum
-            exporter/go.sum
-            tests/e2e/go.sum
+          cache: false
 
       - name: Tidy every module
         run: make tidy

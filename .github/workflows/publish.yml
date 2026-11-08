@@ -130,8 +130,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: operator/go.mod
-          cache-dependency-path: |
-            operator/go.sum
+          cache: false
 
       - name: Build slctl
         working-directory: operator
