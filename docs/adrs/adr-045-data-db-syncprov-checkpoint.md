@@ -1,6 +1,13 @@
 # ADR-045: The data database's syncprov checkpoint defaults on, for a reason that is not the accesslog's
 
-**Status:** Proposed
+**Status:** Accepted 2026-11-08 — on the pure seam red-first (3 of 7 table cases plus the
+bare-overlay convergence assertion failing against the undefaulted function), on the e2e
+spec red against a deployed pre-change operator (`example-db2`, which now declares nothing,
+carried no `olcSpCheckpoint` on any pod) and green after, and on a three-site mesh cycle at
+98 passed / 2 failed — both failures re-run clean and neither touches this attribute. Live:
+`100 10` on the database that declares nothing, `500 15` on the one that declares it, `1 1`
+on both accesslog databases, every RW pod; `syncprovCheckpoint: none` removed the attribute
+on all three pods and clearing the field put the default back.
 **Date:** 2026-11-07
 
 ## Context

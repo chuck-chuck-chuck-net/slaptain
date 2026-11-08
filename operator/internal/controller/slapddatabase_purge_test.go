@@ -107,7 +107,7 @@ func TestDesiredSyncprovCheckpoint(t *testing.T) {
 		field string
 		want  string
 	}{
-		{"unset takes the operator default", "", syncprovCheckpointDefault},
+		{"unset takes the data DB default", "", syncprovCheckpointDefault},
 		{"whitespace-only is still unset", "  ", syncprovCheckpointDefault},
 		{"none opts out explicitly", noneSentinel, ""},
 		{"the sentinel is case-insensitive", "NONE", ""},
