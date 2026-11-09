@@ -30,6 +30,14 @@
 # never get.
 ARG OPENLDAP_OL26_VERSION=2.6.10+dfsg-1
 
+# The runtime entrypoint: caps the open-file limit, then execs slapd. Same
+# source and stage as in Containerfile.
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS launcher-build
+RUN --mount=type=bind,source=launcher/slapd-launcher.c,target=/src/slapd-launcher.c \
+    apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && gcc -O2 -Wall -Wextra -Werror -s -o /slapd-launcher /src/slapd-launcher.c
+
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS build
 ARG OPENLDAP_OL26_VERSION
 
@@ -121,6 +129,7 @@ RUN printf \
 FROM gcr.io/distroless/base-debian13:latest@sha256:075a33d9c49026ca7ee72738b4c4a1caea55d0f44227356e46a611a211050e20
 
 COPY --from=build /staging/ /
+COPY --from=launcher-build /slapd-launcher /usr/sbin/slapd-launcher
 
 # /ldap-config and /ldap-data are populated by the init container
 VOLUME ["/ldap-config", "/ldap-data"]
@@ -129,5 +138,6 @@ USER 1024:1024
 
 EXPOSE 1024 1025
 
-# Chart overrides args; -F points to config written by the init container
-ENTRYPOINT ["/usr/sbin/slapd"]
+# Chart overrides args; -F points to config written by the init container.
+# The launcher caps the open-file limit and execs /usr/sbin/slapd with them.
+ENTRYPOINT ["/usr/sbin/slapd-launcher"]
