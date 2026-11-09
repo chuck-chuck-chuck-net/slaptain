@@ -56,11 +56,10 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
         run: |
           slug=$(scripts/branch-slug.sh "$HEAD_REF")
-          echo "regex=^${slug//./\\.}(-ol26|-ol26src|-ol[0-9.]+-slaptain)?\$" | tee -a "$GITHUB_OUTPUT"
+          echo "tags=$slug,$slug-ol26,$slug-ol26src,$slug-ol*-slaptain" | tee -a "$GITHUB_OUTPUT"
 
       - name: Delete
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           packages: ${{ env.PACKAGES }}
-          delete-tags: ${{ steps.tags.outputs.regex }}
-          use-regex: true
+          delete-tags: ${{ steps.tags.outputs.tags }}
