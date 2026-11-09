@@ -26,8 +26,10 @@ jobs:
     timeout-minutes: 45
     env:
       KUBE_CONTEXT: kind-slaptain
-      # One fast spec while the harness itself is being debugged; widen once it is green.
-      E2E_LABEL_FILTER: sessionlog
+      # The ungated specs, minus those that roll, restart or mutate the cluster for minutes.
+      E2E_LABEL_FILTER: >-
+        !(cleanup-policy || scale-topology || database-hotadd || write-rotation ||
+        purge-rotation || image-selector || monitor-at-rest || startup-config)
       FAIL_FAST: '1'
     steps:
       - name: Checkout
