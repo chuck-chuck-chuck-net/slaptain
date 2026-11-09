@@ -4,7 +4,7 @@ name: Lint
 # and running both doubles every check.
 on:
   push:
-    branches: [main]
+    branches: [main, jlohmer/buildkit-on-gh-runner]
   pull_request:
 
 permissions:
@@ -73,7 +73,8 @@ jobs:
           working-directory: exporter
 
       - name: Save the Go caches
-        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.gocache.outputs.cache-hit != 'true' }}
+        # wip: lets this branch save the entry to test the restore. Drop before merge.
+        if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/jlohmer/buildkit-on-gh-runner') && steps.gocache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
         with:
           path: |
