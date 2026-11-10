@@ -1,13 +1,17 @@
 name: e2e
 
-# The e2e suite on a single-site kind cluster, against the dev images a pull
-# request's publish-dev run has just pushed (ADR-046). publish-dev.yml starts it
-# once every image job has finished, so the images it pulls are this commit's;
-# e2e-slow.yml starts the slow tier when a pull request is labelled e2e slow.
-# Its own workflow, so its result is reported as e2e, and no concurrency group,
-# so a new push never cancels a run in progress.
+# The e2e suite on a single-site kind cluster, against a pull request's dev
+# images (ADR-046). Both tiers follow a pull request's labels:
+#   smoke: every push to a pull request labelled "dev images", and adding that label.
+#   slow:  the same, while the pull request is also labelled "e2e slow", and adding
+#          that label. Run it once by adding the label and removing it again.
+# Run workflow on this file starts either tier on a branch.
+# The images are tagged by branch, so a run first waits until publish-dev has
+# pushed this commit's. No concurrency group: a new push never cancels a run.
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       tier:
@@ -15,28 +19,44 @@ on:
         required: true
         type: choice
         options: [smoke, slow]
-        default: smoke
-      ref:
-        description: Commit to test, the one the images were built from (default the branch head)
-        required: false
-        type: string
-      branch:
-        description: Branch the images are tagged after (default the branch this runs on)
-        required: false
-        type: string
+        default: slow
 
-run-name: e2e ${{ inputs.tier }} ${{ inputs.branch || github.ref_name }} @ ${{ inputs.ref || github.sha }}
+run-name: e2e ${{ github.head_ref || github.ref_name }}
 
 permissions:
   contents: read
 
 jobs:
   e2e:
-    name: e2e (${{ inputs.tier }})
+    name: e2e (${{ matrix.tier }})
+    # A push or the "dev images" label needs that label; adding "e2e slow" starts the
+    # slow tier on its own. A fork's pull request gets no dev images.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       (github.event.label.name == 'e2e slow' ||
+        (contains(github.event.pull_request.labels.*.name, 'dev images') &&
+         (github.event.action != 'labeled' || github.event.label.name == 'dev images'))))
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: >-
+          ${{ fromJSON(
+            (github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.tier)) ||
+            (github.event.label.name == 'e2e slow' && '["slow"]') ||
+            (contains(github.event.pull_request.labels.*.name, 'e2e slow') && '["smoke","slow"]') ||
+            '["smoke"]') }}
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.tier == 'slow' && 180 || 45 }}
+    timeout-minutes: ${{ matrix.tier == 'slow' && 180 || 60 }}
+    permissions:
+      contents: read
+      actions: write
     env:
       KUBE_CONTEXT: kind-slaptain
+      GH_TOKEN: ${{ github.token }}
+      TIER: ${{ matrix.tier }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      BRANCH: ${{ github.head_ref || github.ref_name }}
       # Specs that roll, restart or mutate the cluster for minutes, or are flaky for now.
       # The smoke tier leaves them out and the slow tier runs them.
       SLOW_LABELS: >-
@@ -47,12 +67,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ env.SHA }}
 
       - name: Address the dev images and select the tier
-        env:
-          BRANCH: ${{ inputs.branch || github.ref_name }}
-          TIER: ${{ inputs.tier }}
         run: |
           slug=$(scripts/branch-slug.sh "$BRANCH")
           {
@@ -81,10 +98,43 @@ jobs:
             tests/e2e/go.sum
             operator/go.sum
 
+      # Everything up to here, and the two steps below, overlaps the image builds.
       - name: Create the kind cluster
         uses: helm/kind-action@v1
         with:
           cluster_name: slaptain
+
+      - name: Compile the suite and slctl
+        run: |
+          (cd tests/e2e && go test -c -o /dev/null .)
+          (cd operator && go build -o /dev/null ./cmd/slctl)
+
+      - name: Wait for this commit's dev images
+        run: |
+          for i in $(seq 1 120); do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow publish-dev.yml \
+              --commit "$SHA" --json databaseId,status)
+            for id in $(jq -r '.[] | select(.status == "completed") | .databaseId' <<<"$runs"); do
+              builds=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" --json jobs --jq \
+                '[.jobs[] | select(.name | startswith("Build and push")) | .conclusion]')
+              if jq -e 'length > 0 and all(. == "success")' <<<"$builds" >/dev/null; then
+                exit 0
+              fi
+              # A newer push cancelled this commit's builds: nothing here to test.
+              if jq -e 'any(. == "cancelled")' <<<"$builds" >/dev/null; then
+                echo "::notice::A newer push superseded the images of $SHA; cancelling this run"
+                gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+                sleep 60
+              fi
+            done
+            if [ "$i" -gt 4 ] && ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              echo "::error::No publish-dev run built images for $SHA. Is the pull request labelled dev images?"
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::Timed out waiting for the dev images of $SHA"
+          exit 1
 
       - name: Record the spec-order seed
         run: echo "Ginkgo seed \`$E2E_SEED\`, replay with \`E2E_SEED=$E2E_SEED\`" >> "$GITHUB_STEP_SUMMARY"
@@ -110,6 +160,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-debug
+          name: e2e-debug-${{ matrix.tier }}
           path: e2e-debug/
           retention-days: 7
