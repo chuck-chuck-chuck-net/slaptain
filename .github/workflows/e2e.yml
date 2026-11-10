@@ -60,16 +60,16 @@ jobs:
             echo "IMAGE_TAG=$slug"
             echo "EXPORTER_IMAGE_TAG=$slug"
             echo "E2E_SEED=$(date +%s)"
+            # Every failure, not the first one: the full report is what a reader needs.
+            echo "FAIL_FAST=0"
             if [ "$TIER" = slow ]; then
               # The env-gated groups need only one cluster; external replication needs two.
               echo "E2E_LABEL_FILTER=$SLOW_LABELS || backup || restore || scale || scaleup"
               echo "E2E_BACKUP=1"
               echo "E2E_SCALE=1"
               echo "E2E_SCALEUP=1"
-              echo "FAIL_FAST=0"
             else
               echo "E2E_LABEL_FILTER=!($SLOW_LABELS)"
-              echo "FAIL_FAST=1"
             fi
           } | tee -a "$GITHUB_ENV"
 
