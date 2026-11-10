@@ -9,42 +9,49 @@ name: e2e
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: Commit to test, the one the images were built from
+      tier:
+        description: smoke runs on every labelled push; slow runs what smoke leaves out
         required: true
+        type: choice
+        options: [smoke, slow]
+        default: smoke
+      ref:
+        description: Commit to test, the one the images were built from (default the branch head)
+        required: false
         type: string
       branch:
-        description: Branch the images are tagged after, as branch-slug.sh spells it
-        required: true
+        description: Branch the images are tagged after (default the branch this runs on)
+        required: false
         type: string
 
-run-name: e2e ${{ inputs.branch }} @ ${{ inputs.ref }}
+run-name: e2e ${{ inputs.tier }} ${{ inputs.branch || github.ref_name }} @ ${{ inputs.ref || github.sha }}
 
 permissions:
   contents: read
 
 jobs:
-  smoke:
-    name: Smoke specs on kind
+  e2e:
+    name: e2e (${{ inputs.tier }})
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.tier == 'slow' && 180 || 45 }}
     env:
       KUBE_CONTEXT: kind-slaptain
-      # The ungated specs, minus those that roll, restart or mutate the cluster for minutes.
-      E2E_LABEL_FILTER: >-
-        !(cleanup-policy || scale-topology || database-hotadd || write-rotation ||
+      # Specs that roll, restart or mutate the cluster for minutes, or are flaky for now.
+      # The smoke tier leaves them out and the slow tier runs them.
+      SLOW_LABELS: >-
+        cleanup-policy || scale-topology || database-hotadd || write-rotation ||
         purge-rotation || image-selector || monitor-at-rest || startup-config ||
-        tls-gate || monitor)
-      FAIL_FAST: '1'
+        tls-gate || monitor
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || github.sha }}
 
-      - name: Address the dev images
+      - name: Address the dev images and select the tier
         env:
-          BRANCH: ${{ inputs.branch }}
+          BRANCH: ${{ inputs.branch || github.ref_name }}
+          TIER: ${{ inputs.tier }}
         run: |
           slug=$(scripts/branch-slug.sh "$BRANCH")
           {
@@ -52,6 +59,17 @@ jobs:
             echo "IMAGE_TAG=$slug"
             echo "EXPORTER_IMAGE_TAG=$slug"
             echo "E2E_SEED=$(date +%s)"
+            if [ "$TIER" = slow ]; then
+              # The env-gated groups need only one cluster; external replication needs two.
+              echo "E2E_LABEL_FILTER=$SLOW_LABELS || backup || restore || scale || scaleup"
+              echo "E2E_BACKUP=1"
+              echo "E2E_SCALE=1"
+              echo "E2E_SCALEUP=1"
+              echo "FAIL_FAST=0"
+            else
+              echo "E2E_LABEL_FILTER=!($SLOW_LABELS)"
+              echo "FAIL_FAST=1"
+            fi
           } | tee -a "$GITHUB_ENV"
 
       - name: Set up Go

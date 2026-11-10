@@ -91,5 +91,6 @@ jobs:
           gh workflow run e2e.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref "$BRANCH" \
+            -f tier=smoke \
             -f ref="$SHA" \
             -f branch="$BRANCH"
