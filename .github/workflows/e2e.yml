@@ -1,11 +1,13 @@
 name: e2e
 
 # The e2e suite on a single-site kind cluster, against the dev images a pull
-# request's publish-dev run has just pushed (ADR-046). publish-dev.yml calls it
+# request's publish-dev run has just pushed (ADR-046). publish-dev.yml starts it
 # once every image job has finished, so the images it pulls are this commit's.
+# Its own workflow, so its result is reported as e2e, and no concurrency group,
+# so a new push never cancels a run in progress.
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       ref:
         description: Commit to test, the one the images were built from
@@ -15,6 +17,8 @@ on:
         description: Branch the images are tagged after, as branch-slug.sh spells it
         required: true
         type: string
+
+run-name: e2e ${{ inputs.branch }} @ ${{ inputs.ref }}
 
 permissions:
   contents: read
