@@ -73,10 +73,23 @@ jobs:
         run: docker buildx bake --push "$GROUP"
 
   e2e:
-    name: e2e
+    name: Start e2e
     # Needs every matrix job, so the tests start only once all images are pushed.
     needs: images
-    uses: ./.github/workflows/e2e.yml
-    with:
-      ref: ${{ github.event.pull_request.head.sha }}
-      branch: ${{ github.head_ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      # A GITHUB_TOKEN may start a workflow_dispatch run; e2e.yml is read from the branch.
+      - name: Start the e2e workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh workflow run e2e.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$BRANCH" \
+            -f ref="$SHA" \
+            -f branch="$BRANCH"
