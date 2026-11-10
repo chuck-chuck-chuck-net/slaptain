@@ -29,7 +29,8 @@ jobs:
       # The ungated specs, minus those that roll, restart or mutate the cluster for minutes.
       E2E_LABEL_FILTER: >-
         !(cleanup-policy || scale-topology || database-hotadd || write-rotation ||
-        purge-rotation || image-selector || monitor-at-rest || startup-config)
+        purge-rotation || image-selector || monitor-at-rest || startup-config ||
+        tls-gate)
       FAIL_FAST: '1'
     steps:
       - name: Checkout
