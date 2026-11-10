@@ -34,7 +34,7 @@ jobs:
       E2E_LABEL_FILTER: >-
         !(cleanup-policy || scale-topology || database-hotadd || write-rotation ||
         purge-rotation || image-selector || monitor-at-rest || startup-config ||
-        tls-gate)
+        tls-gate || monitor)
       FAIL_FAST: '1'
     steps:
       - name: Checkout
