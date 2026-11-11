@@ -33,15 +33,20 @@ jobs:
           cache: false
 
       # Go has no "none" build mode ("Go does not support the none build
-      # mode", CodeQL 2.27). The Go autobuilder finds every go.mod in the tree
-      # and builds each module (operator/, tests/e2e/) — the repo root has none.
+      # mode", CodeQL 2.27). Autobuild is no substitute: it runs `make` first,
+      # whose default target bakes every container image. tests/e2e holds only
+      # _test.go files, which `go build` skips.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: go
+          build-mode: manual
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v4
+      - name: Build the Go modules
+        run: |
+          for module in operator exporter; do
+            (cd "$module" && go build ./...)
+          done
 
       # The database upload only feeds variant analysis, and waiting for
       # processing only reports what the Security tab shows anyway.
