@@ -12,7 +12,7 @@ does not restate the project's conventions and discipline in full, which live in
 
 | Tool | Why |
 |---|---|
-| `docker buildx` | Image builds: `docker-bake.hcl` is the build graph, driven by `make` here and by `docker buildx bake` in CI. `BUILDX=buildx` where it is a standalone binary. It needs a BuildKit builder; Docker's default works. podman is only needed to run `docs/its9398/` |
+| `buildx` + a BuildKit worker | Image builds: `docker-bake.hcl` is the build graph, driven by `make` here and by `docker buildx bake` in CI. The worker can be Docker's, a rootless `buildkitd` user service, or a remote one — see *Getting a BuildKit worker* below. `BUILDX=buildx` where buildx is a standalone binary rather than a Docker CLI plugin. podman is only needed to run `docs/its9398/` |
 | Go | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
 | Helm 3 | Every deployment path is Helm. There is no kustomize in this repo |
 | `kubectl` | Contexts for each cluster you target |
@@ -73,8 +73,8 @@ The targets are aliases onto `docker-bake.hcl`, so a laptop and CI build the
 same graph, and each OpenLDAP package set compiles once per run for both
 images that consume it. BuildKit's cache is what makes a second build fast.
 `build-*` builds and discards the result, which checks the gates inside the
-Containerfile. Add `BAKE_FLAGS=--load` to keep an image in the local Docker
-store. `RUN_UPSTREAM_TESTS=1` adds OpenLDAP's own test suite to the package
+Containerfile. Add `BAKE_FLAGS=--load` to keep an image in a local Docker
+store, where there is one. `RUN_UPSTREAM_TESTS=1` adds OpenLDAP's own test suite to the package
 build; it costs tens of minutes and is off by default.
 
 Individual targets: `build-init`, `build-slapd` (the pure pair),
@@ -82,6 +82,56 @@ Individual targets: `build-init`, `build-slapd` (the pure pair),
 `build-toolkit`, `build-operator`, `build-exporter`, `build-slctl`
 (→ `bin/slctl`, plus `install-slctl` for `/usr/local/bin`).
 `docker buildx bake --print <target>` shows what one resolves to.
+
+### Getting a BuildKit worker
+
+`buildx` is a client; the build happens in a worker. Three ways to have one,
+and the graph is identical on all of them:
+
+- **Docker's built-in worker.** Nothing to set up, and `BUILDX="docker buildx"`
+  — the Makefile's default — already addresses it.
+- **A rootless `buildkitd` of your own.** No Docker on the machine at all.
+- **A remote worker.** The build runs wherever the worker is and the client
+  needs no daemon: `buildx create --driver remote --name <n> tcp://<host>:<port>`,
+  then `buildx inspect --bootstrap <n>`. This is the shape CI uses.
+
+The rootless case is the one with steps, and most distributions have already
+taken them: the `buildkit` package ships a **systemd user unit** that runs
+`buildkitd` under `rootlesskit`, so there is no unit file to write.
+
+```bash
+# The user namespace the daemon runs in needs a subordinate id range.
+# Distribution packages usually create one; this prints it, or nothing.
+grep "^$USER:" /etc/subuid /etc/subgid
+
+systemctl --user enable --now buildkit.service
+loginctl enable-linger "$USER"
+
+buildx create --driver remote --name local-rootless --use \
+    "unix://$XDG_RUNTIME_DIR/buildkit/rootless"
+buildx inspect --bootstrap local-rootless
+```
+
+The driver is `remote`, not `docker-container`: the daemon is already running
+and buildx only has to reach its socket. `docker-container` would ask it to
+start a *second* BuildKit, inside a container it has no Docker to create.
+
+Three things that are easy to get wrong, in the order you will meet them:
+
+**`BUILDX` defaults to `docker buildx`.** Without Docker every image target
+then fails on a missing `/var/run/docker.sock`, which reads as a broken build
+rather than an unset variable. Export `BUILDX=buildx` once; every build target
+goes through it.
+
+**Lingering is off by default.** Without `enable-linger` the user unit stops
+with the last login session, so a build driven over SSH — or any detached run
+— loses its worker partway through. The symptom is a connection refused on a
+socket that answered a moment ago.
+
+**A remote driver has no local image store**, so `BAKE_FLAGS=--load` has
+nowhere to put the result. Push instead (`make push`), or have the builder
+write a file: that is what `make import` does, with
+`--set <target>.output=type=docker,dest=.build/<target>.tar`.
 
 ### The tag
 
