@@ -47,10 +47,10 @@ while read -r _localref localsha _remoteref remotesha; do
   changed+=$(git log --name-only --format= "${range[@]}")$'\n'
 done
 
-# The pinned linter, and the toolchain pin that makes it runnable — both read
-# from operator/Makefile, so there is one place to move them.
+# The pinned linter from operator/Makefile, and the toolchain from the go line
+# in operator/go.mod, the same source LINT_GOTOOLCHAIN reads.
 golangci="$repo/operator/bin/golangci-lint"
-toolchain=$(sed -n 's/^LINT_GOTOOLCHAIN ?= //p' operator/Makefile)
+toolchain=go$(sed -n 's/^go //p' operator/go.mod)
 
 status=0
 for module in "${modules[@]}"; do

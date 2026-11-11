@@ -13,7 +13,7 @@ does not restate the project's conventions and discipline in full, which live in
 | Tool | Why |
 |---|---|
 | `docker buildx` | Image builds: `docker-bake.hcl` is the build graph, driven by `make` here and by `docker buildx bake` in CI. `BUILDX=buildx` where it is a standalone binary. It needs a BuildKit builder; Docker's default works. podman is only needed to run `docs/its9398/` |
-| Go 1.26.11+ | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
+| Go | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
 | Helm 3 | Every deployment path is Helm. There is no kustomize in this repo |
 | `kubectl` | Contexts for each cluster you target |
 | `yq` v4 | Only for `lab.yaml` — `tests/e2e.sh` refuses to read a config file without it |
@@ -246,12 +246,13 @@ Warm, it adds well under a second to a push; the first run builds the linter's
 cache. `SKIP_LINT=1 git push` bypasses it. The modules are discovered by their
 `.golangci.yml`, so a third one needs no edit to the hook.
 
-The linter runs under a pinned Go toolchain (`LINT_GOTOOLCHAIN` in
-`operator/Makefile`, which the hook reads), because golangci-lint's bundled
-`x/tools` cannot read the export data a newer stdlib writes. **That pin has to
-stay at or above the `go` line in `go.mod`** — below it, every lint run dies on
-`go.mod requires go >= …` before a single linter starts, and the gate silently
-stops being a gate on every machine that runs it.
+The linter runs under the Go toolchain named by the `go` line in
+`operator/go.mod`,
+because golangci-lint's bundled `x/tools` cannot read the export data a newer stdlib writes.
+`LINT_GOTOOLCHAIN` in `operator/Makefile` and the hook both read that line,
+so a Go bump moves the lint toolchain with it.
+A pin below the `go` line would make every lint run die on `go.mod requires go >= …`
+before a single linter starts.
 
 Publishing is CI's too, and goes through the Makefile so the tag rule in
 [Versioning](VERSIONING.md) stays the single source: `publish-main.yml` runs `make push`
