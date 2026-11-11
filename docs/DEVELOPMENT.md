@@ -13,7 +13,7 @@ does not restate the project's conventions and discipline in full, which live in
 | Tool | Why |
 |---|---|
 | `docker buildx` | Image builds: `docker-bake.hcl` is the build graph, driven by `make` here and by `docker buildx bake` in CI. `BUILDX=buildx` where it is a standalone binary. It needs a BuildKit builder; Docker's default works. podman is only needed to run `docs/its9398/` |
-| Go 1.26.10+ | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
+| Go 1.26.11+ | Two modules: the operator and the e2e suite. `operator/go.mod` carries the authoritative version |
 | Helm 3 | Every deployment path is Helm. There is no kustomize in this repo |
 | `kubectl` | Contexts for each cluster you target |
 | `yq` v4 | Only for `lab.yaml` — `tests/e2e.sh` refuses to read a config file without it |
