@@ -75,7 +75,8 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 # targets only costs nothing (the compiler is not what we are testing here) and
 # keeps `make lint` runnable without a per-shell export. Drop the pin when
 # golangci-lint ships an x/tools that reads v4.
-LINT_GOTOOLCHAIN ?= go1.26.11
+# Read from the go line so a Go bump cannot leave the pin below it.
+LINT_GOTOOLCHAIN ?= go$(shell sed -n 's/^go //p' go.mod)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
