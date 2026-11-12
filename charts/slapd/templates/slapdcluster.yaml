@@ -171,6 +171,52 @@ spec:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 
+  {{- /* spec.placement (ADR-043). Where this cluster's pods are allowed to
+         land. Everything here is a raw Kubernetes type passed through
+         verbatim, and the chart adds nothing of its own.
+
+         topologySpreadConstraints is the one key that is NOT written with the
+         usual `with`, and the reason is semantic rather than stylistic. The
+         operator distinguishes three states, not two: absent means "said
+         nothing" and gets the operator's generated per-fleet spread; an
+         explicit [] means "said none" and is the ONLY way to switch that
+         default off. `with` treats an empty list exactly like an absent one,
+         so it would silently drop a user's [] and hand them back the default
+         they had just turned off — with no error anywhere to notice it by.
+
+         kindIs "slice" is what tells the three apart: an absent key and an
+         explicitly null one are both "invalid" and render nothing (null reads
+         as absent, which is also how the API server stores it), while [] and
+         a populated list are both slices and are rendered as written. */}}
+  {{- $placement := .Values.placement | default dict }}
+  {{- $spread := $placement.topologySpreadConstraints }}
+  {{- if or (kindIs "slice" $spread) $placement.nodeSelector $placement.nodeAffinity $placement.tolerations $placement.priorityClassName }}
+  placement:
+    {{- if kindIs "slice" $spread }}
+    {{- if $spread }}
+    topologySpreadConstraints:
+      {{- toYaml $spread | nindent 6 }}
+    {{- else }}
+    topologySpreadConstraints: []
+    {{- end }}
+    {{- end }}
+    {{- with $placement.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $placement.nodeAffinity }}
+    nodeAffinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $placement.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $placement.priorityClassName }}
+    priorityClassName: {{ . | quote }}
+    {{- end }}
+  {{- end }}
+
   {{- /* spec.accesslogPurge (form A) and spec.rotation (form B) — ADR-024 R6.
          WHEN the purge runs is the cluster's, in one of two mutually exclusive
          forms; WHAT each database keeps stays on the SlapdDatabase.

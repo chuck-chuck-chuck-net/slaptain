@@ -589,5 +589,7 @@ project.
   modifiability result quoted here was established on 2.7.1.
 - [Backup & Restore](BACKUP.md) — the recreate path every bootstrap-time and
   recreate-required tunable points at.
+- [Pod placement](PLACEMENT.md) — a different sense of "placement": which NODE a
+  pod runs on, rather than which `cn=config` entry a tunable lives in.
 - [`docs/BACKLOG.md`](BACKLOG.md) — what is deliberately not tunable yet, with the
   evidence.
