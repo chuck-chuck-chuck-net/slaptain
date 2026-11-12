@@ -494,7 +494,7 @@ FROM debs-${OPENLDAP_SOURCE} AS debs
 
 # ── Build / gather stage ────────────────────────────────────────────────────
 # ── slapd-launcher ──────────────────────────────────────────────────────────
-# The runtime image's entrypoint: caps the open-file limit slapd sizes its
+# The runtime image's entrypoint: sets the open-file limit slapd sizes its
 # connection table by, then execs slapd (launcher/slapd-launcher.c). Its own
 # stage, so it builds beside the packages and stays cached.
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS launcher-build
@@ -647,7 +647,7 @@ USER 1024:1024
 EXPOSE 1024 1025
 
 # Chart overrides args; -F points to config written by the init container.
-# The launcher caps the open-file limit and execs /usr/sbin/slapd with them.
+# The launcher sets the open-file limit and execs /usr/sbin/slapd with them.
 ENTRYPOINT ["/usr/sbin/slapd-launcher"]
 
 # ── Variant environments ────────────────────────────────────────────────────
