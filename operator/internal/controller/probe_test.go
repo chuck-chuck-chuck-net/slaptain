@@ -118,3 +118,30 @@ func TestSlapdContainerProbes(t *testing.T) {
 		}
 	}
 }
+
+// The slapd image's ENTRYPOINT is slapd-launcher, which sets the open-file
+// limit slapd sizes its connection table by (ADR-048). A Command on the
+// container replaces it, and slapd starts with the node's limit again.
+func TestSlapdContainerKeepsImageEntrypoint(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		r := &SlapdClusterReconciler{ClusterDomain: testClusterDomain}
+		sc := &ldapv1alpha1.SlapdCluster{}
+		sc.Name = testClusterName
+		sc.Namespace = testNamespace
+		sc.Spec.Replicas = 1
+		sc.Spec.ReadReplicas = 1
+		found := false
+		for _, c := range r.buildStatefulSetSpec(sc, readOnly, "").Template.Spec.Containers {
+			if c.Name != slapdContainerName {
+				continue
+			}
+			found = true
+			if len(c.Command) != 0 {
+				t.Errorf("readOnly=%v: slapd container sets command %v, which skips slapd-launcher", readOnly, c.Command)
+			}
+		}
+		if !found {
+			t.Fatalf("readOnly=%v: no %q container", readOnly, slapdContainerName)
+		}
+	}
+}
