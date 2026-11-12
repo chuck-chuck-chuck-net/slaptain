@@ -1416,6 +1416,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 		Name:            slapdContainerName,
 		Image:           mainImage,
 		ImagePullPolicy: sc.Spec.Images.Slapd.PullPolicy,
+		// Args only, never Command: the image ENTRYPOINT is slapd-launcher, and a
+		// Command would start slapd with the node's open-file limit (ADR-048).
 		Args: []string{
 			"-h", "ldap://:1024/ ldaps://:1025/ ldapi://%2frun%2fopenldap%2fslapd.ldapi",
 			"-d", logLevel,
