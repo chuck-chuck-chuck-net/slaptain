@@ -62,7 +62,7 @@ jobs:
       SLOW_LABELS: >-
         cleanup-policy || scale-topology || database-hotadd || write-rotation ||
         purge-rotation || image-selector || monitor-at-rest || startup-config ||
-        tls-gate || monitor
+        tls-gate || monitor || secret-rotation
     steps:
       - name: Checkout
         uses: actions/checkout@v7
