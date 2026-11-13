@@ -10,7 +10,13 @@ You may obtain a copy of the License at
 
 package controller
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	"maps"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
+)
 
 // The vocabulary the controllers build objects from: names that must be
 // spelled identically wherever they appear, because a pod template, a Job
@@ -24,7 +30,39 @@ const (
 
 	// appName is the app.kubernetes.io/name of every slaptain-managed pod.
 	appName = "slapd"
+
+	labelManagedBy = "app.kubernetes.io/managed-by"
+	managedBy      = "slaptain"
+
+	// LabelCluster names the SlapdCluster an object belongs to, and is the
+	// operator's cache filter (ADR-044): a Secret, ConfigMap, Service,
+	// StatefulSet, Job or Pod without it is invisible to the cached client.
+	LabelCluster = "ldap.chuck-chuck-chuck.net/cluster"
+	// clusterMulti is LabelCluster's value on an object several clusters
+	// share. The underscore keeps it out of reach of any cluster name.
+	clusterMulti = "multi_cluster"
 )
+
+// withOperatorLabels returns labels plus managed-by and the cluster label, for
+// an object the operator creates for cluster. Never pass it a selector:
+// StatefulSet selectors are immutable, and a Service needs none of these to
+// find its pods.
+func withOperatorLabels(cluster string, labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels)+2)
+	maps.Copy(out, labels)
+	out[labelManagedBy] = managedBy
+	out[LabelCluster] = clusterLabelValue(cluster)
+	return out
+}
+
+// clusterLabelValue fits a cluster name into a label value, which holds 63
+// characters and must end in a letter or digit.
+func clusterLabelValue(name string) string {
+	if len(name) > validation.LabelValueMaxLength {
+		name = name[:validation.LabelValueMaxLength]
+	}
+	return strings.TrimRight(name, "-.")
+}
 
 // Containers, ports and volumes of the slapd pod — and of the Jobs that mount
 // its PVCs (ADR-018), which must use the same volume names and mount paths.
