@@ -66,16 +66,10 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests against
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
-# golangci-lint type-checks with its OWN vendored x/tools, not the toolchain's.
-# v2.7.2's copy reads export data up to version 2, while the Go 1.27 stdlib
-# writes version 4, so every analysis pass fails with
-#   could not import errors (... export data version 4 is greater than
-#   maximum supported version 2)
-# on a host whose default toolchain is 1.27. Pinning the toolchain for the lint
-# targets only costs nothing (the compiler is not what we are testing here) and
-# keeps `make lint` runnable without a per-shell export. Drop the pin when
-# golangci-lint ships an x/tools that reads v4.
-# Read from the go line so a Go bump cannot leave the pin below it.
+# golangci-lint type-checks with its OWN vendored x/tools, not the toolchain's,
+# and a binary built with an older Go than the code it reads panics or fails on
+# export data. Pinning the lint targets to the go line keeps a newer host
+# toolchain out of `make lint`, and a Go bump cannot leave the pin below go.mod.
 LINT_GOTOOLCHAIN ?= go$(shell sed -n 's/^go //p' go.mod)
 
 .PHONY: lint

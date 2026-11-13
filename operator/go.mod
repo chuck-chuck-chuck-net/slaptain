@@ -1,6 +1,6 @@
 module github.com/chuck-chuck-chuck-net/slaptain/operator
 
-go 1.26.11
+go 1.27.4
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.7
