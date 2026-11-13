@@ -172,8 +172,7 @@ func runLDAPUtil(tool string, raw []string) error {
 	}
 
 	if err := c.Run(); err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			os.Exit(ee.ExitCode())
 		}
 		return err
