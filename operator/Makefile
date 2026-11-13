@@ -145,7 +145,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
 # and CI judge by the same rules. Must be a release whose Go is at least the
 # toolchain in go.mod, or it fails on the export-data version before any
 # linter runs (docs/BACKLOG.md, the v2.7.2-under-Go-1.27 entry).
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
