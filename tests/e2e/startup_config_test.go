@@ -28,17 +28,17 @@ import (
 // That split is the whole behaviour, and it is what this spec pins, in the
 // order a user meets it:
 //
-//	1. the table appears in the ConfigMap when a database asks for Accesslog,
-//	   and the running pods do NOT yet carry the attribute — ADR-034's admitted
-//	   first-generation edge, reported as StartupConfigConverged=False/
-//	   RestartRequired rather than silently converged;
-//	2. after a restart every RW pod's data DB carries olcSpSessionlogSource and
-//	   no olcSpSessionlog, the accesslog DB's own syncprov still carries no
-//	   session log (ADR-022 — a replay there displaces the minCSN guard), and
-//	   the condition reads True;
-//	3. dropping the field renders an EMPTY table (never an absent key, which
-//	   means "unmanaged" to the converger), and one restart later the attribute
-//	   is off the disk and the in-memory log is back.
+//  1. the table appears in the ConfigMap when a database asks for Accesslog,
+//     and the running pods do NOT yet carry the attribute — ADR-034's admitted
+//     first-generation edge, reported as StartupConfigConverged=False/
+//     RestartRequired rather than silently converged;
+//  2. after a restart every RW pod's data DB carries olcSpSessionlogSource and
+//     no olcSpSessionlog, the accesslog DB's own syncprov still carries no
+//     session log (ADR-022 — a replay there displaces the minCSN guard), and
+//     the condition reads True;
+//  3. dropping the field renders an EMPTY table (never an absent key, which
+//     means "unmanaged" to the converger), and one restart later the attribute
+//     is off the disk and the in-memory log is back.
 //
 // Ungated, like cleanup_policy_test.go: it needs nothing beyond the standard
 // fixture. It DOES restart the read-write fleet twice, and it mutates the
@@ -92,7 +92,7 @@ var _ = Describe("startup-only configuration", Label("startup-config"), Ordered,
 
 		Eventually(ctx, func() bool {
 			return slapdDatabaseRunning(crdClient, namespace, dbCRName)
-		}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue(),
+		}).WithTimeout(5*time.Minute).WithPolling(5*time.Second).Should(BeTrue(),
 			"SlapdDatabase %s never reached Running", dbCRName)
 
 		rwPods = rwPodNames(ctx, "slapd")
@@ -125,6 +125,30 @@ var _ = Describe("startup-only configuration", Label("startup-config"), Ordered,
 		if carries {
 			By("clearing the inherited session-log source so the specs start from no attribute")
 			setAllSessionlogSourcesInMemory(ctx, origOps)
+
+			// WAIT FOR THE TABLE BEFORE TOUCHING A POD. The converger reads
+			// the ConfigMap at pod start, so a pod deleted before the operator
+			// has republished comes back carrying the PREVIOUS declaration —
+			// and the first spec then reads an attribute it demands be absent
+			// and blames the operator for writing it to a running server,
+			// which is the one thing that did not happen.
+			//
+			// Demonstrated on a live mesh by stopping the operator and taking
+			// exactly these two steps: slapd-0 came back still carrying
+			// olcSpSessionlogSource for a database whose spec said InMemory.
+			// With the operator running, the same restart removed it.
+			//
+			// The window is ~0.2 s wide on an idle operator and much wider
+			// when a reconcile pass is in flight, which is why this cost two
+			// green runs before it bit.
+			By("waiting for the operator to render the table empty")
+			Expect(awaitStartupTable(ctx, configMapName(),
+				func(lines []string) bool { return len(lines) == 0 },
+				3*time.Minute)).To(BeTrue(),
+				"%s must render empty before the fleet restarts: every database now asks "+
+					"for the in-memory log, and the converger applies whatever the table "+
+					"says at pod start (ADR-034)", configMapName())
+
 			restartRWFleet(ctx, rwPods, restartBudget)
 			waitClusterSettled(ctx)
 		}
@@ -146,7 +170,20 @@ var _ = Describe("startup-only configuration", Label("startup-config"), Ordered,
 		}
 		GinkgoLogr.Info("restoring the fixture database's session-log source",
 			"from", sd.Spec.Replication.SyncprovSessionlogSource, "to", origSource)
+		before := startupConfigLines(ctx, configMapName())
 		setSessionlogSource(ctx, origSource, origOps)
+		// Same race as the BeforeAll, same reason to wait — but reported, not
+		// asserted: this block exists to leave the cluster usable after a
+		// failure, and a teardown that fails buries the failure it came for.
+		// A restart on a stale table leaves the fleet declaring one thing and
+		// carrying another, so the wait happens either way.
+		if !awaitStartupTable(ctx, configMapName(),
+			func(lines []string) bool {
+				return strings.Join(lines, "\n") != strings.Join(before, "\n")
+			}, 3*time.Minute) {
+			GinkgoLogr.Info("the startup-only table did not change after restoring the field; "+
+				"restarting anyway", "table", configMapName())
+		}
 		restartRWFleet(ctx, rwPods, restartBudget)
 		waitClusterSettled(ctx)
 	}, NodeTimeout(20*time.Minute))
@@ -441,6 +478,37 @@ func setSessionlogSource(ctx context.Context, source string, ops *int32) {
 		return crdClient.Update(ctx, sd)
 	}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
 		"setting syncprovSessionlogSource=%q on %s", source, dbCRName)
+}
+
+// awaitStartupTable polls the published startup-only table until pred holds,
+// and reports whether it did within budget.
+//
+// It exists because the table is an ASYNCHRONOUS artifact of a spec edit: the
+// SlapdDatabase change enqueues the SlapdCluster, whose controller renders the
+// ConfigMap on a later pass. Anything that restarts a pod to consume the table
+// has to wait for it first — the converger reads the file at pod start and
+// applies what it finds there, not what the CRs now say.
+//
+// Polling rather than Eventually(...).Should(...) so a caller can decide
+// whether a timeout is a failure or a note: the AfterAll needs the wait but
+// must not fail on it.
+func awaitStartupTable(ctx context.Context, name string, pred func([]string) bool,
+	budget time.Duration) bool {
+
+	deadline := time.Now().Add(budget)
+	for {
+		if pred(startupConfigLines(ctx, name)) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 // startupConfigLines reads the published table as the converger would parse it:
