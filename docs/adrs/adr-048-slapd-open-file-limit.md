@@ -46,6 +46,8 @@ If one did, slapd would stop accepting and no metric we export would name the ca
    so it works as UID 1024 with every capability dropped.
    A hard limit below 65,536 stays the ceiling.
    `spec.tuning.maxOpenFiles` (ADR-024) can make it configurable later.
+   The launcher logs the result on every start, as the first line of the pod log:
+   `slapd-launcher: open-file limit soft 65536 (was 1024), hard 524288`.
 3. **Which language?** C, built in a one-step stage beside the package build.
    - Discarded:
      - Go: needs a Go builder stage in the OpenLDAP Containerfile now.
