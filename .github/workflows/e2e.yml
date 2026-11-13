@@ -98,16 +98,27 @@ jobs:
             tests/e2e/go.sum
             operator/go.sum
 
-      # Everything up to here, and the two steps below, overlaps the image builds.
+      # Everything up to the wait for the images overlaps the image builds.
+      # The compile fills the Go build cache in the background while kind starts.
+      - name: Start compiling the suite and slctl
+        run: |
+          (
+            rc=0
+            { (cd tests/e2e && go test -c -o /dev/null .) &&
+                (cd operator && go build -o /dev/null ./cmd/slctl); } || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/compile.rc"
+          ) > "$RUNNER_TEMP/compile.log" 2>&1 &
+
       - name: Create the kind cluster
         uses: helm/kind-action@v1
         with:
           cluster_name: slaptain
 
-      - name: Compile the suite and slctl
+      - name: Wait for the compile
         run: |
-          (cd tests/e2e && go test -c -o /dev/null .)
-          (cd operator && go build -o /dev/null ./cmd/slctl)
+          until [ -e "$RUNNER_TEMP/compile.rc" ]; do sleep 2; done
+          cat "$RUNNER_TEMP/compile.log"
+          exit "$(cat "$RUNNER_TEMP/compile.rc")"
 
       - name: Wait for this commit's dev images
         run: |
