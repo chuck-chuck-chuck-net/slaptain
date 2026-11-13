@@ -142,20 +142,25 @@ run, and ADR-045 for the full reasoning.
 
 ### slapd's open-file limit no longer comes from the node (ADR-048)
 
-The slapd images gain an entrypoint, a small C launcher, that caps
-`RLIMIT_NOFILE` at 65,536 before exec'ing slapd. slapd sizes its connection
-table from the soft limit at startup — `ch_calloc(dtblsize, sizeof(Connection))`,
-indexed by descriptor number — and the `FD_SETSIZE` clamp applies only to the
-`select(2)` build, so on Linux nothing bounds it. An inherited limit of 2²⁰
-costs roughly 720 MiB of connection table before the first client connects; a
-container runtime configured with `LimitNOFILE=infinity` is the usual way to
-inherit one.
+The slapd images gain an entrypoint, a small C launcher, that **sets**
+`RLIMIT_NOFILE` to `min(hard limit, 65,536)` before exec'ing slapd — up or
+down, not only down.
 
-The launcher **lowers** an inherited limit above 65,536 and leaves a lower one
-alone, so a node whose soft default is 1024 still gives slapd 1024 slots. It
-passes its arguments through unchanged, so nothing about how the operator
-starts slapd changes — but it is an `ENTRYPOINT`, and a pod spec that sets
-`command:` bypasses it. The operator sets `args:` only.
+slapd reads the soft limit once, at startup, and uses it for two things at
+once: its descriptor allowance, and the length of its connection table
+(`ch_calloc(dtblsize, sizeof(Connection))`, indexed by descriptor number). The
+`FD_SETSIZE` clamp applies only to the `select(2)` build, so on Linux nothing
+bounds it. That single conflation produces both failure modes, which is why one
+value fixes both: an inherited 2²⁰ costs roughly 720 MiB of connection table
+before the first client connects, and systemd's default `1024:524288` leaves
+slapd 1024 descriptors in total — both listeners, every client, every syncrepl
+connection to every peer and the LMDB files.
+
+Raising the soft limit toward the hard limit needs no privilege, so this works
+as UID 1024 with every capability dropped. The launcher passes its arguments
+through unchanged, so nothing about how the operator starts slapd changes — but
+it is an `ENTRYPOINT`, and a pod spec that sets `command:` would skip it. The
+operator sets `args:` only, and a unit test now holds it to that.
 
 ### Also in this release
 
