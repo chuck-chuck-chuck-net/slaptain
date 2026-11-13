@@ -5,5 +5,5 @@ description: >-
   SlapdDatabases and SlapdSchemas — from one values file applied identically to
   every site (ADR-028 §5).
 type: application
-version: 0.5.0
-appVersion: "0.5.0"
+version: 0.6.0
+appVersion: "0.6.0"

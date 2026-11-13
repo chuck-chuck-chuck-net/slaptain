@@ -29,7 +29,49 @@ One deliberate exception: for a BREAKING change this file still carries the
 single line that keeps today's behaviour, because a release note that makes a
 reader go somewhere else to learn what to set is a release note that failed.
 
-## Unreleased
+## v0.6.0
+
+### One rolling restart, for two reasons
+
+Two changes here touch the slapd Pod template — the default spread constraint
+that arrives with `spec.placement`, and the cache labels the operator now
+stamps on everything it creates. They land in the same release, so an upgrade
+replaces every slapd Pod **once**, not twice. Both fleets roll: read-write,
+and read-only where `readReplicas > 0`.
+
+Nothing moves. Every pod comes back on the node it was already on, because its
+PVC is `ReadWriteOnce` on local storage and the PV's node affinity admits
+exactly one node. ADR-035 permits an operator upgrade to change the pod
+template once; this is the release doing it on purpose, and
+[`docs/UPGRADING.md`](docs/UPGRADING.md) is the procedure.
+
+### New: `spec.placement`, and pods spread across nodes by default (ADR-043)
+
+`spec.placement` passes `nodeSelector`, `affinity`, `tolerations` and
+`topologySpreadConstraints` to both pod templates verbatim, and adds exactly
+one thing of its own: when `topologySpreadConstraints` is unset, the operator
+writes a single constraint per fleet — `maxSkew: 1` over
+`kubernetes.io/hostname`, `whenUnsatisfiable: ScheduleAnyway`, selecting that
+fleet of that cluster alone. Writers spread among writers, readers among
+readers; one combined group would let every writer share a node while the
+per-node totals still looked even.
+
+**Unset means one constraint, not none.** A list you supply replaces the
+generated one entirely and is never merged with it: Kubernetes rejects two
+constraints on one pod sharing a `{topologyKey, whenUnsatisfiable}` pair and
+ignores `labelSelector` when deciding that, so a merge would make your own
+hostname constraint unschedulable from a value you cannot see. An explicit
+empty list (`[]`) asks for no constraint at all.
+
+**`ScheduleAnyway` is deliberate.** The first scheduling decision is the only
+one this workload gets — with `WaitForFirstConsumer` local storage the volume
+binds where the pod first lands and pins it there for the life of the PVC. A
+hard constraint can strand a pod permanently, because the only node it may use
+is the one being refused. So the default protects the *next* pod created from
+scratch — a scale-up, a rebuild, a fresh cluster. It does not rebalance an
+existing cluster and cannot.
+
+Full guide: [`docs/PLACEMENT.md`](docs/PLACEMENT.md).
 
 ### The operator caches only what it labelled (ADR-044)
 
@@ -44,13 +86,9 @@ A Secret you bring is read from the API server instead, and the operator never l
 Label it `ldap.chuck-chuck-chuck.net/cluster: <cluster name>` yourself if you want it cached,
 or `multi_cluster` if several clusters use it.
 
-This rolls every slapd Pod once, because the Pod template gains the two labels.
-The upgrade procedure is in `docs/UPGRADING.md`.
 The operator's memory with the filtered cache is not measured yet.
 
-## v0.6.0
-
-### The data database gets a syncprov checkpoint — and the reason is not ITS#9398
+### The data database gets a syncprov checkpoint — and the reason is not ITS#9398 (ADR-045)
 
 `olcSpCheckpoint: 100 10` is now written to every replicated **data** database's
 syncprov overlay unless the `SlapdDatabase` declares its own value, and
@@ -101,6 +139,40 @@ regeneration-ahead-of-content case, because a checkpointed database always has a
 **To decline it:** `syncprovCheckpoint: none`. See
 [`docs/UPGRADING.md`](docs/UPGRADING.md) for what it does to a mesh you already
 run, and ADR-045 for the full reasoning.
+
+### slapd's open-file limit no longer comes from the node (ADR-048)
+
+The slapd images gain an entrypoint, a small C launcher, that caps
+`RLIMIT_NOFILE` at 65,536 before exec'ing slapd. slapd sizes its connection
+table from the soft limit at startup — `ch_calloc(dtblsize, sizeof(Connection))`,
+indexed by descriptor number — and the `FD_SETSIZE` clamp applies only to the
+`select(2)` build, so on Linux nothing bounds it. An inherited limit of 2²⁰
+costs roughly 720 MiB of connection table before the first client connects; a
+container runtime configured with `LimitNOFILE=infinity` is the usual way to
+inherit one.
+
+The launcher **lowers** an inherited limit above 65,536 and leaves a lower one
+alone, so a node whose soft default is 1024 still gives slapd 1024 slots. It
+passes its arguments through unchanged, so nothing about how the operator
+starts slapd changes — but it is an `ENTRYPOINT`, and a pod spec that sets
+`command:` bypasses it. The operator sets `args:` only.
+
+### Also in this release
+
+- **Go 1.26.11** in all three modules and both builder images, closing
+  GO-2026-6859 in `net/http` — the one vulnerability our code actually reached.
+- **`golang.org/x/net` 0.62.0 and `cel-go` 0.30.0**, the module findings that
+  have a released fix. Nothing here calls either; `x/crypto/openpgp`'s advisory
+  has no release to move to and stays open deliberately.
+- **e2e runs in CI**: a smoke tier on every push to a pull request labelled
+  `dev images`, and a slow tier behind a second label, both on a kind cluster
+  against that commit's branch-tagged images.
+- **Getting a BuildKit worker** in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md):
+  the three kinds of worker, the rootless `buildkitd` systemd user service, and
+  the three ways it bites.
+- `docs/BACKLOG.md` records that the accesslog checkpoint's convergence does not
+  retrofit onto an overlay that already exists — it constructs the overlay DN
+  while slapd stores the indexed one it assigned.
 
 ## v0.5.0
 

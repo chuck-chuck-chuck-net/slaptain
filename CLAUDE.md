@@ -118,7 +118,9 @@ distroless, read-only root FS) as secondary goal — pursued where it doesn't co
 │       ├── adr-040-data-plane-image-identity.md
 │       ├── adr-041-startup-volume-format-diagnosis.md
 │       ├── adr-043-pod-placement.md
+│       ├── adr-044-label-filtered-cache.md
 │       ├── adr-045-data-db-syncprov-checkpoint.md
+│       ├── adr-046-dev-images-from-branches.md
 │       ├── adr-047-ci-architecture.md
 │       └── adr-048-slapd-open-file-limit.md
 ├── charts/

@@ -11,13 +11,21 @@ would say the same thing, it belongs here and `CHANGELOG.md` points at it.
 
 ---
 
-## Unreleased — the operator caches only labelled objects, and every slapd Pod rolls once
+## v0.6.0 — one rolling restart, pods that spread, and a default checkpoint
 
-ADR-044.
-The Pod template of every StatefulSet gains two labels,
-`app.kubernetes.io/managed-by: slaptain` and `ldap.chuck-chuck-chuck.net/cluster: <cluster name>`,
-so each StatefulSet replaces its Pods once after the operator upgrade.
-Upgrade one site at a time and let each finish rolling.
+Two changes in this release touch the slapd Pod template — the default spread
+constraint that comes with `spec.placement`, and the cache labels the operator
+now stamps on what it creates. They land together, so each StatefulSet replaces
+its Pods **once**, not once per change. Expect one rolling restart of the
+read-write StatefulSet and, where `readReplicas > 0`, one of the read-only
+StatefulSet. Upgrade one site at a time and let each finish rolling. ADR-035
+permits an operator upgrade to change the pod template once; this is the release
+doing it on purpose.
+
+**Nothing moves.** Every pod comes back on the node it was already on: its PVC is
+`ReadWriteOnce` on local storage, the PV's node affinity admits exactly one node,
+and the new constraint is soft, so the scheduler has one choice and takes it. "We
+added spreading and nothing moved" is the correct outcome.
 
 While a StatefulSet rolls:
 
@@ -26,6 +34,49 @@ While a StatefulSet rolls:
   It settles once the roll completes.
 - A backup, restore or mkdir Job that the old operator started
   reports its failures without Pod detail.
+
+### Pods are spread across nodes by default (ADR-043)
+
+`spec.placement` arrives (ADR-043), and with it one thing the operator now
+generates for a cluster that says nothing: a single topology spread constraint
+per fleet — `maxSkew: 1` over `kubernetes.io/hostname`,
+`whenUnsatisfiable: ScheduleAnyway`, selecting that fleet of that cluster
+alone. Read-write pods spread among read-write pods, read-only among read-only.
+
+#### Nothing to set, unless you already manage scheduling yourself
+
+If you place slapd pods through something outside the `SlapdCluster` — a
+mutating webhook, a scheduler plugin, a policy engine — the generated
+constraint is now one more input to that decision. Switch it off explicitly:
+
+```yaml
+spec:
+  placement:
+    topologySpreadConstraints: []     # an EMPTY LIST, not an absent key
+```
+
+The empty list means "no constraint". Leaving the key out means "the operator's
+default" — the two are deliberately different answers, and the Helm charts
+carry the distinction.
+
+#### Verifying
+
+Nothing in the CR status reports what placement resolved to. Read the
+StatefulSet:
+
+```bash
+kubectl -n <ns> get statefulset <cluster> \
+  -o jsonpath='{.spec.template.spec.topologySpreadConstraints}' | jq .
+```
+
+Full guide, including what a spread cannot express and why the default is
+`ScheduleAnyway`: [`PLACEMENT.md`](PLACEMENT.md).
+
+### The operator caches only labelled objects (ADR-044)
+
+The Pod template of every StatefulSet gains `app.kubernetes.io/managed-by: slaptain`
+and `ldap.chuck-chuck-chuck.net/cluster: <cluster name>`, which is the other half of
+the roll above.
 
 Services, StatefulSets and ConfigMaps get the labels on the first reconcile,
 before anything rolls.
@@ -46,73 +97,14 @@ That includes `<database>-credentials`.
 The operator cannot tell one it generated from one `scripts/mesh-share-credentials.sh` created,
 so it labels neither.
 
-## Unreleased — slapd pods are spread across nodes by default
-
-`spec.placement` arrives (ADR-043), and with it one thing the operator now
-generates for a cluster that says nothing: a single topology spread constraint
-per fleet — `maxSkew: 1` over `kubernetes.io/hostname`,
-`whenUnsatisfiable: ScheduleAnyway`, selecting that fleet of that cluster
-alone. Read-write pods spread among read-write pods, read-only among read-only.
-
-### It rolls both fleets once, and nothing moves
-
-Lead with this, because otherwise it reads as a defect.
-
-The constraint is a pod-template change, so each StatefulSet rolls its pods
-once on the upgrade. **Every pod then comes back on the node it was already
-on.** Its PVC is `ReadWriteOnce` on local storage, the PV's node affinity
-admits exactly one node, and the new constraint is soft — so the scheduler has
-one choice and takes it.
-
-"We added spreading and nothing moved" is the correct outcome. The default
-protects the *next* pod that is created from scratch — a scale-up, a rebuild,
-a fresh cluster. It does not rebalance an existing one, and it cannot: moving
-a pod to another node means deleting its PVCs and refilling it from
-replication, which is the ADR-012 case-2 rebuild and is a deliberate operation,
-not something an upgrade may do to you.
-
-Expect one rolling restart of the read-write StatefulSet and, where
-`readReplicas > 0`, one of the read-only StatefulSet. ADR-035 permits an
-operator upgrade to change the pod template once; this is the release doing it
-on purpose.
-
-### Nothing to set, unless you already manage scheduling yourself
-
-If you place slapd pods through something outside the `SlapdCluster` — a
-mutating webhook, a scheduler plugin, a policy engine — the generated
-constraint is now one more input to that decision. Switch it off explicitly:
-
-```yaml
-spec:
-  placement:
-    topologySpreadConstraints: []     # an EMPTY LIST, not an absent key
-```
-
-The empty list means "no constraint". Leaving the key out means "the operator's
-default" — the two are deliberately different answers, and the Helm charts
-carry the distinction.
-
-### Verifying
-
-Nothing in the CR status reports what placement resolved to. Read the
-StatefulSet:
-
-```bash
-kubectl -n <ns> get statefulset <cluster> \
-  -o jsonpath='{.spec.template.spec.topologySpreadConstraints}' | jq .
-```
-
-Full guide, including what a spread cannot express and why the default is
-`ScheduleAnyway`: [`PLACEMENT.md`](PLACEMENT.md).
-
-## v0.6.0 — the data database gets a syncprov checkpoint, and it is on by default
+### The data database gets a syncprov checkpoint, and it is on by default (ADR-045)
 
 One default moves. Every **replicated data** database whose `SlapdDatabase` does
 not declare `syncprovCheckpoint` gets `olcSpCheckpoint: 100 10` written to its
 syncprov overlay. (The *accesslog* database's checkpoint is a different
 attribute on a different overlay and is unchanged at `1 1`; v0.5.0 covers it.)
 
-### What it does to a running mesh
+#### What it does to a running mesh
 
 `olcSpCheckpoint` is a converged `cn=config` attribute, and `cn=config` is
 node-local, so the operator writes it to every pod individually at its next
@@ -129,7 +121,7 @@ whether or not the same pass created the overlay.
 A database that **already declares** `syncprovCheckpoint` is untouched — an
 explicit value is used verbatim, as it always was.
 
-### What reports what while it happens
+#### What reports what while it happens
 
 Nothing goes False. There is no condition for this attribute and none is added:
 the write either succeeds, or the database's reconcile fails and says so in the
@@ -146,14 +138,14 @@ slctl ldapsearch --as config -b cn=config \
 Run it per pod with `--pod <ordinal>`; it is node-local state, so a value on
 one pod says nothing about the next.
 
-### What it costs
+#### What it costs
 
 One modify of the suffix entry in the **data** environment per 100 writes — 1 %
 — and nothing at all in the accesslog environment: `syncprov_checkpoint` sets
 `o_dont_replicate`, and `accesslog_response` skips such operations, so the
 journal never sees it and ADR-037's write path is untouched.
 
-### To decline it
+#### To decline it
 
 ```yaml
 spec:
@@ -176,6 +168,7 @@ is not recommended here and not forbidden; see
 [TUNING.md](TUNING.md#both-syncprov-checkpoints-default-on-and-not-to-the-same-value).
 
 ---
+
 
 ## v0.5.0 — the default slapd image becomes PURE, and `spec.images.select` replaces pinning by tag
 

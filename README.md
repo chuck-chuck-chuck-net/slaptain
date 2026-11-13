@@ -34,8 +34,8 @@ different question:
 helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/<chart> --version <X.Y.Z>
 ```
 
-`--version` takes the bare version, **without the leading `v`** — `--version 0.5.0` for the
-`v0.5.0` release. Helm passes it through to the registry as a tag and does not normalise it,
+`--version` takes the bare version, **without the leading `v`** — `--version 0.6.0` for the
+`v0.6.0` release. Helm passes it through to the registry as a tag and does not normalise it,
 so the wrong spelling is a 404 rather than a warning. See [Versioning](docs/VERSIONING.md).
 
 ### 2. Deploy a Cluster
