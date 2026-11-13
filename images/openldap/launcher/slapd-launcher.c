@@ -39,6 +39,8 @@ int main(int argc, char **argv) {
     if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
         perror("slapd-launcher: getrlimit");
     } else {
+        /* RLIM_INFINITY is the largest rlim_t, so an unlimited hard limit
+         * selects NOFILE_MAX here without a special case. */
         rlim_t cap = NOFILE_MAX;
         rlim_t want = rl.rlim_max < cap ? rl.rlim_max : cap;
         rlim_t was = rl.rlim_cur;
