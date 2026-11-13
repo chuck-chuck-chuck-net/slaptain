@@ -25,6 +25,14 @@
 #define NOFILE_MAX 65536
 #endif
 
+/* Prints " <label> <n>", or "unlimited" for RLIM_INFINITY. */
+static void print_limit(const char *label, rlim_t v) {
+    if (v == RLIM_INFINITY)
+        fprintf(stderr, " %s unlimited", label);
+    else
+        fprintf(stderr, " %s %llu", label, (unsigned long long)v);
+}
+
 int main(int argc, char **argv) {
     struct rlimit rl;
 
@@ -33,11 +41,25 @@ int main(int argc, char **argv) {
     } else {
         rlim_t cap = NOFILE_MAX;
         rlim_t want = rl.rlim_max < cap ? rl.rlim_max : cap;
+        rlim_t was = rl.rlim_cur;
         if (rl.rlim_cur != want) {
             rl.rlim_cur = want;
-            if (setrlimit(RLIMIT_NOFILE, &rl) != 0)
+            if (setrlimit(RLIMIT_NOFILE, &rl) != 0) {
                 perror("slapd-launcher: setrlimit");
+                rl.rlim_cur = was;
+            }
         }
+        /* The limits slapd starts with: nothing slapd logs or exports names them. */
+        fprintf(stderr, "slapd-launcher: open-file limit");
+        print_limit("soft", rl.rlim_cur);
+        if (rl.rlim_cur == was) {
+            fprintf(stderr, " (unchanged),");
+        } else {
+            print_limit("(was", was);
+            fprintf(stderr, "),");
+        }
+        print_limit("hard", rl.rlim_max);
+        fputc('\n', stderr);
     }
 
     /* A caller may pass an empty argv (CVE-2021-4034); give slapd a valid one. */
