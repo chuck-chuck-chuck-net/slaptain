@@ -13,6 +13,43 @@ would say the same thing, it belongs here and `CHANGELOG.md` points at it.
 
 ## v0.6.0 — one rolling restart, pods that spread, and a default checkpoint
 
+### Apply the CRDs before upgrading the operator
+
+`helm upgrade` does **not** update CustomResourceDefinitions — they are
+cluster-scoped and shared between releases, so Helm declines to own them, and
+`--skip-crds` only turns the install off; no flag updates an existing one.
+Apply them yourself, then upgrade:
+
+```bash
+kubectl apply --server-side --force-conflicts -f \
+  https://github.com/chuck-chuck-chuck-net/slaptain/releases/download/v0.6.0/slaptain-crds.yaml
+```
+
+`--force-conflicts` is required, not defensive: Helm installed the CRDs as the
+field manager `helm`, so a plain server-side apply refuses with `conflict with
+"helm": .spec.versions`. Forcing hands the schema to `kubectl`, which is the
+correct outcome — Helm skips an existing CRD on install and never touches one on
+upgrade, so nothing takes it back.
+
+**Skipping this does not fail — and in this release it fails invisibly.** The API
+server prunes fields the CRD does not know about without an error: `kubectl apply`
+reports success and the field is simply absent. Against a 0.5.0 CRD that drops
+all of `spec.placement`, so no spread constraint is generated and no pod moves —
+which is **exactly what the next section tells you to expect**. The failed
+upgrade and the successful one look identical from the outside. Check the CRD
+rather than the pods:
+
+```bash
+kubectl get crd slapdclusters.ldap.chuck-chuck-chuck.net \
+  -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.placement}'
+```
+
+An empty result means the old CRD is still installed. Re-apply it, then re-apply
+your CRs — pruned values are gone from the stored object and have to be sent
+again.
+
+### One rolling restart, for two reasons
+
 Two changes in this release touch the slapd Pod template — the default spread
 constraint that comes with `spec.placement`, and the cache labels the operator
 now stamps on what it creates. They land together, so each StatefulSet replaces

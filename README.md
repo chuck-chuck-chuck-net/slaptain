@@ -34,6 +34,29 @@ different question:
 helm pull oci://ghcr.io/chuck-chuck-chuck-net/charts/<chart> --version <X.Y.Z>
 ```
 
+### Upgrading an existing install? Apply the CRDs first
+
+`helm upgrade` does **not** update CustomResourceDefinitions — they are cluster-scoped and
+shared between releases, so Helm declines to own them, and `--skip-crds` only turns the
+install off; no flag updates an existing one. Apply them yourself, then upgrade:
+
+```bash
+kubectl apply --server-side --force-conflicts -f \
+  https://github.com/chuck-chuck-chuck-net/slaptain/releases/download/v0.6.0/slaptain-crds.yaml
+
+helm upgrade slaptain oci://ghcr.io/chuck-chuck-chuck-net/charts/slaptain \
+  -n slaptain-system --version 0.6.0
+```
+
+`--force-conflicts` is required, not defensive: Helm installed the CRDs as the field manager
+`helm`, so a plain server-side apply refuses with `conflict with "helm": .spec.versions`.
+
+**Skipping this does not fail — it fails silently.** The API server prunes fields the CRD does
+not know about without an error. Against a 0.5.0 CRD that drops all of `spec.placement`, so no
+spread constraint is generated and no pod moves — which is exactly what a correct upgrade also
+looks like. Check the CRD, not the pods, and see
+[Upgrading](docs/UPGRADING.md#apply-the-crds-before-upgrading-the-operator) for the probe.
+
 `--version` takes the bare version, **without the leading `v`** — `--version 0.6.0` for the
 `v0.6.0` release. Helm passes it through to the registry as a tag and does not normalise it,
 so the wrong spelling is a 404 rather than a warning. See [Versioning](docs/VERSIONING.md).
@@ -225,8 +248,8 @@ spec:
 
 | `storageFormat` | `flavour` | what it is |
 |---|---|---|
-| `lmdb1.0` | `pure` | **the default** — OpenLDAP 2.7.1, no slaptain patches |
-| `lmdb1.0` | `slaptain` | 2.7.1 plus our behaviour patches |
+| `lmdb1.0` | `pure` | **the default** — OpenLDAP 2.7.2, no slaptain patches |
+| `lmdb1.0` | `slaptain` | 2.7.2 plus our behaviour patches |
 | `lmdb0.9` | `pure` | OpenLDAP 2.6, Debian's own build |
 | `lmdb0.9` | `slaptain` | 2.6 plus our behaviour patches |
 
@@ -286,6 +309,13 @@ you got: `slapd -VV` reports `+slaptain<N>` or `+pure<N>`.
 - **Declarative ACLs and schemas**: declare ACL rules on `SlapdDatabase`, schema elements on `SlapdSchema`; the operator applies them to every pod's `cn=config` individually and self-heals after pod replacement.
 - **Automatic credential management**: the operator generates per-database admin and replication passwords in Kubernetes Secrets — or reads them from user-provided Secrets.
 - **Multi-database support**: run multiple independent databases (each with its own suffix, credentials, ACLs, replication config) in one cluster.
+- **Pod placement**: `spec.placement` passes through the five Kubernetes knobs that
+  decide where pods land — spread constraints, `nodeSelector`, node affinity,
+  tolerations, priority class — and a cluster that declares none gets one generated
+  spread constraint per fleet (`maxSkew: 1` over `kubernetes.io/hostname`,
+  `ScheduleAnyway`). It matters more here than for a typical workload: the PVCs are
+  RWO on local storage, so a pod is pinned to its volume's node for the life of the
+  PVC and a bad spread is permanent. See [Pod Placement](docs/PLACEMENT.md).
 - **Security**: rootless execution (UID 1024), no privilege escalation, read-only root filesystem, distroless runtime images, TLS encryption.
 - **Database lifecycle**: cleanup policy (Retain/Delete) controls what happens when a `SlapdDatabase` CR is deleted. Default: Retain (database stays in slapd, becomes unmanaged).
 - **Data-plane image selection**: `spec.images.select` names the build by what it governs — the on-disk format its volumes are in, and whether it carries slaptain's patches — and drives both the slapd and slapd-init images from one declaration, so a mismatched pair is not a state you can reach.
@@ -457,6 +487,7 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [Bootstrap Internals](docs/BOOTSTRAP.md) — init container and operator bootstrap sequencing
 - [Backup & Restore](docs/BACKUP.md) — S3 backup, scheduled backups + retention, restore into a fresh DB, in-place rollback
 - [Purge Rotation](docs/PURGE-ROTATION.md) — the client-connection contract first, then how to turn the rotation on, the sizing arithmetic, and what it cannot do
+- [Pod Placement](docs/PLACEMENT.md) — where a cluster's pods land: the generated per-fleet spread and why it is soft, the deadlock a hard constraint reaches with a bound local PV, and why cross-fleet separation is not expressible as a spread
 - [Monitoring](docs/MONITORING.md) — what slaptain exposes to Prometheus, the join keys, and what it still cannot tell you
 - [Upgrading](docs/UPGRADING.md) — what an operator upgrade does to a running mesh, per release
 - [Tuning & Sizing](docs/TUNING.md) — what is tunable, slaptain's defaults and how they differ from slapd's, and sizing a cluster from lab to production
@@ -465,7 +496,7 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [slctl](docs/slctl.md) — the diagnostic CLI: status, inspect, debug-dump, ldapsearch/add/modify/delete against a managed cluster
 - [OpenLDAP Versions](docs/OPENLDAP-VERSIONS.md) — the 2.7/2.6 image pairs, the tag scheme, and the 2.6 -> 2.7 migration runbook
 - [Sample manifests](operator/config/samples/) — one commented example per CRD
-- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-041
+- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-048
 - [Development Guide](docs/DEVELOPMENT.md) — prerequisites, image builds, operator dev loop, e2e cycle, debugging, project discipline
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 
