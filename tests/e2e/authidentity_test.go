@@ -184,7 +184,7 @@ var _ = Describe("node-local replication identity", Label("auth-identity"), Orde
 	//
 	// Destructive by nature, so it runs last and restores the original password
 	// on the way out. It only ever touches this suite's own fixture Secret.
-	It("rotates the replication password through the Secret", func(ctx SpecContext) {
+	It("rotates the replication password through the Secret", Label("secret-rotation"), func(ctx SpecContext) {
 		newPW := fmt.Sprintf("rotated-%d", time.Now().UnixNano())
 
 		By("patching replication-password in " + credSecret)
