@@ -115,12 +115,10 @@ func clusterObservation(
 	discoveryFailed map[string]string,
 ) obsmetrics.ClusterObservation {
 	obs := obsmetrics.ClusterObservation{
-		Identity: obsmetrics.Identity{
-			Namespace: sc.Namespace,
-			Cluster:   sc.Name,
-			Mesh:      sc.Spec.MeshRef,
-		},
-		Observed: observed,
+		Namespace: sc.Namespace,
+		Cluster:   sc.Name,
+		Mesh:      sc.Spec.MeshRef,
+		Observed:  observed,
 	}
 
 	// Sorted so one pass's observation is byte-stable; the render sorts its own
@@ -241,13 +239,11 @@ func databaseObservation(
 	probes []podPresence,
 ) obsmetrics.DatabaseObservation {
 	obs := obsmetrics.DatabaseObservation{
-		Identity: obsmetrics.Identity{
-			Namespace: sd.Namespace,
-			Cluster:   sd.Spec.ClusterRef,
-			Mesh:      mesh,
-		},
-		Database: sd.Name,
-		Observed: observed,
+		Namespace: sd.Namespace,
+		Cluster:   sd.Spec.ClusterRef,
+		Mesh:      mesh,
+		Database:  sd.Name,
+		Observed:  observed,
 	}
 
 	for _, p := range probes {

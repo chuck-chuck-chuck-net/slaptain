@@ -35,7 +35,7 @@ const sourceCSN = "20260912104300.000000Z#000000#001#000000"
 
 func replicatedCluster(conds ...metav1.Condition) *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+		Name: testClusterName, Namespace: "ns",
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			Replicas:    3,
 			Replication: ldapv1alpha1.SlapdReplicationConfig{Enabled: true},
@@ -107,8 +107,8 @@ func TestSourceConvergedCondition(t *testing.T) {
 			// artifact is by construction the whole truth.
 			name: "replication disabled",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
-				Spec:       ldapv1alpha1.SlapdClusterSpec{Replicas: 1},
+				Name: testClusterName, Namespace: "ns",
+				Spec: ldapv1alpha1.SlapdClusterSpec{Replicas: 1},
 			},
 			wantStatus: metav1.ConditionTrue,
 			wantReason: reasonNotReplicated,
@@ -117,7 +117,7 @@ func TestSourceConvergedCondition(t *testing.T) {
 		{
 			name: "replication enabled but single replica, no peers",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
 					Replication: ldapv1alpha1.SlapdReplicationConfig{Enabled: true},
@@ -132,7 +132,7 @@ func TestSourceConvergedCondition(t *testing.T) {
 			// this cluster IS a replication participant.
 			name: "single replica with an external peer",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas: 1,
 					Replication: ldapv1alpha1.SlapdReplicationConfig{
@@ -286,16 +286,16 @@ func TestNormalizedCSNVector(t *testing.T) {
 // assertions below (verified 2026-09-12).
 func TestBackupSourcePodMatchesJobAffinity(t *testing.T) {
 	sc := &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
-		Spec:       ldapv1alpha1.SlapdClusterSpec{Replicas: 3},
+		Name: testClusterName, Namespace: "ns",
+		Spec: ldapv1alpha1.SlapdClusterSpec{Replicas: 3},
 	}
 	sd := &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: "ns"},
-		Spec:       ldapv1alpha1.SlapdDatabaseSpec{Suffix: testSuffix},
+		Name: testDefaultDB, Namespace: "ns",
+		Spec: ldapv1alpha1.SlapdDatabaseSpec{Suffix: testSuffix},
 	}
 	sb := &ldapv1alpha1.SlapdBackup{
-		ObjectMeta: metav1.ObjectMeta{Name: "b1", Namespace: "ns"},
-		Spec:       ldapv1alpha1.SlapdBackupSpec{DatabaseRef: testDefaultDB},
+		Name: "b1", Namespace: "ns",
+		Spec: ldapv1alpha1.SlapdBackupSpec{DatabaseRef: testDefaultDB},
 	}
 
 	want := backupSourcePod(sc)

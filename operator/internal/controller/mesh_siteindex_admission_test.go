@@ -18,7 +18,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -49,7 +48,7 @@ func meshAdmissionNamespace(ctx context.Context) string {
 	meshAdmissionSeq++
 	ns := fmt.Sprintf("mesh-siteindex-%d", meshAdmissionSeq)
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: ns},
+		Name: ns,
 	})).To(Succeed())
 	return ns
 }
@@ -66,7 +65,7 @@ func meshWithSites(ns string, layout *ldapv1alpha1.RIDLayout, indices ...int32) 
 		})
 	}
 	return &ldapv1alpha1.SlapdMesh{
-		ObjectMeta: metav1.ObjectMeta{Name: testMeshName, Namespace: ns},
+		Name: testMeshName, Namespace: ns,
 		Spec: ldapv1alpha1.SlapdMeshSpec{
 			Sites:     sites,
 			RIDLayout: layout,

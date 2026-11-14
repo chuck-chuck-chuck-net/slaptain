@@ -20,7 +20,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -144,7 +143,7 @@ func TestDatabaseControllerLabelsEverythingItWrites(t *testing.T) {
 		OperatorImage:   goldenOperatorImage,
 	}
 	sc := labelsTestCluster()
-	sd := &ldapv1alpha1.SlapdDatabase{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: sc.Namespace}}
+	sd := &ldapv1alpha1.SlapdDatabase{Name: "db", Namespace: sc.Namespace}
 
 	if err := r.reconcileCredentials(ctx, sd, sc); err != nil {
 		t.Fatalf("reconcileCredentials: %v", err)
@@ -164,8 +163,8 @@ func TestDatabaseControllerLabelsEverythingItWrites(t *testing.T) {
 
 func TestBackupAndRestoreJobsCarryTheLabels(t *testing.T) {
 	sc := labelsTestCluster()
-	sd := &ldapv1alpha1.SlapdDatabase{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: sc.Namespace}}
-	sb := &ldapv1alpha1.SlapdBackup{ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: sc.Namespace}}
+	sd := &ldapv1alpha1.SlapdDatabase{Name: "db", Namespace: sc.Namespace}
+	sb := &ldapv1alpha1.SlapdBackup{Name: "nightly", Namespace: sc.Namespace}
 	sc.Status.Restore = &ldapv1alpha1.SlapdClusterRestoreStatus{ID: "r1"}
 
 	assertJobLabels(t, buildBackupJob(sb, sd, sc, "init:1", goldenOperatorImage, "key"))
@@ -221,8 +220,8 @@ func TestCacheOptionsFilterTheCoreKindsOnly(t *testing.T) {
 func TestFallbackClientReadsAFilteredMissFromTheAPI(t *testing.T) {
 	ctx := context.Background()
 	s := ridScheme(t)
-	userSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "user", Namespace: "ns"}}
-	sc := &ldapv1alpha1.SlapdCluster{ObjectMeta: metav1.ObjectMeta{Name: "sc", Namespace: "ns"}}
+	userSecret := &corev1.Secret{Name: "user", Namespace: "ns"}
+	sc := &ldapv1alpha1.SlapdCluster{Name: "sc", Namespace: "ns"}
 	cached := fake.NewClientBuilder().WithScheme(s).Build()
 	api := fake.NewClientBuilder().WithScheme(s).WithObjects(userSecret, sc).Build()
 	c := NewCacheFallbackClient(cached, api)
@@ -247,15 +246,15 @@ func TestGeneratedSecretsGetLabelledUserSecretsDoNot(t *testing.T) {
 	s := ridScheme(t)
 	sc := labelsTestCluster()
 	old := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: sc.Name + "-config-password", Namespace: sc.Namespace},
-		Data:       map[string][]byte{secretKeyRootPassword: []byte("kept")},
+		Name: sc.Name + "-config-password", Namespace: sc.Namespace,
+		Data: map[string][]byte{secretKeyRootPassword: []byte("kept")},
 	}
 	oldDB := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "db-credentials", Namespace: sc.Namespace},
-		Data:       map[string][]byte{secretKeyRootPassword: []byte("kept")},
+		Name: "db-credentials", Namespace: sc.Namespace,
+		Data: map[string][]byte{secretKeyRootPassword: []byte("kept")},
 	}
 	user := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: byoSecretName, Namespace: sc.Namespace},
+		Name: byoSecretName, Namespace: sc.Namespace,
 		Data: map[string][]byte{
 			secretKeyRootPassword:        []byte("mine"),
 			secretKeyReplicationPassword: []byte("mine"),
@@ -273,11 +272,11 @@ func TestGeneratedSecretsGetLabelledUserSecretsDoNot(t *testing.T) {
 	}
 	dr := &SlapdDatabaseReconciler{Client: c, Scheme: s}
 	if err := dr.reconcileCredentials(ctx, &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: sc.Namespace},
+		Name: "db", Namespace: sc.Namespace,
 	}, sc); err != nil {
 		t.Fatalf("reconcileCredentials (generated): %v", err)
 	}
-	byo := &ldapv1alpha1.SlapdDatabase{ObjectMeta: metav1.ObjectMeta{Name: "db2", Namespace: sc.Namespace}}
+	byo := &ldapv1alpha1.SlapdDatabase{Name: "db2", Namespace: sc.Namespace}
 	byo.Spec.Credentials.SecretName = byoSecretName
 	if err := dr.reconcileCredentials(ctx, byo, sc); err != nil {
 		t.Fatalf("reconcileCredentials (user): %v", err)
@@ -314,7 +313,7 @@ func TestUnownedConfigPasswordIsNotLabelled(t *testing.T) {
 	ctx := context.Background()
 	s := ridScheme(t)
 	sc := labelsTestCluster()
-	handMade := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: sc.Name + "-config-password", Namespace: sc.Namespace}}
+	handMade := &corev1.Secret{Name: sc.Name + "-config-password", Namespace: sc.Namespace}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(handMade).Build()
 	r := goldenReconciler()
 	r.Client, r.Scheme = c, s

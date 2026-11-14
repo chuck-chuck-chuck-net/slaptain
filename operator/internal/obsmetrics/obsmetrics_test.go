@@ -38,7 +38,7 @@ import (
 // for the rest cannot pass.
 func healthyCluster() ClusterObservation {
 	return ClusterObservation{
-		Identity: Identity{Namespace: testNamespace, Cluster: testCluster, Mesh: testMesh},
+		Namespace: testNamespace, Cluster: testCluster, Mesh: testMesh,
 		Observed: time.Unix(1700000000, 0),
 		Databases: []DatabaseCSN{
 			{Database: testDB, PairsExpected: 3, PairsRead: 3, Spread: new(time.Duration(0))},
@@ -78,7 +78,7 @@ var wantHealthyCluster = []string{
 // the render reads its input rather than its own defaults.
 func controlCluster() ClusterObservation {
 	return ClusterObservation{
-		Identity: Identity{Namespace: "other-ns", Cluster: testControlCluster, Mesh: testControlMesh},
+		Namespace: "other-ns", Cluster: testControlCluster, Mesh: testControlMesh,
 		Observed: time.Unix(1200000000, 0),
 		Databases: []DatabaseCSN{
 			{Database: "people", PairsExpected: 5, PairsRead: 4, Spread: new(7 * time.Second)},
@@ -103,7 +103,7 @@ var wantControlCluster = []string{
 // only when something is wrong.
 func healthyDatabase() DatabaseObservation {
 	return DatabaseObservation{
-		Identity: Identity{Namespace: testNamespace, Cluster: testCluster, Mesh: testMesh},
+		Namespace: testNamespace, Cluster: testCluster, Mesh: testMesh,
 		Database: testDB,
 		Observed: time.Unix(1700000000, 0),
 		Pods: []SuffixProbe{
@@ -130,7 +130,7 @@ var wantHealthyDatabase = []string{
 // both exist.
 func controlDatabase() DatabaseObservation {
 	return DatabaseObservation{
-		Identity: Identity{Namespace: "other-ns", Cluster: testControlCluster, Mesh: testControlMesh},
+		Namespace: "other-ns", Cluster: testControlCluster, Mesh: testControlMesh,
 		Database: "people",
 		Observed: time.Unix(1200000000, 0),
 		Pods: []SuffixProbe{
@@ -754,7 +754,7 @@ func TestRenderOrderIsDeterministic(t *testing.T) {
 	// Input order deliberately unsorted, to pin that the render sorts its
 	// OUTPUT rather than trusting its caller.
 	cluster := ClusterObservation{
-		Identity: Identity{Namespace: "ns", Cluster: "c", Mesh: "m"},
+		Namespace: "ns", Cluster: "c", Mesh: "m",
 		Observed: time.Unix(1700000000, 0),
 		Databases: []DatabaseCSN{
 			{Database: "zeta", PairsExpected: 2, PairsRead: 2, Spread: new(time.Second)},
@@ -766,7 +766,7 @@ func TestRenderOrderIsDeterministic(t *testing.T) {
 		},
 	}
 	db := DatabaseObservation{
-		Identity: Identity{Namespace: "ns", Cluster: "c", Mesh: "m"},
+		Namespace: "ns", Cluster: "c", Mesh: "m",
 		Database: "d",
 		Observed: time.Unix(1700000000, 0),
 		Pods: []SuffixProbe{
@@ -972,7 +972,7 @@ func TestCSNSpreadGatesOnThePointerAndNothingElse(t *testing.T) {
 // catching the thing it was written for.
 func TestSuffixProbeCarriesTheRoleOfEveryPod(t *testing.T) {
 	obs := DatabaseObservation{
-		Identity: Identity{Namespace: "ns", Cluster: "c", Mesh: "m"},
+		Namespace: "ns", Cluster: "c", Mesh: "m",
 		Database: "d",
 		Observed: time.Unix(1700000000, 0),
 		Pods: []SuffixProbe{
@@ -1022,7 +1022,7 @@ func TestSuffixProbeCarriesTheRoleOfEveryPod(t *testing.T) {
 // must never be noisy.
 func TestSuffixGlueIsItsOwnFamilyWithPresenceAsTheSignal(t *testing.T) {
 	obs := DatabaseObservation{
-		Identity: Identity{Namespace: "ns", Cluster: "c", Mesh: "m"},
+		Namespace: "ns", Cluster: "c", Mesh: "m",
 		Database: "d",
 		Observed: time.Unix(1700000000, 0),
 		Pods: []SuffixProbe{

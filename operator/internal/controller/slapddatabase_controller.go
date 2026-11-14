@@ -666,8 +666,8 @@ func (r *SlapdDatabaseReconciler) reconcileCredentials(
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: sd.Namespace, Labels: withOperatorLabels(sc.Name, nil)},
-		Type:       corev1.SecretTypeOpaque,
+		Name: secretName, Namespace: sd.Namespace, Labels: withOperatorLabels(sc.Name, nil),
+		Type: corev1.SecretTypeOpaque,
 		StringData: map[string]string{
 			secretKeyRootPassword:        rootPW,
 			secretKeyReplicationPassword: replPW,
@@ -4013,14 +4013,10 @@ func (r *SlapdDatabaseReconciler) setStatus(
 	})
 
 	statusPatch := &ldapv1alpha1.SlapdDatabase{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: ldapv1alpha1.GroupVersion.String(),
-			Kind:       kindSlapdDatabase,
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sd.Name,
-			Namespace: sd.Namespace,
-		},
+		APIVersion: ldapv1alpha1.GroupVersion.String(),
+		Kind:       kindSlapdDatabase,
+		Name:       sd.Name,
+		Namespace:  sd.Namespace,
 	}
 	statusPatch.Status = sd.Status
 	ac, err := applyConfiguration(statusPatch)
@@ -4056,10 +4052,8 @@ func (r *SlapdDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				for _, db := range dbList.Items {
 					if db.Spec.ClusterRef == sc.Name {
 						reqs = append(reqs, ctrl.Request{
-							NamespacedName: client.ObjectKey{
-								Name:      db.Name,
-								Namespace: db.Namespace,
-							},
+							Name:      db.Name,
+							Namespace: db.Namespace,
 						})
 					}
 				}
@@ -4099,7 +4093,7 @@ func (r *SlapdDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 						continue
 					}
 					reqs = append(reqs, ctrl.Request{
-						NamespacedName: client.ObjectKey{Name: db.Name, Namespace: db.Namespace},
+						Name: db.Name, Namespace: db.Namespace,
 					})
 				}
 				return reqs

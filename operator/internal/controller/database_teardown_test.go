@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const pod0Host = "slapd-0.slapd-headless.ns.svc.cluster.local"
@@ -122,7 +121,7 @@ func TestPlanSubtreeDeletion(t *testing.T) {
 func TestDatabasePodHosts(t *testing.T) {
 	sc := func(replicas, readReplicas int32) *ldapv1alpha1.SlapdCluster {
 		return &ldapv1alpha1.SlapdCluster{
-			ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+			Name: testClusterName, Namespace: "ns",
 			Spec: ldapv1alpha1.SlapdClusterSpec{
 				Replicas:     replicas,
 				ReadReplicas: readReplicas,

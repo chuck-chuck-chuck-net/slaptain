@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -64,7 +63,7 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 	// A three-site mesh, indices 0/1/2 → serverID bases 0/16/32, which is
 	// the lab's shape and what tests/e2e.sh generates.
 	mesh := &ldapv1alpha1.SlapdMesh{
-		ObjectMeta: metav1.ObjectMeta{Name: backupTestMesh, Namespace: "ns"},
+		Name: backupTestMesh, Namespace: "ns",
 		Spec: ldapv1alpha1.SlapdMeshSpec{
 			Sites: []ldapv1alpha1.MeshSite{
 				{Name: testSite1, ServerIDIndex: idx(0)},
@@ -86,7 +85,7 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 			// The case the whole file exists for.
 			name: "single replica, peers derived from a mesh",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
 					MeshRef:     backupTestMesh,
@@ -105,7 +104,7 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 			// would pass the case above for the wrong reason.
 			name: "single replica, no mesh and no peers",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
 					Replication: ldapv1alpha1.SlapdReplicationConfig{Enabled: true},
@@ -120,7 +119,7 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 			// peers, and one peer is enough.
 			name: "single replica, mesh narrowed by a site selector",
 			cluster: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
 					MeshRef:     backupTestMesh,
@@ -149,7 +148,7 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 
 			job := buildBackupJob(
 				&ldapv1alpha1.SlapdBackup{
-					ObjectMeta: metav1.ObjectMeta{Name: "bk", Namespace: "ns"},
+					Name: "bk", Namespace: "ns",
 					Spec: ldapv1alpha1.SlapdBackupSpec{
 						DatabaseRef: testDBName,
 						Storage: ldapv1alpha1.S3StorageSpec{
@@ -159,8 +158,8 @@ func TestBackupJobMountsAccesslogOnSingleReplicaMeshMember(t *testing.T) {
 					},
 				},
 				&ldapv1alpha1.SlapdDatabase{
-					ObjectMeta: metav1.ObjectMeta{Name: testDBName, Namespace: "ns"},
-					Spec:       ldapv1alpha1.SlapdDatabaseSpec{Suffix: testSuffix},
+					Name: testDBName, Namespace: "ns",
+					Spec: ldapv1alpha1.SlapdDatabaseSpec{Suffix: testSuffix},
 				},
 				sc, "init:img", "operator:img", "key",
 			)

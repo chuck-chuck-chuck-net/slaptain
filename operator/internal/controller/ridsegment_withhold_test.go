@@ -73,19 +73,19 @@ func newRIDFixture(ctx context.Context) *ridFixture {
 	}
 
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: f.ns},
+		Name: f.ns,
 	})).To(Succeed())
 
 	// The cn=config admin password the reconcile reads at step 6. Pre-created
 	// because the SlapdCluster controller, which normally generates it, is not
 	// running here.
 	Expect(k8sClient.Create(ctx, &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: f.cluster + "-config-password", Namespace: f.ns},
+		Name: f.cluster + "-config-password", Namespace: f.ns,
 		StringData: map[string]string{secretKeyRootPassword: "not-a-real-password"},
 	})).To(Succeed())
 
 	sc := &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: f.cluster, Namespace: f.ns},
+		Name: f.cluster, Namespace: f.ns,
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			Replicas: 1,
 			Replication: ldapv1alpha1.SlapdReplicationConfig{
@@ -108,7 +108,7 @@ func newRIDFixture(ctx context.Context) *ridFixture {
 func (f *ridFixture) createDB(ctx context.Context, name string, segment *int32) error {
 	enabled := true
 	return k8sClient.Create(ctx, &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: f.ns},
+		Name: name, Namespace: f.ns,
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			ClusterRef: f.cluster,
 			Suffix:     fmt.Sprintf("dc=%s,dc=test", name),
@@ -122,7 +122,7 @@ func (f *ridFixture) createDB(ctx context.Context, name string, segment *int32) 
 
 func (f *ridFixture) reconcile(ctx context.Context, name string) {
 	_, err := f.reconciler.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: name, Namespace: f.ns},
+		Name: name, Namespace: f.ns,
 	})
 	Expect(err).NotTo(HaveOccurred(),
 		"a refused RID segment is a reported state, not a controller error: returning an error "+
@@ -315,7 +315,7 @@ var _ = Describe("RID segment withhold (ADR-031 decision 6)", func() {
 		f := newRIDFixture(ctx)
 		disabled := false
 		Expect(k8sClient.Create(ctx, &ldapv1alpha1.SlapdDatabase{
-			ObjectMeta: metav1.ObjectMeta{Name: "quiet", Namespace: f.ns},
+			Name: "quiet", Namespace: f.ns,
 			Spec: ldapv1alpha1.SlapdDatabaseSpec{
 				ClusterRef:  f.cluster,
 				Suffix:      "dc=quiet,dc=test",
