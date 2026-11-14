@@ -496,7 +496,7 @@ Running a replicated OpenLDAP cluster on Kubernetes creates lifecycle problems t
 - [slctl](docs/slctl.md) — the diagnostic CLI: status, inspect, debug-dump, ldapsearch/add/modify/delete against a managed cluster
 - [OpenLDAP Versions](docs/OPENLDAP-VERSIONS.md) — the 2.7/2.6 image pairs, the tag scheme, and the 2.6 -> 2.7 migration runbook
 - [Sample manifests](operator/config/samples/) — one commented example per CRD
-- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-048
+- [Architecture Decision Records](docs/adrs/) — ADR-001 through ADR-049
 - [Development Guide](docs/DEVELOPMENT.md) — prerequisites, image builds, operator dev loop, e2e cycle, debugging, project discipline
 - [GitHub Issues](https://github.com/chuck-chuck-chuck-net/slaptain/issues) — bug reports and feature requests
 
