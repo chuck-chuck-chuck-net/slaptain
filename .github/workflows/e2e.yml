@@ -31,14 +31,14 @@ permissions:
 jobs:
   e2e:
     name: e2e (${{ matrix.tier }})
-    # A push or the "dev images" label needs that label; adding "e2e slow" starts the
-    # slow tier on its own. A fork's pull request gets no dev images.
+    # Every run needs the "dev images" label; adding "e2e slow" starts the slow tier on
+    # its own. A fork's pull request gets no dev images.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       (github.event.label.name == 'e2e slow' ||
-        (contains(github.event.pull_request.labels.*.name, 'dev images') &&
-         (github.event.action != 'labeled' || github.event.label.name == 'dev images'))))
+       contains(github.event.pull_request.labels.*.name, 'dev images') &&
+       (github.event.action != 'labeled' ||
+        github.event.label.name == 'dev images' || github.event.label.name == 'e2e slow'))
     strategy:
       fail-fast: false
       matrix:
@@ -127,34 +127,25 @@ jobs:
 
       - name: Wait for this commit's dev images
         run: |
-          for i in $(seq 1 120); do
-            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow publish-dev.yml \
-              --commit "$SHA" --json databaseId,status)
-            cancelled=0
-            for id in $(jq -r '.[] | select(.status == "completed") | .databaseId' <<<"$runs"); do
+          for _ in $(seq 1 120); do
+            # Once the branch has moved on, the branch tag will never carry this commit's images.
+            if [ "$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)" != "$SHA" ]; then
+              echo "::notice::$BRANCH has moved past $SHA; cancelling this run"
+              gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+              sleep 60
+            fi
+            for id in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow publish-dev.yml \
+                --commit "$SHA" --status completed --json databaseId --jq '.[].databaseId'); do
               builds=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" --json jobs --jq \
                 '[.jobs[] | select(.name | startswith("Build and push")) | .conclusion]')
               if jq -e 'length > 0 and all(. == "success")' <<<"$builds" >/dev/null; then
                 exit 0
               fi
-              if jq -e 'any(. == "cancelled")' <<<"$builds" >/dev/null; then
-                cancelled=1
-              fi
-            done
-            if ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
-              # Opening a pull request with its labels starts publish-dev once per event, and
-              # the runs of one commit cancel each other, so only a cancel with no run left
-              # means a newer push superseded this commit's builds.
-              if [ "$cancelled" = 1 ]; then
-                echo "::notice::A newer push superseded the images of $SHA; cancelling this run"
-                gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
-                sleep 60
-              fi
-              if [ "$i" -gt 4 ]; then
-                echo "::error::No publish-dev run built images for $SHA. Is the pull request labelled dev images?"
+              if jq -e 'any(. == "failure")' <<<"$builds" >/dev/null; then
+                echo "::error::The dev images of $SHA failed to build"
                 exit 1
               fi
-            fi
+            done
             sleep 30
           done
           echo "::error::Timed out waiting for the dev images of $SHA"

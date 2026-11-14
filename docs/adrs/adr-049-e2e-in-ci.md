@@ -28,7 +28,7 @@ Multi-site and external replication need two, with routed pod networks (ADR-016)
      so the suite tests what the pull request would ship, and the job builds nothing.
    - The job waits until `publish-dev` has pushed its own commit's images,
      because the branch tag still points at the previous push until then.
-     When a newer push cancelled those builds, the tag will never show this commit,
+     Once the branch has moved past this commit, the tag will never show it,
      and the job cancels itself rather than test a newer commit under this one's name.
 3. **When does it run?**
    - On every push to a pull request labelled `dev images`, and when the label is added.
