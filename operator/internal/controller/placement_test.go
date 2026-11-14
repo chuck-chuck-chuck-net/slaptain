@@ -46,11 +46,11 @@ func TestDefaultSpreadConstraint(t *testing.T) {
 		readOnly bool
 		want     map[string]string
 	}{
-		{"read-write fleet", false, selectorLabels("slapd")},
-		{"read-only fleet", true, readOnlySelectorLabels("slapd")},
+		{"read-write fleet", false, selectorLabels(testClusterName)},
+		{"read-only fleet", true, readOnlySelectorLabels(testClusterName)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := defaultSpreadConstraint("slapd", tc.readOnly)
+			got := defaultSpreadConstraint(testClusterName, tc.readOnly)
 
 			if got.MaxSkew != 1 {
 				t.Errorf("maxSkew = %d, want 1", got.MaxSkew)
@@ -85,8 +85,8 @@ func TestDefaultSpreadConstraint(t *testing.T) {
 // The two fleets must not get the same constraint: that is option 3 of
 // ADR-043, which looks right and is strictly weaker.
 func TestDefaultSpreadConstraintDiffersPerFleet(t *testing.T) {
-	rw := defaultSpreadConstraint("slapd", false)
-	ro := defaultSpreadConstraint("slapd", true)
+	rw := defaultSpreadConstraint(testClusterName, false)
+	ro := defaultSpreadConstraint(testClusterName, true)
 	if reflect.DeepEqual(rw, ro) {
 		t.Fatalf("both fleets got the same constraint %+v — a combined group permits every writer "+
 			"to share a node while the per-node totals still look even (ADR-043 option 3)", rw)
@@ -116,13 +116,13 @@ func TestSpreadConstraintsFor(t *testing.T) {
 		{
 			name: "unset generates the read-write default",
 			set:  func(*ldapv1alpha1.SlapdCluster) {},
-			want: []corev1.TopologySpreadConstraint{defaultSpreadConstraint("slapd", false)},
+			want: []corev1.TopologySpreadConstraint{defaultSpreadConstraint(testClusterName, false)},
 		},
 		{
 			name:     "unset generates the read-only default",
 			readOnly: true,
 			set:      func(*ldapv1alpha1.SlapdCluster) {},
-			want:     []corev1.TopologySpreadConstraint{defaultSpreadConstraint("slapd", true)},
+			want:     []corev1.TopologySpreadConstraint{defaultSpreadConstraint(testClusterName, true)},
 		},
 		{
 			name: "a user list replaces the default, it is not merged into",
@@ -156,12 +156,12 @@ func TestSpreadConstraintsFor(t *testing.T) {
 			set: func(sc *ldapv1alpha1.SlapdCluster) {
 				sc.Spec.Placement.NodeSelector = map[string]string{"role": "directory"}
 			},
-			want: []corev1.TopologySpreadConstraint{defaultSpreadConstraint("slapd", false)},
+			want: []corev1.TopologySpreadConstraint{defaultSpreadConstraint(testClusterName, false)},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sc := &ldapv1alpha1.SlapdCluster{}
-			sc.Name = "slapd"
+			sc.Name = testClusterName
 			sc.Namespace = testNamespace
 			tc.set(sc)
 
