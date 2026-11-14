@@ -7,7 +7,9 @@ name: e2e
 #          that label. Run it once by adding the label and removing it again.
 # Run workflow on this file starts either tier on a branch.
 # The images are tagged by branch, so a run first waits until publish-dev has
-# pushed this commit's. No concurrency group: a new push never cancels a run.
+# pushed this commit's. Runs of one commit and tier cancel each other, so opening a
+# pull request with its labels leaves one run per tier; a new push never cancels an
+# older commit's run.
 
 on:
   pull_request:
@@ -46,6 +48,9 @@ jobs:
             (github.event.label.name == 'e2e slow' && '["slow"]') ||
             (contains(github.event.pull_request.labels.*.name, 'e2e slow') && '["smoke","slow"]') ||
             '["smoke"]') }}
+    concurrency:
+      group: e2e-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.tier }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.tier == 'slow' && 180 || 60 }}
     permissions:
