@@ -130,22 +130,30 @@ jobs:
           for i in $(seq 1 120); do
             runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow publish-dev.yml \
               --commit "$SHA" --json databaseId,status)
+            cancelled=0
             for id in $(jq -r '.[] | select(.status == "completed") | .databaseId' <<<"$runs"); do
               builds=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" --json jobs --jq \
                 '[.jobs[] | select(.name | startswith("Build and push")) | .conclusion]')
               if jq -e 'length > 0 and all(. == "success")' <<<"$builds" >/dev/null; then
                 exit 0
               fi
-              # A newer push cancelled this commit's builds: nothing here to test.
               if jq -e 'any(. == "cancelled")' <<<"$builds" >/dev/null; then
+                cancelled=1
+              fi
+            done
+            if ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              # Opening a pull request with its labels starts publish-dev once per event, and
+              # the runs of one commit cancel each other, so only a cancel with no run left
+              # means a newer push superseded this commit's builds.
+              if [ "$cancelled" = 1 ]; then
                 echo "::notice::A newer push superseded the images of $SHA; cancelling this run"
                 gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
                 sleep 60
               fi
-            done
-            if [ "$i" -gt 4 ] && ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
-              echo "::error::No publish-dev run built images for $SHA. Is the pull request labelled dev images?"
-              exit 1
+              if [ "$i" -gt 4 ]; then
+                echo "::error::No publish-dev run built images for $SHA. Is the pull request labelled dev images?"
+                exit 1
+              fi
             fi
             sleep 30
           done
