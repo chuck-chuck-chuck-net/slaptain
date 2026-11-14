@@ -32,7 +32,7 @@ const restoreIDLabel = "ldap.chuck-chuck-chuck.net/restore-id"
 
 // reapJob deletes one Job together with its pods. Safe to call repeatedly.
 func reapJob(ctx context.Context, c client.Client, namespace, name string) error {
-	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+	job := &batchv1.Job{Name: name, Namespace: namespace}
 	if err := c.Delete(ctx, job, cascadingDelete()); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("reap Job %s/%s: %w", namespace, name, err)
 	}

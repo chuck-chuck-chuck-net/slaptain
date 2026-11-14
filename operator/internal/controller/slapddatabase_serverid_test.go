@@ -13,8 +13,6 @@ package controller
 import (
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
@@ -25,7 +23,7 @@ const (
 
 func scForServerIDs(name, ns string, replicas int32, replEnabled, tls bool, sidBase int32) *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Name: name, Namespace: ns,
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			Replicas: replicas,
 			Replication: ldapv1alpha1.SlapdReplicationConfig{

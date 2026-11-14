@@ -69,7 +69,7 @@ func slapdProbeCommand() []string {
 // on a cluster that failed to form is a support call.
 func slapdStartupProbe() *corev1.Probe {
 	return &corev1.Probe{
-		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: slapdProbeCommand()}},
+		Exec:             &corev1.ExecAction{Command: slapdProbeCommand()},
 		PeriodSeconds:    5,
 		TimeoutSeconds:   5,
 		FailureThreshold: 60, // 300s
@@ -88,7 +88,7 @@ func slapdStartupProbe() *corev1.Probe {
 // 874 s. A minute is comfortably between, on evidence rather than symmetry.
 func slapdReadinessProbe() *corev1.Probe {
 	return &corev1.Probe{
-		ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: slapdProbeCommand()}},
+		Exec:             &corev1.ExecAction{Command: slapdProbeCommand()},
 		PeriodSeconds:    10,
 		TimeoutSeconds:   5,
 		FailureThreshold: 6, // 60s

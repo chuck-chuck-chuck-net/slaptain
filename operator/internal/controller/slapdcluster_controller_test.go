@@ -47,10 +47,8 @@ var _ = Describe("SlapdCluster Controller", func() {
 			err := k8sClient.Get(ctx, typeNamespacedName, slapdcluster)
 			if err != nil && errors.IsNotFound(err) {
 				resource := &ldapv1alpha1.SlapdCluster{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: metav1.NamespaceDefault,
-					},
+					Name:      resourceName,
+					Namespace: metav1.NamespaceDefault,
 					// TODO(user): Specify other spec details if needed.
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())

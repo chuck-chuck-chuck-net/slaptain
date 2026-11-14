@@ -272,7 +272,7 @@ func psaAdmits(
 	ctx context.Context, coreClient kubernetes.Interface, ns string, sc *corev1.SecurityContext,
 ) (bool, error) {
 	probe := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "slctl-psa-probe", Namespace: ns},
+		Name: "slctl-psa-probe", Namespace: ns,
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:            "probe",

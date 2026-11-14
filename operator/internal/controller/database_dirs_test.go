@@ -14,8 +14,6 @@ import (
 	"reflect"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
@@ -30,7 +28,7 @@ import (
 // effective names, in two separate lists, that whole class is gone.
 func TestDatabaseDirsFor(t *testing.T) {
 	db := func(name, clusterRef, dataDir string) ldapv1alpha1.SlapdDatabase {
-		d := ldapv1alpha1.SlapdDatabase{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		d := ldapv1alpha1.SlapdDatabase{Name: name}
 		d.Spec.ClusterRef = clusterRef
 		d.Spec.DataDirectory = dataDir
 		return d

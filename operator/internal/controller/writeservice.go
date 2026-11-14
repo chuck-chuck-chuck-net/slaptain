@@ -223,12 +223,10 @@ func (r *SlapdClusterReconciler) writeService(
 	}
 
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      writeServiceName(sc.Name),
-			Namespace: sc.Namespace,
-			Labels:    withOperatorLabels(sc.Name, nil),
-		},
+		APIVersion: "v1", Kind: kindService,
+		Name:      writeServiceName(sc.Name),
+		Namespace: sc.Namespace,
+		Labels:    withOperatorLabels(sc.Name, nil),
 		Spec: corev1.ServiceSpec{
 			Type:     svcType,
 			Selector: writeServiceSelector(sc.Name, writer),

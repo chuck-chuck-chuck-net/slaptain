@@ -18,7 +18,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -51,7 +50,7 @@ func sessionlogSourceNamespace(ctx context.Context) string {
 	sessionlogSourceAdmissionSeq++
 	ns := fmt.Sprintf("sessionlog-source-%d", sessionlogSourceAdmissionSeq)
 	Expect(k8sClient.Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: ns},
+		Name: ns,
 	})).To(Succeed())
 	return ns
 }
@@ -64,7 +63,7 @@ func dbWithSessionlogSource(
 ) *ldapv1alpha1.SlapdDatabase {
 	segment := int32(0)
 	return &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: ns},
+		Name: testDefaultDB, Namespace: ns,
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			ClusterRef: testClusterName,
 			Suffix:     "dc=example,dc=org",

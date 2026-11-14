@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
@@ -44,10 +43,10 @@ func TestBindNeedsDatabase(t *testing.T) {
 // one — that is the whole point of making the lookup conditional.
 func TestResolveBindWithoutDatabase(t *testing.T) {
 	coreClient := fake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "slapd-config-password", Namespace: testNamespace},
-		Data:       map[string][]byte{"root-password": []byte("s3cret")},
+		Name: "slapd-config-password", Namespace: testNamespace,
+		Data: map[string][]byte{"root-password": []byte("s3cret")},
 	})
-	sc := &ldapv1alpha1.SlapdCluster{ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testNamespace}}
+	sc := &ldapv1alpha1.SlapdCluster{Name: testClusterName, Namespace: testNamespace}
 
 	t.Run(identConfig, func(t *testing.T) {
 		dn, pw, err := resolveBind(context.Background(), coreClient, testNamespace, sc, nil,

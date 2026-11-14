@@ -21,7 +21,7 @@ import (
 
 func peerCluster(peers ...ldapv1alpha1.ExternalPeer) *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+		Name: testClusterName, Namespace: "ns",
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			Replicas: 3,
 			Replication: ldapv1alpha1.SlapdReplicationConfig{

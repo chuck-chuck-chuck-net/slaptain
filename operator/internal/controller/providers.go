@@ -59,11 +59,10 @@ import (
 // StatefulSet is named "slapd-" and no pod of one is named "slapd--1". The
 // prefix must therefore be non-empty AND not itself end in a dash.
 func podOrdinal(podName string) (int32, error) {
-	i := strings.LastIndex(podName, "-")
-	if i < 0 {
+	prefix, tail, ok := strings.CutLast(podName, "-")
+	if !ok {
 		return 0, fmt.Errorf("pod name %q has no ordinal: no %q separator", podName, "-")
 	}
-	prefix, tail := podName[:i], podName[i+1:]
 	if prefix == "" || strings.HasSuffix(prefix, "-") {
 		return 0, fmt.Errorf("pod name %q has no ordinal: %q is not a StatefulSet name", podName, prefix)
 	}
