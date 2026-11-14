@@ -34,11 +34,9 @@ func pod(ordinal int32, ready bool) corev1.Pod {
 		status = corev1.ConditionTrue
 	}
 	return corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      statefulSetPodName(testClusterName, ordinal),
-			Namespace: testNamespace,
-			Labels:    selectorLabels(testClusterName),
-		},
+		Name:      statefulSetPodName(testClusterName, ordinal),
+		Namespace: testNamespace,
+		Labels:    selectorLabels(testClusterName),
 		Status: corev1.PodStatus{
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}},
 		},

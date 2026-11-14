@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
 
@@ -13,12 +11,12 @@ import (
 // the bash script its main container (restore/wipe) runs.
 func newRestoreJobFixture(target restorePodTarget) (string, *ldapv1alpha1.SlapdDatabase) {
 	sc := &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+		Name: testClusterName, Namespace: "ns",
 	}
 	sc.Status.Restore = &ldapv1alpha1.SlapdClusterRestoreStatus{ID: "r1"}
 	sd := &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-db"},
-		Spec:       ldapv1alpha1.SlapdDatabaseSpec{Suffix: "dc=demo,dc=example"},
+		Name: "demo-db",
+		Spec: ldapv1alpha1.SlapdDatabaseSpec{Suffix: "dc=demo,dc=example"},
 	}
 	st := ldapv1alpha1.S3StorageSpec{Bucket: "b", CredentialsSecretName: "s3"}
 	job := buildRestoreJob(sc, sd, st, "demo/key.ldif.gz", "init:img", "op:img", target)

@@ -635,8 +635,8 @@ func (r *SlapdClusterReconciler) reconcileSecret(ctx context.Context, sc *ldapv1
 	}
 
 	cfgSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: cfgName, Namespace: sc.Namespace, Labels: withOperatorLabels(sc.Name, nil)},
-		Type:       corev1.SecretTypeOpaque,
+		Name: cfgName, Namespace: sc.Namespace, Labels: withOperatorLabels(sc.Name, nil),
+		Type: corev1.SecretTypeOpaque,
 		StringData: map[string]string{
 			secretKeyRootPassword: rootPW,
 		},
@@ -665,12 +665,10 @@ func (r *SlapdClusterReconciler) reconcileHeadlessService(ctx context.Context, s
 // so the Service's shape is unit-testable without a client.
 func (r *SlapdClusterReconciler) headlessService(sc *ldapv1alpha1.SlapdCluster) *corev1.Service {
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name + "-headless",
-			Namespace: sc.Namespace,
-			Labels:    withOperatorLabels(sc.Name, nil),
-		},
+		APIVersion: "v1", Kind: kindService,
+		Name:      sc.Name + "-headless",
+		Namespace: sc.Namespace,
+		Labels:    withOperatorLabels(sc.Name, nil),
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
 			// Publish endpoints for NotReady pods too.
@@ -743,13 +741,11 @@ func (r *SlapdClusterReconciler) clusterIPService(sc *ldapv1alpha1.SlapdCluster)
 	}
 
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        sc.Name,
-			Namespace:   sc.Namespace,
-			Annotations: sc.Spec.Service.Annotations,
-			Labels:      withOperatorLabels(sc.Name, nil),
-		},
+		APIVersion: "v1", Kind: kindService,
+		Name:        sc.Name,
+		Namespace:   sc.Namespace,
+		Annotations: sc.Spec.Service.Annotations,
+		Labels:      withOperatorLabels(sc.Name, nil),
 		Spec: corev1.ServiceSpec{
 			Type:                     svcType,
 			Selector:                 selectorLabels(sc.Name),
@@ -787,13 +783,11 @@ func (r *SlapdClusterReconciler) reconcileStatefulSet(ctx context.Context, sc *l
 		return err
 	}
 	sts := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name,
-			Namespace: sc.Namespace,
-			Labels:    withOperatorLabels(sc.Name, nil),
-		},
-		Spec: r.buildStatefulSetSpec(sc, false, tagSuffix),
+		APIVersion: apiVersionAppsV1, Kind: kindStatefulSet,
+		Name:      sc.Name,
+		Namespace: sc.Namespace,
+		Labels:    withOperatorLabels(sc.Name, nil),
+		Spec:      r.buildStatefulSetSpec(sc, false, tagSuffix),
 	}
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
@@ -867,12 +861,10 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyHeadlessService(ctx context.Co
 // readOnlyHeadlessService builds the read-only headless Service.
 func (r *SlapdClusterReconciler) readOnlyHeadlessService(sc *ldapv1alpha1.SlapdCluster) *corev1.Service {
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name + "-readonly-headless",
-			Namespace: sc.Namespace,
-			Labels:    withOperatorLabels(sc.Name, nil),
-		},
+		APIVersion: "v1", Kind: kindService,
+		Name:      sc.Name + "-readonly-headless",
+		Namespace: sc.Namespace,
+		Labels:    withOperatorLabels(sc.Name, nil),
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
 			// Publish endpoints for NotReady pods too.
@@ -949,12 +941,10 @@ func (r *SlapdClusterReconciler) readOnlyService(sc *ldapv1alpha1.SlapdCluster) 
 	}
 
 	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kindService},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name + "-readonly",
-			Namespace: sc.Namespace,
-			Labels:    withOperatorLabels(sc.Name, nil),
-		},
+		APIVersion: "v1", Kind: kindService,
+		Name:      sc.Name + "-readonly",
+		Namespace: sc.Namespace,
+		Labels:    withOperatorLabels(sc.Name, nil),
 		Spec: corev1.ServiceSpec{
 			Type:     svcType,
 			Selector: readOnlySelectorLabels(sc.Name),
@@ -987,13 +977,11 @@ func (r *SlapdClusterReconciler) reconcileReadOnlyStatefulSet(ctx context.Contex
 		return err
 	}
 	sts := &appsv1.StatefulSet{
-		TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: kindStatefulSet},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name + "-readonly",
-			Namespace: sc.Namespace,
-			Labels:    withOperatorLabels(sc.Name, nil),
-		},
-		Spec: r.buildStatefulSetSpec(sc, true, tagSuffix),
+		APIVersion: apiVersionAppsV1, Kind: kindStatefulSet,
+		Name:      sc.Name + "-readonly",
+		Namespace: sc.Namespace,
+		Labels:    withOperatorLabels(sc.Name, nil),
+		Spec:      r.buildStatefulSetSpec(sc, true, tagSuffix),
 	}
 	if err := controllerutil.SetControllerReference(sc, sts, r.Scheme); err != nil {
 		return err
@@ -1105,14 +1093,14 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	// ── Volumes (non-PVC) ─────────────────────────────────────────────────────
 	volumes := []corev1.Volume{
 		{
-			Name:         volumeRun,
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			Name:     volumeRun,
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 		{
 			// Writable /tmp for the init container's bootstrap.sh ($TMP_CONF).
 			// Lets us run init with readOnlyRootFilesystem=true.
-			Name:         "tmp",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			Name:     "tmp",
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
 		{
 			// The per-database directory lists (ADR-013 amendment, option H).
@@ -1121,16 +1109,12 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			// env var, and every database add or remove therefore rolled the
 			// fleet for an operation slapd performs live.
 			Name: databaseDirsVolume,
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: databaseDirsConfigMapName(sc.Name),
-					},
-					// Tolerate its absence: a pod must still start when the
-					// cluster has no databases yet and the ConfigMap has not
-					// been written, exactly as an empty DATABASE_DIRS did.
-					Optional: new(true),
-				},
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				Name: databaseDirsConfigMapName(sc.Name),
+				// Tolerate its absence: a pod must still start when the
+				// cluster has no databases yet and the ConfigMap has not
+				// been written, exactly as an empty DATABASE_DIRS did.
+				Optional: new(true),
 			},
 		},
 		{
@@ -1140,17 +1124,13 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			// that into the pod template's hash — rolling the fleet to deliver
 			// a value that only takes effect at the NEXT pod start anyway.
 			Name: startupConfigVolume,
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: startupConfigMapName(sc.Name),
-					},
-					// Tolerate its absence: a cluster whose operator has not
-					// written the ConfigMap yet must still start pods, and an
-					// absent file is exactly what tells the converger it has
-					// nothing to manage.
-					Optional: new(true),
-				},
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				Name: startupConfigMapName(sc.Name),
+				// Tolerate its absence: a cluster whose operator has not
+				// written the ConfigMap yet must still start pods, and an
+				// absent file is exactly what tells the converger it has
+				// nothing to manage.
+				Optional: new(true),
 			},
 		},
 	}
@@ -1189,10 +1169,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 	if sc.Spec.LDAP.TLS.Enabled {
 		volumes = append(volumes, corev1.Volume{
 			Name: volumeTLS,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: sc.Spec.LDAP.TLS.SecretName,
-				},
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: sc.Spec.LDAP.TLS.SecretName,
 			},
 		})
 	}
@@ -1205,10 +1183,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			}
 			volumes = append(volumes, corev1.Volume{
 				Name: "peer-tls-" + peer.Name,
-				VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{
-						SecretName: peer.TLSSecretName,
-					},
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: peer.TLSSecretName,
 				},
 			})
 		}
@@ -1228,8 +1204,8 @@ func (r *SlapdClusterReconciler) buildStatefulSetSpec(sc *ldapv1alpha1.SlapdClus
 			Name: "LDAP_ROOT_PW",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: configSecretName},
-					Key:                  secretKeyRootPassword,
+					Name: configSecretName,
+					Key:  secretKeyRootPassword,
 				},
 			},
 		},
@@ -1740,10 +1716,8 @@ func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					return nil
 				}
 				return []ctrl.Request{{
-					NamespacedName: client.ObjectKey{
-						Name:      db.Spec.ClusterRef,
-						Namespace: db.Namespace,
-					},
+					Name:      db.Spec.ClusterRef,
+					Namespace: db.Namespace,
 				}}
 			},
 		)).
@@ -1761,10 +1735,8 @@ func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					return nil
 				}
 				return []ctrl.Request{{
-					NamespacedName: client.ObjectKey{
-						Name:      db.Spec.ClusterRef,
-						Namespace: sr.Namespace,
-					},
+					Name:      db.Spec.ClusterRef,
+					Namespace: sr.Namespace,
 				}}
 			},
 		)).
@@ -1795,10 +1767,8 @@ func (r *SlapdClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 						continue
 					}
 					reqs = append(reqs, ctrl.Request{
-						NamespacedName: client.ObjectKey{
-							Name:      list.Items[i].Name,
-							Namespace: list.Items[i].Namespace,
-						},
+						Name:      list.Items[i].Name,
+						Namespace: list.Items[i].Namespace,
 					})
 				}
 				return reqs
@@ -1901,7 +1871,7 @@ func setCondition(conditions *[]metav1.Condition, newCond metav1.Condition) {
 func pvcTemplate(name, size, storageClass string, accessMode corev1.PersistentVolumeAccessMode) corev1.PersistentVolumeClaim {
 	qty := resource.MustParse(size)
 	pvc := corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{accessMode},
 			Resources: corev1.VolumeResourceRequirements{

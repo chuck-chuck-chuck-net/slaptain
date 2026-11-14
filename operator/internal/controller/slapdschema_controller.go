@@ -321,14 +321,10 @@ func (r *SlapdSchemaReconciler) setStatus(
 	})
 
 	statusPatch := &ldapv1alpha1.SlapdSchema{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: ldapv1alpha1.GroupVersion.String(),
-			Kind:       "SlapdSchema",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ss.Name,
-			Namespace: ss.Namespace,
-		},
+		APIVersion: ldapv1alpha1.GroupVersion.String(),
+		Kind:       "SlapdSchema",
+		Name:       ss.Name,
+		Namespace:  ss.Namespace,
 	}
 	statusPatch.Status = ss.Status
 	ac, err := applyConfiguration(statusPatch)
@@ -369,10 +365,8 @@ func (r *SlapdSchemaReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				for _, ss := range ssList.Items {
 					if ss.Spec.ClusterRef == sc.Name {
 						reqs = append(reqs, ctrl.Request{
-							NamespacedName: client.ObjectKey{
-								Name:      ss.Name,
-								Namespace: ss.Namespace,
-							},
+							Name:      ss.Name,
+							Namespace: ss.Namespace,
 						})
 					}
 				}

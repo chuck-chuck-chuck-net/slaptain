@@ -86,11 +86,9 @@ func (r *SlapdScheduledBackupReconciler) Reconcile(ctx context.Context, req ctrl
 	if scheduledTime := r.dueTime(ssb, sched, now); !scheduledTime.IsZero() {
 		name := scheduledBackupName(ssb, scheduledTime)
 		sb := &ldapv1alpha1.SlapdBackup{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: ssb.Namespace,
-				Labels:    map[string]string{scheduledBackupLabel: ssb.Name},
-			},
+			Name:      name,
+			Namespace: ssb.Namespace,
+			Labels:    map[string]string{scheduledBackupLabel: ssb.Name},
 			Spec: ldapv1alpha1.SlapdBackupSpec{
 				DatabaseRef: ssb.Spec.DatabaseRef,
 				Storage:     ssb.Spec.Storage,
@@ -251,14 +249,10 @@ func (r *SlapdScheduledBackupReconciler) patchStatus(ctx context.Context, ssb *l
 	})
 
 	statusPatch := &ldapv1alpha1.SlapdScheduledBackup{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: ldapv1alpha1.GroupVersion.String(),
-			Kind:       "SlapdScheduledBackup",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ssb.Name,
-			Namespace: ssb.Namespace,
-		},
+		APIVersion: ldapv1alpha1.GroupVersion.String(),
+		Kind:       "SlapdScheduledBackup",
+		Name:       ssb.Name,
+		Namespace:  ssb.Namespace,
 	}
 	statusPatch.Status = ssb.Status
 	ac, err := applyConfiguration(statusPatch)

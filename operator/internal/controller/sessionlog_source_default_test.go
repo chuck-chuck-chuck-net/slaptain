@@ -92,8 +92,8 @@ func TestSessionlogSourceDefaultsToAccesslog(t *testing.T) {
 // nothing must now appear in it — otherwise the default would be a value the
 // init container never converges.
 func TestTheDefaultReachesTheStartupConfigTable(t *testing.T) {
-	sd := ldapv1alpha1.SlapdDatabase{}
-	sd.Name = "example-db"
+	sd := ldapv1alpha1.SlapdDatabase{
+		Name: "example-db"}
 	sd.Spec.ClusterRef = testClusterName
 	sd.Spec.Suffix = "dc=example,dc=org"
 

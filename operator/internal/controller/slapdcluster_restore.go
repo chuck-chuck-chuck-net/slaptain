@@ -581,11 +581,9 @@ func (r *SlapdClusterReconciler) resolveSourceObject(ctx context.Context, ns, ba
 func (r *SlapdClusterReconciler) markRestored(ctx context.Context, sc *ldapv1alpha1.SlapdCluster, dbNames []string) error {
 	for _, name := range dbNames {
 		patch := &ldapv1alpha1.SlapdDatabase{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: ldapv1alpha1.GroupVersion.String(),
-				Kind:       kindSlapdDatabase,
-			},
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: sc.Namespace},
+			APIVersion: ldapv1alpha1.GroupVersion.String(),
+			Kind:       kindSlapdDatabase,
+			Name:       name, Namespace: sc.Namespace,
 		}
 		patch.Status.RestoreApplied = true
 		ac, err := applyConfiguration(patch)
@@ -605,14 +603,10 @@ func (r *SlapdClusterReconciler) markRestored(ctx context.Context, sc *ldapv1alp
 // not an error worth logging with a stack trace.
 func (r *SlapdClusterReconciler) applyStatus(ctx context.Context, sc *ldapv1alpha1.SlapdCluster) error {
 	statusPatch := &ldapv1alpha1.SlapdCluster{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: ldapv1alpha1.GroupVersion.String(),
-			Kind:       "SlapdCluster",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sc.Name,
-			Namespace: sc.Namespace,
-		},
+		APIVersion: ldapv1alpha1.GroupVersion.String(),
+		Kind:       "SlapdCluster",
+		Name:       sc.Name,
+		Namespace:  sc.Namespace,
 	}
 	statusPatch.Status = sc.Status
 	ac, err := applyConfiguration(statusPatch)

@@ -96,7 +96,7 @@ func (f *ridFixture) withExternalPeer(ctx context.Context) {
 // bindPasswordSecretName names, in the form the resolution reads it.
 func createPeerBindSecret(ctx context.Context, ns, name string) {
 	Expect(k8sClient.Create(ctx, &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Name: name, Namespace: ns,
 		StringData: map[string]string{"password": "not-a-real-password"},
 	})).To(Succeed())
 }

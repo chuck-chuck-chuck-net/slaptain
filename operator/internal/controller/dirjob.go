@@ -216,16 +216,14 @@ func (r *SlapdDatabaseReconciler) buildDirJob(
 	}
 
 	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: sc.Namespace,
-			Labels: withOperatorLabels(sc.Name, map[string]string{
-				labelName:      appName,
-				labelInstance:  sc.Name,
-				labelComponent: "database-dirs",
-				dirJobLabel:    podName,
-			}),
-		},
+		Name:      jobName,
+		Namespace: sc.Namespace,
+		Labels: withOperatorLabels(sc.Name, map[string]string{
+			labelName:      appName,
+			labelInstance:  sc.Name,
+			labelComponent: "database-dirs",
+			dirJobLabel:    podName,
+		}),
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: new(dirJobTTL),
 			BackoffLimit:            new(int32(2)),

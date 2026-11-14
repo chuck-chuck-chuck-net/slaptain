@@ -15,7 +15,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 )
@@ -145,8 +144,8 @@ func TestPodOrdinal(t *testing.T) {
 // non-empty, a Multus network-status annotation for NAD "replication-net".
 func runningPod(name, podIP, nadIP string) corev1.Pod {
 	p := corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIP: podIP},
+		Name:   name,
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: podIP},
 	}
 	if nadIP != "" {
 		p.Annotations = map[string]string{

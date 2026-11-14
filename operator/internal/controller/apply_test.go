@@ -44,12 +44,10 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 
 	objs := map[string]runtime.Object{
 		"Service": &corev1.Service{
-			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        testHeadlessSvc,
-				Namespace:   testE2ENamespace,
-				Annotations: map[string]string{"a": "b"},
-			},
+			APIVersion: "v1", Kind: "Service",
+			Name:        testHeadlessSvc,
+			Namespace:   testE2ENamespace,
+			Annotations: map[string]string{"a": "b"},
 			Spec: corev1.ServiceSpec{
 				ClusterIP: corev1.ClusterIPNone,
 				Selector:  map[string]string{labelName: appName},
@@ -62,11 +60,9 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 			},
 		},
 		"StatefulSet": &appsv1.StatefulSet{
-			TypeMeta: metav1.TypeMeta{APIVersion: apiVersionAppsV1, Kind: "StatefulSet"},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      testClusterName,
-				Namespace: testE2ENamespace,
-			},
+			APIVersion: apiVersionAppsV1, Kind: "StatefulSet",
+			Name:      testClusterName,
+			Namespace: testE2ENamespace,
 			Spec: appsv1.StatefulSetSpec{
 				Replicas:    &replicas,
 				ServiceName: testHeadlessSvc,
@@ -85,11 +81,9 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 		},
 		"SlapdClusterStatus": func() *ldapv1alpha1.SlapdCluster {
 			sc := &ldapv1alpha1.SlapdCluster{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
-					Kind:       "SlapdCluster",
-				},
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testE2ENamespace},
+				APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
+				Kind:       "SlapdCluster",
+				Name:       testClusterName, Namespace: testE2ENamespace,
 			}
 			sc.Status.Phase = ldapv1alpha1.PhaseRunning
 			sc.Status.ReadyReplicas = 3
@@ -105,11 +99,9 @@ func TestApplyConfigurationBodyIsUnchanged(t *testing.T) {
 		}(),
 		"SlapdDatabaseStatus": func() *ldapv1alpha1.SlapdDatabase {
 			sd := &ldapv1alpha1.SlapdDatabase{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
-					Kind:       kindSlapdDatabase,
-				},
-				ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: testE2ENamespace},
+				APIVersion: "ldap.chuck-chuck-chuck.net/v1alpha1",
+				Kind:       kindSlapdDatabase,
+				Name:       testDefaultDB, Namespace: testE2ENamespace,
 			}
 			sd.Status.RestoreApplied = true
 			return sd

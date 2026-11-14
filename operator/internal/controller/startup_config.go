@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -186,13 +185,11 @@ func (r *SlapdClusterReconciler) reconcileStartupConfigMap(
 	}
 
 	cm := &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      startupConfigMapName(sc.Name),
-			Namespace: sc.Namespace,
-			Labels:    withOperatorLabels(sc.Name, nil),
-		},
-		Data: startupConfigFor(dbList.Items, sc.Name).configMapData(),
+		APIVersion: "v1", Kind: "ConfigMap",
+		Name:      startupConfigMapName(sc.Name),
+		Namespace: sc.Namespace,
+		Labels:    withOperatorLabels(sc.Name, nil),
+		Data:      startupConfigFor(dbList.Items, sc.Name).configMapData(),
 	}
 	if err := controllerutil.SetControllerReference(sc, cm, r.Scheme); err != nil {
 		return err

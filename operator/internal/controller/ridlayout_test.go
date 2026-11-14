@@ -15,7 +15,6 @@ import (
 	"errors"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -42,16 +41,16 @@ const testMeshName = "ldap"
 // to `meshRef` ("" for a cluster that is not part of a mesh).
 func ridCluster(meshRef string) *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testRIDCluster, Namespace: testRIDNS},
-		Spec:       ldapv1alpha1.SlapdClusterSpec{MeshRef: meshRef},
+		Name: testRIDCluster, Namespace: testRIDNS,
+		Spec: ldapv1alpha1.SlapdClusterSpec{MeshRef: meshRef},
 	}
 }
 
 // ridMesh builds a SlapdMesh carrying `layout` (nil for "ridLayout omitted").
 func ridMesh(layout *ldapv1alpha1.RIDLayout) *ldapv1alpha1.SlapdMesh {
 	return &ldapv1alpha1.SlapdMesh{
-		ObjectMeta: metav1.ObjectMeta{Name: testMeshName, Namespace: testRIDNS},
-		Spec:       ldapv1alpha1.SlapdMeshSpec{RIDLayout: layout},
+		Name: testMeshName, Namespace: testRIDNS,
+		Spec: ldapv1alpha1.SlapdMeshSpec{RIDLayout: layout},
 	}
 }
 

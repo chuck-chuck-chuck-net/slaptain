@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 )
@@ -594,7 +592,7 @@ func TestParseRIDLayoutFlag(t *testing.T) {
 // ridCluster is a three-replica cluster, optionally a mesh member.
 func ridCluster(meshRef string) *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+		Name: testClusterName, Namespace: "ns",
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			Replicas: 3,
 			MeshRef:  meshRef,
@@ -604,7 +602,7 @@ func ridCluster(meshRef string) *ldapv1alpha1.SlapdCluster {
 
 func ridDatabase(name, clusterRef string, segment *int32) ldapv1alpha1.SlapdDatabase {
 	return ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		Name: name, Namespace: "ns",
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			ClusterRef: clusterRef,
 			Replication: ldapv1alpha1.DatabaseReplicationConfig{
@@ -616,7 +614,7 @@ func ridDatabase(name, clusterRef string, segment *int32) ldapv1alpha1.SlapdData
 
 func ridMesh(layout *ldapv1alpha1.RIDLayout, sites ...ldapv1alpha1.MeshSite) *ldapv1alpha1.SlapdMesh {
 	return &ldapv1alpha1.SlapdMesh{
-		ObjectMeta: metav1.ObjectMeta{Name: testMeshName, Namespace: "ns"},
+		Name: testMeshName, Namespace: "ns",
 		Spec: ldapv1alpha1.SlapdMeshSpec{
 			Sites:     sites,
 			RIDLayout: layout,
