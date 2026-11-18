@@ -208,7 +208,10 @@ setup_initial_ldif() {
   # Remove cn=backup user as we don't need it
   sed -i '/cn=backup/,+6d' /usr/share/univention-ldap/base.ldif
 
-  cat /usr/share/univention-ldap/{base.ldif,core-edition.ldif} \
+  # UCS 5.3 requires univentionObjectIdentifier on every univentionObject, and core-edition.ldif has none.
+  cat /usr/share/univention-ldap/base.ldif \
+    <(sed "/^univentionObjectType: settings\/license$/a univentionObjectIdentifier: $(cat /proc/sys/kernel/random/uuid)" \
+      /usr/share/univention-ldap/core-edition.ldif) \
     | ucr-light-filter | sed -e "${filter_string}" \
     | slapadd -f /etc/ldap/slapd.conf
 
