@@ -18,20 +18,27 @@ permissions:
 env:
   PACKAGES: >-
     dev/slaptain/operator,dev/slaptain/slapd,dev/slaptain/slapd-init,dev/slaptain/slapd-toolkit,dev/slaptain/slapd-exporter
+  # The same list in the space-separated form container-retention-policy reads.
+  IMAGE_NAMES: >-
+    dev/slaptain/operator dev/slaptain/slapd dev/slaptain/slapd-init dev/slaptain/slapd-toolkit dev/slaptain/slapd-exporter
 
 jobs:
+  # container-retention-policy goes on past a version GitHub refuses to delete
+  # (public, more than 5000 downloads) and still exits 0; the log lists it.
   expired:
     name: Delete dev images older than 7 days
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Delete
-        uses: dataaxiom/ghcr-cleanup-action@v1
+        uses: snok/container-retention-policy@v3.1.0
         with:
-          packages: ${{ env.PACKAGES }}
-          older-than: 7 days
-          delete-tags: '*'
-          delete-untagged: true
+          account: ${{ github.repository_owner }}
+          token: ${{ github.token }}
+          # A GITHUB_TOKEN cannot list packages, so these are exact names, not patterns.
+          image-names: ${{ env.IMAGE_NAMES }}
+          cut-off: 7d
+          tag-selection: both
 
   closed:
     name: Delete the closed pull request's dev images
