@@ -55,6 +55,12 @@ if [[ -z "${GIT_TAG:-}" ]]; then
     fi
 fi
 
+# An IMAGE_TAG from the environment addresses all three images, as in e2e.sh:
+# dev images (ADR-046) carry a branch slug, which no GIT_TAG derives.
+OPERATOR_TAG="${IMAGE_TAG:-$GIT_TAG}"
+SLAPD_TAG_LINE=""
+[[ -n "${IMAGE_TAG:-}" ]] && SLAPD_TAG_LINE="tag: $IMAGE_TAG"
+
 PULL_SECRET_FILE="$SCRIPT_DIR/image-pull-secret.yaml"
 PULL_SECRET_HELM_ARGS=()
 if [[ -f "$PULL_SECRET_FILE" ]]; then
@@ -98,7 +104,7 @@ setup_operator() {
     $HELM upgrade --install slaptain "$PROJECT_ROOT/charts/operator" \
         --namespace "$NAMESPACE_OPERATOR" --create-namespace \
         --set "image.repository=$REGISTRY/$PROJECT/operator" \
-        --set "image.tag=$GIT_TAG" \
+        --set "image.tag=$OPERATOR_TAG" \
         "${PULL_SECRET_HELM_ARGS[@]}"
     $KUBECTL -n "$NAMESPACE_OPERATOR" rollout status deployment/slaptain --timeout=120s
 }
@@ -153,8 +159,10 @@ spec:
   images:
     slapd:
       repository: $REGISTRY/$PROJECT/slapd
+      $SLAPD_TAG_LINE
     init:
       repository: $REGISTRY/$PROJECT/slapd-init
+      $SLAPD_TAG_LINE
   replicas: 1
   logLevel: 256
   replication:
@@ -222,8 +230,10 @@ spec:
   images:
     slapd:
       repository: $REGISTRY/$PROJECT/slapd
+      $SLAPD_TAG_LINE
     init:
       repository: $REGISTRY/$PROJECT/slapd-init
+      $SLAPD_TAG_LINE
   replicas: 1
   logLevel: 256
   replication:
@@ -231,6 +241,7 @@ spec:
     mode: consumer-only
     externalPeers:
       - name: fake-prod
+        siteIndex: 1
         uri: "ldap://fakeprod.${NAMESPACE_FAKEPROD}.svc.cluster.local:389"
         bindDN: "cn=replication,$SUFFIX"
         bindPasswordSecretName: mig-replication-pw
@@ -383,6 +394,7 @@ run_tests() {
         cd "$PROJECT_ROOT/tests/e2e"
         KUBECONFIG="$tmp_kubeconfig" \
         E2E_MIGRATION=1 \
+        LDAP_ADDR="${NODE_IP}:${NODEPORT_SLAPTAIN}" \
         E2E_MIGRATION_LDAP_ADDR="${NODE_IP}:${NODEPORT_SLAPTAIN}" \
         E2E_MIGRATION_ADMIN_PW="$admin_pw" \
         E2E_MIGRATION_FAKEPROD_LDAP_ADDR="${NODE_IP}:${NODEPORT_FAKEPROD}" \

@@ -5,6 +5,8 @@ name: e2e
 #   smoke: every push to a pull request labelled "dev images", and adding that label.
 #   slow:  the same, while the pull request is also labelled "e2e slow", and adding
 #          that label. Run it once by adding the label and removing it again.
+#          It is four jobs, each on its own cluster: three shards of the slow specs
+#          and the migration scenario.
 # Run workflow on this file starts either tier on a branch.
 # The images are tagged by branch, so a run first waits until publish-dev has
 # pushed this commit's. Runs of one commit and tier cancel each other, so opening a
@@ -44,15 +46,17 @@ jobs:
       matrix:
         tier: >-
           ${{ fromJSON(
-            (github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.tier)) ||
-            (github.event.label.name == 'e2e slow' && '["slow"]') ||
-            (contains(github.event.pull_request.labels.*.name, 'e2e slow') && '["smoke","slow"]') ||
+            (github.event_name == 'workflow_dispatch' && inputs.tier == 'smoke' && '["smoke"]') ||
+            ((github.event_name == 'workflow_dispatch' || github.event.label.name == 'e2e slow') &&
+             '["slow-1","slow-2","slow-3","migration"]') ||
+            (contains(github.event.pull_request.labels.*.name, 'e2e slow') &&
+             '["smoke","slow-1","slow-2","slow-3","migration"]') ||
             '["smoke"]') }}
     concurrency:
       group: e2e-${{ github.event.pull_request.head.sha || github.sha }}-${{ matrix.tier }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ matrix.tier == 'slow' && 180 || 60 }}
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: write
@@ -68,6 +72,9 @@ jobs:
         cleanup-policy || scale-topology || database-hotadd || write-rotation ||
         purge-rotation || image-selector || monitor-at-rest || startup-config ||
         tls-gate || monitor || secret-rotation
+      # The slow shards, cut to about equal run time. slow-3 runs the rest.
+      SHARD_1: secret-rotation || purge-rotation || write-rotation
+      SHARD_2: backup || restore || resilience || startup-config
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -84,15 +91,30 @@ jobs:
             echo "E2E_SEED=$(date +%s)"
             # Every failure, not the first one: the full report is what a reader needs.
             echo "FAIL_FAST=0"
-            if [ "$TIER" = slow ]; then
-              # The env-gated groups need only one cluster; external replication needs two.
-              echo "E2E_LABEL_FILTER=$SLOW_LABELS || backup || restore || scale || scaleup"
-              echo "E2E_BACKUP=1"
-              echo "E2E_SCALE=1"
-              echo "E2E_SCALEUP=1"
-            else
-              echo "E2E_LABEL_FILTER=!($SLOW_LABELS)"
-            fi
+            echo "E2E_SCRIPT=tests/e2e.sh"
+            # The env-gated groups need only one cluster; external replication needs two.
+            case "$TIER" in
+              smoke)
+                echo "E2E_LABEL_FILTER=!($SLOW_LABELS)"
+                ;;
+              slow-1)
+                echo "E2E_LABEL_FILTER=$SHARD_1"
+                ;;
+              slow-2)
+                echo "E2E_LABEL_FILTER=($SHARD_2) && !($SHARD_1)"
+                echo "E2E_BACKUP=1"
+                echo "E2E_RESILIENCE=1"
+                ;;
+              slow-3)
+                echo "E2E_LABEL_FILTER=($SLOW_LABELS || scale || scaleup) && !($SHARD_1 || $SHARD_2)"
+                echo "E2E_SCALE=1"
+                echo "E2E_SCALEUP=1"
+                ;;
+              migration)
+                # Two SlapdClusters in two namespaces, with its own script and specs.
+                echo "E2E_SCRIPT=tests/e2e-migration.sh"
+                ;;
+            esac
           } | tee -a "$GITHUB_ENV"
 
       - name: Set up Go
@@ -155,10 +177,12 @@ jobs:
         run: echo "Ginkgo seed \`$E2E_SEED\`, replay with \`E2E_SEED=$E2E_SEED\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy the operator and the fixture
-        run: tests/e2e.sh setup "$KUBE_CONTEXT"
+        run: |
+          "$E2E_SCRIPT" setup "$KUBE_CONTEXT"
 
       - name: Run the specs
-        run: tests/e2e.sh test "$KUBE_CONTEXT"
+        run: |
+          "$E2E_SCRIPT" test "$KUBE_CONTEXT"
 
       - name: Collect cluster state
         if: failure()
