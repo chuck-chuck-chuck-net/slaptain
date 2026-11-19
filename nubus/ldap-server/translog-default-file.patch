@@ -1,0 +1,49 @@
+--- a/servers/slapd/overlays/translog.c
++++ b/servers/slapd/overlays/translog.c
+@@ -22,6 +22,8 @@
+ static const char LAST_ID[] = "/var/lib/univention-ldap/last_id";
+ static const char LAST_ID_TMP[] = "/var/lib/univention-ldap/last_id.new";
+ static const char TRANSACTION[] = "/var/lib/univention-ldap/notify/transaction";
++/* cn=config has no attribute for the file, so a slapd without slapd.conf gets the UCS default. */
++static const char DEFAULT_LOGFILE[] = "/var/lib/univention-ldap/listener/listener";
+
+ static FILE* fopen_lock(const char *name, const char *type, FILE **l_file)
+ {
+@@ -278,7 +280,8 @@
+ 	slap_overinst *on = (slap_overinst *)be->bd_info;
+ 	translog_data *ad = ch_calloc(1, sizeof(translog_data));
+
+-	ad->ad_translog_ignore_temporary = false;
++	ad->ad_logfile = ch_strdup( DEFAULT_LOGFILE );
++	ad->ad_translog_ignore_temporary = true;
+
+ 	on->on_bi.bi_private = ad;
+ 	ldap_pvt_thread_mutex_init( &ad->ad_mutex );
+@@ -289,11 +292,6 @@
+ 	(void) cr;
+ 	Debug( LDAP_DEBUG_TRACE, "OVER: db_close\n");
+
+-	slap_overinst *on = (slap_overinst *)be->bd_info;
+-	translog_data *ad = on->on_bi.bi_private;
+-
+-	free( ad->ad_logfile );
+-	ad->ad_logfile = NULL;
+ 	return 0;
+ }
+
+@@ -305,6 +303,7 @@
+ 	translog_data *ad = on->on_bi.bi_private;
+
+ 	ldap_pvt_thread_mutex_destroy( &ad->ad_mutex );
++	ch_free( ad->ad_logfile );
+ 	free( ad );
+ 	return 0;
+ }
+@@ -324,6 +323,7 @@
+ 		Debug(LDAP_DEBUG_CONFIG, "OVER: Configured Translog Overlay to use file \"%s\"\n", argv[1]);
+
+ 		/* save filename in translog_data */
++		ch_free( ad->ad_logfile );
+ 		ad->ad_logfile = ch_strdup( argv[1] );
+ 		return 0;
+ 	}
