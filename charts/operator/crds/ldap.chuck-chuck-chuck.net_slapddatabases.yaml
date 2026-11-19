@@ -334,6 +334,55 @@ spec:
                   a value, and explicitly disabling it (checkpoint: "") while noSync is on
                   is rejected.
                 type: boolean
+              overlays:
+                description: |-
+                  overlays are further overlays on this database, beyond the syncprov and
+                  accesslog the operator manages itself. Each is added after those, in list
+                  order, and its attributes are converged on every reconcile. Removing an
+                  entry from the list leaves the overlay in place; the module must already be
+                  loaded, e.g. by a moduleload in the slapd-init image's bootstrap snippets.
+                items:
+                  description: |-
+                    DatabaseOverlay is one overlay entry under the database's cn=config entry,
+                    olcOverlay=<name>,olcDatabase={N}mdb,cn=config.
+
+                    Support tier 2 (ADR-039): the operator writes what is declared and reports
+                    a refusal, but validates none of the overlay's semantics, and no overlay
+                    beyond syncprov and accesslog is covered by the replication e2e.
+                  properties:
+                    attributes:
+                      additionalProperties:
+                        items:
+                          type: string
+                        type: array
+                      description: |-
+                        attributes are the overlay's cn=config attributes, e.g.
+                        {"olcRefintAttribute": ["uniqueMember"]}. Each listed attribute is
+                        replaced when its values differ; attributes not listed are left alone.
+                      type: object
+                    name:
+                      description: name is the olcOverlay value, e.g. "memberof" or
+                        "refint".
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9_-]+$
+                      type: string
+                    objectClass:
+                      description: |-
+                        objectClass is the overlay's configuration object class besides
+                        olcOverlayConfig, e.g. "olcMemberOf". Leave it unset for an overlay that
+                        has no dynamic configuration of its own.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: syncprov and accesslog are managed by the operator and
+                    cannot be listed in spec.overlays.
+                  rule: self.all(o, o.name != 'syncprov' && o.name != 'accesslog')
               replication:
                 description: |-
                   replication holds per-database replication settings. Always required —

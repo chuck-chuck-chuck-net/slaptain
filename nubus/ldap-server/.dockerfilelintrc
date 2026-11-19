@@ -1,0 +1,3 @@
+rules:
+  # Temporarily disable as longer as proper debian packaging is not done
+  apt-get-update_require_install: off

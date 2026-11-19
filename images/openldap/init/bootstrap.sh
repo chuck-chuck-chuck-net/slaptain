@@ -177,6 +177,18 @@ include /etc/ldap/schema/inetorgperson.schema
 include /etc/ldap/schema/nis.schema
 EOF
 
+    # ── Image-provided global snippets ─────────────────────────────────────────
+    # A derived slapd-init image may drop *.conf files here (moduleload, extra
+    # schemas, global directives). slaptest folds them into cn=config like the
+    # lines above, so they reach only pods bootstrapped after the image change.
+    # Appended rather than included: slaptest nests the schemas of an included
+    # file under a cn=schema child named after that file.
+    for snippet in /etc/ldap/bootstrap.d/*.conf; do
+        [[ -e "$snippet" ]] || continue
+        echo "Appending bootstrap snippet: $snippet"
+        { echo; cat "$snippet"; } >> "$TMP_CONF"
+    done
+
     # ── ServerID directive (ADR-011, sid-1-per-default; ADR-017, bare form) ────
     # Emit this pod's OWN serverID as a bare integer — unconditionally for every
     # RW pod, even a standalone single-replica cluster ("serverID 1"). cn=config

@@ -71,3 +71,51 @@ jobs:
           GROUP: ${{ matrix.group }}
           GHA_CACHE: '1'
         run: docker buildx bake --push "$GROUP"
+
+  # The Nubus ldap-server targets for slaptain, from a copy of the ldap repository's
+  # docker/ldap-server (branch jlohmer/nubus-slaptain). The init target copies bootstrap.sh
+  # out of this push's slapd-init, hence the wait for the images job.
+  nubus-ldap:
+    name: Build and push the Nubus slapd images (${{ matrix.target }})
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        target: [slaptain-slapd, slaptain-init]
+    concurrency:
+      group: publish-dev-${{ github.event.pull_request.number }}-nubus-${{ matrix.target }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Derive the image names
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          slug=$(scripts/branch-slug.sh "$HEAD_REF")
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/dev"
+          {
+            echo "IMAGE=$registry/nubus/${{ matrix.target }}:$slug"
+            echo "SLAPTAIN_INIT_IMAGE=$registry/slaptain/slapd-init:$slug-ol26"
+          } | tee -a "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push
+        run: |
+          docker buildx build --push \
+            --target "${{ matrix.target }}" \
+            --build-arg UCS_BASE_IMAGE=artifacts.software-univention.de/jlohmer-dev/images/ucs-base \
+            --build-arg SLAPTAIN_INIT_IMAGE="$SLAPTAIN_INIT_IMAGE" \
+            --tag "$IMAGE" \
+            nubus/ldap-server

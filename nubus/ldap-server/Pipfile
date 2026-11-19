@@ -1,0 +1,19 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[requires]
+python_version = "3.11"
+
+[packages]
+kubernetes = "*"
+pyasn1-modules = "==0.2.8"
+typer-slim = "*"
+pydantic = "*"
+urllib3 = ">=2.7.0"
+
+[dev-packages]
+pdbpp = "*"
+pytest = "*"
+pytest-mock = "*"

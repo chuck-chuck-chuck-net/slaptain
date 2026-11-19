@@ -908,6 +908,11 @@ func (r *SlapdDatabaseReconciler) reconcilePodDatabase(
 		}
 	}
 
+	// After the provider infrastructure, so declared overlays stack above syncprov and accesslog.
+	if err := r.ensureUserOverlays(ctx, conn, host, dataDN, sd.Spec.Overlays); err != nil {
+		return fmt.Errorf("ensure overlays at %s: %w", host, err)
+	}
+
 	// Align olcReadOnly on the data DB to the cluster's current mode. In
 	// consumer-only mode the data DB rejects client writes; in peer mode it
 	// accepts them. This is the load-bearing step for in-place mode
