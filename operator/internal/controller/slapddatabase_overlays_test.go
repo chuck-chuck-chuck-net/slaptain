@@ -8,11 +8,15 @@ import (
 )
 
 func TestPlanUserOverlays(t *testing.T) {
-	const dataDN = "olcDatabase={1}mdb,cn=config"
+	const (
+		dataDN       = "olcDatabase={1}mdb,cn=config"
+		refintName   = "refint"
+		uniqueMember = "uniqueMember"
+	)
 	refint := ldapv1alpha1.DatabaseOverlay{
-		Name:        "refint",
+		Name:        refintName,
 		ObjectClass: "olcRefintConfig",
-		Attributes:  map[string][]string{"olcRefintAttribute": {"uniqueMember"}},
+		Attributes:  map[string][]string{"olcRefintAttribute": {uniqueMember}},
 	}
 	shadowbind := ldapv1alpha1.DatabaseOverlay{Name: "shadowbind"}
 
@@ -25,27 +29,27 @@ func TestPlanUserOverlays(t *testing.T) {
 	}{
 		{
 			name:     "absent overlays are added in declared order",
-			current:  []observedOverlay{{dn: "olcOverlay={0}syncprov," + dataDN, name: "syncprov"}},
+			current:  []observedOverlay{{dn: "olcOverlay={0}syncprov," + dataDN, name: overlaySyncprov}},
 			desired:  []ldapv1alpha1.DatabaseOverlay{shadowbind, refint},
-			wantAdds: []string{"shadowbind", "refint"},
+			wantAdds: []string{"shadowbind", refintName},
 		},
 		{
 			name: "present and matching overlay is left alone",
 			current: []observedOverlay{{
-				dn: "olcOverlay={1}refint," + dataDN, name: "refint",
-				attrs: map[string][]string{"olcrefintattribute": {"uniqueMember"}},
+				dn: "olcOverlay={1}refint," + dataDN, name: refintName,
+				attrs: map[string][]string{"olcrefintattribute": {uniqueMember}},
 			}},
 			desired: []ldapv1alpha1.DatabaseOverlay{refint},
 		},
 		{
 			name: "a differing attribute is replaced on the overlay's real DN",
 			current: []observedOverlay{{
-				dn: "olcOverlay={1}refint," + dataDN, name: "refint",
+				dn: "olcOverlay={1}refint," + dataDN, name: refintName,
 				attrs: map[string][]string{"olcrefintattribute": {"member"}},
 			}},
 			desired: []ldapv1alpha1.DatabaseOverlay{refint},
 			wantMods: []overlayAttrChange{{
-				dn: "olcOverlay={1}refint," + dataDN, attr: "olcRefintAttribute", values: []string{"uniqueMember"},
+				dn: "olcOverlay={1}refint," + dataDN, attr: "olcRefintAttribute", values: []string{uniqueMember},
 			}},
 		},
 		{
@@ -62,7 +66,7 @@ func TestPlanUserOverlays(t *testing.T) {
 		{
 			name: "an overlay no longer declared is not removed",
 			current: []observedOverlay{
-				{dn: "olcOverlay={1}refint," + dataDN, name: "refint"},
+				{dn: "olcOverlay={1}refint," + dataDN, name: refintName},
 			},
 			desired: nil,
 		},
