@@ -172,7 +172,7 @@ func TestAggregateDataPresentRWOnlyMessagesUnchanged(t *testing.T) {
 func TestSuffixProbeTargets(t *testing.T) {
 	cluster := func(replicas, readReplicas int32) *ldapv1alpha1.SlapdCluster {
 		return &ldapv1alpha1.SlapdCluster{
-			ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+			Name: testClusterName, Namespace: "ns",
 			Spec: ldapv1alpha1.SlapdClusterSpec{
 				Replicas:     replicas,
 				ReadReplicas: readReplicas,

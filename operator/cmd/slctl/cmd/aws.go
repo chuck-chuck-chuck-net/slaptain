@@ -481,8 +481,7 @@ func runAWS(raw []string) error {
 	c.Env = env
 
 	if err := c.Run(); err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			os.Exit(ee.ExitCode())
 		}
 		return err

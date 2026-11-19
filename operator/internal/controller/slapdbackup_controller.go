@@ -453,14 +453,10 @@ func (r *SlapdBackupReconciler) patchStatus(ctx context.Context, sb *ldapv1alpha
 	})
 
 	statusPatch := &ldapv1alpha1.SlapdBackup{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: ldapv1alpha1.GroupVersion.String(),
-			Kind:       "SlapdBackup",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sb.Name,
-			Namespace: sb.Namespace,
-		},
+		APIVersion: ldapv1alpha1.GroupVersion.String(),
+		Kind:       "SlapdBackup",
+		Name:       sb.Name,
+		Namespace:  sb.Namespace,
 	}
 	statusPatch.Status = sb.Status
 	ac, err := applyConfiguration(statusPatch)

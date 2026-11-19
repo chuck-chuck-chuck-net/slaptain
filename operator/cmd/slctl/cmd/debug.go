@@ -222,8 +222,7 @@ func runDebug(cmd *cobra.Command, args []string) error {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	if err := c.Run(); err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			os.Exit(ee.ExitCode())
 		}
 		return err
@@ -273,7 +272,7 @@ func psaAdmits(
 	ctx context.Context, coreClient kubernetes.Interface, ns string, sc *corev1.SecurityContext,
 ) (bool, error) {
 	probe := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "slctl-psa-probe", Namespace: ns},
+		Name: "slctl-psa-probe", Namespace: ns,
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:            "probe",

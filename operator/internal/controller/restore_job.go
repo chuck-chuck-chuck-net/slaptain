@@ -106,7 +106,7 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 		// RW pod: download the artifact, wipe the target DB files, slapadd offline.
 		volumes = append(volumes,
 			pvcVolume("config", t.configPVC),
-			corev1.Volume{Name: volumeStaging, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			corev1.Volume{Name: volumeStaging, EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		)
 		downloadArgs := []string{"restore-download", "--bucket", st.Bucket, "--key", objectKey, "--out", restoreLDIFFile}
 		if st.Endpoint != "" {
@@ -120,8 +120,8 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 		}
 		secretRef := func(key string) *corev1.EnvVarSource {
 			return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: st.CredentialsSecretName},
-				Key:                  key,
+				Name: st.CredentialsSecretName,
+				Key:  key,
 			}}
 		}
 		initContainers = []corev1.Container{{
@@ -204,17 +204,15 @@ func buildRestoreJob(sc *ldapv1alpha1.SlapdCluster, sd *ldapv1alpha1.SlapdDataba
 	// config/data/accesslog PVCs.
 	ttl := int32(600)
 	return &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      t.jobName,
-			Namespace: sc.Namespace,
-			Labels: withOperatorLabels(sc.Name, map[string]string{
-				labelName:                             appName,
-				labelInstance:                         sc.Name,
-				labelComponent:                        restoreComponent,
-				"ldap.chuck-chuck-chuck.net/database": sd.Name,
-				restoreIDLabel:                        sc.Status.Restore.ID,
-			}),
-		},
+		Name:      t.jobName,
+		Namespace: sc.Namespace,
+		Labels: withOperatorLabels(sc.Name, map[string]string{
+			labelName:                             appName,
+			labelInstance:                         sc.Name,
+			labelComponent:                        restoreComponent,
+			"ldap.chuck-chuck-chuck.net/database": sd.Name,
+			restoreIDLabel:                        sc.Status.Restore.ID,
+		}),
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
 			TTLSecondsAfterFinished: &ttl,

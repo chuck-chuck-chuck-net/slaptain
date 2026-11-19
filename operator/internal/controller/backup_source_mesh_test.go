@@ -57,7 +57,7 @@ func TestIsReplicationParticipantHonoursMeshRef(t *testing.T) {
 			// reference to a mesh.
 			name: "single replica, peers come from a mesh",
 			sc: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
 					MeshRef:     labMesh,
@@ -74,7 +74,7 @@ func TestIsReplicationParticipantHonoursMeshRef(t *testing.T) {
 			// "not replicated".
 			name: "single replica, mesh unresolvable from this reader",
 			sc: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
 					MeshRef:     "gone",
@@ -96,7 +96,7 @@ func TestIsReplicationParticipantHonoursMeshRef(t *testing.T) {
 			// answer stays the confident one.
 			name: "meshRef but replication disabled",
 			sc: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas: 1,
 					MeshRef:  labMesh,
@@ -109,7 +109,7 @@ func TestIsReplicationParticipantHonoursMeshRef(t *testing.T) {
 			// This is every standalone cluster and its answer must not move.
 			name: "no meshRef, genuinely standalone",
 			sc: &ldapv1alpha1.SlapdCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+				Name: testClusterName, Namespace: "ns",
 				Spec: ldapv1alpha1.SlapdClusterSpec{
 					Replicas:    1,
 					Replication: ldapv1alpha1.SlapdReplicationConfig{Enabled: true},
@@ -133,7 +133,7 @@ func TestIsReplicationParticipantHonoursMeshRef(t *testing.T) {
 // unknown, which is the truth.
 func TestSourceConvergedOnSingleReplicaMeshMember(t *testing.T) {
 	sc := &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: "ns"},
+		Name: testClusterName, Namespace: "ns",
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			Replicas:    1,
 			MeshRef:     labMesh,

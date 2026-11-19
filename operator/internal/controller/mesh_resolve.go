@@ -372,8 +372,7 @@ func meshResolveCondition(sc *ldapv1alpha1.SlapdCluster, err error) {
 		status = metav1.ConditionFalse
 		reason = reasonMeshUnreadable
 		msg = err.Error()
-		var re *meshResolveError
-		if errors.As(err, &re) {
+		if re, ok := errors.AsType[*meshResolveError](err); ok {
 			reason = re.Reason
 			msg = re.Message
 		}

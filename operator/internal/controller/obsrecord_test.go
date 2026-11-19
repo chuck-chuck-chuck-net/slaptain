@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
@@ -61,7 +60,7 @@ const (
 // discovery result at all.
 func obsRecordCluster() *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testE2ENamespace},
+		Name: testClusterName, Namespace: testE2ENamespace,
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			MeshRef: testMeshName,
 			Replication: ldapv1alpha1.SlapdReplicationConfig{
@@ -97,7 +96,7 @@ func obsRecordCluster() *ldapv1alpha1.SlapdCluster {
 // a cross-site outage begins.
 func obsRecordControlCluster() *ldapv1alpha1.SlapdCluster {
 	return &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "ldap-b", Namespace: "other-ns"},
+		Name: "ldap-b", Namespace: "other-ns",
 		Spec: ldapv1alpha1.SlapdClusterSpec{
 			Replication: ldapv1alpha1.SlapdReplicationConfig{
 				Enabled: true,
@@ -132,7 +131,7 @@ func obsRecordNames() map[string]string {
 
 func obsRecordDatabase() *ldapv1alpha1.SlapdDatabase {
 	return &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: testE2ENamespace},
+		Name: testDefaultDB, Namespace: testE2ENamespace,
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			ClusterRef: testClusterName,
 			Suffix:     sfxA,
@@ -401,7 +400,7 @@ func TestClusterObservationSpreadAbsenceSurvivesTheRender(t *testing.T) {
 // that never ran.
 func TestEmptyPassMapsToAnObservationThatRendersNothing(t *testing.T) {
 	sc := &ldapv1alpha1.SlapdCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: testE2ENamespace},
+		Name: testClusterName, Namespace: testE2ENamespace,
 	}
 	obs := clusterObservation(sc, time.Time{}, nil, nil, nil)
 
@@ -414,8 +413,8 @@ func TestEmptyPassMapsToAnObservationThatRendersNothing(t *testing.T) {
 	}
 
 	dbObs := databaseObservation(&ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB, Namespace: testE2ENamespace},
-		Spec:       ldapv1alpha1.SlapdDatabaseSpec{ClusterRef: testClusterName, Suffix: sfxA},
+		Name: testDefaultDB, Namespace: testE2ENamespace,
+		Spec: ldapv1alpha1.SlapdDatabaseSpec{ClusterRef: testClusterName, Suffix: sfxA},
 	}, "", time.Time{}, nil)
 	if samples := renderedDatabase(t, dbObs); len(samples) != 0 {
 		t.Errorf("RenderDatabase = %v, want no samples at all for a pass that observed "+

@@ -257,7 +257,7 @@ func TestObserveStartupConfig(t *testing.T) {
 // table entry the pods were never given.
 func TestDeclaresStartupOnlyAttributes(t *testing.T) {
 	accesslog := &ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB},
+		Name: testDefaultDB,
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			Replication: ldapv1alpha1.DatabaseReplicationConfig{
 				SyncprovSessionlogSource: ldapv1alpha1.SyncprovSessionlogSourceAccesslog,
@@ -273,12 +273,12 @@ func TestDeclaresStartupOnlyAttributes(t *testing.T) {
 	// the attribute once it has restarted. Asking for the in-memory log by
 	// name is what declares nothing.
 	if !declaresStartupOnlyAttributes(&ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB},
+		Name: testDefaultDB,
 	}) {
 		t.Error("a default database now sources from its journal, which is startup-only")
 	}
 	if declaresStartupOnlyAttributes(&ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: testDefaultDB},
+		Name: testDefaultDB,
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			Replication: ldapv1alpha1.DatabaseReplicationConfig{
 				SyncprovSessionlogSource: ldapv1alpha1.SyncprovSessionlogSourceInMemory,

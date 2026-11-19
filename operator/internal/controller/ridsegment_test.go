@@ -16,8 +16,6 @@ import (
 	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	ldapv1alpha1 "github.com/chuck-chuck-chuck-net/slaptain/operator/api/v1alpha1"
 	"github.com/chuck-chuck-chuck-net/slaptain/operator/internal/ridcoord"
 )
@@ -41,7 +39,7 @@ const (
 // against cluster `clusterRef`, with replication enabled.
 func ridDB(name, clusterRef string, segment *int32) ldapv1alpha1.SlapdDatabase {
 	return ldapv1alpha1.SlapdDatabase{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testRIDNS},
+		Name: name, Namespace: testRIDNS,
 		Spec: ldapv1alpha1.SlapdDatabaseSpec{
 			ClusterRef: clusterRef,
 			Replication: ldapv1alpha1.DatabaseReplicationConfig{

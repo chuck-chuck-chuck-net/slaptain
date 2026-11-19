@@ -502,7 +502,7 @@ func scrape(t *testing.T, reg *prometheus.Registry) []scraped {
 			default:
 				t.Fatalf("family %s has unexpected type %s", mf.GetName(), typ)
 			}
-			out = append(out, scraped{Sample: Sample{Name: mf.GetName(), Labels: labels, Value: v}, Type: typ})
+			out = append(out, scraped{Name: mf.GetName(), Labels: labels, Value: v, Type: typ})
 		}
 	}
 	return out

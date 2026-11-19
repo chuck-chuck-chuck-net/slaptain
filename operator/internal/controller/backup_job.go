@@ -76,7 +76,7 @@ func buildBackupJob(sb *ldapv1alpha1.SlapdBackup, sd *ldapv1alpha1.SlapdDatabase
 	volumes := volumesWithAccesslog(sc, []corev1.Volume{
 		pvcVolume("config", configPVC),
 		pvcVolume("data", dataPVC),
-		{Name: volumeStaging, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: volumeStaging, EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	})
 
 	// slapcat → gzip into staging. bash + pipefail so a slapcat failure isn't
@@ -111,8 +111,8 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 
 	secretRef := func(key string) *corev1.EnvVarSource {
 		return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: st.CredentialsSecretName},
-			Key:                  key,
+			Name: st.CredentialsSecretName,
+			Key:  key,
 		}}
 	}
 	upload := corev1.Container{
@@ -133,16 +133,14 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 	backoff := int32(2)
 	ttl := int32(600)
 	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      sb.Name + "-backup",
-			Namespace: sb.Namespace,
-			Labels: withOperatorLabels(sc.Name, map[string]string{
-				labelName:                           appName,
-				labelInstance:                       sc.Name,
-				labelComponent:                      "backup",
-				"ldap.chuck-chuck-chuck.net/backup": sb.Name,
-			}),
-		},
+		Name:      sb.Name + "-backup",
+		Namespace: sb.Namespace,
+		Labels: withOperatorLabels(sc.Name, map[string]string{
+			labelName:                           appName,
+			labelInstance:                       sc.Name,
+			labelComponent:                      "backup",
+			"ldap.chuck-chuck-chuck.net/backup": sb.Name,
+		}),
 		Spec: batchv1.JobSpec{
 			// ADR-018 R4: backstop only. The SlapdBackup controller reaps this Job
 			// once the backup reaches a terminal phase; this bounds the lease its
@@ -188,8 +186,8 @@ slapcat -F /config/slapd.d -b "$SUFFIX" -a '(cn=replication)' > ` + backupReplEn
 // pvcVolume builds a PVC-backed pod volume.
 func pvcVolume(name, claim string) corev1.Volume {
 	return corev1.Volume{
-		Name:         name,
-		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}},
+		Name:                  name,
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim},
 	}
 }
 
