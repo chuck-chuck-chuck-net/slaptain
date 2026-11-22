@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+# This is a NO-OP ucr filter stub.
+# Exclusively for etc/ldap/slapd.conf.d/25univention-ldap-server_local-schema
+# Where the "ucr filter" call is embedded in an LDAP Schema template
+cat <&0

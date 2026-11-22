@@ -120,7 +120,7 @@ func TestGuardedAddRefusesStartupOnlyAttribute(t *testing.T) {
 	w := &recordingWriter{}
 	req := ldap.NewAddRequest("olcOverlay=syncprov,olcDatabase={1}mdb,cn=config", nil)
 	req.Attribute("objectClass", []string{"olcOverlayConfig", "olcSyncProvConfig"})
-	req.Attribute(attrOlcOverlay, []string{"syncprov"})
+	req.Attribute(attrOlcOverlay, []string{overlaySyncprov})
 	req.Attribute(startupAttrSessionlogSource, []string{testAccesslogDN})
 
 	err := guardedAdd(w, req)
@@ -156,7 +156,7 @@ func TestGuardedWritesPassOrdinaryRequestsThrough(t *testing.T) {
 	t.Run("add is forwarded", func(t *testing.T) {
 		w := &recordingWriter{}
 		req := ldap.NewAddRequest("olcOverlay=syncprov,olcDatabase={1}mdb,cn=config", nil)
-		req.Attribute(attrOlcOverlay, []string{"syncprov"})
+		req.Attribute(attrOlcOverlay, []string{overlaySyncprov})
 		if err := guardedAdd(w, req); err != nil {
 			t.Fatalf("guardedAdd returned %v", err)
 		}

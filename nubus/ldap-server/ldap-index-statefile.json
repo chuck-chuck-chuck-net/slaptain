@@ -1,0 +1,1118 @@
+{
+    "attributes": {
+        "aRecord": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/cosine.schema"
+        },
+        "associatedDomain": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/cosine.schema"
+        },
+        "automountInformation": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/automount.schema"
+        },
+        "cNAMERecord": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/cosine.schema"
+        },
+        "cn": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "approx"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ]
+        },
+        "default": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ]
+        },
+        "description": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/core.schema"
+        },
+        "dhcpHWAddress": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/dhcp.schema"
+        },
+        "displayName": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/inetorgperson.schema"
+        },
+        "employeeNumber": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/inetorgperson.schema"
+        },
+        "entryUUID": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ]
+        },
+        "gidNumber": {
+            "equality": "integerMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/nis.schema"
+        },
+        "givenName": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "approx"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ]
+        },
+        "homeDirectory": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/nis.schema"
+        },
+        "krb5PrincipalName": {
+            "equality": "octetStringMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/krb5-kdc.schema"
+        },
+        "macAddress": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/nis.schema"
+        },
+        "mail": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "approx"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ]
+        },
+        "mailAlternativeAddress": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/mail.schema"
+        },
+        "mailPrimaryAddress": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/mail.schema"
+        },
+        "memberUid": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/nis.schema"
+        },
+        "name": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/core.schema"
+        },
+        "objectClass": {
+            "equality": "objectIdentifierMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/core.schema"
+        },
+        "ou": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ]
+        },
+        "pTRRecord": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/dnszone.schema"
+        },
+        "printerModel": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/univention.schema"
+        },
+        "relativeDomainName": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/dnszone.schema"
+        },
+        "sambaAcctFlags": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/samba.schema"
+        },
+        "sambaDomainName": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/samba.schema"
+        },
+        "sambaGroupType": {
+            "equality": "integerMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/samba.schema"
+        },
+        "sambaPrimaryGroupSID": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/samba.schema"
+        },
+        "sambaSID": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/samba.schema"
+        },
+        "sambaSIDList": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/samba.schema"
+        },
+        "secretary": {
+            "equality": "distinguishedNameMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/cosine.schema"
+        },
+        "shadowExpire": {
+            "equality": "integerMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/nis.schema"
+        },
+        "shadowMax": {
+            "equality": "integerMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/nis.schema"
+        },
+        "sn": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "approx"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ]
+        },
+        "uid": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "approx"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ]
+        },
+        "uidNumber": {
+            "equality": "integerMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/nis.schema"
+        },
+        "uniqueMember": {
+            "equality": "distinguishedNameMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/etc/ldap/schema/core.schema"
+        },
+        "univentionCanonicalRecipientRewriteEnabled": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/mail.schema"
+        },
+        "univentionDataType": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/univention-data.schema"
+        },
+        "univentionInventoryNumber": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/univention.schema"
+        },
+        "univentionLicenseModule": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ]
+        },
+        "univentionLicenseObject": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/directory.schema"
+        },
+        "univentionMailHomeServer": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/mail.schema"
+        },
+        "univentionNagiosHostname": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/nagios.schema"
+        },
+        "univentionObjectFlag": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/univention-objecttype.schema"
+        },
+        "univentionObjectType": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/univention-objecttype.schema"
+        },
+        "univentionOperatingSystem": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/univention.schema"
+        },
+        "univentionPolicyReference": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/policy.schema"
+        },
+        "univentionServerRole": {
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ]
+        },
+        "univentionService": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/univention.schema"
+        },
+        "univentionShareGid": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/share.schema"
+        },
+        "univentionShareSambaName": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/share.schema"
+        },
+        "univentionShareWriteable": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/share.schema"
+        },
+        "univentionSyntaxDescription": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/univention-syntax.schema"
+        },
+        "univentionUDMOptionModule": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyCLIName": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyCopyable": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyDefault": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyDeleteObjectClass": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyDoNotSearch": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyHook": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyLayoutOverwritePosition": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyLayoutOverwriteTab": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyLayoutPosition": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyLayoutTabAdvanced": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyLayoutTabName": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyLdapMapping": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyLongDescription": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyModule": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyMultivalue": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyObjectClass": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyOptions": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyShortDescription": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertySyntax": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyTranslationLongDescription": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyTranslationShortDescription": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyTranslationTabName": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyValueMayChange": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyValueRequired": {
+            "equality": "caseIgnoreMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "univentionUDMPropertyVersion": {
+            "equality": "caseExactMatch",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/custom-attribute.schema"
+        },
+        "zoneName": {
+            "equality": "caseIgnoreIA5Match",
+            "indexes": [
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "eq"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "pres"
+                },
+                {
+                    "last_index_date": "2025-01-01T00:00:00.000000",
+                    "type": "sub"
+                }
+            ],
+            "schema_file": "/usr/share/univention-ldap/schema/dnszone.schema"
+        }
+    }
+}
