@@ -1,7 +1,7 @@
 # slapd-exporter: ADR-033 Surface 3, its own module (exporter/), image and
 # version line (git tags exporter/vX.Y.Z, image tag X.Y.Z — docs/VERSIONING.md).
 # Build context is the exporter module (exporter/), like the operator image.
-FROM golang:1.27.4@sha256:5e8afd493a7124a8586e134d9b532731161d4b9becf9dee5a5956b107426f93d AS builder
+FROM golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf AS builder
 WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
